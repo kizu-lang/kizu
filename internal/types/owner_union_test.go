@@ -146,6 +146,26 @@ impl Node {
 		"owner-payload union `Node` deinit must dispatch on `self` with an exhaustive `match`")
 }
 
+// TestCheckRejectsOwnerUnionDeinitMatchNotFirst rejects a deinit that can skip
+// the active-variant cleanup by running a statement before `match self`.
+func TestCheckRejectsOwnerUnionDeinitMatchNotFirst(t *testing.T) {
+	source := `union Node {
+    Left(std::string::String),
+    Right(i64),
+}
+impl Node {
+    fn deinit(self: Node) -> void {
+        if true { return; }
+        match self {
+            Left(s) => s.deinit(),
+            Right(n) => n,
+        }
+    }
+}`
+	assertCheckError(t, source,
+		"owner-payload union `Node` deinit must dispatch on `self` with an exhaustive `match`")
+}
+
 // TestCheckRejectsOwnerUnionWildcardDeinit rejects `_` hiding owner variants.
 func TestCheckRejectsOwnerUnionWildcardDeinit(t *testing.T) {
 	source := `union Node {

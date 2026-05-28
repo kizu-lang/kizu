@@ -860,40 +860,36 @@ func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *ast.Functio
 	return nil
 }
 
-// ownerUnionSelfMatch returns the `match self { ... }` statement at the top of an
-// owner-union deinit body, if present.
+// ownerUnionSelfMatch returns the `match self { ... }` statement only when it is
+// the first executable statement of the deinit body. Requiring it first keeps the
+// v0.2 shape simple and guarantees the active-variant cleanup always runs: a
+// statement (such as an early `return`) cannot precede and skip it.
 func ownerUnionSelfMatch(body *ast.BlockStmt, selfName string) *ast.MatchStmt {
-	if body == nil {
+	if body == nil || len(body.Statements) == 0 {
 		return nil
 	}
-	for _, stmt := range body.Statements {
-		switch s := stmt.(type) {
-		case *ast.MatchStmt:
-			if ownerUnionIdentName(s.Value) == selfName {
-				return s
-			}
-		case *ast.ExprStmt:
-			if m, ok := s.Expr.(*ast.MatchStmt); ok && ownerUnionIdentName(m.Value) == selfName {
-				return m
-			}
+	switch s := body.Statements[0].(type) {
+	case *ast.MatchStmt:
+		if ownerUnionIdentName(s.Value) == selfName {
+			return s
+		}
+	case *ast.ExprStmt:
+		if m, ok := s.Expr.(*ast.MatchStmt); ok && ownerUnionIdentName(m.Value) == selfName {
+			return m
 		}
 	}
 	return nil
 }
 
-// matchArmCleansPayload reports whether an arm body calls `<binding>.deinit()`.
+// matchArmCleansPayload reports whether an arm body is exactly the direct cleanup
+// call `<binding>.deinit()`. Only the direct form is accepted in v0.2 so the
+// active payload is always cleaned without path-sensitive analysis of the arm.
 func matchArmCleansPayload(body ast.Statement, binding string) bool {
-	switch s := body.(type) {
-	case *ast.ExprStmt:
-		return ownerUnionDeinitCall(s.Expr, binding)
-	case *ast.BlockStmt:
-		for _, stmt := range s.Statements {
-			if expr, ok := stmt.(*ast.ExprStmt); ok && ownerUnionDeinitCall(expr.Expr, binding) {
-				return true
-			}
-		}
+	expr, ok := body.(*ast.ExprStmt)
+	if !ok {
+		return false
 	}
-	return false
+	return ownerUnionDeinitCall(expr.Expr, binding)
 }
 
 // ownerUnionDeinitCall reports whether expr is the cleanup call `binding.deinit()`.
