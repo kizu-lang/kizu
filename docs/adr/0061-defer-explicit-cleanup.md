@@ -4,6 +4,8 @@
 
 Accepted.
 
+Extended by ADR-0075 for `errdefer` and owner aggregate cleanup contracts.
+
 ## Context
 
 Kizu stdlib owners such as `std::array::Array<T>`, `std::string::String`,

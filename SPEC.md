@@ -418,7 +418,7 @@ tooling は hover / completion / generated docs で attached documentation を�
 最初の段落は summary として扱えますが、compiler diagnostic の意味づけには
 使いません。
 
-### 6.3.1 defer cleanup statement
+### 6.3.1 defer / errdefer cleanup statement
 
 `defer <expr-stmt>;` は、現在の lexical block に明示 cleanup 呼び出しを登録します。
 function body も block として扱います。
@@ -437,6 +437,21 @@ fn main() -> !void {
 登録された cleanup は block を出るときに、登録順の逆順で実行します。
 通常の block exit、明示 `return`、`try` などの error return path でも実行します。
 
+`errdefer <expr-stmt>;` は、現在の lexical block から error return path で出る場合だけ
+cleanup 呼び出しを実行します。通常の block exit や正常な `return` では実行しません。
+`defer` と `errdefer` は同じ cleanup stack に登録し、block exit 時に登録順の逆順で評価します。
+正常 exit では `errdefer` entry を skip します。
+
+```kizu
+fn make_values(allocator: std::mem::Allocator) -> !std::array::Array<i64> {
+    let values = std::array::Array<i64>(allocator);
+    errdefer values.deinit();
+
+    try values.append(1);
+    return values;
+}
+```
+
 v0.2 で許可する形は cleanup method call の expression statement だけです。
 
 ```kizu
@@ -453,6 +468,8 @@ cleanup 対象は自動探索しません。Drop / RAII / implicit destructor �
 deferred cleanup は明示 cleanup call と同じ ownership rule で検査します。
 登録時点で receiver を参照できる必要があり、block exit で実行する時点でも
 receiver が move 済み、deinit 済み、borrow 中なら拒否します。
+`errdefer` receiver は、その `errdefer` が実行され得る各 error exit path で同じ rule を満たす
+必要があります。成功 path で owner を move / return することは `errdefer` の実行を要求しません。
 
 ### 6.4 struct
 
@@ -994,6 +1011,25 @@ non-copy field を含む struct
 
 `array`、`map`、`std::mem::Box<T>` は v0.1 では実装しません。
 将来追加する場合も、copy できない所有値として扱います。
+
+owner field または owner payload を含む struct / union は owner aggregate です。
+owner aggregate は copy できず、値渡しや代入では move されます。
+block を出る時点で owner aggregate は次のいずれかで処理済みでなければなりません。
+
+* `value.deinit()` による明示 cleanup
+* 別の owner aggregate / container への move
+* owned return value として caller への move
+
+owner aggregate を値引数として受け取る関数は、その値を consume します。
+読み取りだけを行う関数は `&T` で受け取ります。
+mutation が必要な関数は `&var T` で受け取り、consume する関数は owner aggregate を値で受け取ります。
+
+named owner aggregate を standalone owner として構築、返却、値渡しする場合は、
+`deinit(self: T) -> void` を source 上に定義して cleanup contract を見えるようにします。
+`deinit` body 内では `self.field.deinit()` のような direct field cleanup を許可します。
+`deinit` の外では owner field を個別 cleanup して部分破壊状態を露出させてはいけません。
+container 内部の structural element cleanup は、`array.deinit()` のような明示 cleanup 呼び出しの
+実装 detail としてだけ許可します。これは callable な implicit destructor を合成しません。
 
 ## 9. borrow
 
@@ -1795,8 +1831,11 @@ non-copy element は `at` / `at_mut` で local borrow として読み書きし�
 `pop` は最後の initialized element を array から move して `!T` を返します。
 `set` は置換前の element を cleanup してから新しい value を move します。
 `deinit` は残っている initialized element を cleanup してから array storage を解放します。
-element cleanup は explicit `deinit(self: T) -> void` があればそれを使い、
-なければ field / payload 内の既知 owner を再帰的に cleanup します。
+element cleanup は explicit `deinit(self: T) -> void` があればそれを使います。
+`T` が owner aggregate で callable な `deinit` を持たない場合、`array.deinit()` の内部に限って
+field / payload 内の既知 owner を再帰的に cleanup できます。
+これは explicit `array.deinit()` の一部であり、implicit destructor や callable な
+`T.deinit()` 合成ではありません。
 element borrow が生きている間は `append`、`pop`、`set`、`deinit` を禁止します。
 mutable element borrow が生きている間は array 全体の read も禁止します。
 `deinit` 後の array 使用は safe Kizu では禁止します。
@@ -2239,6 +2278,7 @@ var declaration
 assignment
 return statement
 defer cleanup statement
+errdefer cleanup statement
 if statement
 if expression
 while statement
@@ -2280,6 +2320,7 @@ error union / try
 limited comptime
 std task / channel / thread prototypes
 defer cleanup statement
+errdefer cleanup statement
 ```
 
 ### Milestone 4: Type checker

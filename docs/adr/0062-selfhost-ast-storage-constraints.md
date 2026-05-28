@@ -106,6 +106,9 @@ where the owner is returned or where the current compiler subset has not yet
 made `defer` available for that path; new selfhost code should not add manual
 multi-exit cleanup patterns without a reason.
 
+ADR-0075 adds `errdefer` for returned owner values: use `errdefer owner.deinit()`
+when a fallible builder must clean up on error but transfer the owner on success.
+
 ## Consequences
 
 - Hosted selfhost frontend expansion can add more AST node variants without
