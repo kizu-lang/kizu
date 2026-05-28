@@ -658,3 +658,194 @@ fn ast_node_text(
 pub fn metadata_line() -> []u8 {
     return "selfhost::ir::codegen::Program function-block-instruction-v0";
 }
+
+// lower_run_int_program lowers a main that prints a single integer expression by
+// folding the integer argument to a constant i64 and rendering its decimal text
+// into the caller-owned scratch buffer, reusing the const-string program shape so
+// the existing emitter prints the value. Non-matching programs return an
+// unsupported program so the caller falls back to the string-print run path.
+//
+// These functions are intentionally excluded from the IR artifact's selected
+// body-fact set: the stage2 self-compilation path reproduces only the bounded
+// const-string run shape, so threading a scratch String through the selected
+// lowering functions would emit signatures the fact pipeline cannot model. Keeping
+// the integer path here lets the interpreter and the from-source native compiler
+// run it while the stage2 program shape stays unchanged.
+pub fn lower_run_int_program(
+    scratch: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !Program {
+    let node = ast.get(root);
+    return match node.data {
+        Program(program) => try lower_int_declarations(scratch, text, ast, program.declarations),
+        _ => unsupported_program(text[0..0]),
+    };
+}
+
+fn lower_int_declarations(
+    scratch: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !Program {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let node = ast.get(child);
+        let program = match node.data {
+            FnDecl(fn_decl) => try lower_int_function(scratch, text, ast, fn_decl.name, fn_decl.body),
+            _ => unsupported_program(text[0..0]),
+        };
+        if program_supported(&program) {
+            return program;
+        }
+        index = index + 1;
+    }
+    return unsupported_program(text[0..0]);
+}
+
+fn lower_int_function(
+    scratch: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !Program {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
+        return unsupported_program(text[0..0]);
+    }
+    let node = ast.get(body);
+    return match node.data {
+        Block(block) => try lower_int_block(scratch, text, ast, block.statements),
+        _ => unsupported_program(text[0..0]),
+    };
+}
+
+fn lower_int_block(
+    scratch: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !Program {
+    if statements.len != 1 {
+        return unsupported_program(text[0..0]);
+    }
+    let statement = try ast.child_at(statements, 0);
+    let node = ast.get(statement);
+    return match node.data {
+        ExprStmt(expr_stmt) => try lower_int_print_statement(scratch, text, ast, expr_stmt.expr),
+        _ => unsupported_program(text[0..0]),
+    };
+}
+
+fn lower_int_print_statement(
+    scratch: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> !Program {
+    let node = ast.get(expr);
+    return match node.data {
+        Call(call_node) => try lower_int_print_call(scratch, text, ast, call_node.callee, call_node.args),
+        _ => unsupported_program(text[0..0]),
+    };
+}
+
+fn lower_int_print_call(
+    scratch: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !Program {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
+        return unsupported_program(text[0..0]);
+    }
+    let arg = try ast.child_at(args, 0);
+    let arg_node = ast.get(arg);
+    let is_integer = match arg_node.data {
+        Int(int_node) => true,
+        Binary(binary) => true,
+        _ => false,
+    };
+    if !is_integer {
+        return unsupported_program(text[0..0]);
+    }
+    let value = try fold_int_expr(text, ast, arg);
+    let start = scratch.len();
+    try std::fmt::append_i64(scratch, value);
+    let end = scratch.len();
+    let decimal = scratch.as_bytes();
+    let payload_text = decimal[start..end];
+    if std::mem::len(payload_text) == 0 {
+        return unsupported_program(text[0..0]);
+    }
+    return lowered_main_print_program(payload_text);
+}
+
+// fold_int_expr evaluates an integer literal or arithmetic expression to a
+// constant i64 by walking the checked AST. The parser already encodes operator
+// precedence in the tree shape, so a direct post-order fold yields the value.
+fn fold_int_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(node_id);
+    return match node.data {
+        Int(int_node) => try parse_int_literal(ast_node_text(text, ast, node_id)),
+        Binary(binary) => try fold_int_binary(text, ast, binary.op, binary.left, binary.right),
+        _ => try unsupported_int_expr(),
+    };
+}
+
+fn unsupported_int_expr() -> !i64 {
+    return error("unsupported integer expression in run codegen");
+}
+
+fn fold_int_binary(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    op: std::kizu::ast::BinaryOp,
+    left_id: std::kizu::ast::NodeId,
+    right_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let left = try fold_int_expr(text, ast, left_id);
+    let right = try fold_int_expr(text, ast, right_id);
+    if op == std::kizu::ast::binary_add() {
+        return left + right;
+    }
+    if op == std::kizu::ast::binary_sub() {
+        return left - right;
+    }
+    if op == std::kizu::ast::binary_mul() {
+        return left * right;
+    }
+    if op == std::kizu::ast::binary_div() {
+        if right == 0 {
+            return error("division by zero in run codegen");
+        }
+        return left / right;
+    }
+    return error("unsupported integer operator in run codegen");
+}
+
+fn parse_int_literal(literal: []u8) -> !i64 {
+    let length = std::mem::len(literal);
+    if length == 0 {
+        return error("empty integer literal in run codegen");
+    }
+    var index = 0;
+    var value = 0;
+    while index < length {
+        let byte = literal[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("unsupported integer literal in run codegen");
+        }
+        value = value * 10 + cast<i64>(byte - cast<u8>(48));
+        index = index + 1;
+    }
+    return value;
+}
