@@ -895,18 +895,6 @@ KizuSliceU8 kizu_array_as_bytes(void *handle) {
     return result;
 }
 
-void *kizu_union_box(int64_t size, const void *value) {
-    if (size <= 0 || !value) {
-        return NULL;
-    }
-    void *box = malloc((size_t)size);
-    if (!box) {
-        return NULL;
-    }
-    memcpy(box, value, (size_t)size);
-    return box;
-}
-
 void *kizu_map_new(int64_t value_size) {
     if (value_size <= 0) {
         return NULL;

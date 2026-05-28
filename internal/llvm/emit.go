@@ -111,7 +111,6 @@ func (e *emitter) writeHeader() {
 	e.writeArrayRuntimeDecls()
 	e.writeMapRuntimeDecls()
 	e.writeArenaRuntimeDecls()
-	e.writeUnionRuntimeDecls()
 	e.writeTestRuntimeDecls()
 	e.writeExternalCallDecls()
 	if e.usesBoundsTrap() {
@@ -226,11 +225,15 @@ func (e *emitter) writeStructTypes() {
 	}
 }
 
-// writeUnionTypes writes named LLVM layouts for tagged unions.
+// writeUnionTypes writes the #991 `tag + inline payload storage` layout for
+// each declared tagged union: `{ i64, [N x i8] }`, where N is the byte capacity
+// of the largest variant payload. Payload shapes are validated in
+// validateModuleTypes, so the capacity is known here.
 func (e *emitter) writeUnionTypes() {
 	names := e.sortedUnionNames()
 	for _, name := range names {
-		fmt.Fprintf(&e.out, "%s = type { i64, ptr }\n", llvmUnionTypeName(name))
+		capacity, _ := e.unionPayloadCapacity(name)
+		fmt.Fprintf(&e.out, "%s = type { i64, [%d x i8] }\n", llvmUnionTypeName(name), capacity)
 	}
 	if len(names) > 0 {
 		e.out.WriteByte('\n')
@@ -412,7 +415,38 @@ func (e *emitter) validateModuleTypes() error {
 			return err
 		}
 	}
+	for _, name := range e.sortedUnionNames() {
+		if _, err := e.unionPayloadCapacity(name); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// unionPayloadCapacity returns the inline payload byte capacity for a declared
+// union, or a #991 diagnostic when a variant payload is an unsupported shape.
+func (e *emitter) unionPayloadCapacity(name string) (int, error) {
+	union, ok := e.module.Unions[name]
+	if !ok {
+		return 0, fmt.Errorf("llvm error: unknown union `%s`", name)
+	}
+	capacity, align, ok := e.unionPayloadStorage(name, union, nil)
+	if !ok {
+		return 0, fmt.Errorf(
+			"llvm error: union `%s` has an unsupported tagged-union payload shape; "+
+				"inline payload size/alignment must be compile-time known per the #991 ABI "+
+				"(see docs/selfhost-runtime-abi.md, broader shapes tracked by #495)",
+			name,
+		)
+	}
+	if align > maxInlinePayloadAlign {
+		return 0, fmt.Errorf(
+			"llvm error: union `%s` requires payload alignment %d, but the #991 inline "+
+				"payload storage only guarantees alignment %d",
+			name, align, maxInlinePayloadAlign,
+		)
+	}
+	return capacity, nil
 }
 
 // collectErrorUnionName records concrete !T / Error!T type names.
@@ -1311,7 +1345,8 @@ func (e *emitter) writeErrorError(instr *ir.Instr) error {
 	return nil
 }
 
-// writeTypedMessageErrorPayload builds Error::Message([]u8) for typed error unions.
+// writeTypedMessageErrorPayload builds Error::Message([]u8) for typed error
+// unions using the #991 inline payload layout.
 func (e *emitter) writeTypedMessageErrorPayload(
 	resultName string,
 	errorName string,
@@ -1321,16 +1356,7 @@ func (e *emitter) writeTypedMessageErrorPayload(
 	if !ok || variant.Payload != "[]u8" {
 		return fmt.Errorf("llvm error: typed error `%s` cannot be built from []u8", errorName)
 	}
-	slot := e.writeStackValue(resultName+".message", message)
-	boxName := resultName + ".box"
-	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_union_box(i64 %s, ptr %s)\n",
-		boxName, e.elementSizeOperand(message.Type), slot)
-	tagName := resultName + ".tag"
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s poison, i64 %d, 0\n",
-		tagName, e.llvmType(errorName), variant.Index)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, 1\n",
-		resultName, e.llvmType(errorName), tagName, boxName)
-	return nil
+	return e.writeInlineUnion(resultName, errorName, variant, &message)
 }
 
 // writeErrorFailurePayloadValue builds a failed error union from an error payload.
