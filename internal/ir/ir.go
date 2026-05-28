@@ -83,9 +83,11 @@ type Instr struct {
 }
 
 // Cleanup is a deferred void instruction that must run before a scope exits.
+// OnError marks errdefer cleanups, which run only on error-return paths.
 type Cleanup struct {
-	Op   string
-	Args []Value
+	Op      string
+	Args    []Value
+	OnError bool
 }
 
 // FieldArg connects a struct field name to a value.

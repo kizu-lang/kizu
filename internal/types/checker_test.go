@@ -1219,6 +1219,37 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsErrDeferredCleanup checks errdefer type-checks like defer.
+func TestCheckAcceptsErrDeferredCleanup(t *testing.T) {
+	source := `struct User {
+    name: []u8,
+}
+fn build() -> !std::arena::Arena<User> {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = std::arena::Arena<User>(allocator);
+    errdefer users.deinit();
+    return users;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsInvalidErrDeferredCleanup checks errdefer rejects non-cleanup.
+func TestCheckRejectsInvalidErrDeferredCleanup(t *testing.T) {
+	source := `fn main() {
+    errdefer print("not cleanup");
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "errdefer expects cleanup method call") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckRejectsInvalidDeferredCleanup checks the first supported defer form.
 func TestCheckRejectsInvalidDeferredCleanup(t *testing.T) {
 	source := `fn main() {

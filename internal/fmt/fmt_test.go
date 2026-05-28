@@ -23,6 +23,18 @@ func TestFormatPreservesAlreadyFormatted(t *testing.T) {
 	}
 }
 
+// TestFormatErrDeferCleanup checks errdefer lays out like a statement keyword.
+func TestFormatErrDeferCleanup(t *testing.T) {
+	src := `fn build() -> !void {errdefer values.deinit();return;}`
+	want := "fn build() -> !void {\n" +
+		"    errdefer values.deinit();\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(errdefer):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatIsIdempotent checks Format(Format(x)) == Format(x) on compact input.
 func TestFormatIsIdempotent(t *testing.T) {
 	src := `fn main(){print("a");print("b");}fn other(){return;}`

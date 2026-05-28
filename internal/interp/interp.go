@@ -405,34 +405,56 @@ func (i *Interpreter) evalCallArg(param ast.Param, arg ast.Expression, env *Env)
 	return refValue(binding), nil
 }
 
+// cleanupEntry is one registered block-exit cleanup. errPath entries come from
+// errdefer and run only when the block exits through an error-return path.
+type cleanupEntry struct {
+	expr    ast.Expression
+	errPath bool
+}
+
 // evalBlock executes statements in a lexical block.
 func (i *Interpreter) evalBlock(block *ast.BlockStmt, env *Env) (Value, bool, error) {
 	result := voidValue()
-	defers := []ast.Expression{}
+	cleanups := []cleanupEntry{}
 	for _, stmt := range block.Statements {
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
-			defers = append(defers, deferStmt.Expr)
+			cleanups = append(cleanups, cleanupEntry{expr: deferStmt.Expr})
+			continue
+		}
+		if errDeferStmt, ok := stmt.(*ast.ErrDeferStmt); ok {
+			cleanups = append(cleanups, cleanupEntry{expr: errDeferStmt.Expr, errPath: true})
 			continue
 		}
 		value, returned, err := i.evalStmt(stmt, env)
 		if signal, ok := err.(trySignal); ok {
-			if err := i.runDeferredCleanups(defers, env); err != nil {
+			if err := i.runBlockCleanups(cleanups, true, env); err != nil {
 				return voidValue(), false, err
 			}
 			return signal.value, true, nil
 		}
 		if err != nil || returned {
-			if cleanupErr := i.runDeferredCleanups(defers, env); cleanupErr != nil {
+			errorExit := exitIsError(value, err, returned)
+			if cleanupErr := i.runBlockCleanups(cleanups, errorExit, env); cleanupErr != nil {
 				return voidValue(), false, cleanupErr
 			}
 			return value, returned, err
 		}
 		result = value
 	}
-	if err := i.runDeferredCleanups(defers, env); err != nil {
+	if err := i.runBlockCleanups(cleanups, false, env); err != nil {
 		return voidValue(), false, err
 	}
 	return result, false, nil
+}
+
+// exitIsError reports whether a non-fallthrough block exit took an error-return
+// path. A propagated runtime error or a returned error-union value both count;
+// a normal value return is a success exit that must skip errdefer cleanups.
+func exitIsError(value Value, err error, returned bool) bool {
+	if err != nil {
+		return true
+	}
+	return returned && value.kind == kindErrorUnion
 }
 
 // evalScopedBlock creates a child scope only when the block declares locals.
@@ -461,10 +483,15 @@ func (i *Interpreter) blockNeedsScope(block *ast.BlockStmt) bool {
 	return false
 }
 
-// runDeferredCleanups executes block-exit cleanups in reverse registration order.
-func (i *Interpreter) runDeferredCleanups(defers []ast.Expression, env *Env) error {
-	for idx := len(defers) - 1; idx >= 0; idx-- {
-		if _, err := i.evalExpr(defers[idx], env); err != nil {
+// runBlockCleanups executes block-exit cleanups in reverse registration order.
+// defer entries always run; errdefer entries run only when the block exits
+// through an error-return path. defer and errdefer share one ordered stack.
+func (i *Interpreter) runBlockCleanups(cleanups []cleanupEntry, errorExit bool, env *Env) error {
+	for idx := len(cleanups) - 1; idx >= 0; idx-- {
+		if cleanups[idx].errPath && !errorExit {
+			continue
+		}
+		if _, err := i.evalExpr(cleanups[idx].expr, env); err != nil {
 			return err
 		}
 	}
@@ -484,7 +511,7 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		}
 		value, err := i.evalExpr(s.Value, env)
 		return value, true, err
-	case *ast.DeferStmt:
+	case *ast.DeferStmt, *ast.ErrDeferStmt:
 		return voidValue(), false,
 			fmt.Errorf("runtime error: defer statement must appear directly in a block")
 	case *ast.ExprStmt:

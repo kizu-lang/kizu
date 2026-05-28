@@ -11,6 +11,7 @@ var keywordCompletionItems = []completionItem{
 	{Label: "var", Kind: completionItemKindKeyword},
 	{Label: "return", Kind: completionItemKindKeyword},
 	{Label: "defer", Kind: completionItemKindKeyword},
+	{Label: "errdefer", Kind: completionItemKindKeyword},
 	{Label: "if", Kind: completionItemKindKeyword},
 	{Label: "else", Kind: completionItemKindKeyword},
 	{Label: "while", Kind: completionItemKindKeyword},
@@ -80,6 +81,7 @@ var snippetCompletionItems = []completionItem{
 	snippet("var", "mutable binding", "var ${1:name} = ${2:value};"),
 	snippet("return", "return statement", "return ${1:value};"),
 	snippet("defer", "defer cleanup", "defer ${1:value}.deinit();"),
+	snippet("errdefer", "errdefer cleanup", "errdefer ${1:value}.deinit();"),
 	snippet("unsafe", "unsafe capability block", "@unsafe(${1:ptr_read}) {\n    $0\n}"),
 	snippet(
 		"requires unsafe",

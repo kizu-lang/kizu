@@ -90,6 +90,8 @@ func (i *Interpreter) resolveStmt(stmt ast.Statement, scopes []*resolveScope) {
 		i.resolveExpr(s.Expr, scopes)
 	case *ast.DeferStmt:
 		i.resolveExpr(s.Expr, scopes)
+	case *ast.ErrDeferStmt:
+		i.resolveExpr(s.Expr, scopes)
 	case *ast.IfStmt:
 		i.resolveExpr(s.Condition, scopes)
 		i.resolveScopedBlock(s.Consequence, scopes)

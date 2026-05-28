@@ -21,6 +21,14 @@ type Checker struct {
 	currentFunction *functionInfo
 	currentStd      bool
 	typeArgValues   map[string]string
+	liveErrDefers   []errDeferEntry
+}
+
+// errDeferEntry records one active errdefer cleanup whose receiver must stay
+// valid on every error-return path that can run it.
+type errDeferEntry struct {
+	receiver ast.Expression
+	name     string
 }
 
 type functionInfo struct {
@@ -316,12 +324,21 @@ func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
 func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 	lastUses := blockLastUses(block)
 	defers := []ast.Expression{}
+	errDeferMark := len(c.liveErrDefers)
+	defer c.restoreErrDefers(errDeferMark)
 	for idx, stmt := range block.Statements {
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
 			if err := c.checkDeferStmt(deferStmt, env); err != nil {
 				return err
 			}
 			defers = append(defers, deferStmt.Expr)
+			env.releaseLastUseBorrows(idx, lastUses)
+			continue
+		}
+		if errDeferStmt, ok := stmt.(*ast.ErrDeferStmt); ok {
+			if err := c.checkErrDeferStmt(errDeferStmt, env); err != nil {
+				return err
+			}
 			env.releaseLastUseBorrows(idx, lastUses)
 			continue
 		}
@@ -347,6 +364,8 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkReturnStmt(s, env)
 	case *ast.DeferStmt:
 		return errorf("move error: defer statement must appear directly in a block")
+	case *ast.ErrDeferStmt:
+		return errorf("move error: errdefer statement must appear directly in a block")
 	case *ast.ExprStmt:
 		return c.checkExprStmt(s, env)
 	case *ast.IfStmt:
@@ -384,6 +403,66 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
 	return err
 }
 
+// checkErrDeferStmt validates an error-path cleanup registration. The receiver
+// must be a readable owned local at registration. Unlike defer, the cleanup is
+// not applied at normal block exit, so it never blocks a success-path move; its
+// receiver is instead re-validated at each error-return path that can run it.
+func (c *Checker) checkErrDeferStmt(stmt *ast.ErrDeferStmt, env *scope) error {
+	call, ok := stmt.Expr.(*ast.CallExpr)
+	if !ok {
+		return errorf("move error: errdefer expects cleanup method call")
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Name != "deinit" {
+		return errorf("move error: errdefer expects cleanup method call")
+	}
+	if _, err := c.readExpr(field.Receiver, env); err != nil {
+		return err
+	}
+	name := ""
+	if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
+		name = ident.Name
+	}
+	c.liveErrDefers = append(c.liveErrDefers, errDeferEntry{receiver: field.Receiver, name: name})
+	return nil
+}
+
+// restoreErrDefers drops errdefer entries registered inside an exited block.
+func (c *Checker) restoreErrDefers(mark int) {
+	c.liveErrDefers = c.liveErrDefers[:mark]
+}
+
+// validateErrDeferReceivers rejects active errdefer cleanups whose receiver has
+// become invalid on an error-return path: moved, explicitly deinitialized, or
+// borrowed. This runs at every error path (try) that could trigger the cleanup.
+func (c *Checker) validateErrDeferReceivers(env *scope) error {
+	for _, entry := range c.liveErrDefers {
+		if entry.name == "" {
+			continue
+		}
+		value, exists := env.lookup(entry.name)
+		if !exists {
+			continue
+		}
+		if value.deinitialized {
+			return errorf(
+				"move error: errdefer cleanup receiver `%s` was deinitialized before an error path",
+				entry.name)
+		}
+		if value.moved {
+			return errorf(
+				"move error: errdefer cleanup receiver `%s` was moved before an error path",
+				entry.name)
+		}
+		if value.activeBorrows > 0 || value.activeMutBorrows > 0 {
+			return errorf(
+				"borrow error: errdefer cleanup receiver `%s` is borrowed on an error path",
+				entry.name)
+		}
+	}
+	return nil
+}
+
 // checkDeferredCleanups applies deferred cleanup effects in reverse order.
 func (c *Checker) checkDeferredCleanups(defers []ast.Expression, env *scope) error {
 	for idx := len(defers) - 1; idx >= 0; idx-- {
@@ -417,8 +496,33 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 {
 		return errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
 	}
+	// An error return runs active errdefer cleanups before the function exits,
+	// so their receivers must still be valid here. A success return transfers
+	// the owner instead and must not be blocked by the cleanup it skips.
+	if c.returnTakesErrorPath(stmt.Value, env) {
+		if err := c.validateErrDeferReceivers(env); err != nil {
+			return err
+		}
+	}
 	_, err := c.moveExpr(stmt.Value, env)
 	return err
+}
+
+// returnTakesErrorPath reports whether returning expr exits through the error
+// path: the `error(...)` builtin or propagating an existing error-union value.
+func (c *Checker) returnTakesErrorPath(expr ast.Expression, env *scope) bool {
+	if call, ok := expr.(*ast.CallExpr); ok {
+		if ident, ok := call.Callee.(*ast.IdentExpr); ok && ident.Name == "error" {
+			return true
+		}
+	}
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		if value, exists := env.lookup(ident.Name); exists &&
+			strings.HasPrefix(value.typeName, "!") {
+			return true
+		}
+	}
+	return false
 }
 
 // borrowedReturnAllowed permits returning the declared borrowed source parameter.
@@ -1443,6 +1547,8 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 	}
 	lastUses := blockLastUses(block)
 	defers := []ast.Expression{}
+	errDeferMark := len(c.liveErrDefers)
+	defer c.restoreErrDefers(errDeferMark)
 	lastIdx := len(block.Statements) - 1
 	for idx, stmt := range block.Statements[:lastIdx] {
 		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
@@ -1450,6 +1556,13 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 				return "", err
 			}
 			defers = append(defers, deferStmt.Expr)
+			env.releaseLastUseBorrows(idx, lastUses)
+			continue
+		}
+		if errDeferStmt, ok := stmt.(*ast.ErrDeferStmt); ok {
+			if err := c.checkErrDeferStmt(errDeferStmt, env); err != nil {
+				return "", err
+			}
 			env.releaseLastUseBorrows(idx, lastUses)
 			continue
 		}
@@ -2903,6 +3016,11 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 	arg, ok := errorUnionElement(got)
 	if !ok {
 		return "", errorf("move error: try expects !T, got %s", got)
+	}
+	// A try can return early through the error path, which runs any active
+	// errdefer cleanups. Their receivers must still be valid at this point.
+	if err := c.validateErrDeferReceivers(env); err != nil {
+		return "", err
 	}
 	return arg, nil
 }
@@ -6370,6 +6488,8 @@ func stmtIdentUses(stmt ast.Statement) []string {
 	case *ast.ReturnStmt:
 		return exprIdentUses(s.Value)
 	case *ast.DeferStmt:
+		return exprIdentUses(s.Expr)
+	case *ast.ErrDeferStmt:
 		return exprIdentUses(s.Expr)
 	case *ast.ExprStmt:
 		return exprIdentUses(s.Expr)

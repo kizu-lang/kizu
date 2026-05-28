@@ -669,6 +669,8 @@ func (p *Parser) parseKeywordStatement() (ast.Statement, bool) {
 		return p.parseReturnStmt(), true
 	case token.Defer:
 		return p.parseDeferStmt(), true
+	case token.ErrDefer:
+		return p.parseErrDeferStmt(), true
 	case token.If:
 		return p.parseIfStmt(), true
 	case token.While:
@@ -839,13 +841,28 @@ func (p *Parser) parseDeferStmt() ast.Statement {
 	stmt := &ast.DeferStmt{}
 	if p.peek.Type == token.Let || p.peek.Type == token.Var ||
 		p.peek.Type == token.Return || p.peek.Type == token.Defer ||
-		p.peek.Type == token.LBrace {
+		p.peek.Type == token.ErrDefer || p.peek.Type == token.LBrace {
 		p.errorf("defer expects an expression statement")
 		return stmt
 	}
 	p.nextToken()
 	stmt.Expr = p.parseExpression(lowest)
 	p.expectStatementTerminator("defer statement")
+	return stmt
+}
+
+// parseErrDeferStmt parses one error-path cleanup expression statement.
+func (p *Parser) parseErrDeferStmt() ast.Statement {
+	stmt := &ast.ErrDeferStmt{}
+	if p.peek.Type == token.Let || p.peek.Type == token.Var ||
+		p.peek.Type == token.Return || p.peek.Type == token.Defer ||
+		p.peek.Type == token.ErrDefer || p.peek.Type == token.LBrace {
+		p.errorf("errdefer expects an expression statement")
+		return stmt
+	}
+	p.nextToken()
+	stmt.Expr = p.parseExpression(lowest)
+	p.expectStatementTerminator("errdefer statement")
 	return stmt
 }
 

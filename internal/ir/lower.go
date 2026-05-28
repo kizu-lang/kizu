@@ -195,6 +195,13 @@ func (l *lowerer) lowerBlock(block *ast.BlockStmt) error {
 			}
 			continue
 		}
+		if errDeferStmt, ok := stmt.(*ast.ErrDeferStmt); ok {
+			if err := l.lowerErrDeferStmt(errDeferStmt); err != nil {
+				l.popDeferFrame()
+				return err
+			}
+			continue
+		}
 		if err := l.lowerStmt(stmt); err != nil {
 			l.popDeferFrame()
 			return err
@@ -222,7 +229,7 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return err
 	case *ast.ReturnStmt:
 		return l.lowerReturnStmt(s)
-	case *ast.DeferStmt:
+	case *ast.DeferStmt, *ast.ErrDeferStmt:
 		return fmt.Errorf("ir error: defer statement must appear directly in a block")
 	case *ast.ExprStmt:
 		_, err := l.lowerExpr(s.Expr)
@@ -251,7 +258,7 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 // lowerReturnStmt lowers explicit returns and wraps !T success values.
 func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 	if stmt.Value == nil {
-		l.emitActiveCleanups()
+		l.emitNormalCleanups()
 		l.block.Terminator = Terminator{Op: "return", Value: l.returnVoidValue()}
 		return nil
 	}
@@ -259,16 +266,34 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 	if err != nil {
 		return err
 	}
+	errorReturn := l.producesErrorValue(value)
 	if errorName, success, ok := errorUnionParts(l.current.Return); ok {
 		if value.Type == success {
 			value = l.emit("error.ok", l.current.Return, []Value{value}, "")
 		} else if errorName != "" && value.Type == errorName {
 			value = l.emit("error.error", l.current.Return, []Value{value}, "")
+			errorReturn = true
 		}
 	}
-	l.emitActiveCleanups()
+	if errorReturn {
+		l.emitErrorCleanups()
+	} else {
+		l.emitNormalCleanups()
+	}
 	l.block.Terminator = Terminator{Op: "return", Value: value}
 	return nil
+}
+
+// producesErrorValue reports whether v was defined by an error.error
+// instruction in the current block, such as the `error(...)` builtin. Such a
+// return exits through the error path and must run errdefer cleanups.
+func (l *lowerer) producesErrorValue(v Value) bool {
+	for idx := len(l.block.Instrs) - 1; idx >= 0; idx-- {
+		if l.block.Instrs[idx].Result.Name == v.Name {
+			return l.block.Instrs[idx].Op == "error.error"
+		}
+	}
+	return false
 }
 
 // returnVoidValue returns the correct SSA return value for void-like returns.
@@ -572,7 +597,7 @@ func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 		return Value{}, err
 	}
 	result := l.emit("error.try", errorUnionElementType(value.Type), []Value{value}, "")
-	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = l.activeCleanups()
+	l.block.Instrs[len(l.block.Instrs)-1].Cleanups = l.errorCleanups()
 	return result, nil
 }
 

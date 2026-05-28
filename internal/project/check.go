@@ -495,6 +495,8 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 		return &cp, err
 	case *ast.DeferStmt:
 		return c.qualifyDeferStmt(module, s)
+	case *ast.ErrDeferStmt:
+		return c.qualifyErrDeferStmt(module, s)
 	case *ast.ExprStmt:
 		cp := *s
 		expr, err := c.qualifyExpr(module, s.Expr)
@@ -532,6 +534,17 @@ func (c *graphChecker) qualifyDeferStmt(
 	module *moduleUnit,
 	stmt *ast.DeferStmt,
 ) (*ast.DeferStmt, error) {
+	cp := *stmt
+	expr, err := c.qualifyExpr(module, stmt.Expr)
+	cp.Expr = expr
+	return &cp, err
+}
+
+// qualifyErrDeferStmt rewrites type-bearing expressions in an errdefer cleanup.
+func (c *graphChecker) qualifyErrDeferStmt(
+	module *moduleUnit,
+	stmt *ast.ErrDeferStmt,
+) (*ast.ErrDeferStmt, error) {
 	cp := *stmt
 	expr, err := c.qualifyExpr(module, stmt.Expr)
 	cp.Expr = expr

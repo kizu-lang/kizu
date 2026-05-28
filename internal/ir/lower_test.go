@@ -113,6 +113,35 @@ func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
 	}
 }
 
+// TestLowerErrDeferRunsOnlyOnErrorReturn checks errdefer cleanup attaches to
+// the try error path and an explicit error return, but is skipped on success.
+func TestLowerErrDeferRunsOnlyOnErrorReturn(t *testing.T) {
+	errorReturn := lowerSource(t, `struct User { name: []u8 }
+fn make() -> !std::arena::Arena<User> {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = std::arena::Arena<User>(allocator);
+    errdefer users.deinit();
+    return error("boom");
+}
+fn main() {}`)
+	dump := Dump(errorReturn)
+	if !strings.Contains(dump, "arena.deinit") {
+		t.Fatalf("error return must emit errdefer cleanup:\n%s", dump)
+	}
+
+	successReturn := lowerSource(t, `struct User { name: []u8 }
+fn make() -> !std::arena::Arena<User> {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = std::arena::Arena<User>(allocator);
+    errdefer users.deinit();
+    return users;
+}
+fn main() {}`)
+	if got := Dump(successReturn); strings.Contains(got, "arena.deinit") {
+		t.Fatalf("success return must skip errdefer cleanup:\n%s", got)
+	}
+}
+
 // TestLowerByteSliceAccess emits explicit checked slice operations.
 func TestLowerByteSliceAccess(t *testing.T) {
 	module := lowerSource(t, `fn main() {
