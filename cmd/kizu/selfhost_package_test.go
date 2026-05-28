@@ -1283,8 +1283,6 @@ func assertCompiledSubModules(t *testing.T) {
 		"pub fn find_param_type(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_type_lower.kizu",
 		"pub fn kizu_type_to_llvm(")
-	assertFileContains(t, "../../selfhost/src/backend/compiled_struct_emit.kizu",
-		"pub fn append_field_access_insertvalue(", "pub fn append_index_expr_insertvalue(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir.kizu",
 		"pub struct MirFunction", "pub struct MirBlock", "pub struct MirValue",
 		"pub struct MirInstruction", "pub struct MirTerminator", "pub struct MirType",
@@ -1323,8 +1321,6 @@ func assertCompiledModulesNoHardcoding(t *testing.T, compiled string) {
 		"../../selfhost/src/backend/compiled_fact_lookup.kizu",
 		"../../selfhost/src/backend/compiled_type_lower.kizu",
 		"../../selfhost/src/backend/compiled_signature.kizu",
-		"../../selfhost/src/backend/compiled_struct_emit.kizu",
-		"../../selfhost/src/backend/compiled_expr_emit.kizu",
 		"../../selfhost/src/backend/compiled_mir.kizu",
 		"../../selfhost/src/backend/compiled_mir_lower.kizu",
 		"../../selfhost/src/backend/compiled_mir_lower_struct.kizu",
