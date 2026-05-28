@@ -45,36 +45,39 @@ pub fn append_compiled_function_params(
     llvm_return_type: []u8,
     params_spec: []u8
 ) -> !void {
-    let statement_count = try count_block_statements(ir_bytes, function_name);
+    let bs = ir_contract::body_facts_start(ir_bytes, function_name);
+    let statement_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, 0, "statement", bs
+    );
     if statement_count == 1 {
-        let statement = try ir_contract::body_child_sequence(
-            ir_bytes, function_name, 0, "statement", 0
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", 0, bs
         );
-        let kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
         if !std::mem::equal_bytes(kind, "Return") {
             return error("compiled function: single statement must be return");
         }
-        let value = try ir_contract::body_child_sequence(
-            ir_bytes, function_name, statement, "value", 0
+        let value = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, statement, "value", 0, bs
         );
-        let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+        let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
         if std::mem::equal_bytes(value_kind, "String") {
             let mir = try compiled_mir_lower::lower_string_return_function(
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, value
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, value, bs
             );
             try compiled_mir_llvm::append_function(out, mir);
             return;
         }
         if std::mem::equal_bytes(value_kind, "Int") {
             let mir = try compiled_mir_lower::lower_int_return_function(
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, value
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, value, bs
             );
             try compiled_mir_llvm::append_function(out, mir);
             return;
         }
         if std::mem::equal_bytes(value_kind, "FieldExpr") {
             let mir = try compiled_mir_lower::lower_enum_field_return_function(
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, value
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, value, bs
             );
             try compiled_mir_llvm::append_function(out, mir);
             return;
@@ -85,14 +88,14 @@ pub fn append_compiled_function_params(
             }
             let mir = try compiled_mir_lower::lower_struct_return_function(
                 ir_bytes, function_name, llvm_symbol,
-                llvm_return_type, params_spec, value
+                llvm_return_type, params_spec, value, bs
             );
             try compiled_mir_llvm::append_function(out, mir);
             return;
         }
         if std::mem::equal_bytes(value_kind, "Call") {
             let mir = try compiled_mir_lower::lower_call_return_function(
-                ir_bytes, function_name, llvm_symbol, params_spec, value
+                ir_bytes, function_name, llvm_symbol, params_spec, value, bs
             );
             try compiled_mir_llvm::append_function(out, mir);
             return;
@@ -102,7 +105,7 @@ pub fn append_compiled_function_params(
         }
         let mir = try compiled_mir_lower::lower_expr_return_function(
             ir_bytes, function_name, llvm_symbol,
-            llvm_return_type, params_spec, value
+            llvm_return_type, params_spec, value, bs
         );
         try compiled_mir_llvm::append_function(out, mir);
         return;
@@ -113,7 +116,8 @@ pub fn append_compiled_function_params(
         llvm_symbol,
         llvm_return_type,
         params_spec,
-        statement_count
+        statement_count,
+        bs
     );
     try compiled_mir_llvm::append_function(out, mir);
     return;
@@ -132,8 +136,4 @@ pub fn append_compiled_function_auto(
         llvm_return_type, params_spec
     );
     return;
-}
-
-fn count_block_statements(ir_bytes: []u8, function_name: []u8) -> !i64 {
-    return try ir_contract::body_edge_count(ir_bytes, function_name, 0, "statement");
 }

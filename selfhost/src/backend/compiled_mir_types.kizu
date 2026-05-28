@@ -17,13 +17,14 @@ pub fn resolve_value_llvm_type(
     function_name: []u8,
     module_prefix: []u8,
     params_spec: []u8,
-    name: []u8
+    name: []u8,
+    bs: i64
 ) -> ![]u8 {
     let param_type = find_spec_llvm_type_or_empty(params_spec, name);
     if std::mem::len(param_type) > 0 {
         return param_type;
     }
-    let kizu_type = try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name);
+    let kizu_type = try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
     return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
 }
 
@@ -32,13 +33,14 @@ pub fn resolve_value_kizu_type(
     function_name: []u8,
     module_prefix: []u8,
     params_spec: []u8,
-    name: []u8
+    name: []u8,
+    bs: i64
 ) -> ![]u8 {
     let param_type = find_spec_llvm_type_or_empty(params_spec, name);
     if std::mem::len(param_type) > 0 {
         return try find_function_param_kizu_type(ir_bytes, function_name, name);
     }
-    return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name);
+    return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
 }
 
 pub fn struct_lookup_kizu_type(kizu_type: []u8) -> []u8 {
@@ -52,11 +54,11 @@ pub fn struct_lookup_kizu_type(kizu_type: []u8) -> []u8 {
     return kizu_type;
 }
 
-pub fn count_call_args(ir_bytes: []u8, function_name: []u8, call_node: i64) -> !i64 {
+pub fn count_call_args(ir_bytes: []u8, function_name: []u8, call_node: i64, bs: i64) -> !i64 {
     var count = 0;
     while true {
-        let child = try ir_contract::body_child_sequence_or_minus_one(
-            ir_bytes, function_name, call_node, "arg", count
+        let child = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, call_node, "arg", count, bs
         );
         if child < 0 {
             return count;
@@ -70,10 +72,11 @@ pub fn lower_call_return_type(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
-    call_node: i64
+    call_node: i64,
+    bs: i64
 ) -> ![]u8 {
-    let callee_name = try ir_contract::body_call_callee_or_empty(
-        ir_bytes, function_name, call_node
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
     );
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         let stdlib_ret = try compiled_fact_lookup::lookup_stdlib_return(
@@ -82,7 +85,7 @@ pub fn lower_call_return_type(
         return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, stdlib_ret);
     }
     return try compiled_signature::resolve_call_return_type(
-        ir_bytes, function_name, module_prefix, call_node
+        ir_bytes, function_name, module_prefix, call_node, bs
     );
 }
 
@@ -90,10 +93,11 @@ pub fn lower_call_module_prefix(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
-    call_node: i64
+    call_node: i64,
+    bs: i64
 ) -> ![]u8 {
-    let callee_name = try ir_contract::body_call_callee_or_empty(
-        ir_bytes, function_name, call_node
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
     );
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         return ir_bytes[0..0];
@@ -105,10 +109,11 @@ pub fn lower_call_callee_name(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
-    call_node: i64
+    call_node: i64,
+    bs: i64
 ) -> ![]u8 {
-    let callee_name = try ir_contract::body_call_callee_or_empty(
-        ir_bytes, function_name, call_node
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
     );
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         return try compiled_fact_lookup::lookup_stdlib_symbol(ir_bytes, callee_name);
@@ -135,22 +140,23 @@ pub fn resolve_field_receiver_kizu_type(
     function_name: []u8,
     module_prefix: []u8,
     params_spec: []u8,
-    receiver_node: i64
+    receiver_node: i64,
+    bs: i64
 ) -> ![]u8 {
-    let receiver_kind = try ir_contract::body_node_kind(
-        ir_bytes, function_name, receiver_node
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver_node, bs
     );
     if std::mem::equal_bytes(receiver_kind, "Var") {
-        let receiver_name = try ir_contract::body_token_or_empty(
-            ir_bytes, function_name, receiver_node
+        let receiver_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, receiver_node, bs
         );
         return try resolve_value_kizu_type(
-            ir_bytes, function_name, module_prefix, params_spec, receiver_name
+            ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
         );
     }
     if std::mem::equal_bytes(receiver_kind, "FieldExpr") {
         return try resolve_field_expr_kizu_type(
-            ir_bytes, function_name, module_prefix, params_spec, receiver_node
+            ir_bytes, function_name, module_prefix, params_spec, receiver_node, bs
         );
     }
     return error("compiled mir: unsupported field receiver type");
@@ -161,10 +167,11 @@ pub fn resolve_field_receiver_llvm_type(
     function_name: []u8,
     module_prefix: []u8,
     params_spec: []u8,
-    receiver_node: i64
+    receiver_node: i64,
+    bs: i64
 ) -> ![]u8 {
     let kizu_type = try resolve_field_receiver_kizu_type(
-        ir_bytes, function_name, module_prefix, params_spec, receiver_node
+        ir_bytes, function_name, module_prefix, params_spec, receiver_node, bs
     );
     return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
 }
@@ -174,10 +181,11 @@ pub fn resolve_field_expr_kizu_type(
     function_name: []u8,
     module_prefix: []u8,
     params_spec: []u8,
-    expr_node: i64
+    expr_node: i64,
+    bs: i64
 ) -> ![]u8 {
     let info = try resolve_field_expr(
-        ir_bytes, function_name, module_prefix, params_spec, expr_node
+        ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
     );
     return info.field_kizu_type;
 }
@@ -187,10 +195,11 @@ pub fn resolve_field_expr_index(
     function_name: []u8,
     module_prefix: []u8,
     params_spec: []u8,
-    expr_node: i64
+    expr_node: i64,
+    bs: i64
 ) -> !i64 {
     let info = try resolve_field_expr(
-        ir_bytes, function_name, module_prefix, params_spec, expr_node
+        ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
     );
     return info.field_index;
 }
@@ -200,22 +209,23 @@ pub fn resolve_field_expr(
     function_name: []u8,
     module_prefix: []u8,
     params_spec: []u8,
-    expr_node: i64
+    expr_node: i64,
+    bs: i64
 ) -> !FieldAccessInfo {
-    let mode = try ir_contract::sequence_fact_second_value(
-        ir_bytes, "body-field-expr ", function_name, expr_node
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, expr_node, bs
     );
     if !std::mem::equal_bytes(mode, "field") {
         return error("compiled mir: namespace field has no struct type");
     }
-    let field_name = try ir_contract::body_field_expr_name(
-        ir_bytes, function_name, expr_node, "field"
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, expr_node, "field", bs
     );
-    let receiver = try ir_contract::body_child_sequence(
-        ir_bytes, function_name, expr_node, "receiver", 0
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr_node, "receiver", 0, bs
     );
     let receiver_kizu_type = try resolve_field_receiver_kizu_type(
-        ir_bytes, function_name, module_prefix, params_spec, receiver
+        ir_bytes, function_name, module_prefix, params_spec, receiver, bs
     );
     let receiver_llvm_type = try compiled_type_lower::kizu_type_to_llvm(
         ir_bytes, module_prefix, receiver_kizu_type
@@ -328,37 +338,38 @@ fn resolve_local_kizu_type(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
-    name: []u8
+    name: []u8,
+    bs: i64
 ) -> ![]u8 {
     var stmt_index = 0;
     while true {
-        let statement = try ir_contract::body_child_sequence_or_minus_one(
-            ir_bytes, function_name, 0, "statement", stmt_index
+        let statement = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, 0, "statement", stmt_index, bs
         );
         if statement < 0 {
             return error("compiled mir: local type not found");
         }
-        let stmt_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
         if std::mem::equal_bytes(stmt_kind, "Let") {
-            let name_node = try ir_contract::body_child_sequence(
-                ir_bytes, function_name, statement, "name", 0
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
             );
-            let local_name = try ir_contract::body_token_or_empty(
-                ir_bytes, function_name, name_node
+            let local_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, name_node, bs
             );
             if std::mem::equal_bytes(local_name, name) {
-                let value = try ir_contract::body_child_sequence(
-                    ir_bytes, function_name, statement, "value", 0
+                let value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "value", 0, bs
                 );
-                let value_kind = try ir_contract::body_node_kind(
-                    ir_bytes, function_name, value
+                let value_kind = try ir_contract::body_node_kind_from(
+                    ir_bytes, function_name, value, bs
                 );
                 if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
-                    return try resolve_struct_literal_kizu_type(ir_bytes, function_name, value);
+                    return try resolve_struct_literal_kizu_type(ir_bytes, function_name, value, bs);
                 }
                 if std::mem::equal_bytes(value_kind, "Call") {
-                    let callee_name = try ir_contract::body_call_callee_or_empty(
-                        ir_bytes, function_name, value
+                    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+                        ir_bytes, function_name, value, bs
                     );
                     let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
                         ir_bytes, "function-signature-return ", module_prefix, callee_name
@@ -379,10 +390,11 @@ fn resolve_local_kizu_type(
 fn resolve_struct_literal_kizu_type(
     ir_bytes: []u8,
     function_name: []u8,
-    struct_literal_node: i64
+    struct_literal_node: i64,
+    bs: i64
 ) -> ![]u8 {
-    let type_node = try ir_contract::body_child_sequence(
-        ir_bytes, function_name, struct_literal_node, "type", 0
+    let type_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, struct_literal_node, "type", 0, bs
     );
-    return try ir_contract::body_token_or_empty(ir_bytes, function_name, type_node);
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, type_node, bs);
 }
