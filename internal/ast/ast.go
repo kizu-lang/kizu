@@ -620,6 +620,13 @@ func (s *ExprStmt) String() string {
 type IdentExpr struct {
 	Name string
 	Span Span
+	// SlotDepth/SlotIndex are a lexical address precomputed by the interpreter
+	// resolver, valid only when SlotResolved is true and the name is
+	// unambiguous in scope. Evaluation verifies the binding name and falls
+	// back to name lookup otherwise.
+	SlotDepth    int
+	SlotIndex    int
+	SlotResolved bool
 }
 
 // expressionNode marks IdentExpr as an expression node.
@@ -633,6 +640,11 @@ func (e *IdentExpr) String() string {
 // IntExpr represents an integer literal.
 type IntExpr struct {
 	Value string
+	// Parsed holds the decimal value precomputed at parse time; Parsed is
+	// only valid when ParseOK is true. Evaluators fall back to reparsing
+	// Value otherwise so overflow still surfaces at the original point.
+	Parsed  int64
+	ParseOK bool
 }
 
 // expressionNode marks IntExpr as an expression node.

@@ -154,6 +154,7 @@ func (i *Interpreter) registerProgram(program *ast.Program) {
 			continue
 		}
 	}
+	i.resolveProgram(program)
 }
 
 // runTestDecl executes one test block with a fresh local environment.
@@ -860,7 +861,7 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	case *ast.ComptimeExpr:
 		return i.evalExpr(e.Expr, env)
 	case *ast.IdentExpr:
-		return i.evalIdent(e.Name, env)
+		return i.evalIdentExpr(e, env)
 	case *ast.PrefixExpr:
 		return i.evalPrefixExpr(e, env)
 	case *ast.BinaryExpr:
@@ -1024,6 +1025,9 @@ func (i *Interpreter) evalIndexBound(name string, expr ast.Expression, env *Env)
 func evalLiteralExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr:
+		if e.ParseOK {
+			return intValue(e.Parsed), nil
+		}
 		return parseInt(e.Value)
 	case *ast.StringExpr:
 		return stringValue(e.Value), nil
@@ -1041,6 +1045,18 @@ func parseInt(lit string) (Value, error) {
 		return voidValue(), fmt.Errorf("runtime error: invalid integer `%s`", lit)
 	}
 	return intValue(v), nil
+}
+
+// evalIdentExpr resolves an identifier, reading its precomputed slot when the
+// resolver assigned one and the bound name still matches, and otherwise
+// falling back to name lookup.
+func (i *Interpreter) evalIdentExpr(e *ast.IdentExpr, env *Env) (Value, error) {
+	if e.SlotResolved {
+		if b := env.bindingAt(e.SlotDepth, e.SlotIndex); b != nil && b.name == e.Name {
+			return b.value, nil
+		}
+	}
+	return i.evalIdent(e.Name, env)
 }
 
 // evalIdent resolves a name from runtime bindings or static type arguments.

@@ -5,7 +5,7 @@ import (
 	"sort"
 )
 
-type valueKind int
+type valueKind uint8
 
 const (
 	kindVoid valueKind = iota
@@ -39,12 +39,12 @@ const (
 
 // Value is a runtime value produced by the Phase 2 interpreter.
 type Value struct {
-	kind     valueKind
 	i        int64
-	b        bool
 	s        string
 	typeName string
 	object   any
+	kind     valueKind
+	b        bool
 }
 
 // StructLayout stores field indexes shared by runtime struct instances.

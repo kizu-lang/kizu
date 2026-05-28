@@ -15,6 +15,7 @@ var (
 )
 
 type binding struct {
+	name        string
 	value       Value
 	mutable     bool
 	fieldParent *binding
@@ -27,7 +28,6 @@ type binding struct {
 // Env stores lexical bindings for a function call or block execution.
 type Env struct {
 	parent     *Env
-	bindings   map[string]*binding
 	cache      map[string]*binding
 	inline     [8]binding
 	cells      []binding
@@ -45,9 +45,6 @@ func NewEnvWithCapacity(capacity int) *Env {
 	env := envPool.Get().(*Env)
 	env.parent = nil
 	env.hasBorrows = false
-	if env.bindings == nil {
-		env.bindings = make(map[string]*binding, capacity)
-	}
 	if capacity <= len(env.inline) {
 		env.cells = env.inline[:0]
 	} else if cap(env.cells) < capacity {
@@ -68,16 +65,48 @@ func (e *Env) Child() *Env {
 
 // Define creates a binding in the current environment.
 func (e *Env) Define(name string, value Value, mutable bool) error {
-	if _, ok := e.bindings[name]; ok {
+	if _, ok := e.localBinding(name); ok {
 		return fmt.Errorf("runtime error: `%s` is already defined", name)
 	}
 	if e.cache != nil {
 		delete(e.cache, name)
 	}
 	next := e.nextBinding()
-	*next = binding{value: value, mutable: mutable}
-	e.bindings[name] = next
+	*next = binding{name: name, value: value, mutable: mutable}
 	return nil
+}
+
+// bindingAt returns the binding at a precomputed lexical address, walking
+// depth parents then indexing inline cell storage. It returns nil when the
+// address falls outside cells (overflowed into the pool, or not yet defined)
+// so callers fall back to name lookup.
+func (e *Env) bindingAt(depth, index int) *binding {
+	for d := 0; d < depth; d++ {
+		if e == nil {
+			return nil
+		}
+		e = e.parent
+	}
+	if e == nil || index < 0 || index >= len(e.cells) {
+		return nil
+	}
+	return &e.cells[index]
+}
+
+// localBinding scans this environment's own bindings for a name. Scopes are
+// small, so a linear scan over stable cell storage beats string-keyed hashing.
+func (e *Env) localBinding(name string) (*binding, bool) {
+	for i := range e.cells {
+		if e.cells[i].name == name {
+			return &e.cells[i], true
+		}
+	}
+	for _, b := range e.pooled {
+		if b.name == name {
+			return b, true
+		}
+	}
+	return nil, false
 }
 
 // nextBinding returns stable storage for one binding in this environment.
@@ -97,9 +126,6 @@ func (e *Env) Release() {
 	if e == nil || e.hasBorrows {
 		return
 	}
-	for name := range e.bindings {
-		delete(e.bindings, name)
-	}
 	for name := range e.cache {
 		delete(e.cache, name)
 	}
@@ -117,7 +143,7 @@ func (e *Env) Release() {
 
 // SetMutable marks an existing binding as assignable in the nearest scope.
 func (e *Env) SetMutable(name string) {
-	if b, ok := e.bindings[name]; ok {
+	if b, ok := e.localBinding(name); ok {
 		b.mutable = true
 		return
 	}
@@ -128,7 +154,7 @@ func (e *Env) SetMutable(name string) {
 
 // Get returns a binding value from the nearest environment that defines it.
 func (e *Env) Get(name string) (Value, bool) {
-	if b, ok := e.bindings[name]; ok {
+	if b, ok := e.localBinding(name); ok {
 		return b.value, true
 	}
 	if e.parent != nil {
@@ -148,7 +174,7 @@ func (e *Env) Get(name string) (Value, bool) {
 
 // resolve returns a binding from this environment or an ancestor without side effects.
 func (e *Env) resolve(name string) (*binding, bool) {
-	if b, ok := e.bindings[name]; ok {
+	if b, ok := e.localBinding(name); ok {
 		return b, true
 	}
 	if e.parent != nil {
@@ -162,7 +188,7 @@ func (e *Env) resolve(name string) (*binding, bool) {
 
 // Binding returns the mutable storage cell for a local name.
 func (e *Env) Binding(name string) (*binding, bool) {
-	if b, ok := e.bindings[name]; ok {
+	if b, ok := e.localBinding(name); ok {
 		e.hasBorrows = true
 		return b, true
 	}
@@ -174,7 +200,7 @@ func (e *Env) Binding(name string) (*binding, bool) {
 
 // Assign updates a mutable binding in the nearest environment that defines it.
 func (e *Env) Assign(name string, value Value) error {
-	if b, ok := e.bindings[name]; ok {
+	if b, ok := e.localBinding(name); ok {
 		if !b.mutable {
 			return fmt.Errorf("runtime error: cannot assign to immutable binding `%s`", name)
 		}

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -1163,7 +1164,12 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	case token.Ident:
 		return p.parseIdentPrefixExpression()
 	case token.Int:
-		return &ast.IntExpr{Value: p.cur.Literal}
+		expr := &ast.IntExpr{Value: p.cur.Literal}
+		if v, err := strconv.ParseInt(expr.Value, 10, 64); err == nil {
+			expr.Parsed = v
+			expr.ParseOK = true
+		}
+		return expr
 	case token.String:
 		return &ast.StringExpr{Value: p.cur.Literal}
 	case token.True:
