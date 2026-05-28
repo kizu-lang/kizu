@@ -435,7 +435,7 @@ fn append_expr_insts(
     var index = 0;
     while index < insts.len() {
         let inst = try insts.at(index);
-        try append_expr_inst(out, llvm_symbol, inst);
+        try append_expr_inst(out, llvm_symbol, inst, insts);
         index = index + 1;
     }
     return;
@@ -443,7 +443,8 @@ fn append_expr_insts(
 fn append_expr_inst(
     out: &var std::string::String,
     llvm_symbol: []u8,
-    inst: &compiled_mir::MirExprInst
+    inst: &compiled_mir::MirExprInst,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
     if inst.kind == compiled_mir::MirExprInstKind::ConstString {
         let payload_len = try compiled_util::string_token_decoded_len(
@@ -506,7 +507,9 @@ fn append_expr_inst(
         inst.kind == compiled_mir::MirExprInstKind::ConstEnumTag {
         try out.append_bytes("  %t");
         try std::fmt::append_i64(out, inst.id);
-        try out.append_bytes(" = add i64 0, ");
+        try out.append_bytes(" = add ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_bytes(" 0, ");
         try std::fmt::append_i64(out, inst.int_value);
         try out.append_byte(cast<u8>(10));
         return;
@@ -521,7 +524,7 @@ fn append_expr_inst(
         return;
     }
     if inst.kind == compiled_mir::MirExprInstKind::Binary {
-        try append_binary_expr_inst(out, inst);
+        try append_binary_expr_inst(out, inst, insts);
         return;
     }
     if inst.kind == compiled_mir::MirExprInstKind::FieldAccess {
@@ -604,7 +607,8 @@ fn append_expr_globals(
 
 fn append_binary_expr_inst(
     out: &var std::string::String,
-    inst: &compiled_mir::MirExprInst
+    inst: &compiled_mir::MirExprInst,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
     try out.append_bytes("  %t");
     try std::fmt::append_i64(out, inst.id);
@@ -644,12 +648,28 @@ fn append_binary_expr_inst(
             }
         }
     }
-    try out.append_bytes(" i64 %t");
+    let operand_type = try binary_operand_type(insts, inst.left);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(operand_type);
+    try out.append_bytes(" %t");
     try std::fmt::append_i64(out, inst.left);
     try out.append_bytes(", %t");
     try std::fmt::append_i64(out, inst.right);
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+// binary_operand_type returns the LLVM type of a comparison operand, defaulting
+// to i64 when the operand instruction has no recorded type.
+fn binary_operand_type(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    operand_id: i64
+) -> ![]u8 {
+    let operand_type = try expr_inst_type_by_id(insts, operand_id);
+    if std::mem::len(operand_type) == 0 {
+        return "i64";
+    }
+    return operand_type;
 }
 
 fn append_struct_return(
