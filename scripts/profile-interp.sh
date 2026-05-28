@@ -15,7 +15,7 @@
 # Quantify a change (A/B) with benchstat:
 #   scripts/profile-interp.sh bench >before.txt   # before your change
 #   scripts/profile-interp.sh bench >after.txt    # after your change
-#   benchstat before.txt after.txt
+#   go run golang.org/x/perf/cmd/benchstat@latest before.txt after.txt
 set -eu
 
 bench='^BenchmarkInterpHotPath$'

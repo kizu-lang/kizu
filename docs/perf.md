@@ -124,7 +124,8 @@ ground truth は `TestSelfhostBackendArtifactGate`(`KIZU_RUN_SELFHOST_GATES=1`�
    ```sh
    scripts/profile-interp.sh bench >before.txt   # 修正前
    scripts/profile-interp.sh bench >after.txt    # 修正後
-   benchstat before.txt after.txt
+   # benchstat 未導入なら go run で実行できる
+   go run golang.org/x/perf/cmd/benchstat@latest before.txt after.txt
    ```
 
 5. ground truth で wall-time を確認する。
@@ -152,6 +153,7 @@ ground truth は `TestSelfhostBackendArtifactGate`(`KIZU_RUN_SELFHOST_GATES=1`�
 | baseline | 418.2s |
 | ローカル束縛を線形走査(scope ごとの string-map を撤去) | 367.8s (-12%) |
 | `Value` を 64 byte に縮小(`kind` を uint8 化 + 並び替え) | 352.5s (-4%) |
+| 整数リテラルをパース時に事前解析(評価ごとの `strconv` を撤去) | 332.3s (-5.7%) |
 
 ## 将来の測定対象
 
