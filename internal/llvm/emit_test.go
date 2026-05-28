@@ -704,8 +704,15 @@ func TestEmitTypedErrorCast(t *testing.T) {
 	}
 	for _, want := range []string{
 		"%kizu.error.CompileError.i64 = type { i8, i64, %kizu.union.CompileError }",
+		"%kizu.union.CompileError = type { i64, [16 x i8] }",
 		"%kizu.2.failure.extracted = extractvalue %kizu.error.i64 %kizu.1, 2",
-		"%kizu.2.failure.typed.box = call ptr @kizu_union_box",
+		"store i64 0, ptr %kizu.2.failure.typed.tag.ptr, align 8",
+		"%kizu.2.failure.typed.payload.ptr = getelementptr %kizu.union.CompileError, " +
+			"ptr %kizu.2.failure.typed.slot, i32 0, i32 1",
+		"store %kizu.slice.u8 %kizu.2.failure.extracted, " +
+			"ptr %kizu.2.failure.typed.payload.ptr, align 8",
+		"%kizu.2.failure.typed = load %kizu.union.CompileError, " +
+			"ptr %kizu.2.failure.typed.slot, align 8",
 		"%kizu.2 = insertvalue %kizu.error.CompileError.i64 %kizu.2.value.base, " +
 			"%kizu.union.CompileError %kizu.2.failure.typed, 2",
 		"ret %kizu.error.CompileError.i64 %kizu.4",
@@ -740,6 +747,94 @@ func TestEmitRejectsMismatchedErrorPropagation(t *testing.T) {
 	}
 	want := "error.try cannot propagate ConfigError!i64 into NetworkError!void"
 	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestEmitUnionInlinePayloadLayout proves declared tagged unions lower to the
+// #991 `tag + inline payload storage` ABI, that construction initializes the
+// tag and only the active payload, and that match reads only the active
+// payload from inline storage with no hidden heap box.
+func TestEmitUnionInlinePayloadLayout(t *testing.T) {
+	module := lowerSource(t, unionInlineSource)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		// Layout is tag + a fixed inline byte array sized for the largest
+		// payload ([]u8 is 16 bytes), not a tag-plus-pointer or mega record.
+		"%kizu.union.Shape = type { i64, [16 x i8] }",
+		// Construction stores the active tag and only the active payload.
+		"%kizu.2.tag.ptr = getelementptr %kizu.union.Shape, ptr %kizu.2.slot, i32 0, i32 0",
+		"store i64 1, ptr %kizu.2.tag.ptr, align 8",
+		"%kizu.2.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.2.slot, i32 0, i32 1",
+		"store i64 10, ptr %kizu.2.payload.ptr, align 8",
+		// match payload access projects only the active variant payload.
+		"%kizu.6.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.6.slot, i32 0, i32 1",
+		"%kizu.6 = load i64, ptr %kizu.6.payload.ptr, align 8",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+	if strings.Contains(got, "kizu_union_box") {
+		t.Fatalf("inline tagged-union ABI must not box payloads on the heap:\n%s", got)
+	}
+}
+
+// TestEmitUnionRejectsRecursivePayload checks an unbounded by-value union
+// payload fails visibly with a backend diagnostic instead of looping or
+// falling back, per the #991 unsupported-shape policy.
+func TestEmitUnionRejectsRecursivePayload(t *testing.T) {
+	module := &ir.Module{
+		Unions: map[string]ir.Union{
+			"Rec": {Name: "Rec", Variants: map[string]ir.UnionVariant{
+				"Node": {Name: "Node", Index: 0, Payload: "Rec"},
+			}},
+		},
+		Functions: []*ir.Function{{
+			Name:   "main",
+			Return: "void",
+			Blocks: []*ir.Block{{
+				Name:       "entry",
+				Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "void", Type: "void"}},
+			}},
+		}},
+	}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject a recursive union payload")
+	}
+	if !strings.Contains(err.Error(), "union `Rec` has an unsupported tagged-union payload shape") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestEmitUnionRejectsUnsupportedPayloadWidth checks a payload outside the
+// value layout table (a non-i64/u8 integer width) fails visibly rather than
+// being silently lowered.
+func TestEmitUnionRejectsUnsupportedPayloadWidth(t *testing.T) {
+	module := &ir.Module{
+		Unions: map[string]ir.Union{
+			"Narrow": {Name: "Narrow", Variants: map[string]ir.UnionVariant{
+				"Value": {Name: "Value", Index: 0, Payload: "i32"},
+			}},
+		},
+		Functions: []*ir.Function{{
+			Name:   "main",
+			Return: "void",
+			Blocks: []*ir.Block{{
+				Name:       "entry",
+				Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "void", Type: "void"}},
+			}},
+		}},
+	}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject an unsupported union payload width")
+	}
+	if !strings.Contains(err.Error(), "union `Narrow` has an unsupported tagged-union payload shape") {
 		t.Fatalf("got %q", err.Error())
 	}
 }
@@ -800,6 +895,28 @@ const structSource = `struct User { age: i64, }
 fn main() {
     let user = User { age: 30 };
     print(user.age);
+}`
+
+const unionInlineSource = `union Shape {
+    Point,
+    Circle(i64),
+    Label([]u8),
+}
+
+fn describe(shape: &Shape) -> void {
+    match shape {
+        Point => print("point"),
+        Circle(radius) => print(radius),
+        Label(text) => print(text),
+    }
+}
+
+fn main() {
+    let circle = Shape::Circle(10);
+    let label = Shape::Label("name");
+    describe(circle);
+    describe(label);
+    describe(Shape::Point);
 }`
 
 const errorUnionSource = `fn read() -> !i64 {
