@@ -460,6 +460,43 @@ pub fn body_child_sequence_or_minus_one(
     return -1;
 }
 
+pub fn body_edge_count(
+    bytes: []u8,
+    function_name: []u8,
+    parent_sequence: i64,
+    edge: []u8
+) -> !i64 {
+    let byte_len = std::mem::len(bytes);
+    let prefix = "body-edge ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(function_name);
+    let edge_len = std::mem::len(edge);
+    var index = 0;
+    var count = 0;
+    while index + prefix_len + name_len < byte_len {
+        if is_line_start(bytes, index) and
+            std::mem::equal_bytes(bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(bytes[name_start..name_end], function_name) and
+                is_space(bytes[name_end]) {
+                let parent_start = skip_spaces(bytes, name_end);
+                let actual_parent = try parse_i64_token(bytes, parent_start);
+                if actual_parent == parent_sequence {
+                    let parent_end = token_end(bytes, parent_start);
+                    let edge_start = skip_spaces(bytes, parent_end);
+                    let edge_end = token_end(bytes, edge_start);
+                    if std::mem::equal_bytes(bytes[edge_start..edge_end], edge) {
+                        count = count + 1;
+                    }
+                }
+            }
+        }
+        index = line_end(bytes, index) + 1;
+    }
+    return count;
+}
+
 pub fn require_body_call(bytes: []u8, function_name: []u8, callee: []u8) -> !void {
     if try body_has_call(bytes, function_name, callee) {
         return;
@@ -746,6 +783,67 @@ fn parse_i64_token(bytes: []u8, start: i64) -> !i64 {
         return error("invalid IR artifact fact");
     }
     return value;
+}
+
+pub fn extract_function_ir(
+    allocator: Allocator,
+    bytes: []u8,
+    function_name: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    let byte_len = std::mem::len(bytes);
+    let name_len = std::mem::len(function_name);
+    var index = 0;
+    while index < byte_len {
+        let end = line_end(bytes, index);
+        if index + 5 < end and
+            bytes[index] == cast<u8>(98) and
+            bytes[index + 1] == cast<u8>(111) and
+            bytes[index + 2] == cast<u8>(100) and
+            bytes[index + 3] == cast<u8>(121) and
+            bytes[index + 4] == cast<u8>(45) {
+            if body_line_has_function(bytes, index, end, function_name, name_len) {
+                try out.append_bytes(bytes[index..end]);
+                try out.append_byte(cast<u8>(10));
+            }
+        } else {
+            try out.append_bytes(bytes[index..end]);
+            try out.append_byte(cast<u8>(10));
+        }
+        if end < byte_len {
+            index = end + 1;
+        } else {
+            index = byte_len;
+        }
+    }
+    return out;
+}
+
+fn body_line_has_function(
+    bytes: []u8,
+    line_start: i64,
+    end: i64,
+    function_name: []u8,
+    name_len: i64
+) -> bool {
+    var i = line_start + 5;
+    while i < end {
+        if bytes[i] == cast<u8>(32) {
+            break;
+        }
+        i = i + 1;
+    }
+    i = i + 1;
+    if i + name_len > end {
+        return false;
+    }
+    if !std::mem::equal_bytes(bytes[i..i + name_len], function_name) {
+        return false;
+    }
+    if i + name_len < end and !is_space(bytes[i + name_len]) {
+        return false;
+    }
+    return true;
 }
 
 fn token_end(bytes: []u8, start: i64) -> i64 {
