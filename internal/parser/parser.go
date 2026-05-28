@@ -1477,6 +1477,7 @@ func (p *Parser) parseBinaryExpr(left ast.Expression) ast.Expression {
 		Left:         left,
 		Operator:     p.cur.Literal,
 		OperatorSpan: tokenSpan(p.cur),
+		Op:           ast.ClassifyBinaryOp(p.cur.Literal),
 	}
 	precedence := p.curPrecedence()
 	p.nextToken()

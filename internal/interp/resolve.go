@@ -50,6 +50,7 @@ func (i *Interpreter) resolveFunction(fn *ast.FunctionDecl) {
 		frame.names = append(frame.names, param.Name)
 	}
 	i.resolveBlockInline(fn.Body, []*resolveScope{frame})
+	i.compileFunction(fn)
 }
 
 // resolveBlockInline resolves statements that run in the current (top) scope,

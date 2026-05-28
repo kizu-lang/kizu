@@ -15,9 +15,16 @@ var (
 )
 
 type binding struct {
-	name        string
-	value       Value
-	mutable     bool
+	name    string
+	value   Value
+	alias   *bindingAlias
+	mutable bool
+}
+
+// bindingAlias records where a borrow reference must write back. It is set only
+// on Ref payloads that alias a struct field, array element, or box, and stays
+// nil for ordinary environment cells so the hot path keeps binding small.
+type bindingAlias struct {
 	fieldParent *binding
 	fieldName   string
 	arrayParent *Array

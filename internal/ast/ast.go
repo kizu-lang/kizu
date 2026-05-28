@@ -724,12 +724,75 @@ func (e *PrefixExpr) String() string {
 	return fmt.Sprintf("(%s%s)", e.Operator, e.Right.String())
 }
 
+// BinaryOp identifies a binary operator so evaluation can dispatch on an
+// integer instead of repeatedly comparing the Operator string.
+type BinaryOp uint8
+
+// Binary operator kinds. BinaryOpUnknown covers any operator the classifier
+// does not recognize, letting consumers fall back to the Operator string.
+const (
+	BinaryOpUnknown BinaryOp = iota
+	BinaryOpAdd
+	BinaryOpSub
+	BinaryOpMul
+	BinaryOpDiv
+	BinaryOpMod
+	BinaryOpLt
+	BinaryOpLe
+	BinaryOpGt
+	BinaryOpGe
+	BinaryOpEq
+	BinaryOpNe
+	BinaryOpAnd
+	BinaryOpOr
+)
+
+// ClassifyBinaryOp maps an operator spelling to its BinaryOp, returning
+// BinaryOpUnknown for anything unrecognized.
+func ClassifyBinaryOp(op string) BinaryOp {
+	switch op {
+	case "+":
+		return BinaryOpAdd
+	case "-":
+		return BinaryOpSub
+	case "*":
+		return BinaryOpMul
+	case "/":
+		return BinaryOpDiv
+	case "%":
+		return BinaryOpMod
+	case "<":
+		return BinaryOpLt
+	case "<=":
+		return BinaryOpLe
+	case ">":
+		return BinaryOpGt
+	case ">=":
+		return BinaryOpGe
+	case "==":
+		return BinaryOpEq
+	case "!=":
+		return BinaryOpNe
+	case "and":
+		return BinaryOpAnd
+	case "or":
+		return BinaryOpOr
+	default:
+		return BinaryOpUnknown
+	}
+}
+
 // BinaryExpr represents an infix binary operator expression.
 type BinaryExpr struct {
 	Left         Expression
 	Operator     string
 	OperatorSpan Span
 	Right        Expression
+	// Op is the operator precomputed by ClassifyBinaryOp so evaluation can
+	// dispatch on an integer. The parser sets it for every binary operator;
+	// BinaryOpUnknown only arises for an unrecognized spelling, which the
+	// evaluator rejects through the same path as any other invalid operator.
+	Op BinaryOp
 }
 
 // expressionNode marks BinaryExpr as an expression node.

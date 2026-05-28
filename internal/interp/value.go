@@ -38,13 +38,17 @@ const (
 )
 
 // Value is a runtime value produced by the Phase 2 interpreter.
+//
+// s holds either a string value's bytes (kindString/kindFunctionName) or a
+// kind's type name (kindType/kindStruct/kindArray/kindMap/kindBox/kindChannel/
+// kindAtomic/kindMutex/kindIo/kindAllocator). A Value never needs both senses
+// at once, so they share one field to keep Value small for fast copying.
 type Value struct {
-	i        int64
-	s        string
-	typeName string
-	object   any
-	kind     valueKind
-	b        bool
+	i      int64
+	s      string
+	object any
+	kind   valueKind
+	b      bool
 }
 
 // StructLayout stores field indexes shared by runtime struct instances.
@@ -230,7 +234,7 @@ func (v Value) scalarString() (string, bool) {
 	case kindString:
 		return v.s, true
 	case kindType:
-		return v.typeName, true
+		return v.s, true
 	default:
 		return "", false
 	}
@@ -270,9 +274,9 @@ func (v Value) objectString() string {
 func (v Value) capabilityString() string {
 	switch v.kind {
 	case kindIo:
-		return "<io:" + v.typeName + ">"
+		return "<io:" + v.s + ">"
 	case kindAllocator:
-		return "<allocator:" + v.typeName + ">"
+		return "<allocator:" + v.s + ">"
 	case kindTaskGroup:
 		return "<taskgroup>"
 	case kindTask:
@@ -323,15 +327,15 @@ func stringValue(v string) Value {
 
 // typeValue returns a compile-time type runtime value.
 func typeValue(name string) Value {
-	return Value{kind: kindType, typeName: name}
+	return Value{kind: kindType, s: name}
 }
 
 // structValue returns a map-backed runtime struct value.
 func structValue(typeName string, fields map[string]Value) Value {
 	return Value{
-		kind:     kindStruct,
-		typeName: typeName,
-		object:   &StructFields{mapped: fields},
+		kind:   kindStruct,
+		s:      typeName,
+		object: &StructFields{mapped: fields},
 	}
 }
 
@@ -351,9 +355,9 @@ func structLayoutValue(typeName string, layout *StructLayout) Value {
 		object = &StructFields{layout: layout, values: make([]Value, len(layout.names))}
 	}
 	return Value{
-		kind:     kindStruct,
-		typeName: typeName,
-		object:   object,
+		kind:   kindStruct,
+		s:      typeName,
+		object: object,
 	}
 }
 
@@ -715,24 +719,24 @@ func unionValue(typeName string, tag string, payload *Value) Value {
 
 // ioValue returns an explicit I/O capability value.
 func ioValue(mode string) Value {
-	return Value{kind: kindIo, typeName: mode}
+	return Value{kind: kindIo, s: mode}
 }
 
 // allocatorValue returns an explicit allocator capability value.
 func allocatorValue(name string) Value {
-	return Value{kind: kindAllocator, typeName: name}
+	return Value{kind: kindAllocator, s: name}
 }
 
 // arrayValue returns an empty owned array value.
 func arrayValue(typeName string) Value {
-	return Value{kind: kindArray, typeName: typeName, object: &Array{}}
+	return Value{kind: kindArray, s: typeName, object: &Array{}}
 }
 
 // mapValue returns an empty owned map value.
 func mapValue(valueType string) Value {
 	return Value{
-		kind:     kindMap,
-		typeName: fmt.Sprintf("std::map::Map<[]u8, %s>", valueType),
+		kind: kindMap,
+		s:    fmt.Sprintf("std::map::Map<[]u8, %s>", valueType),
 		object: &Map{
 			valueType: valueType,
 			entries:   map[string]Value{},
@@ -743,7 +747,7 @@ func mapValue(valueType string) Value {
 // boxValue returns one owned indirection value.
 func boxValue(typeName string, value Value) Value {
 	return Value{
-		kind: kindBox, typeName: fmt.Sprintf("std::mem::Box<%s>", typeName),
+		kind: kindBox, s: fmt.Sprintf("std::mem::Box<%s>", typeName),
 		object: &Box{value: value},
 	}
 }
@@ -770,7 +774,7 @@ func queueValue() Value {
 
 // channelValue returns an empty owned-message channel.
 func channelValue(typeName string) Value {
-	return Value{kind: kindChannel, typeName: typeName, object: &Channel{}}
+	return Value{kind: kindChannel, s: typeName, object: &Channel{}}
 }
 
 // partitionValue returns a bounded partition initialized with copied values.
@@ -804,12 +808,12 @@ func localBufferValue(count int64, init Value) Value {
 
 // atomicValue returns a seq_cst primitive atomic value.
 func atomicValue(typeName string, value Value) Value {
-	return Value{kind: kindAtomic, typeName: typeName, object: &Atomic{value: value}}
+	return Value{kind: kindAtomic, s: typeName, object: &Atomic{value: value}}
 }
 
 // mutexValue returns a protected synchronous value.
 func mutexValue(typeName string, value Value) Value {
-	return Value{kind: kindMutex, typeName: typeName, object: &Mutex{value: value}}
+	return Value{kind: kindMutex, s: typeName, object: &Mutex{value: value}}
 }
 
 // refValue returns a local borrow reference to a runtime binding.
