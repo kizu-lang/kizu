@@ -266,7 +266,7 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 	if err != nil {
 		return err
 	}
-	errorReturn := false
+	errorReturn := l.producesErrorValue(value)
 	if errorName, success, ok := errorUnionParts(l.current.Return); ok {
 		if value.Type == success {
 			value = l.emit("error.ok", l.current.Return, []Value{value}, "")
@@ -282,6 +282,18 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 	}
 	l.block.Terminator = Terminator{Op: "return", Value: value}
 	return nil
+}
+
+// producesErrorValue reports whether v was defined by an error.error
+// instruction in the current block, such as the `error(...)` builtin. Such a
+// return exits through the error path and must run errdefer cleanups.
+func (l *lowerer) producesErrorValue(v Value) bool {
+	for idx := len(l.block.Instrs) - 1; idx >= 0; idx-- {
+		if l.block.Instrs[idx].Result.Name == v.Name {
+			return l.block.Instrs[idx].Op == "error.error"
+		}
+	}
+	return false
 }
 
 // returnVoidValue returns the correct SSA return value for void-like returns.

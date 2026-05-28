@@ -367,6 +367,33 @@ fn main() -> !i64 {
 	}
 }
 
+// TestRunErrDeferRunsOnExplicitErrorReturn checks errdefer runs when a function
+// returns an error value directly, not only on try propagation.
+func TestRunErrDeferRunsOnExplicitErrorReturn(t *testing.T) {
+	out, err := parseAndRun(`struct Trace {
+    label: []u8,
+}
+impl Trace {
+    fn deinit(self: Trace) -> void {
+        print(self.label);
+    }
+}
+fn build() -> !i64 {
+    let guard = Trace { label: "errdefer-ran" };
+    errdefer guard.deinit();
+    return error("boom");
+}
+fn main() -> !i64 {
+    return try build();
+}`)
+	if err == nil {
+		t.Fatalf("expected error return, got nil (out %q)", out)
+	}
+	if out != "errdefer-ran\n" {
+		t.Fatalf("got %q, want %q", out, "errdefer-ran\n")
+	}
+}
+
 // TestRunArrayPopMovesAndDeinitDropsRemaining checks resource Array cleanup.
 func TestRunArrayPopMovesAndDeinitDropsRemaining(t *testing.T) {
 	got := runSource(t, `struct Trace {

@@ -496,8 +496,33 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 {
 		return errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
 	}
+	// An error return runs active errdefer cleanups before the function exits,
+	// so their receivers must still be valid here. A success return transfers
+	// the owner instead and must not be blocked by the cleanup it skips.
+	if c.returnTakesErrorPath(stmt.Value, env) {
+		if err := c.validateErrDeferReceivers(env); err != nil {
+			return err
+		}
+	}
 	_, err := c.moveExpr(stmt.Value, env)
 	return err
+}
+
+// returnTakesErrorPath reports whether returning expr exits through the error
+// path: the `error(...)` builtin or propagating an existing error-union value.
+func (c *Checker) returnTakesErrorPath(expr ast.Expression, env *scope) bool {
+	if call, ok := expr.(*ast.CallExpr); ok {
+		if ident, ok := call.Callee.(*ast.IdentExpr); ok && ident.Name == "error" {
+			return true
+		}
+	}
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		if value, exists := env.lookup(ident.Name); exists &&
+			strings.HasPrefix(value.typeName, "!") {
+			return true
+		}
+	}
+	return false
 }
 
 // borrowedReturnAllowed permits returning the declared borrowed source parameter.
@@ -6463,6 +6488,8 @@ func stmtIdentUses(stmt ast.Statement) []string {
 	case *ast.ReturnStmt:
 		return exprIdentUses(s.Value)
 	case *ast.DeferStmt:
+		return exprIdentUses(s.Expr)
+	case *ast.ErrDeferStmt:
 		return exprIdentUses(s.Expr)
 	case *ast.ExprStmt:
 		return exprIdentUses(s.Expr)

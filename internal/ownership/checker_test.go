@@ -850,6 +850,18 @@ fn build() -> !std::arena::Arena<User> {
 }`,
 			want: "errdefer cleanup receiver `users` is borrowed on an error path",
 		},
+		{
+			name: "deinitialized before explicit error return",
+			source: `struct User { name: []u8 }
+fn build() -> !std::arena::Arena<User> {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = std::arena::Arena<User>(allocator);
+    errdefer users.deinit();
+    users.deinit();
+    return error("boom");
+}`,
+			want: "errdefer cleanup receiver `users` was deinitialized before an error path",
+		},
 	})
 }
 
