@@ -282,6 +282,8 @@ func nativeSourceRunCases() []runParityCase {
 		nativeSourceRunStem("run_arithmetic_mixed"),
 		nativeSourceRunStem("run_if_adult"),
 		nativeSourceRunStem("run_if_minor"),
+		nativeSourceRunStem("run_functions"),
+		nativeSourceRunStem("run_functions_nested"),
 	}
 }
 
