@@ -792,7 +792,7 @@ fn main() {
 func TestCheckControlExpressionMoveMarksOuterValueMoved(t *testing.T) {
 	source := `struct Name { value: []u8 }
 fn pick(left: Name, right: Name) -> Name {
-    let chosen = if true { left } else { right }
+    let chosen = if true { left } else { right };
     return chosen;
 }
 fn main() {

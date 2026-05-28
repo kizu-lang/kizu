@@ -563,15 +563,16 @@ fn main() { let color = Color::Blue; match color { Red => print("red"), _ => pri
 	}
 }
 
-// TestParseControlExpressions checks if/match expressions and optional semicolons.
+// TestParseControlExpressions checks if/match expression values without `;`
+// inside semicolon-terminated simple statements (ADR-0074).
 func TestParseControlExpressions(t *testing.T) {
 	input := `enum Color { Red, Green }
 fn main() {
-    let color = Color::Green
-    let value = if true { 1 } else { 2 }
-    let name = match color { Red => "red", Green => "green", }
-    print(value)
-    print(name)
+    let color = Color::Green;
+    let value = if true { 1 } else { 2 };
+    let name = match color { Red => "red", Green => "green", };
+    print(value);
+    print(name);
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -583,6 +584,50 @@ fn main() { let color = Color::Green; let value = if true { 1; } else { 2; }; ` 
 		`let name = match color { Red => "red", Green => "green" }; print(value); print(name); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseRequiresSemicolonAfterSimpleStatements rejects semicolonless simple
+// statements while keeping branch and arm values free of `;` (ADR-0036/ADR-0074).
+func TestParseRequiresSemicolonAfterSimpleStatements(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{
+			input: `fn main() { let value = 1 }`,
+			want:  "expected `;` after let statement",
+		},
+		{
+			input: `fn main() { var value = 1 }`,
+			want:  "expected `;` after let statement",
+		},
+		{
+			input: `fn main() { let value = 0; value = 1 }`,
+			want:  "expected `;` after assignment",
+		},
+		{
+			input: `fn main() { print(1) print(2); }`,
+			want:  "expected `;` after expression statement",
+		},
+		{
+			input: "fn main() {\n    let value = 1\n    print(value);\n}",
+			want:  "expected `;` after let statement",
+		},
+		{
+			input: `fn loop_body() { while true { break } }`,
+			want:  "expected `;` after break statement",
+		},
+	}
+	for _, tc := range cases {
+		p := New(lexer.New(tc.input))
+		_ = p.ParseProgram()
+		if len(p.Errors()) == 0 {
+			t.Fatalf("expected parser error for %q", tc.input)
+		}
+		if !strings.Contains(strings.Join(p.Errors(), "\n"), tc.want) {
+			t.Fatalf("got parser errors %v, want %q", p.Errors(), tc.want)
+		}
 	}
 }
 
@@ -650,11 +695,11 @@ struct User {
     name: []u8,
 }
 fn main() {
-    let user = User { name: "alice", }
-    let values = std::array::Array<i64,>(allocator,)
-    print(id(1,))
-    print(values.len())
-    print(user.name)
+    let user = User { name: "alice", };
+    let values = std::array::Array<i64,>(allocator,);
+    print(id(1,));
+    print(values.len());
+    print(user.name);
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
