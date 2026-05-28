@@ -640,9 +640,22 @@ func (p *Parser) parseStatement() ast.Statement {
 	if p.peek.Type == token.Assign {
 		return p.parseAssignStmt(expr)
 	}
-	semicolon := p.cur.Type == token.Semicolon || p.peek.Type == token.Semicolon
-	p.expectStatementTerminator("expression statement")
-	return &ast.ExprStmt{Expr: expr, Semicolon: semicolon}
+	return p.finishExprStmt(expr)
+}
+
+// finishExprStmt requires a terminating `;` after an expression statement,
+// except when the expression is a branch value (`}`) or a match arm value (`,`).
+func (p *Parser) finishExprStmt(expr ast.Expression) ast.Statement {
+	switch p.peek.Type {
+	case token.Semicolon:
+		p.nextToken()
+		return &ast.ExprStmt{Expr: expr, Semicolon: true}
+	case token.RBrace, token.Comma:
+		return &ast.ExprStmt{Expr: expr, Semicolon: false}
+	default:
+		p.errorf("expected `;` after expression statement")
+		return &ast.ExprStmt{Expr: expr, Semicolon: false}
+	}
 }
 
 // parseKeywordStatement parses statements that start with reserved keywords.
@@ -817,7 +830,7 @@ func (p *Parser) parseReturnStmt() ast.Statement {
 	}
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
-	p.expectExplicitSemicolon("return statement")
+	p.expectStatementTerminator("return statement")
 	return stmt
 }
 
@@ -832,7 +845,7 @@ func (p *Parser) parseDeferStmt() ast.Statement {
 	}
 	p.nextToken()
 	stmt.Expr = p.parseExpression(lowest)
-	p.expectExplicitSemicolon("defer statement")
+	p.expectStatementTerminator("defer statement")
 	return stmt
 }
 
@@ -914,7 +927,8 @@ func (p *Parser) parseOptionalBranchLabel() string {
 	return p.cur.Literal
 }
 
-// expectStatementTerminator requires Zig/C-style semicolons after simple statements.
+// expectStatementTerminator requires an explicit Zig/C-style semicolon after a
+// simple statement. Missing semicolons are parse errors (ADR-0036/ADR-0074).
 func (p *Parser) expectStatementTerminator(context string) bool {
 	if p.cur.Type == token.Semicolon {
 		return true
@@ -923,40 +937,8 @@ func (p *Parser) expectStatementTerminator(context string) bool {
 		p.nextToken()
 		return true
 	}
-	if p.hasImplicitStatementTerminator() {
-		return true
-	}
 	p.errorf("expected `;` after %s", context)
 	return false
-}
-
-// expectExplicitSemicolon requires a concrete semicolon token.
-func (p *Parser) expectExplicitSemicolon(context string) bool {
-	if p.cur.Type == token.Semicolon {
-		return true
-	}
-	if p.peek.Type == token.Semicolon {
-		p.nextToken()
-		return true
-	}
-	p.errorf("expected `;` after %s", context)
-	return false
-}
-
-// hasImplicitStatementTerminator reports whether a simple statement may end here.
-func (p *Parser) hasImplicitStatementTerminator() bool {
-	if p.peek.Line > p.cur.Line {
-		return true
-	}
-	switch p.peek.Type {
-	case token.RBrace, token.EOF, token.Comma:
-		return true
-	case token.Let, token.Var, token.Return, token.If, token.While, token.For,
-		token.Break, token.Continue, token.Match, token.Unsafe, token.At, token.Comptime:
-		return true
-	default:
-		return false
-	}
 }
 
 // consumeListDelimiter consumes a comma or accepts the end of a brace-delimited list.

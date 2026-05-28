@@ -399,15 +399,16 @@ fn main() {
 	}
 }
 
-// TestRunControlExpressions checks if/match expressions and semicolonless statements.
+// TestRunControlExpressions checks if/match expression values inside
+// semicolon-terminated simple statements (ADR-0074).
 func TestRunControlExpressions(t *testing.T) {
 	got := runSource(t, `enum Color { Red, Green }
 fn main() {
-    let color = Color::Green
-    let value = if false { 1 } else { 2 }
-    let name = match color { Red => "red", Green => "green", }
-    print(value)
-    print(name)
+    let color = Color::Green;
+    let value = if false { 1 } else { 2 };
+    let name = match color { Red => "red", Green => "green", };
+    print(value);
+    print(name);
 }`)
 	want := "2\ngreen\n"
 	if got != want {

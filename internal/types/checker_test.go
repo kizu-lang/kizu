@@ -812,11 +812,11 @@ fn main() -> void {
 func TestCheckAcceptsControlExpressions(t *testing.T) {
 	source := `enum Color { Red, Green }
 fn main() -> void {
-    let color = Color::Green
-    let value = if true { 1 } else { 2 }
-    let name = match color { Red => "red", Green => "green", }
-    print(value)
-    print(name)
+    let color = Color::Green;
+    let value = if true { 1 } else { 2 };
+    let name = match color { Red => "red", Green => "green", };
+    print(value);
+    print(name);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -826,7 +826,7 @@ fn main() -> void {
 // TestCheckRejectsSemicolonTailControlExpressions keeps block values explicit.
 func TestCheckRejectsSemicolonTailControlExpressions(t *testing.T) {
 	source := `fn main() -> void {
-    let value = if true { 1; } else { 2; }
+    let value = if true { 1; } else { 2; };
     print(value);
 }`
 	err := checkSource(source)
