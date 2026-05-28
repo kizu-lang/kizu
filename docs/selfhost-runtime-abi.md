@@ -125,9 +125,10 @@ types:
 ```
 
 Fields use the value layout table recursively. Enum tags lower to `i64`.
-Tagged-union payload storage is deferred to #495 unless #454 encounters a
-reachable union payload; in that case the payload shape is a blocker issue, not
-a silent fallback.
+Tagged-union payload storage uses the minimal selfhost ABI in
+[Tagged-Union Payload Layout](#tagged-union-payload-layout). Shapes outside that
+section are deferred to #495; a reachable unsupported shape is a blocker issue,
+not a silent fallback.
 
 Diagnostics use the same record rule. Diagnostic message text is `[]u8`.
 The renderer is outside this ABI; only the record layout and recoverable error
@@ -136,8 +137,122 @@ boundary are specified here.
 For #578, the hosted artifact exercises the first concrete record ABI shape:
 `%kizu.record.abi.summary = type { i64, %kizu.slice.u8 }`. Direct calls return
 that record by value, and `%kizu.error.record.abi.summary` covers both success
-and failure return paths. Tagged-union payload ABI remains deferred to #495 and
-must not be silently lowered through a Go fallback.
+and failure return paths. Tagged-union payload ABI follows
+[Tagged-Union Payload Layout](#tagged-union-payload-layout) and must not be
+silently lowered through a Go fallback.
+
+## Tagged-Union Payload Layout
+
+This section specifies the minimal selfhost/v0.2 tagged-union payload ABI
+(`selfhost-abi-v0`) needed by selfhost compiler data structures such as the MIR
+sum types in `selfhost/src/backend/compiled_mir.kizu`. It is intentionally not a
+general-purpose union ABI for every Kizu type (#495 tracks broader work). It
+composes with the owner aggregate cleanup contract in ADR-0075.
+
+### Representation
+
+A `union` value lowers to `tag + inline payload storage`:
+
+```text
+%kizu.union.<module>.<Type> = type { i64, [<N> x i8] }
+```
+
+- The first field is the active tag, an `i64`, in variant declaration order
+  starting at `0`. It mirrors how enum tags lower to `i64`.
+- The second field is inline payload storage: a fixed byte array sized and
+  aligned for the largest variant payload. Payload size and alignment are
+  compile-time known for every supported shape.
+- A variant payload is stored in that inline storage using the value layout
+  table recursively (records, slices, scalars). The backend reads it back at the
+  declared payload type for the active variant.
+- There is no hidden heap allocation in the ABI. A union value is self-contained
+  by value, like records, and is passed and returned by value.
+- A payload-free variant (for example a `union` arm written as a bare tag) uses
+  tag `i64` only; the inline storage is unused for that variant.
+
+The tag-plus-all-fields mega record with sentinel values is not the target
+representation. Backends must not encode a union as a struct that materializes
+every variant's fields simultaneously.
+
+### Active Variant And Inactive Storage
+
+- The active tag alone determines which payload is initialized.
+- Only the active variant's payload bytes are initialized and readable. Inactive
+  payload bytes have no semantic value; safe code must not read them, and a
+  `match` only exposes the active variant's binding.
+- Reading a payload at a variant that is not the active tag is undefined for safe
+  Kizu and must be impossible by representation (`match` dispatch on the tag),
+  not by sentinel assumptions about field contents.
+
+### Ownership And Cleanup
+
+The cleanup rule composes with ADR-0075 owner aggregates:
+
+- A union whose every variant payload is copy/scalar (or payload-free) is a copy
+  value and needs no `deinit`.
+- A union with at least one owner payload (a payload that contains an owned
+  container such as `std::array::Array<T>`, `std::string::String`, a nested
+  owner aggregate, etc.) is itself an **owner aggregate**: it is move-only,
+  read-only APIs take `&T`, mutating APIs take `&var T`, and consuming APIs take
+  it by value.
+- A named owner union used as a standalone, returned, or by-value value must
+  expose an explicit `deinit(self: T) -> void`.
+- A union `deinit` cleans **only the active variant**, normally through an
+  exhaustive `match`, and delegates to that payload's own cleanup:
+
+```kizu
+union MirStmt {
+    LetCall(MirLetCall),
+    ReturnExpr(MirReturnExpr),
+    If(MirIf),
+}
+
+impl MirStmt {
+    fn deinit(self: MirStmt) -> void {
+        match self {
+            LetCall(stmt) => stmt.deinit(),
+            ReturnExpr(stmt) => stmt.deinit(),
+            If(stmt) => stmt.deinit(),
+        };
+    }
+}
+```
+
+- Inactive payload storage is never cleaned. Cleanup touches only the bytes the
+  active tag says are initialized.
+- `Array<OwnerUnion>.deinit()` cleans each initialized element through that
+  element's explicit `deinit`. It must not rely on hidden destructor synthesis,
+  and the union's `deinit` stays the single source-visible cleanup contract.
+- No backend cleanup is generated that is not visible from a source-level
+  `deinit`. There is no Drop/RAII/implicit destructor behavior.
+
+### Unsupported Shapes
+
+A payload shape that this section does not cover must fail visibly with a
+backend/IR diagnostic at lowering time. It must not be lowered through a Go
+fallback, a fixture-specific branch, or a static artifact path. Currently
+unsupported shapes include:
+
+- payloads whose size or alignment is not compile-time known for the union
+- payloads that require a representation outside the value layout table (for
+  example raw/nullable pointers or non-`i64`/`u8` integer widths, per
+  [Unsupported Shapes Tracked By #495](#unsupported-shapes-tracked-by-495))
+- recursive unions whose inline payload size cannot be bounded without
+  indirection (indirection/boxing for recursive payloads remains #495 work)
+
+When a selfhost path reaches an unsupported union shape, the dependent issue
+must extend this section or open a concrete blocker linked to #495, never silence
+it with a fallback.
+
+### First Implementation Target
+
+`MirStmt` in `selfhost/src/backend/compiled_mir.kizu` is the first representative
+selfhost MIR sum type for #1001 to migrate off the tag-plus-all-fields encoding
+onto this ABI. It currently carries a `kind: MirStmtKind` tag plus many inactive
+owned `Array` and record fields; under this ABI its variants
+(`LetCall`, `LetStruct`, `ReturnCall`, `ReturnStruct`, `ReturnExpr`,
+`ReturnError`, `If`, ...) become payload variants with an explicit active-variant
+`deinit`. #1001 implements that migration after this decision lands.
 
 ## Error And Trap Representation
 
@@ -651,7 +766,9 @@ The following are intentionally outside `selfhost-abi-v0`:
 - mutable slices
 - public array, string, map, arena, and handle storage layout beyond the listed
   opaque runtime representations
-- tagged-union payload ABI beyond blocker-specific additions
+- tagged-union payload shapes beyond the minimal `tag + inline payload storage`
+  ABI in [Tagged-Union Payload Layout](#tagged-union-payload-layout) (for
+  example heap-indirected or recursive payloads)
 - task, thread, channel, mutex, and atomic runtime ABI
 - C ABI interop and native object/linker metadata beyond textual LLVM emission
 - async/await or hidden runtime scheduling
