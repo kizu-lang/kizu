@@ -154,6 +154,7 @@ ground truth は `TestSelfhostBackendArtifactGate`(`KIZU_RUN_SELFHOST_GATES=1`�
 | ローカル束縛を線形走査(scope ごとの string-map を撤去) | 367.8s (-12%) |
 | `Value` を 64 byte に縮小(`kind` を uint8 化 + 並び替え) | 352.5s (-4%) |
 | 整数リテラルをパース時に事前解析(評価ごとの `strconv` を撤去) | 332.3s (-5.7%) |
+| 変数を lexical slot に事前解決(scope 走査 + cache map を撤去) | 249.6s (**-24.9%**) |
 
 ## 将来の測定対象
 
