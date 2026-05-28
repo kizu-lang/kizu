@@ -29,7 +29,7 @@ go test ./...
 | function call and explicit return type | `functions.kizu` | prints `3` |
 | empty `return` in `void` function | `return.kizu` | exits early and prints `done` |
 | `if` / `else` | `if.kizu` | prints `adult` |
-| `if` / `match` expressions and optional semicolons | `control_expressions.kizu` | asserts expression branch values |
+| `if` / `match` expressions with required statement semicolons | `control_expressions.kizu` | asserts expression branch values |
 | `while` | `while.kizu` | prints `0`, `1`, `2` |
 | `break` / `continue` | `break_continue.kizu` | controls a `while` loop |
 | labeled loop branch | `labeled_loop.kizu` | exits an outer loop explicitly |
