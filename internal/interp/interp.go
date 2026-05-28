@@ -1024,6 +1024,9 @@ func (i *Interpreter) evalIndexBound(name string, expr ast.Expression, env *Env)
 func evalLiteralExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr:
+		if e.ParseOK {
+			return intValue(e.Parsed), nil
+		}
 		return parseInt(e.Value)
 	case *ast.StringExpr:
 		return stringValue(e.Value), nil

@@ -633,6 +633,11 @@ func (e *IdentExpr) String() string {
 // IntExpr represents an integer literal.
 type IntExpr struct {
 	Value string
+	// Parsed holds the decimal value precomputed at parse time; Parsed is
+	// only valid when ParseOK is true. Evaluators fall back to reparsing
+	// Value otherwise so overflow still surfaces at the original point.
+	Parsed  int64
+	ParseOK bool
 }
 
 // expressionNode marks IntExpr as an expression node.
