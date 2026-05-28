@@ -1108,6 +1108,7 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 	if !ok {
 		return errorf("move error: match expects enum or union, got %s", valueType)
 	}
+	ownerDeinitDispatch := c.matchesOwnerUnionDeinit(stmt.Value, valueType)
 	for _, arm := range stmt.Arms {
 		if arm.IsWildcard() {
 			if arm.Binding != "" {
@@ -1120,7 +1121,14 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 		child := armEnv.child()
 		if payload := unionPayloads[arm.Tag]; !arm.IsWildcard() && payload != "" && arm.Binding != "" {
 			value := c.newBinding(arm.Binding, payload)
-			value.borrowedParam = true
+			// Inside an owner union's own `deinit`, the active variant is consumed:
+			// bind the owner payload as an owned local so it can be cleaned through
+			// its explicit `deinit`. Inactive variants are never bound, so their
+			// payload storage is never read or cleaned. Every other match keeps the
+			// payload borrowed so safe code cannot move out of a live union.
+			if !(ownerDeinitDispatch && !c.isCopyType(payload)) {
+				value.borrowedParam = true
+			}
 			child.define(value)
 		}
 		if err := c.checkStmt(arm.Body, child); err != nil {
@@ -5421,6 +5429,30 @@ func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 		return false
 	}
 	return sameOwnershipType(fn.params[0].typeName, receiver.owner.typeName)
+}
+
+// matchesOwnerUnionDeinit reports whether a `match` consumes the active variant
+// of a union inside that union's own `deinit(self: T) -> void`. Only there is the
+// active payload owned and cleanable; everywhere else it stays a borrow.
+func (c *Checker) matchesOwnerUnionDeinit(value ast.Expression, valueType string) bool {
+	fn := c.currentFunction
+	if fn == nil || fn.decl == nil || fn.decl.Name != "deinit" || returnTypeName(fn) != "void" {
+		return false
+	}
+	if len(fn.params) == 0 || len(fn.decl.Params) == 0 {
+		return false
+	}
+	if fn.params[0].borrow || fn.params[0].mutBorrow {
+		return false
+	}
+	if !sameOwnershipType(fn.params[0].typeName, valueType) {
+		return false
+	}
+	ident, ok := value.(*ast.IdentExpr)
+	if !ok || ident.Name != fn.decl.Params[0].Name {
+		return false
+	}
+	return c.unions[valueType] != nil
 }
 
 // astFieldProvenance returns the Ast identity carried by ParseResult fields.

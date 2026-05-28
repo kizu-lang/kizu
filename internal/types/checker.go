@@ -268,6 +268,9 @@ func (c *Checker) Check(program *ast.Program) error {
 	if err := c.checkPublicAPI(program); err != nil {
 		return err
 	}
+	if err := c.checkOwnerUnionContracts(program); err != nil {
+		return err
+	}
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
@@ -680,6 +683,238 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		}
 	}
 	return nil
+}
+
+// ownedContainerBases lists the inline-stored std containers that own heap
+// storage and must be released through their explicit `deinit`. Per
+// docs/selfhost-runtime-abi.md a payload built from one of these (directly or
+// nested) is an owner payload of the v0.2 inline tagged-union payload ABI.
+//
+// std::mem::Box is intentionally excluded: a boxed (heap-indirected) or
+// recursive union payload is deferred to #495 by the same document, so it is
+// outside this contract and is left to ordinary move/borrow checking.
+var ownedContainerBases = map[string]bool{
+	"std::array::Array":   true,
+	"std::string::String": true,
+	"std::map::Map":       true,
+	"std::arena::Arena":   true,
+}
+
+// typeContainsOwner reports whether typeName transitively holds an owned
+// container. Scalars, enums, copy AST nodes, and arena handles are not owners;
+// structs and unions are owners only when a field or variant payload is one.
+func (c *Checker) typeContainsOwner(typeName string, visited map[string]bool) bool {
+	name := strings.TrimSpace(typeName)
+	name = strings.TrimPrefix(name, "!")
+	base := name
+	if b, _, ok := splitGenericType(name); ok {
+		base = b
+	}
+	if ownedContainerBases[base] {
+		return true
+	}
+	if visited[base] {
+		return false
+	}
+	if st, ok := c.structs[base]; ok {
+		visited[base] = true
+		for _, field := range st.Fields {
+			if c.typeContainsOwner(field.TypeName, visited) {
+				return true
+			}
+		}
+		return false
+	}
+	if union, ok := c.unions[base]; ok {
+		visited[base] = true
+		for _, payload := range union.variants {
+			if payload != "" && c.typeContainsOwner(payload, visited) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// unionHasOwnerPayload reports whether any variant payload is an owner payload.
+func (c *Checker) unionHasOwnerPayload(decl *ast.UnionDecl) bool {
+	for _, variant := range decl.Variants {
+		if variant.Payload == "" {
+			continue
+		}
+		if c.typeContainsOwner(variant.Payload, map[string]bool{decl.Name: true}) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkOwnerUnionContracts enforces the #991 / ADR-0075 cleanup contract for
+// every owner-payload union declared in the program.
+func (c *Checker) checkOwnerUnionContracts(program *ast.Program) error {
+	for _, decl := range program.Decls {
+		union, ok := decl.(*ast.UnionDecl)
+		if !ok {
+			continue
+		}
+		if err := c.validateOwnerUnionCleanup(union); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateOwnerUnionCleanup classifies a union and, when it carries an owner
+// payload, requires a source-visible active-variant `deinit(self: T) -> void`.
+// A union with only copy/scalar or payload-free variants stays a non-owner value
+// and needs no deinit.
+func (c *Checker) validateOwnerUnionCleanup(decl *ast.UnionDecl) error {
+	if !c.unionHasOwnerPayload(decl) {
+		return nil
+	}
+	if len(decl.TypeParams) > 0 {
+		return errorf(
+			"type error: generic owner-payload union `%s` is unsupported in v0.2; "+
+				"use a concrete owner union with explicit `deinit`",
+			decl.Name)
+	}
+	method := c.implMethod(decl.Name, "deinit")
+	if method == nil {
+		return errorf(
+			"type error: owner-payload union `%s` requires explicit `deinit(self: %s) -> void`",
+			decl.Name, decl.Name)
+	}
+	if err := c.checkOwnerUnionDeinitSignature(decl, method); err != nil {
+		return err
+	}
+	return c.checkOwnerUnionDeinitBody(decl, method.decl)
+}
+
+// checkOwnerUnionDeinitSignature enforces the consuming `deinit(self: T) -> void`
+// receiver shape required for owner aggregates.
+func (c *Checker) checkOwnerUnionDeinitSignature(decl *ast.UnionDecl, method *functionType) error {
+	if method.returnType != typeVoid {
+		return errorf("type error: owner-payload union `%s` deinit must return void", decl.Name)
+	}
+	if len(method.params) != 1 {
+		return errorf("type error: owner-payload union `%s` deinit must take only `self: %s`",
+			decl.Name, decl.Name)
+	}
+	if method.borrowParams[0] || method.mutBorrowParams[0] {
+		return errorf("type error: owner-payload union `%s` deinit must take `self` by value", decl.Name)
+	}
+	if string(method.params[0]) != decl.Name {
+		return errorf("type error: owner-payload union `%s` deinit receiver must be `%s`",
+			decl.Name, decl.Name)
+	}
+	return nil
+}
+
+// checkOwnerUnionDeinitBody validates the accepted active-variant cleanup shape:
+// an exhaustive `match self` whose every owner-payload variant binds and cleans
+// its payload. Inactive variants are never cleaned because only the active arm
+// runs, so copy and payload-free variants need no cleanup.
+func (c *Checker) checkOwnerUnionDeinitBody(decl *ast.UnionDecl, fn *ast.FunctionDecl) error {
+	if fn == nil || len(fn.Params) == 0 {
+		return errorf("type error: owner-payload union `%s` deinit must take `self`", decl.Name)
+	}
+	selfName := fn.Params[0].Name
+	match := ownerUnionSelfMatch(fn.Body, selfName)
+	if match == nil {
+		return errorf(
+			"type error: owner-payload union `%s` deinit must dispatch on `%s` with an exhaustive `match`",
+			decl.Name, selfName)
+	}
+	armByTag := map[string]ast.MatchArm{}
+	for _, arm := range match.Arms {
+		if arm.IsWildcard() {
+			return errorf(
+				"type error: owner-payload union `%s` deinit `match` cannot use `_`; "+
+					"clean each variant explicitly",
+				decl.Name)
+		}
+		armByTag[arm.Tag] = arm
+	}
+	for _, variant := range decl.Variants {
+		if variant.Payload == "" ||
+			!c.typeContainsOwner(variant.Payload, map[string]bool{decl.Name: true}) {
+			continue
+		}
+		arm, ok := armByTag[variant.Name]
+		if !ok {
+			return errorf("type error: owner-payload union `%s` deinit must handle variant `%s`",
+				decl.Name, variant.Name)
+		}
+		if arm.Binding == "" {
+			return errorf(
+				"type error: owner-payload union variant `%s::%s` must bind its payload to clean it in deinit",
+				decl.Name, variant.Name)
+		}
+		if !matchArmCleansPayload(arm.Body, arm.Binding) {
+			return errorf(
+				"type error: owner-payload union variant `%s::%s` must clean its payload via `%s.deinit()`",
+				decl.Name, variant.Name, arm.Binding)
+		}
+	}
+	return nil
+}
+
+// ownerUnionSelfMatch returns the `match self { ... }` statement at the top of an
+// owner-union deinit body, if present.
+func ownerUnionSelfMatch(body *ast.BlockStmt, selfName string) *ast.MatchStmt {
+	if body == nil {
+		return nil
+	}
+	for _, stmt := range body.Statements {
+		switch s := stmt.(type) {
+		case *ast.MatchStmt:
+			if ownerUnionIdentName(s.Value) == selfName {
+				return s
+			}
+		case *ast.ExprStmt:
+			if m, ok := s.Expr.(*ast.MatchStmt); ok && ownerUnionIdentName(m.Value) == selfName {
+				return m
+			}
+		}
+	}
+	return nil
+}
+
+// matchArmCleansPayload reports whether an arm body calls `<binding>.deinit()`.
+func matchArmCleansPayload(body ast.Statement, binding string) bool {
+	switch s := body.(type) {
+	case *ast.ExprStmt:
+		return ownerUnionDeinitCall(s.Expr, binding)
+	case *ast.BlockStmt:
+		for _, stmt := range s.Statements {
+			if expr, ok := stmt.(*ast.ExprStmt); ok && ownerUnionDeinitCall(expr.Expr, binding) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ownerUnionDeinitCall reports whether expr is the cleanup call `binding.deinit()`.
+func ownerUnionDeinitCall(expr ast.Expression, binding string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Namespace || field.Name != "deinit" {
+		return false
+	}
+	return ownerUnionIdentName(field.Receiver) == binding
+}
+
+// ownerUnionIdentName returns the identifier name of expr, or "" when not a name.
+func ownerUnionIdentName(expr ast.Expression) string {
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		return ident.Name
+	}
+	return ""
 }
 
 // functionParamInfo keeps parsed parameter types aligned with function metadata.
