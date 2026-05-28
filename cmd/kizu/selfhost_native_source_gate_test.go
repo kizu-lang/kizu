@@ -276,6 +276,26 @@ func nativeSourceRunCases() []runParityCase {
 			artifactMode: "hosted-artifact",
 			artifactStem: "run_two_local_strings",
 		},
+		{
+			name:         "run_arithmetic",
+			command:      "run",
+			fixture:      "selfhost/tests/cli/run_arithmetic.kizu",
+			exitCode:     0,
+			stdoutGolden: "selfhost/tests/cli/golden/run_arithmetic.stdout",
+			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+			artifactMode: "hosted-artifact",
+			artifactStem: "run_arithmetic",
+		},
+		{
+			name:         "run_arithmetic_mixed",
+			command:      "run",
+			fixture:      "selfhost/tests/cli/run_arithmetic_mixed.kizu",
+			exitCode:     0,
+			stdoutGolden: "selfhost/tests/cli/golden/run_arithmetic_mixed.stdout",
+			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+			artifactMode: "hosted-artifact",
+			artifactStem: "run_arithmetic_mixed",
+		},
 	}
 }
 
