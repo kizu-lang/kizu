@@ -239,6 +239,7 @@ pub fn lower_multi_statement_function(
                         bs
                     );
                     temp_counter = if_result.temp_counter;
+                    string_counter = if_result.string_counter;
                 } else {
                     return error("compiled mir: unsupported statement kind");
                 }
@@ -259,6 +260,7 @@ pub struct MultiLowerResult {
 }
 pub struct MultiIfLowerResult {
     pub temp_counter: i64,
+    pub string_counter: i64,
 }
 fn lower_multi_let_statement(
     ir_bytes: []u8,
@@ -412,6 +414,8 @@ fn lower_multi_if_statement(
         &var cond_insts,
         bs
     );
+    let cond_strings = try count_strings_in_insts(&cond_insts);
+    let then_string_base = string_counter + cond_strings;
     let then_base = cond_result + 1;
     let then_stmt = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, then_node, "statement", 0, bs
@@ -450,7 +454,7 @@ fn lower_multi_if_statement(
                 ir_bytes, function_name, module_prefix, ret_value, bs
             );
             call_args = try lower_call_args(
-                ir_bytes, function_name, module_prefix, locals_spec, ret_value, 0, bs
+                ir_bytes, function_name, module_prefix, locals_spec, ret_value, then_string_base, bs
             );
             then_kind = compiled_mir::MirIfThenKind::ReturnCall;
             then_module_prefix = try compiled_mir_types::lower_call_module_prefix(
@@ -464,12 +468,22 @@ fn lower_multi_if_statement(
                 module_prefix,
                 locals_spec,
                 ret_value,
-                0,
+                then_string_base,
                 then_base,
                 &var then_insts,
                 bs
             );
         }
+    }
+    let then_call_strings = try count_string_args(&call_args);
+    let then_expr_strings = try count_strings_in_insts(&then_insts);
+    let new_string_counter = then_string_base + then_call_strings + then_expr_strings;
+    var next_temp = then_base;
+    if then_kind == compiled_mir::MirIfThenKind::ReturnCall {
+        next_temp = then_base + 1;
+    }
+    if then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
+        next_temp = then_result + 1;
     }
     try stmts.append(compiled_mir::if_stmt(
             if_index,
@@ -486,7 +500,8 @@ fn lower_multi_if_statement(
             then_insts
     ));
     return MultiIfLowerResult {
-        temp_counter: then_base
+        temp_counter: next_temp,
+        string_counter: new_string_counter
     };
 }
 fn lower_call_args(
@@ -578,6 +593,24 @@ fn count_string_args(args: &std::array::Array<compiled_mir::MirCallArg>) -> !i64
         let arg = try args.at(index);
         if arg.kind == compiled_mir::MirCallArgKind::String {
             count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+fn count_strings_in_insts(
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !i64 {
+    var count = 0;
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if inst.kind == compiled_mir::MirExprInstKind::ConstString {
+            count = count + 1;
+        }
+        if inst.kind == compiled_mir::MirExprInstKind::Call {
+            count = count + try count_string_args(&inst.call_args);
         }
         index = index + 1;
     }
