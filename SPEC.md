@@ -335,9 +335,11 @@ fn add(a: i64, b: i64) -> i64 {
 戻り値を返す場合は `return expr;` を必須にします。
 Rust のような末尾式 return は採用しません。
 セミコロンの有無で関数の戻り値が変わる仕様も採用しません。
-simple statement の終端には `;` を書けますが、次が `}`、EOF、次の statement 開始、
-または `match` arm 区切りの場合は省略できます。
-ただし `return` は Rust と同じく `return;` / `return expr;` の `;` を必須にします。
+simple statement の終端には `;` を必須にします。
+対象は `let` / `var` declaration、assignment、`return`、`break` / `continue`、
+expression statement です。
+block statement、`if`、`while`、`for`、`match`、`@unsafe`、`comptime if` 自体には
+終端 `;` を付けません。
 comma-separated list は末尾カンマを許容します。
 
 ```kizu
@@ -661,13 +663,16 @@ if age >= 20 {
 
 expression として使う場合は `else` が必須で、両 branch の末尾 value type が一致しなければ
 なりません。関数の戻り値は引き続き明示的な `return` で返します。
+branch value は expression なので `;` を付けません。
+`let` / `var` initializer、assignment、または expression statement として `if` expression を使う場合は、
+外側の statement を `;` で終端します。
 
 ```kizu
 let label = if age >= 20 {
     "adult"
 } else {
     "minor"
-}
+};
 ```
 
 三項演算子は採用しません。
@@ -763,6 +768,17 @@ v0.2 では wildcard pattern `_` を fallback arm として許可します。
 `_` arm がある場合、明示されていない残りの tag を束ねるため exhaustive とみなします。
 `_` arm がない場合は、すべての tag を明示しなければなりません。
 expression として使う場合は、すべての arm の value type が一致しなければなりません。
+arm value は expression なので `;` を付けません。
+`let` / `var` initializer、assignment、または expression statement として `match` expression を使う場合は、
+外側の statement を `;` で終端します。
+
+```kizu
+let label = match color {
+    Red => "red",
+    Green => "green",
+    Blue => "blue",
+};
+```
 
 ## 7. 型
 

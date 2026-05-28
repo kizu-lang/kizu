@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Superseded by ADR-0074.
+
+ADR-0074 restores expression-position `if` with branch expressions that do not
+use `;`, while keeping the enclosing simple statement semicolon required.
 
 ## Context
 
