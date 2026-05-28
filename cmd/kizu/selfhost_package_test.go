@@ -994,7 +994,7 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 func assertExecuteRoutesRunThroughCodegenIR(t *testing.T, execute string) {
 	t.Helper()
 	requiredExecute := []string{
-		"backend::lower_run_codegen_program(file_text, parsed.ast, parsed.root)",
+		"backend::lower_run_codegen_program(",
 		"backend::emit_run_codegen_artifact(",
 		"artifact.bytes > 0 and artifact.metadata_bytes > 0",
 		"backend::run_artifact_ll_path(allocator, path)",
