@@ -233,69 +233,55 @@ func countNativeSourceRunCaseFailures(
 	return failures
 }
 
+// nativeSourceRunOK builds an exit-0 hosted-artifact run case whose program
+// output is compared against a golden file. stderr always matches the empty
+// run_hello.stderr golden.
+func nativeSourceRunOK(name, fixtureBase, stdoutBase, stem string) runParityCase {
+	return runParityCase{
+		name:         name,
+		command:      "run",
+		fixture:      "selfhost/tests/cli/" + fixtureBase,
+		exitCode:     0,
+		stdoutGolden: "selfhost/tests/cli/golden/" + stdoutBase,
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		artifactMode: "hosted-artifact",
+		artifactStem: stem,
+	}
+}
+
+// nativeSourceRunStem builds an exit-0 case whose fixture, golden, and artifact
+// stem all share one name.
+func nativeSourceRunStem(stem string) runParityCase {
+	return nativeSourceRunOK(stem, stem+".kizu", stem+".stdout", stem)
+}
+
+// nativeSourceRunReturn is the explicit-return case that the bounded run path
+// rejects with the usage error.
+func nativeSourceRunReturn() runParityCase {
+	return runParityCase{
+		name:         "run_return",
+		command:      "run",
+		fixture:      "selfhost/tests/cli/run_return.kizu",
+		exitCode:     64,
+		stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		stderrGolden: "selfhost/tests/cli/golden/usage.stderr",
+		artifactMode: "hosted-artifact",
+		artifactStem: "-",
+	}
+}
+
 // nativeSourceRunCases returns representative checked-AST run lowering cases.
 func nativeSourceRunCases() []runParityCase {
 	return []runParityCase{
-		{
-			name:         "run_hello",
-			command:      "run",
-			fixture:      "selfhost/tests/cli/run_hello.kizu",
-			exitCode:     0,
-			stdoutGolden: "selfhost/tests/cli/golden/run_hello.stdout",
-			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-			artifactMode: "hosted-artifact",
-			artifactStem: "run_hello",
-		},
-		{
-			name:         "run_return",
-			command:      "run",
-			fixture:      "selfhost/tests/cli/run_return.kizu",
-			exitCode:     64,
-			stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-			stderrGolden: "selfhost/tests/cli/golden/usage.stderr",
-			artifactMode: "hosted-artifact",
-			artifactStem: "-",
-		},
-		{
-			name:         "run_local_string",
-			command:      "run",
-			fixture:      "selfhost/tests/cli/run_local_string.kizu",
-			exitCode:     0,
-			stdoutGolden: "selfhost/tests/cli/golden/run_print_custom.stdout",
-			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-			artifactMode: "hosted-artifact",
-			artifactStem: "run_local_string",
-		},
-		{
-			name:         "run_two_local_strings",
-			command:      "run",
-			fixture:      "selfhost/tests/cli/run_two_local_strings.kizu",
-			exitCode:     0,
-			stdoutGolden: "selfhost/tests/cli/golden/run_two_local_strings.stdout",
-			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-			artifactMode: "hosted-artifact",
-			artifactStem: "run_two_local_strings",
-		},
-		{
-			name:         "run_arithmetic",
-			command:      "run",
-			fixture:      "selfhost/tests/cli/run_arithmetic.kizu",
-			exitCode:     0,
-			stdoutGolden: "selfhost/tests/cli/golden/run_arithmetic.stdout",
-			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-			artifactMode: "hosted-artifact",
-			artifactStem: "run_arithmetic",
-		},
-		{
-			name:         "run_arithmetic_mixed",
-			command:      "run",
-			fixture:      "selfhost/tests/cli/run_arithmetic_mixed.kizu",
-			exitCode:     0,
-			stdoutGolden: "selfhost/tests/cli/golden/run_arithmetic_mixed.stdout",
-			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-			artifactMode: "hosted-artifact",
-			artifactStem: "run_arithmetic_mixed",
-		},
+		nativeSourceRunStem("run_hello"),
+		nativeSourceRunReturn(),
+		nativeSourceRunOK("run_local_string", "run_local_string.kizu",
+			"run_print_custom.stdout", "run_local_string"),
+		nativeSourceRunStem("run_two_local_strings"),
+		nativeSourceRunStem("run_arithmetic"),
+		nativeSourceRunStem("run_arithmetic_mixed"),
+		nativeSourceRunStem("run_if_adult"),
+		nativeSourceRunStem("run_if_minor"),
 	}
 }
 

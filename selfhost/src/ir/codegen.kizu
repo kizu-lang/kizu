@@ -659,18 +659,21 @@ pub fn metadata_line() -> []u8 {
     return "selfhost::ir::codegen::Program function-block-instruction-v0";
 }
 
-// lower_run_int_program lowers a main that prints a single integer expression by
-// folding the integer argument to a constant i64 and rendering its decimal text
-// into the caller-owned scratch buffer, reusing the const-string program shape so
-// the existing emitter prints the value. Non-matching programs return an
-// unsupported program so the caller falls back to the string-print run path.
+// lower_run_int_program lowers a bounded constant subset of main to the existing
+// const-string program shape by evaluating the program at compile time over the
+// checked AST: integer let locals, integer arithmetic (add/sub/mul/div),
+// boolean/comparison conditions, and if/else selection, terminating in a single
+// print of a string literal or an integer expression. The computed payload
+// (decimal text for integers) is rendered into the caller-owned scratch buffer.
+// Non-matching programs return an unsupported program so the caller falls back to
+// the string-print run path.
 //
 // These functions are intentionally excluded from the IR artifact's selected
 // body-fact set: the stage2 self-compilation path reproduces only the bounded
 // const-string run shape, so threading a scratch String through the selected
 // lowering functions would emit signatures the fact pipeline cannot model. Keeping
-// the integer path here lets the interpreter and the from-source native compiler
-// run it while the stage2 program shape stays unchanged.
+// the constant-evaluation path here lets the interpreter and the from-source
+// native compiler run it while the stage2 program shape stays unchanged.
 pub fn lower_run_int_program(
     scratch: &var std::string::String,
     text: []u8,
@@ -718,62 +721,128 @@ fn lower_int_function(
     }
     let node = ast.get(body);
     return match node.data {
-        Block(block) => try lower_int_block(scratch, text, ast, block.statements),
+        Block(block) => try lower_const_block(scratch, text, ast, block.statements, empty_int_env(text)),
         _ => unsupported_program(text[0..0]),
     };
 }
 
-fn lower_int_block(
+// lower_const_block evaluates a block at compile time: leading integer let
+// bindings extend the environment, and the terminal statement is either a print
+// (producing the program payload) or an if/else whose taken branch block is
+// evaluated with the same environment.
+fn lower_const_block(
     scratch: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    statements: std::kizu::ast::ChildRange
+    statements: std::kizu::ast::ChildRange,
+    env: IntEnv
 ) -> !Program {
-    if statements.len != 1 {
-        return unsupported_program(text[0..0]);
+    var current = env;
+    var index = 0;
+    while index < statements.len {
+        let statement = try ast.child_at(statements, index);
+        let node = ast.get(statement);
+        let terminal = index + 1 == statements.len;
+        if terminal {
+            return match node.data {
+                ExprStmt(expr_stmt) => try lower_const_print_statement(scratch, text, ast, expr_stmt.expr, &current),
+                If(if_node) => try lower_const_if(scratch, text, ast, if_node.condition, if_node.then_block, if_node.else_block, &current),
+                _ => unsupported_program(text[0..0]),
+            };
+        }
+        let next = match node.data {
+            Let(let_node) => try extend_int_env(text, ast, &current, let_node.name, let_node.value),
+            _ => overflow_int_env(text),
+        };
+        if next.count < 0 {
+            return unsupported_program(text[0..0]);
+        }
+        current = next;
+        index = index + 1;
     }
-    let statement = try ast.child_at(statements, 0);
-    let node = ast.get(statement);
+    return unsupported_program(text[0..0]);
+}
+
+fn lower_const_if(
+    scratch: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    env: &IntEnv
+) -> !Program {
+    let taken = try eval_bool_expr(text, ast, condition, env);
+    var block = else_block;
+    if taken {
+        block = then_block;
+    }
+    let node = ast.get(block);
     return match node.data {
-        ExprStmt(expr_stmt) => try lower_int_print_statement(scratch, text, ast, expr_stmt.expr),
+        Block(inner) => try lower_const_block(scratch, text, ast, inner.statements, copy_int_env(env)),
         _ => unsupported_program(text[0..0]),
     };
 }
 
-fn lower_int_print_statement(
+fn lower_const_print_statement(
     scratch: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    expr: std::kizu::ast::NodeId
+    expr: std::kizu::ast::NodeId,
+    env: &IntEnv
 ) -> !Program {
     let node = ast.get(expr);
     return match node.data {
-        Call(call_node) => try lower_int_print_call(scratch, text, ast, call_node.callee, call_node.args),
+        Call(call_node) => try lower_const_print_call(scratch, text, ast, call_node.callee, call_node.args, env),
         _ => unsupported_program(text[0..0]),
     };
 }
 
-fn lower_int_print_call(
+fn lower_const_print_call(
     scratch: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
     callee: std::kizu::ast::NodeId,
-    args: std::kizu::ast::ChildRange
+    args: std::kizu::ast::ChildRange,
+    env: &IntEnv
 ) -> !Program {
     if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
         return unsupported_program(text[0..0]);
     }
     let arg = try ast.child_at(args, 0);
     let arg_node = ast.get(arg);
-    let is_integer = match arg_node.data {
-        Int(int_node) => true,
-        Binary(binary) => true,
-        _ => false,
+    return match arg_node.data {
+        String(string_node) => lower_const_string_print(text, ast, arg),
+        Int(int_node) => try lower_const_int_print(scratch, text, ast, arg, env),
+        Binary(binary) => try lower_const_int_print(scratch, text, ast, arg, env),
+        _ => unsupported_program(text[0..0]),
     };
-    if !is_integer {
+}
+
+fn lower_const_string_print(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    arg: std::kizu::ast::NodeId
+) -> Program {
+    let payload = string_literal_span(text, ast, arg);
+    if payload.start < 0 {
         return unsupported_program(text[0..0]);
     }
-    let value = try fold_int_expr(text, ast, arg);
+    let payload_text = text[payload.start..payload.end];
+    if std::mem::len(payload_text) == 0 {
+        return unsupported_program(text[0..0]);
+    }
+    return lowered_main_print_program(payload_text);
+}
+
+fn lower_const_int_print(
+    scratch: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    arg: std::kizu::ast::NodeId,
+    env: &IntEnv
+) -> !Program {
+    let value = try eval_int_expr(text, ast, arg, env);
     let start = scratch.len();
     try std::fmt::append_i64(scratch, value);
     let end = scratch.len();
@@ -785,18 +854,126 @@ fn lower_int_print_call(
     return lowered_main_print_program(payload_text);
 }
 
-// fold_int_expr evaluates an integer literal or arithmetic expression to a
-// constant i64 by walking the checked AST. The parser already encodes operator
-// precedence in the tree shape, so a direct post-order fold yields the value.
-fn fold_int_expr(
+// IntEnv is a bounded compile-time environment of integer locals. A negative
+// count marks an environment that overflowed the supported slot budget.
+struct IntEnv {
+    count: i64,
+    name0: []u8,
+    value0: i64,
+    name1: []u8,
+    value1: i64,
+    name2: []u8,
+    value2: i64,
+}
+
+fn copy_int_env(env: &IntEnv) -> IntEnv {
+    return IntEnv {
+        count: env.count,
+        name0: env.name0,
+        value0: env.value0,
+        name1: env.name1,
+        value1: env.value1,
+        name2: env.name2,
+        value2: env.value2
+    };
+}
+
+fn empty_int_env(text: []u8) -> IntEnv {
+    return IntEnv {
+        count: 0,
+        name0: text[0..0],
+        value0: 0,
+        name1: text[0..0],
+        value1: 0,
+        name2: text[0..0],
+        value2: 0
+    };
+}
+
+fn overflow_int_env(text: []u8) -> IntEnv {
+    return IntEnv {
+        count: -1,
+        name0: text[0..0],
+        value0: 0,
+        name1: text[0..0],
+        value1: 0,
+        name2: text[0..0],
+        value2: 0
+    };
+}
+
+fn extend_int_env(
     text: []u8,
     ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
+    env: &IntEnv,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId
+) -> !IntEnv {
+    let local_name = ast_node_text(text, ast, name);
+    let local_value = try eval_int_expr(text, ast, value, env);
+    if env.count == 0 {
+        return IntEnv {
+            count: 1,
+            name0: local_name,
+            value0: local_value,
+            name1: env.name1,
+            value1: env.value1,
+            name2: env.name2,
+            value2: env.value2
+        };
+    }
+    if env.count == 1 {
+        return IntEnv {
+            count: 2,
+            name0: env.name0,
+            value0: env.value0,
+            name1: local_name,
+            value1: local_value,
+            name2: env.name2,
+            value2: env.value2
+        };
+    }
+    if env.count == 2 {
+        return IntEnv {
+            count: 3,
+            name0: env.name0,
+            value0: env.value0,
+            name1: env.name1,
+            value1: env.value1,
+            name2: local_name,
+            value2: local_value
+        };
+    }
+    return overflow_int_env(text);
+}
+
+fn int_env_value(env: &IntEnv, name: []u8) -> !i64 {
+    if env.count >= 1 and std::mem::equal_bytes(env.name0, name) {
+        return env.value0;
+    }
+    if env.count >= 2 and std::mem::equal_bytes(env.name1, name) {
+        return env.value1;
+    }
+    if env.count >= 3 and std::mem::equal_bytes(env.name2, name) {
+        return env.value2;
+    }
+    return error("unknown integer local in run codegen");
+}
+
+// eval_int_expr evaluates an integer literal, local reference, or arithmetic
+// expression to a constant i64. The parser already encodes operator precedence
+// in the tree shape, so a direct post-order fold yields the value.
+fn eval_int_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    env: &IntEnv
 ) -> !i64 {
     let node = ast.get(node_id);
     return match node.data {
         Int(int_node) => try parse_int_literal(ast_node_text(text, ast, node_id)),
-        Binary(binary) => try fold_int_binary(text, ast, binary.op, binary.left, binary.right),
+        Var(var_node) => try int_env_value(env, ast_node_text(text, ast, node_id)),
+        Binary(binary) => try eval_int_binary(text, ast, binary.op, binary.left, binary.right, env),
         _ => try unsupported_int_expr(),
     };
 }
@@ -805,15 +982,16 @@ fn unsupported_int_expr() -> !i64 {
     return error("unsupported integer expression in run codegen");
 }
 
-fn fold_int_binary(
+fn eval_int_binary(
     text: []u8,
     ast: std::kizu::ast::Ast,
     op: std::kizu::ast::BinaryOp,
     left_id: std::kizu::ast::NodeId,
-    right_id: std::kizu::ast::NodeId
+    right_id: std::kizu::ast::NodeId,
+    env: &IntEnv
 ) -> !i64 {
-    let left = try fold_int_expr(text, ast, left_id);
-    let right = try fold_int_expr(text, ast, right_id);
+    let left = try eval_int_expr(text, ast, left_id, env);
+    let right = try eval_int_expr(text, ast, right_id, env);
     if op == std::kizu::ast::binary_add() {
         return left + right;
     }
@@ -830,6 +1008,77 @@ fn fold_int_binary(
         return left / right;
     }
     return error("unsupported integer operator in run codegen");
+}
+
+// eval_bool_expr evaluates a boolean literal, integer comparison, or logical
+// (and/or) expression to a constant bool over the integer environment.
+fn eval_bool_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    env: &IntEnv
+) -> !bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Bool(bool_node) => try parse_bool_literal(ast_node_text(text, ast, node_id)),
+        Binary(binary) => try eval_bool_binary(text, ast, binary.op, binary.left, binary.right, env),
+        _ => try unsupported_bool_expr(),
+    };
+}
+
+fn unsupported_bool_expr() -> !bool {
+    return error("unsupported boolean expression in run codegen");
+}
+
+fn parse_bool_literal(literal: []u8) -> !bool {
+    if std::mem::equal_bytes(literal, "true") {
+        return true;
+    }
+    if std::mem::equal_bytes(literal, "false") {
+        return false;
+    }
+    return error("unsupported boolean literal in run codegen");
+}
+
+fn eval_bool_binary(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    op: std::kizu::ast::BinaryOp,
+    left_id: std::kizu::ast::NodeId,
+    right_id: std::kizu::ast::NodeId,
+    env: &IntEnv
+) -> !bool {
+    if op == std::kizu::ast::binary_and() {
+        let left = try eval_bool_expr(text, ast, left_id, env);
+        let right = try eval_bool_expr(text, ast, right_id, env);
+        return left and right;
+    }
+    if op == std::kizu::ast::binary_or() {
+        let left = try eval_bool_expr(text, ast, left_id, env);
+        let right = try eval_bool_expr(text, ast, right_id, env);
+        return left or right;
+    }
+    let left = try eval_int_expr(text, ast, left_id, env);
+    let right = try eval_int_expr(text, ast, right_id, env);
+    if op == std::kizu::ast::binary_eq() {
+        return left == right;
+    }
+    if op == std::kizu::ast::binary_not_eq() {
+        return left != right;
+    }
+    if op == std::kizu::ast::binary_lt() {
+        return left < right;
+    }
+    if op == std::kizu::ast::binary_lte() {
+        return left <= right;
+    }
+    if op == std::kizu::ast::binary_gt() {
+        return left > right;
+    }
+    if op == std::kizu::ast::binary_gte() {
+        return left >= right;
+    }
+    return error("unsupported boolean operator in run codegen");
 }
 
 fn parse_int_literal(literal: []u8) -> !i64 {
