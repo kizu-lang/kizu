@@ -136,10 +136,88 @@ pub fn append_call_arg_setup_with_prefix(
                 try out.append_bytes(", ");
                 try std::fmt::append_i64(out, arg.source_field_index);
                 try out.append_byte(cast<u8>(10));
+            } else {
+                if arg.kind == compiled_mir::MirCallArgKind::Slice {
+                    try append_slice_arg_setup(out, &arg, call_prefix, index);
+                }
             }
         }
         index = index + 1;
     }
+    return;
+}
+
+fn append_slice_arg_bound(
+    out: &var std::string::String,
+    call_prefix: i64,
+    index: i64,
+    suffix: []u8,
+    base: []u8,
+    offset: i64
+) -> !void {
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes(suffix);
+    if std::mem::len(base) == 0 {
+        try out.append_bytes(" = add i64 0, ");
+    } else {
+        try out.append_bytes(" = add i64 %");
+        try out.append_bytes(base);
+        try out.append_bytes(", ");
+    }
+    try std::fmt::append_i64(out, offset);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_slice_arg_setup(
+    out: &var std::string::String,
+    arg: &compiled_mir::MirCallArg,
+    call_prefix: i64,
+    index: i64
+) -> !void {
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_sbase = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(arg.value);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
+    try append_slice_arg_bound(
+        out, call_prefix, index, "_sstart", arg.slice_start_base, arg.slice_start_offset
+    );
+    try append_slice_arg_bound(
+        out, call_prefix, index, "_send", arg.slice_end_base, arg.slice_end_offset
+    );
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_sgep = getelementptr i8, ptr ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_sbase, i64 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_sstart");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_slen = sub i64 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_send, ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_sstart");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_s0 = insertvalue %kizu.slice.u8 poison, ptr ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_sgep, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_slice = insertvalue %kizu.slice.u8 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_s0, i64 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_slen, 1");
+    try out.append_byte(cast<u8>(10));
     return;
 }
 
@@ -198,7 +276,12 @@ pub fn append_call_args_with_prefix(
                         if arg.kind == compiled_mir::MirCallArgKind::EmptySlice {
                             try out.append_bytes("zeroinitializer");
                         } else {
-                            return error("compiled mir llvm: unsupported call arg");
+                            if arg.kind == compiled_mir::MirCallArgKind::Slice {
+                                try append_arg_local_name(out, call_prefix, index);
+                                try out.append_bytes("_slice");
+                            } else {
+                                return error("compiled mir llvm: unsupported call arg");
+                            }
                         }
                     }
                 }

@@ -616,6 +616,58 @@ fn count_strings_in_insts(
     }
     return count;
 }
+struct SliceBound {
+    base: []u8,
+    offset: i64,
+}
+
+fn lower_slice_bound(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    bs: i64
+) -> !SliceBound {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
+    if std::mem::equal_bytes(kind, "Var") {
+        let name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, node, bs);
+        return SliceBound { base: name, offset: 0 };
+    }
+    if std::mem::equal_bytes(kind, "Int") {
+        let literal = try ir_contract::body_int_value_from(ir_bytes, function_name, node, bs);
+        return SliceBound { base: "", offset: literal };
+    }
+    if std::mem::equal_bytes(kind, "Binary") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-binary ", function_name, node, bs
+        );
+        let left_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "left", 0, bs
+        );
+        let right_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "right", 0, bs
+        );
+        let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
+        let right_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, right_node, bs
+        );
+        if !std::mem::equal_bytes(left_kind, "Var") or !std::mem::equal_bytes(right_kind, "Int") {
+            return error("compiled mir: unsupported slice bound shape");
+        }
+        let base = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, left_node, bs);
+        let literal = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, right_node, bs
+        );
+        if std::mem::equal_bytes(op, "add") {
+            return SliceBound { base: base, offset: literal };
+        }
+        if std::mem::equal_bytes(op, "sub") {
+            return SliceBound { base: base, offset: 0 - literal };
+        }
+        return error("compiled mir: unsupported slice bound op");
+    }
+    return error("compiled mir: unsupported slice bound kind");
+}
+
 fn lower_call_index_arg(
     ir_bytes: []u8,
     function_name: []u8,
@@ -623,18 +675,34 @@ fn lower_call_index_arg(
     arg_node: i64,
     bs: i64
 ) -> !compiled_mir::MirCallArg {
+    let target_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, target_node, bs
+    );
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return error("compiled mir: slice target must be a var");
+    }
+    let target_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, target_node, bs
+    );
     let start_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, arg_node, "start", 0, bs
     );
     let end_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, arg_node, "end", 0, bs
     );
-    let start_val = try ir_contract::body_int_value_from(ir_bytes, function_name, start_node, bs);
-    let end_val = try ir_contract::body_int_value_from(ir_bytes, function_name, end_node, bs);
-    if start_val != 0 or end_val != 0 {
-        return error("compiled mir: only [0..0] call index arg supported");
-    }
-    return compiled_mir::empty_slice_call_arg(arg_type);
+    let start_bound = try lower_slice_bound(ir_bytes, function_name, start_node, bs);
+    let end_bound = try lower_slice_bound(ir_bytes, function_name, end_node, bs);
+    return compiled_mir::slice_call_arg(
+        arg_type,
+        target_name,
+        start_bound.base,
+        start_bound.offset,
+        end_bound.base,
+        end_bound.offset
+    );
 }
 
 fn lower_call_field_arg(
