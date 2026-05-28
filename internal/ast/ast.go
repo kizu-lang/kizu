@@ -620,6 +620,13 @@ func (s *ExprStmt) String() string {
 type IdentExpr struct {
 	Name string
 	Span Span
+	// SlotDepth/SlotIndex are a lexical address precomputed by the interpreter
+	// resolver, valid only when SlotResolved is true and the name is
+	// unambiguous in scope. Evaluation verifies the binding name and falls
+	// back to name lookup otherwise.
+	SlotDepth    int
+	SlotIndex    int
+	SlotResolved bool
 }
 
 // expressionNode marks IdentExpr as an expression node.

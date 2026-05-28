@@ -76,6 +76,23 @@ func (e *Env) Define(name string, value Value, mutable bool) error {
 	return nil
 }
 
+// bindingAt returns the binding at a precomputed lexical address, walking
+// depth parents then indexing inline cell storage. It returns nil when the
+// address falls outside cells (overflowed into the pool, or not yet defined)
+// so callers fall back to name lookup.
+func (e *Env) bindingAt(depth, index int) *binding {
+	for d := 0; d < depth; d++ {
+		if e == nil {
+			return nil
+		}
+		e = e.parent
+	}
+	if e == nil || index < 0 || index >= len(e.cells) {
+		return nil
+	}
+	return &e.cells[index]
+}
+
 // localBinding scans this environment's own bindings for a name. Scopes are
 // small, so a linear scan over stable cell storage beats string-keyed hashing.
 func (e *Env) localBinding(name string) (*binding, bool) {
