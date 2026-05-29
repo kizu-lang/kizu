@@ -250,6 +250,23 @@ pub struct MirLetExprStmt {
     pub expr_insts: std::array::Array<MirExprInst>,
 }
 
+// MirReturnArrayGetStmt backs a multi-statement 'return self.<field>.get(<expr>);'
+// (Array<T>.get -> !T, tracker 961). It composes the ArrayGet body with an arbitrary
+// index expression: expr_insts/index_result_id lower the index (e.g. range.start +
+// index) into %t<index_result_id>, and the receiver fields name the Array<T> handle.
+// The renderer emits the index, then the checked @kizu_rt_array_at call + ok-branch +
+// by-value load + error-union wrap, sharing the body with the single-statement
+// accessor. Ast.child_at is its first consumer.
+pub struct MirReturnArrayGetStmt {
+    pub receiver_type: []u8,
+    pub receiver_name: []u8,
+    pub field_index: i64,
+    pub element_type: []u8,
+    pub index_result_id: i64,
+    pub string_index: i64,
+    pub expr_insts: std::array::Array<MirExprInst>,
+}
+
 // cond_short_circuit selects how the condition drives the branch:
 //   0 = single condition (cond_insts / cond_result_id only)
 //   1 = lhs and rhs short-circuit; rhs is only evaluated when lhs is true
@@ -307,6 +324,7 @@ pub union MirStmt {
     ReturnStruct(MirReturnStructStmt),
     ReturnExpr(MirReturnExprStmt),
     ReturnError(MirReturnErrorStmt),
+    ReturnArrayGet(MirReturnArrayGetStmt),
     If(MirIfStmt),
     While(MirWhileStmt),
 }
@@ -466,6 +484,13 @@ impl MirReturnErrorStmt {
     }
 }
 
+impl MirReturnArrayGetStmt {
+    fn deinit(self: MirReturnArrayGetStmt) -> void {
+        self.expr_insts.deinit();
+        return;
+    }
+}
+
 impl MirIfStmt {
     fn deinit(self: MirIfStmt) -> void {
         self.cond_insts.deinit();
@@ -499,6 +524,7 @@ impl MirStmt {
             ReturnStruct(payload) => payload.deinit(),
             ReturnExpr(payload) => payload.deinit(),
             ReturnError(payload) => payload.deinit(),
+            ReturnArrayGet(payload) => payload.deinit(),
             If(payload) => payload.deinit(),
             While(payload) => payload.deinit(),
         }
@@ -1215,6 +1241,26 @@ pub fn return_expr_stmt(
     return MirStmt::ReturnExpr(MirReturnExprStmt {
         string_index: string_index,
         expr_result_id: result_id,
+        expr_insts: insts
+    });
+}
+
+pub fn return_array_get_stmt(
+    receiver_type: []u8,
+    receiver_name: []u8,
+    field_index: i64,
+    element_type: []u8,
+    index_result_id: i64,
+    string_index: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt::ReturnArrayGet(MirReturnArrayGetStmt {
+        receiver_type: receiver_type,
+        receiver_name: receiver_name,
+        field_index: field_index,
+        element_type: element_type,
+        index_result_id: index_result_id,
+        string_index: string_index,
         expr_insts: insts
     });
 }

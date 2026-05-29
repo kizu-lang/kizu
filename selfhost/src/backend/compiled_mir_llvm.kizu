@@ -44,40 +44,45 @@ fn append_ll_line(out: &var std::string::String, text: []u8) -> !void {
     return;
 }
 
-// append_array_get_block renders a read-only 'return self.<field>.get(index);'
-// accessor (Array<T>.get -> !T, tracker 961). It extracts the Array<T> %kizu.owned
-// handle off the struct value receiver, calls the checked @kizu_rt_array_at runtime
-// helper (the same one std arrays use, returning a borrowed %kizu.error.slice.u8
-// view), and branches on the ok flag: on success it loads the element value out of
-// the borrowed view and wraps it as the error-union success value (field 1); on
-// failure it forwards the runtime message as the error-union failure value (field 2).
-// The error branch is a real failure return, never 'unreachable'.
-fn append_array_get_block(
+// append_array_get_body renders the shared checked Array<T>.get body
+// (Array<T>.get -> !T, tracker 961): it extracts the Array<T> %kizu.owned handle off
+// the struct value receiver, calls the checked @kizu_rt_array_at runtime helper (the
+// same one std arrays use, returning a borrowed %kizu.error.slice.u8 view), and
+// branches on the ok flag. The success path loads the element value out of the
+// borrowed view and wraps it as the error-union success value (field 1); the failure
+// path forwards the runtime message as the error-union failure value (field 2), never
+// 'unreachable'. The index operand is the i64 index parameter (%<index_param_name>)
+// when index_is_param, otherwise the lowered index temp (%t<index_temp_id>). The body
+// uses function-scoped fixed names, so a function carries at most one array get.
+fn append_array_get_body(
     out: &var std::string::String,
-    function: &compiled_mir::MirFunction,
-    inst: &compiled_mir::MirArrayGetInst
+    error_union: []u8,
+    receiver_type: []u8,
+    receiver_name: []u8,
+    field_index: i64,
+    element_type: []u8,
+    index_is_param: bool,
+    index_param_name: []u8,
+    index_temp_id: i64
 ) -> !void {
-    let error_union = function.return_type.llvm_name;
-    try out.append_bytes("define ");
-    try out.append_bytes(error_union);
-    try out.append_bytes(" @");
-    try out.append_bytes(function.name);
-    try out.append_bytes("(");
-    try compiled_signature::append_params_signature(out, function.params_spec);
-    try append_ll_line(out, ") {");
-    try append_ll_line(out, "entry:");
     // Read the Array<T> handle off the struct value receiver.
     try out.append_bytes("  %array = extractvalue ");
-    try out.append_bytes(inst.receiver_type);
+    try out.append_bytes(receiver_type);
     try out.append_bytes(" %");
-    try out.append_bytes(inst.receiver_name);
+    try out.append_bytes(receiver_name);
     try out.append_bytes(", ");
-    try std::fmt::append_i64(out, inst.field_index);
+    try std::fmt::append_i64(out, field_index);
     try out.append_byte(cast<u8>(10));
     // Call the checked array element accessor; it returns a borrowed view as a
     // %kizu.error.slice.u8 (ok flag, element view slice, error message).
-    try out.append_bytes("  %view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %");
-    try out.append_bytes(inst.index_name);
+    try out.append_bytes("  %view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 ");
+    if index_is_param {
+        try out.append_bytes("%");
+        try out.append_bytes(index_param_name);
+    } else {
+        try out.append_bytes("%t");
+        try std::fmt::append_i64(out, index_temp_id);
+    }
     try append_ll_line(out, ")");
     try append_ll_line(out, "  %view_ok = extractvalue %kizu.error.slice.u8 %view, 0");
     try append_ll_line(out,
@@ -87,7 +92,7 @@ fn append_array_get_block(
     try append_ll_line(out, "  %view_slice = extractvalue %kizu.error.slice.u8 %view, 1");
     try append_ll_line(out, "  %elem_ptr = extractvalue %kizu.slice.u8 %view_slice, 0");
     try out.append_bytes("  %elem = load ");
-    try out.append_bytes(inst.element_type);
+    try out.append_bytes(element_type);
     try append_ll_line(out, ", ptr %elem_ptr");
     try out.append_bytes("  %ok_flag = insertvalue ");
     try out.append_bytes(error_union);
@@ -95,7 +100,7 @@ fn append_array_get_block(
     try out.append_bytes("  %ok_value = insertvalue ");
     try out.append_bytes(error_union);
     try out.append_bytes(" %ok_flag, ");
-    try out.append_bytes(inst.element_type);
+    try out.append_bytes(element_type);
     try append_ll_line(out, " %elem, 1");
     try out.append_bytes("  ret ");
     try out.append_bytes(error_union);
@@ -112,6 +117,38 @@ fn append_array_get_block(
     try out.append_bytes("  ret ");
     try out.append_bytes(error_union);
     try append_ll_line(out, " %fail_value");
+    return;
+}
+
+// append_array_get_block renders a single-statement read-only
+// 'return self.<field>.get(index);' accessor (Array<T>.get -> !T, tracker 961). The
+// index is the i64 index parameter; the body is shared with the multi-statement
+// 'return self.<field>.get(<expr>);' lowering.
+fn append_array_get_block(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    inst: &compiled_mir::MirArrayGetInst
+) -> !void {
+    let error_union = function.return_type.llvm_name;
+    try out.append_bytes("define ");
+    try out.append_bytes(error_union);
+    try out.append_bytes(" @");
+    try out.append_bytes(function.name);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, function.params_spec);
+    try append_ll_line(out, ") {");
+    try append_ll_line(out, "entry:");
+    try append_array_get_body(
+        out,
+        error_union,
+        inst.receiver_type,
+        inst.receiver_name,
+        inst.field_index,
+        inst.element_type,
+        true,
+        inst.index_name,
+        0
+    );
     try append_ll_line(out, "}");
     try out.append_byte(cast<u8>(10));
     return;
@@ -218,6 +255,7 @@ fn append_multi_stmt(
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
         ReturnError(payload) => try append_multi_return_error(out, function, payload);,
+        ReturnArrayGet(payload) => try append_multi_return_array_get(out, function, payload);,
         If(payload) => try append_multi_if(out, function, payload, local_prefix);,
         While(payload) => try append_multi_while(out, function, payload);,
     }
@@ -313,6 +351,30 @@ fn append_multi_return_error(
     );
     return;
 }
+// append_multi_return_array_get renders a multi-statement
+// 'return self.<field>.get(<expr>);' (Array<T>.get -> !T, tracker 961). It first
+// lowers the index expression (e.g. range.start + index) into %t<index_result_id>,
+// then emits the shared checked array-get body keyed off that index temp. The error
+// branch is a real error-union failure return, never 'unreachable'.
+fn append_multi_return_array_get(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirReturnArrayGetStmt
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    try append_array_get_body(
+        out,
+        function.return_type.llvm_name,
+        stmt.receiver_type,
+        stmt.receiver_name,
+        stmt.field_index,
+        stmt.element_type,
+        false,
+        "",
+        stmt.index_result_id
+    );
+    return;
+}
 // append_error_union_failure_value renders a return error("...") failure value
 // for the %kizu.error.<success> ABI: field 0 is the i1 false ok flag, field 1 the
 // success value (left as zeroinitializer), and the error message %kizu.slice.u8 at
@@ -396,6 +458,7 @@ fn append_stmt_globals(
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnError(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
+        ReturnArrayGet(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         If(payload) => try append_if_globals(out, llvm_symbol, payload);,
         While(payload) => try append_while_globals(out, llvm_symbol, payload);,
     }

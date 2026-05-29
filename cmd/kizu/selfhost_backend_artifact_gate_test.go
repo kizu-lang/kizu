@@ -357,6 +357,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
 	fragments = append(fragments, requiredLLVMReturnErrorFragments()...)
 	fragments = append(fragments, requiredLLVMArrayGetFragments()...)
+	fragments = append(fragments, requiredLLVMChildAtFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -507,6 +508,38 @@ func requiredLLVMArrayGetFragments() []string {
 			"%kizu.slice.u8 %fail_msg, 2",
 		"  ret %kizu.error.related_span %fail_value",
 		"define %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index)",
+	}
+}
+
+// requiredLLVMChildAtFragments returns the tracker-961 std::kizu::ast::Ast.child_at
+// accessor compiled into stage2. It composes the checked Array<NodeId>.get accessor
+// with a bounds-check `if index < 0 or index >= range.len { return error(...); }`:
+// the `or` short-circuit branches to the shared error block, which materializes the
+// "child index out of bounds" message and returns a real %kizu.error.node_id failure
+// value (field 2), never `unreachable`. The continuation computes range.start + index
+// (extractvalue of the ChildRange + add), reads the children Array (field 1) off the
+// Ast value, calls the checked @kizu_rt_array_at, and on success loads the NodeId by
+// value and wraps it as the error-union success value (field 1).
+func requiredLLVMChildAtFragments() []string {
+	return []string{
+		"%kizu.kizu.ast.node_id = type { i64 }",
+		"%kizu.error.node_id = type { i1, %kizu.kizu.ast.node_id, %kizu.slice.u8 }",
+		"define %kizu.error.node_id @kizu_kizu__ast_ast_child_at",
+		"%kizu.kizu.ast.child_range %range",
+		"br i1 %t2, label %if0_then, label %if0_rhs",
+		"%t5 = icmp sge i64 %t3, %t4",
+		"%t4 = extractvalue %kizu.kizu.ast.child_range %range, 1",
+		"br i1 %t5, label %if0_then, label %if0_cont",
+		"%errfail6 = insertvalue %kizu.error.node_id %errfail6_flag, %kizu.slice.u8 %t6, 2",
+		"  ret %kizu.error.node_id %errfail6",
+		"%t7 = extractvalue %kizu.kizu.ast.child_range %range, 0",
+		"%t9 = add i64 %t7, %t8",
+		"%array = extractvalue %kizu.kizu.ast.ast %self, 1",
+		"%view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %t9)",
+		"%elem = load %kizu.kizu.ast.node_id, ptr %elem_ptr",
+		"%ok_value = insertvalue %kizu.error.node_id %ok_flag, %kizu.kizu.ast.node_id %elem, 1",
+		"  ret %kizu.error.node_id %ok_value",
+		"  ret %kizu.error.node_id %fail_value",
 	}
 }
 
