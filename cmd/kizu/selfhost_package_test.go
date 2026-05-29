@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -987,6 +988,63 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	assertCodegenIRShape(t, codegen)
 	assertCodegenIRForbiddenBridges(t, hosted, codegen)
 	assertHostedRunLLVMResponsibilities(t, cliRun, cliFrontend, cliCodegen, cliHostedRenderer)
+}
+
+// TestSelfhostRunFrontendScannerFrozen freezes the stage2 run-frontend token
+// scanner so it cannot grow new source-shape routes (tracker 961).
+//
+// stage2 has no compiled parser/AST yet, so the run frontend in
+// cli_frontend_llvm.kizu still recognizes the supported run shape by scanning
+// source tokens. That scanner is a temporary stopgap until stage2 compiles the
+// parser/AST and the real lower_run_ast traversal. Until then the scanner is
+// frozen: new run features must be added by AST node lowering, not by adding
+// more source-token scanners. This gate fails if any new cli_frontend function
+// or parse_<feature> scanner is introduced, or if the temporary-scanner
+// documentation (with its deletion path) is dropped.
+func TestSelfhostRunFrontendScannerFrozen(t *testing.T) {
+	cliFrontend := readSelfhostFile(t, "../../selfhost/src/backend/cli_frontend_llvm.kizu")
+
+	// The run frontend is a frozen allowlist of functions. Any new
+	// @kizu_selfhost__cli_frontend_* function (define or call) fails the gate.
+	allowed := map[string]bool{
+		"cli_frontend_lower_checked_run_ast": true,
+		"cli_frontend_parse_let_binding":     true,
+		"cli_frontend_parse_print_statement": true,
+		"cli_frontend_string_payload":        true,
+		"cli_frontend_token_slice":           true,
+	}
+	frontendFnRe := regexp.MustCompile(`kizu_selfhost__(cli_frontend_[a-z0-9_]+)`)
+	for _, match := range frontendFnRe.FindAllStringSubmatch(cliFrontend, -1) {
+		if !allowed[match[1]] {
+			t.Fatalf(
+				"run frontend introduces non-allowlisted scanner function %q; add run "+
+					"features by AST node lowering, not new source-token scanners (tracker 961)",
+				match[1],
+			)
+		}
+	}
+
+	// Exactly the two legacy parse_<feature> scanners are permitted. A third
+	// parse_<feature> define means the scanner is growing a new shape route.
+	parseDefineRe := regexp.MustCompile(`define [^"]*@kizu_selfhost__cli_frontend_parse_[a-z_]+\(`)
+	if got := len(parseDefineRe.FindAllString(cliFrontend, -1)); got != 2 {
+		t.Fatalf(
+			"run frontend defines %d parse_<feature> scanners, want exactly the 2 frozen "+
+				"legacy scanners (tracker 961)",
+			got,
+		)
+	}
+
+	// The temporary-scanner isolation must stay documented with a deletion path
+	// so the stopgap cannot quietly become permanent.
+	for _, marker := range []string{
+		"TEMPORARY LEGACY SCANNER (tracker 961)",
+		"DELETION CONDITION",
+	} {
+		if !strings.Contains(cliFrontend, marker) {
+			t.Fatalf("run frontend dropped temporary-scanner documentation marker %q", marker)
+		}
+	}
 }
 
 // assertExecuteRoutesRunThroughCodegenIR checks the CLI layer hands run input
