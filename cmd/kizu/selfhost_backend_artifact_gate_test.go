@@ -419,6 +419,17 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 		"%index_next = add i64 %index, 1",
 		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
 		"%t7_gep = getelementptr i8, ptr %t7_ptr, i64 %t6",
+		// tracker 961 foundation: empty_int_env is the first stage2 function that
+		// takes a real std::kizu::ast value type (ChildRange) as a parameter and
+		// forwards it whole into a struct field, without touching the AstNode/AstData
+		// union. The ChildRange LLVM type and its embedding IntEnv type are emitted,
+		// and the decls parameter is inserted as an aggregate into field index 1.
+		"%kizu.kizu.ast.child_range = type { i64, i64 }",
+		"%kizu.selfhost.codegen.int_env = type { i64, %kizu.kizu.ast.child_range, " +
+			"%kizu.slice.u8, i64, %kizu.slice.u8, i64, %kizu.slice.u8, i64 }",
+		"define %kizu.selfhost.codegen.int_env @kizu_selfhost__ir_codegen_empty_int_env",
+		"%v0_1 = insertvalue %kizu.selfhost.codegen.int_env %v0_0, " +
+			"%kizu.kizu.ast.child_range %decls, 1",
 	}
 }
 
