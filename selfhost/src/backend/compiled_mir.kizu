@@ -35,6 +35,12 @@ pub enum MirCallArgKind {
     Slice,
 }
 
+// A FieldAccess call arg mirrors MirStructField's nested layout: source_type /
+// source_field_index extract the first field off the Var receiver, and when
+// nested_field_index >= 0 a second extractvalue reads nested_field_index off
+// nested_source_type (the intermediate field type). nested_field_index == -1
+// marks a single-level access (receiver.field) so the renderer skips the second
+// extractvalue (tracker 961, mirrors nested_field_access_struct_field).
 pub struct MirCallArg {
     pub ty: []u8,
     pub kind: MirCallArgKind,
@@ -43,6 +49,8 @@ pub struct MirCallArg {
     pub string_index: i64,
     pub source_type: []u8,
     pub source_field_index: i64,
+    pub nested_source_type: []u8,
+    pub nested_field_index: i64,
     pub slice_start_base: []u8,
     pub slice_start_offset: i64,
     pub slice_end_base: []u8,
@@ -503,6 +511,8 @@ pub fn var_call_arg(ty: []u8, name: []u8) -> MirCallArg {
         string_index: -1,
         source_type: "",
         source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
@@ -519,6 +529,8 @@ pub fn string_call_arg(ty: []u8, payload: []u8, string_index: i64) -> MirCallArg
         string_index: string_index,
         source_type: "",
         source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
@@ -535,6 +547,8 @@ pub fn bool_call_arg(ty: []u8, value: bool) -> MirCallArg {
         string_index: -1,
         source_type: "",
         source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
@@ -556,6 +570,38 @@ pub fn field_access_call_arg(
         string_index: -1,
         source_type: source_type,
         source_field_index: source_field_index,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: "",
+        slice_start_offset: 0,
+        slice_end_base: "",
+        slice_end_offset: 0
+    };
+}
+
+// nested_field_access_call_arg lowers a two-level field access (receiver.a.b)
+// passed as a call argument. source_type/source_field_index read the first
+// field off the Var receiver and nested_source_type/nested_field_index read the
+// leaf field off that intermediate value, matching nested_field_access_struct_field
+// (tracker 961).
+pub fn nested_field_access_call_arg(
+    ty: []u8,
+    source_type: []u8,
+    source_name: []u8,
+    source_field_index: i64,
+    nested_type: []u8,
+    nested_field_index: i64
+) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::FieldAccess,
+        value: source_name,
+        bool_value: false,
+        string_index: -1,
+        source_type: source_type,
+        source_field_index: source_field_index,
+        nested_source_type: nested_type,
+        nested_field_index: nested_field_index,
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
@@ -572,6 +618,8 @@ pub fn empty_slice_call_arg(ty: []u8) -> MirCallArg {
         string_index: -1,
         source_type: "",
         source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
@@ -595,6 +643,8 @@ pub fn slice_call_arg(
         string_index: -1,
         source_type: "",
         source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
         slice_start_base: start_base,
         slice_start_offset: start_offset,
         slice_end_base: end_base,

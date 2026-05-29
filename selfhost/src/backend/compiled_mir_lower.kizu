@@ -825,6 +825,11 @@ fn lower_call_field_arg(
     let receiver_kind = try ir_contract::body_node_kind_from(
         ir_bytes, function_name, receiver, bs
     );
+    if std::mem::equal_bytes(receiver_kind, "FieldExpr") {
+        return try lower_nested_call_field_arg(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, receiver, bs
+        );
+    }
     if !std::mem::equal_bytes(receiver_kind, "Var") {
         return error("compiled mir: call field arg receiver must be Var");
     }
@@ -836,6 +841,47 @@ fn lower_call_field_arg(
     );
     return compiled_mir::field_access_call_arg(
         arg_type, field.receiver_llvm_type, receiver_name, field.field_index
+    );
+}
+
+// lower_nested_call_field_arg handles a two-level field access (root.a.b) in
+// call-argument position. It mirrors lower_nested_struct_field_expr: resolve the
+// intermediate field off the Var root, then the leaf field off the intermediate,
+// and emit a nested FieldAccess arg the renderer lowers as two extractvalues
+// (tracker 961). Deeper chains stay rejected by the Var check below.
+fn lower_nested_call_field_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    receiver: i64,
+    bs: i64
+) -> !compiled_mir::MirCallArg {
+    let root_receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, receiver, "receiver", 0, bs
+    );
+    let root_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, root_receiver, bs);
+    if !std::mem::equal_bytes(root_kind, "Var") {
+        return error("compiled mir: nested call field arg receiver must start with Var");
+    }
+    let root_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, root_receiver, bs
+    );
+    let first_field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, receiver, bs
+    );
+    let second_field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, arg_node, bs
+    );
+    return compiled_mir::nested_field_access_call_arg(
+        arg_type,
+        first_field.receiver_llvm_type,
+        root_name,
+        first_field.field_index,
+        first_field.field_llvm_type,
+        second_field.field_index
     );
 }
 
