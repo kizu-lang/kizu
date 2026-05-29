@@ -1285,9 +1285,9 @@ func assertCompiledSubModules(t *testing.T) {
 		"pub fn kizu_type_to_llvm(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir.kizu",
 		"pub struct MirFunction", "pub struct MirBlock", "pub struct MirValue",
-		"pub struct MirInstruction", "pub struct MirTerminator", "pub struct MirType",
+		"pub union MirInstruction", "pub struct MirTerminator", "pub struct MirType",
 		"pub struct MirCallArg", "pub struct MirStructField",
-		"pub struct MirExprInst")
+		"pub union MirExprInst")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_lower.kizu",
 		"pub fn lower_string_return_function(", "pub fn lower_int_return_function(",
 		"pub fn lower_enum_field_return_function(",
@@ -1720,12 +1720,12 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub struct MirFunction",
 		"pub struct MirBlock",
 		"pub struct MirValue",
-		"pub struct MirInstruction",
+		"pub union MirInstruction",
 		"pub struct MirTerminator",
 		"pub struct MirType",
 		"pub struct MirCallArg",
 		"pub struct MirStructField",
-		"pub struct MirExprInst",
+		"pub union MirExprInst",
 	},
 	"../../selfhost/src/backend/compiled_mir_lower.kizu": {
 		"pub fn lower_string_return_function(",

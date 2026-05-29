@@ -26,15 +26,6 @@ pub struct MirValue {
     pub int_value: i64,
 }
 
-pub enum MirInstKind {
-    ConstString,
-    ConstInt,
-    Call,
-    StructLiteral,
-    Expr,
-    MultiStatement,
-}
-
 pub enum MirCallArgKind {
     Var,
     String,
@@ -80,33 +71,84 @@ pub struct MirStructField {
     pub nested_source_type: []u8,
 }
 
-pub enum MirExprInstKind {
-    Var,
-    ConstString,
-    ConstBool,
-    ConstInt,
-    PrefixNot,
-    Binary,
-    ConstEnumTag,
-    FieldAccess,
-    Call,
-}
-
-pub struct MirExprInst {
+// Per-variant MirExprInst payloads. Each holds only the fields its variant
+// reads in the renderer; only the Call payload owns an inline Array, so the
+// union below never carries inactive owned arrays for the scalar variants
+// (issue 1007/1012, ADR-0075 tagged-union payload ABI). Every payload keeps
+// id and llvm_type because expr_inst_id / expr_inst_llvm_type resolve them
+// for any variant when wiring instruction results together.
+pub struct MirVarExpr {
     pub id: i64,
-    pub kind: MirExprInstKind,
     pub llvm_type: []u8,
     pub value: []u8,
-    pub int_value: i64,
+}
+
+pub struct MirConstStringExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub value: []u8,
+    pub string_index: i64,
+}
+
+pub struct MirConstBoolExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
     pub bool_value: bool,
+}
+
+pub struct MirConstIntExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub int_value: i64,
+}
+
+pub struct MirConstEnumTagExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub int_value: i64,
+}
+
+pub struct MirPrefixNotExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub operand: i64,
+}
+
+pub struct MirBinaryExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub op: []u8,
     pub left: i64,
     pub right: i64,
-    pub op: []u8,
+}
+
+pub struct MirFieldAccessExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub value: []u8,
+    pub left: i64,
     pub source_type: []u8,
     pub source_field_index: i64,
+}
+
+pub struct MirCallExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
     pub call_module_prefix: []u8,
     pub call_callee_name: []u8,
     pub call_args: std::array::Array<MirCallArg>,
+}
+
+pub union MirExprInst {
+    Var(MirVarExpr),
+    ConstString(MirConstStringExpr),
+    ConstBool(MirConstBoolExpr),
+    ConstInt(MirConstIntExpr),
+    ConstEnumTag(MirConstEnumTagExpr),
+    PrefixNot(MirPrefixNotExpr),
+    Binary(MirBinaryExpr),
+    FieldAccess(MirFieldAccessExpr),
+    Call(MirCallExpr),
 }
 
 pub enum MirIfThenKind {
@@ -180,12 +222,25 @@ pub union MirStmt {
     If(MirIfStmt),
 }
 
-pub struct MirInstruction {
-    pub kind: MirInstKind,
+// Only the Call instruction reads a result value and callee symbol; the scalar
+// block instructions render purely from the function return type and terminator.
+// The block-level call arguments live on MirFunction.call_args (which the call
+// renderer reads), so the Call payload carries no argument Array of its own and
+// every MirInstruction variant is copy-only. The union owns nothing and needs no
+// deinit (issue 1007/1012, ADR-0075).
+pub struct MirCallInst {
     pub result: MirValue,
     pub module_prefix: []u8,
     pub callee_name: []u8,
-    pub args: std::array::Array<MirCallArg>,
+}
+
+pub union MirInstruction {
+    ConstString,
+    ConstInt,
+    StructLiteral,
+    Expr,
+    MultiStatement,
+    Call(MirCallInst),
 }
 
 pub enum MirTerminatorKind {
@@ -216,31 +271,30 @@ pub struct MirFunction {
     pub entry: MirBlock,
 }
 
-// Interim cleanup for the remaining tag-plus-all-fields MIR records. Each deinit
-// frees the owned Array fields initialized in the current record representation.
-// This is not union active-variant cleanup; issue 991 specifies a tagged-union
-// payload ABI and issue 1007 tracks the migration. MirStmt has already moved onto
-// the union payload ABI (issue 1011); MirExprInst, MirInstruction, MirBlock, and
-// MirFunction stay on the interim records until issue 1012. Until then, every
-// constructed MIR owner aggregate must be deinitialized, moved, or returned.
-impl MirExprInst {
-    fn deinit(self: MirExprInst) -> void {
+// MirExprInst is the only block-level owner union: its Call variant owns the
+// expression call-argument Array, so its deinit frees that payload and the scalar
+// variants own nothing (issue 1010 owner-payload union cleanup contract). It is
+// only ever stored in Arrays, so this cleanup runs through structural array drop.
+impl MirCallExpr {
+    fn deinit(self: MirCallExpr) -> void {
         self.call_args.deinit();
         return;
     }
 }
 
-impl MirInstruction {
-    fn deinit(self: MirInstruction) -> void {
-        self.args.deinit();
-        return;
-    }
-}
-
-impl MirBlock {
-    fn deinit(self: MirBlock) -> void {
-        self.first_instruction.deinit();
-        return;
+impl MirExprInst {
+    fn deinit(self: MirExprInst) -> void {
+        match self {
+            Var(payload) => return;,
+            ConstString(payload) => return;,
+            ConstBool(payload) => return;,
+            ConstInt(payload) => return;,
+            ConstEnumTag(payload) => return;,
+            PrefixNot(payload) => return;,
+            Binary(payload) => return;,
+            FieldAccess(payload) => return;,
+            Call(payload) => payload.deinit(),
+        }
     }
 }
 
@@ -306,13 +360,16 @@ impl MirStmt {
     }
 }
 
+// MirFunction is a product record holding the lowered owner Arrays; its deinit
+// frees each one. MirBlock (entry) and its MirInstruction own nothing (the call
+// arguments live on call_args above), so entry needs no cleanup and MirBlock and
+// MirInstruction carry no deinit (issue 1007/1012).
 impl MirFunction {
     fn deinit(self: MirFunction) -> void {
         self.call_args.deinit();
         self.struct_fields.deinit();
         self.expr_insts.deinit();
         self.multi_stmts.deinit();
-        self.entry.deinit();
         return;
     }
 }
@@ -633,117 +690,52 @@ pub fn empty_slice_struct_field(index: i64) -> MirStructField {
 }
 
 pub fn var_expr_inst(id: i64, ty: []u8, name: []u8) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::Var(MirVarExpr {
         id: id,
-        kind: MirExprInstKind::Var,
         llvm_type: ty,
-        value: name,
-        int_value: 0,
-        bool_value: false,
-        left: -1,
-        right: -1,
-        op: "",
-        source_type: "",
-        source_field_index: -1,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        value: name
+    });
 }
 
 pub fn string_expr_inst(id: i64, payload: []u8, string_index: i64) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::ConstString(MirConstStringExpr {
         id: id,
-        kind: MirExprInstKind::ConstString,
         llvm_type: "%kizu.slice.u8",
         value: payload,
-        int_value: string_index,
-        bool_value: false,
-        left: -1,
-        right: -1,
-        op: "",
-        source_type: "",
-        source_field_index: -1,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        string_index: string_index
+    });
 }
 
 pub fn bool_expr_inst(id: i64, value: bool) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::ConstBool(MirConstBoolExpr {
         id: id,
-        kind: MirExprInstKind::ConstBool,
         llvm_type: "i1",
-        value: "",
-        int_value: 0,
-        bool_value: value,
-        left: -1,
-        right: -1,
-        op: "",
-        source_type: "",
-        source_field_index: -1,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        bool_value: value
+    });
 }
 
 pub fn int_expr_inst(id: i64, value: i64) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::ConstInt(MirConstIntExpr {
         id: id,
-        kind: MirExprInstKind::ConstInt,
         llvm_type: "i64",
-        value: "",
-        int_value: value,
-        bool_value: false,
-        left: -1,
-        right: -1,
-        op: "",
-        source_type: "",
-        source_field_index: -1,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        int_value: value
+    });
 }
 
 pub fn typed_int_expr_inst(id: i64, value: i64, llvm_type: []u8) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::ConstInt(MirConstIntExpr {
         id: id,
-        kind: MirExprInstKind::ConstInt,
         llvm_type: llvm_type,
-        value: "",
-        int_value: value,
-        bool_value: false,
-        left: -1,
-        right: -1,
-        op: "",
-        source_type: "",
-        source_field_index: -1,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        int_value: value
+    });
 }
 
 pub fn prefix_not_expr_inst(id: i64, operand: i64) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::PrefixNot(MirPrefixNotExpr {
         id: id,
-        kind: MirExprInstKind::PrefixNot,
         llvm_type: "i1",
-        value: "",
-        int_value: 0,
-        bool_value: false,
-        left: operand,
-        right: -1,
-        op: "not",
-        source_type: "",
-        source_field_index: -1,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        operand: operand
+    });
 }
 
 fn binary_result_type(op: []u8) -> []u8 {
@@ -755,41 +747,21 @@ fn binary_result_type(op: []u8) -> []u8 {
 }
 
 pub fn binary_expr_inst(id: i64, op: []u8, left: i64, right: i64) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::Binary(MirBinaryExpr {
         id: id,
-        kind: MirExprInstKind::Binary,
         llvm_type: binary_result_type(op),
-        value: "",
-        int_value: 0,
-        bool_value: false,
-        left: left,
-        right: right,
         op: op,
-        source_type: "",
-        source_field_index: -1,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        left: left,
+        right: right
+    });
 }
 
 pub fn enum_tag_expr_inst(id: i64, tag: i64) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::ConstEnumTag(MirConstEnumTagExpr {
         id: id,
-        kind: MirExprInstKind::ConstEnumTag,
         llvm_type: "i64",
-        value: "",
-        int_value: tag,
-        bool_value: false,
-        left: -1,
-        right: -1,
-        op: "",
-        source_type: "",
-        source_field_index: -1,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        int_value: tag
+    });
 }
 
 pub fn field_access_expr_inst(
@@ -799,22 +771,14 @@ pub fn field_access_expr_inst(
     receiver_type: []u8,
     source_field_index: i64
 ) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::FieldAccess(MirFieldAccessExpr {
         id: id,
-        kind: MirExprInstKind::FieldAccess,
         llvm_type: field_type,
         value: receiver_name,
-        int_value: 0,
-        bool_value: false,
         left: -1,
-        right: -1,
-        op: "",
         source_type: receiver_type,
-        source_field_index: source_field_index,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        source_field_index: source_field_index
+    });
 }
 
 pub fn field_access_temp_expr_inst(
@@ -824,22 +788,14 @@ pub fn field_access_temp_expr_inst(
     receiver_type: []u8,
     source_field_index: i64
 ) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::FieldAccess(MirFieldAccessExpr {
         id: id,
-        kind: MirExprInstKind::FieldAccess,
         llvm_type: field_type,
         value: "",
-        int_value: 0,
-        bool_value: false,
         left: receiver_id,
-        right: -1,
-        op: "",
         source_type: receiver_type,
-        source_field_index: source_field_index,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+        source_field_index: source_field_index
+    });
 }
 
 pub fn call_expr_inst(
@@ -849,21 +805,43 @@ pub fn call_expr_inst(
     callee_name: []u8,
     args: std::array::Array<MirCallArg>
 ) -> MirExprInst {
-    return MirExprInst {
+    return MirExprInst::Call(MirCallExpr {
         id: id,
-        kind: MirExprInstKind::Call,
         llvm_type: llvm_type,
-        value: "",
-        int_value: 0,
-        bool_value: false,
-        left: -1,
-        right: -1,
-        op: "",
-        source_type: "",
-        source_field_index: -1,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
         call_args: args
+    });
+}
+
+// expr_inst_id and expr_inst_llvm_type read the result id and LLVM type that
+// every expr-inst variant carries, so result wiring (type-by-id lookups) does
+// not depend on the active variant.
+pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
+    return match inst {
+        Var(payload) => payload.id,
+        ConstString(payload) => payload.id,
+        ConstBool(payload) => payload.id,
+        ConstInt(payload) => payload.id,
+        ConstEnumTag(payload) => payload.id,
+        PrefixNot(payload) => payload.id,
+        Binary(payload) => payload.id,
+        FieldAccess(payload) => payload.id,
+        Call(payload) => payload.id,
+    };
+}
+
+pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
+    return match inst {
+        Var(payload) => payload.llvm_type,
+        ConstString(payload) => payload.llvm_type,
+        ConstBool(payload) => payload.llvm_type,
+        ConstInt(payload) => payload.llvm_type,
+        ConstEnumTag(payload) => payload.llvm_type,
+        PrefixNot(payload) => payload.llvm_type,
+        Binary(payload) => payload.llvm_type,
+        FieldAccess(payload) => payload.llvm_type,
+        Call(payload) => payload.llvm_type,
     };
 }
 
@@ -972,69 +950,39 @@ pub fn if_stmt(
     });
 }
 
-pub fn mir_string_const_instruction(result: MirValue) -> MirInstruction {
-    return MirInstruction {
-        kind: MirInstKind::ConstString,
-        result: result,
-        module_prefix: "",
-        callee_name: "",
-        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+// The scalar block instructions render from the function return type and
+// terminator value, so their union variants are payload-free and carry no
+// result, callee symbol, or argument Array.
+pub fn mir_string_const_instruction() -> MirInstruction {
+    return MirInstruction::ConstString;
 }
 
-pub fn const_int_instruction(result: MirValue) -> MirInstruction {
-    return MirInstruction {
-        kind: MirInstKind::ConstInt,
-        result: result,
-        module_prefix: "",
-        callee_name: "",
-        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+pub fn const_int_instruction() -> MirInstruction {
+    return MirInstruction::ConstInt;
 }
 
-pub fn struct_literal_instruction(result: MirValue) -> MirInstruction {
-    return MirInstruction {
-        kind: MirInstKind::StructLiteral,
-        result: result,
-        module_prefix: "",
-        callee_name: "",
-        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+pub fn struct_literal_instruction() -> MirInstruction {
+    return MirInstruction::StructLiteral;
 }
 
-pub fn expr_instruction(result: MirValue) -> MirInstruction {
-    return MirInstruction {
-        kind: MirInstKind::Expr,
-        result: result,
-        module_prefix: "",
-        callee_name: "",
-        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+pub fn expr_instruction() -> MirInstruction {
+    return MirInstruction::Expr;
 }
 
-pub fn multi_statement_instruction(result: MirValue) -> MirInstruction {
-    return MirInstruction {
-        kind: MirInstKind::MultiStatement,
-        result: result,
-        module_prefix: "",
-        callee_name: "",
-        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
-    };
+pub fn multi_statement_instruction() -> MirInstruction {
+    return MirInstruction::MultiStatement;
 }
 
 pub fn call_instruction(
     result: MirValue,
     module_prefix: []u8,
-    callee_name: []u8,
-    args: std::array::Array<MirCallArg>
+    callee_name: []u8
 ) -> MirInstruction {
-    return MirInstruction {
-        kind: MirInstKind::Call,
+    return MirInstruction::Call(MirCallInst {
         result: result,
         module_prefix: module_prefix,
-        callee_name: callee_name,
-        args: args
-    };
+        callee_name: callee_name
+    });
 }
 
 pub fn return_value(value: MirValue) -> MirTerminator {
