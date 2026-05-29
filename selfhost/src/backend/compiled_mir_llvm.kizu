@@ -103,63 +103,102 @@ fn append_multi_stmt(
     stmt: &compiled_mir::MirStmt,
     local_prefix: i64
 ) -> !void {
-    if stmt.kind == compiled_mir::MirStmtKind::LetCall {
-        try append_multi_call(out, function.name, stmt, local_prefix);
-        return;
+    match stmt {
+        LetCall(payload) => try append_multi_let_call(out, function, payload, local_prefix);,
+        LetStruct(payload) => try append_multi_let_struct(out, function.name, payload);,
+        ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
+        ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
+        ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
+        ReturnError => try append_multi_return_error(out);,
+        If(payload) => try append_multi_if(out, function, payload, local_prefix);,
     }
-    if stmt.kind == compiled_mir::MirStmtKind::LetStruct {
-        try append_multi_let_struct(out, function.name, stmt);
-        return;
+    return;
+}
+fn append_multi_let_call(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirLetCallStmt,
+    local_prefix: i64
+) -> !void {
+    try append_call_inst(
+        out,
+        function.name,
+        stmt.name,
+        stmt.llvm_type,
+        stmt.call_module_prefix,
+        stmt.call_callee_name,
+        &stmt.call_args,
+        local_prefix
+    );
+    return;
+}
+fn append_multi_return_call(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirReturnCallStmt,
+    local_prefix: i64
+) -> !void {
+    try append_call_inst(
+        out,
+        function.name,
+        stmt.name,
+        stmt.llvm_type,
+        stmt.call_module_prefix,
+        stmt.call_callee_name,
+        &stmt.call_args,
+        local_prefix
+    );
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_multi_return_struct(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirReturnStructStmt
+) -> !void {
+    try append_struct_body_at(
+        out,
+        function.name,
+        function.return_type.llvm_name,
+        &stmt.struct_fields,
+        stmt.string_index
+    );
+    try out.append_bytes("  ret ");
+    try out.append_bytes(function.return_type.llvm_name);
+    let return_fields = &stmt.struct_fields;
+    if return_fields.len() == 0 {
+        try out.append_bytes(" poison");
+    } else {
+        let last_field = try return_fields.at(return_fields.len() - 1);
+        try out.append_bytes(" %v");
+        try std::fmt::append_i64(out, stmt.string_index);
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, last_field.index);
     }
-    if stmt.kind == compiled_mir::MirStmtKind::ReturnCall {
-        try append_multi_call(out, function.name, stmt, local_prefix);
-        try out.append_bytes("  ret ");
-        try out.append_bytes(stmt.llvm_type);
-        try out.append_bytes(" %");
-        try out.append_bytes(stmt.name);
-        try out.append_byte(cast<u8>(10));
-        return;
-    }
-    if stmt.kind == compiled_mir::MirStmtKind::ReturnStruct {
-        try append_struct_body_at(
-            out,
-            function.name,
-            function.return_type.llvm_name,
-            &stmt.struct_fields,
-            stmt.string_index
-        );
-        try out.append_bytes("  ret ");
-        try out.append_bytes(function.return_type.llvm_name);
-        let return_fields = &stmt.struct_fields;
-        if return_fields.len() == 0 {
-            try out.append_bytes(" poison");
-        } else {
-            let last_field = try return_fields.at(return_fields.len() - 1);
-            try out.append_bytes(" %v");
-            try std::fmt::append_i64(out, stmt.string_index);
-            try out.append_bytes("_");
-            try std::fmt::append_i64(out, last_field.index);
-        }
-        try out.append_byte(cast<u8>(10));
-        return;
-    }
-    if stmt.kind == compiled_mir::MirStmtKind::ReturnExpr {
-        try append_expr_insts(out, function.name, &stmt.expr_insts);
-        try append_expr_return_value(
-            out, function.return_type.llvm_name, &stmt.expr_insts, stmt.expr_result_id
-        );
-        return;
-    }
-    if stmt.kind == compiled_mir::MirStmtKind::ReturnError {
-        try out.append_bytes("  unreachable");
-        try out.append_byte(cast<u8>(10));
-        return;
-    }
-    if stmt.kind == compiled_mir::MirStmtKind::If {
-        try append_multi_if(out, function, stmt, local_prefix);
-        return;
-    }
-    return error("compiled mir llvm: unsupported statement kind");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_multi_return_expr(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirReturnExprStmt
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    try append_expr_return_value(
+        out, function.return_type.llvm_name, &stmt.expr_insts, stmt.expr_result_id
+    );
+    return;
+}
+fn append_multi_return_error(
+    out: &var std::string::String
+) -> !void {
+    try out.append_bytes("  unreachable");
+    try out.append_byte(cast<u8>(10));
+    return;
 }
 fn append_multi_statement_globals(
     out: &var std::string::String,
@@ -179,29 +218,27 @@ fn append_stmt_globals(
     llvm_symbol: []u8,
     stmt: &compiled_mir::MirStmt
 ) -> !void {
-    if stmt.kind == compiled_mir::MirStmtKind::LetCall or
-        stmt.kind == compiled_mir::MirStmtKind::ReturnCall {
-        try compiled_mir_llvm_call::append_call_string_globals(
-            out, llvm_symbol, &stmt.call_args
-        );
-        return;
+    match stmt {
+        LetCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        LetStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
+        ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
+        ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
+        ReturnError => return;,
+        If(payload) => try append_if_globals(out, llvm_symbol, payload);,
     }
-    if stmt.kind == compiled_mir::MirStmtKind::LetStruct or
-        stmt.kind == compiled_mir::MirStmtKind::ReturnStruct {
-        try append_struct_globals_at(out, llvm_symbol, &stmt.struct_fields, stmt.string_index);
-        return;
-    }
-    if stmt.kind == compiled_mir::MirStmtKind::ReturnExpr {
-        try append_expr_globals(out, llvm_symbol, &stmt.expr_insts);
-        return;
-    }
-    if stmt.kind == compiled_mir::MirStmtKind::If {
-        try append_expr_globals(out, llvm_symbol, &stmt.expr_insts);
-        try compiled_mir_llvm_call::append_call_string_globals(
-            out, llvm_symbol, &stmt.then_call_args
-        );
-        try append_expr_globals(out, llvm_symbol, &stmt.then_expr_insts);
-    }
+    return;
+}
+fn append_if_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &stmt.then_call_args
+    );
+    try append_expr_globals(out, llvm_symbol, &stmt.then_expr_insts);
     return;
 }
 fn append_expr_return_value(
@@ -265,25 +302,29 @@ fn is_error_union_type(llvm_type: []u8) -> bool {
     return std::mem::equal_bytes(llvm_type[0..prefix_len], prefix);
 }
 
-fn append_multi_call(
+fn append_call_inst(
     out: &var std::string::String,
     llvm_symbol: []u8,
-    stmt: &compiled_mir::MirStmt,
+    name: []u8,
+    llvm_type: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    call_args: &std::array::Array<compiled_mir::MirCallArg>,
     local_prefix: i64
 ) -> !void {
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
-        out, llvm_symbol, &stmt.call_args, local_prefix
+        out, llvm_symbol, call_args, local_prefix
     );
     try out.append_bytes("  %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes(name);
     try out.append_bytes(" = call ");
-    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
-        out, stmt.call_module_prefix, stmt.call_callee_name
+        out, module_prefix, callee_name
     );
     try out.append_bytes("(");
-    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, call_args, local_prefix);
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
     return;
@@ -291,7 +332,7 @@ fn append_multi_call(
 fn append_multi_let_struct(
     out: &var std::string::String,
     llvm_symbol: []u8,
-    stmt: &compiled_mir::MirStmt
+    stmt: &compiled_mir::MirLetStructStmt
 ) -> !void {
     try append_struct_body_at(
         out,
@@ -321,12 +362,12 @@ fn append_multi_let_struct(
 fn append_multi_if(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
-    stmt: &compiled_mir::MirStmt,
+    stmt: &compiled_mir::MirIfStmt,
     local_prefix: i64
 ) -> !void {
-    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
     try out.append_bytes("  br i1 %t");
-    try std::fmt::append_i64(out, stmt.expr_result_id);
+    try std::fmt::append_i64(out, stmt.cond_result_id);
     try out.append_bytes(", label %if");
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_then, label %if");
@@ -353,7 +394,7 @@ fn append_multi_if(
             try out.append_bytes("  ret ");
             try out.append_bytes(stmt.llvm_type);
             try out.append_bytes(" %t");
-            try std::fmt::append_i64(out, stmt.expr_result_id + 1);
+            try std::fmt::append_i64(out, stmt.cond_result_id + 1);
             try out.append_byte(cast<u8>(10));
         } else {
             if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
@@ -382,14 +423,14 @@ fn append_multi_if(
 fn append_multi_then_call(
     out: &var std::string::String,
     llvm_symbol: []u8,
-    stmt: &compiled_mir::MirStmt,
+    stmt: &compiled_mir::MirIfStmt,
     local_prefix: i64
 ) -> !void {
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
         out, llvm_symbol, &stmt.then_call_args, local_prefix
     );
     try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, stmt.expr_result_id + 1);
+    try std::fmt::append_i64(out, stmt.cond_result_id + 1);
     try out.append_bytes(" = call ");
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
