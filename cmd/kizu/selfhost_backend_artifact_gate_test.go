@@ -359,6 +359,15 @@ func requiredLLVMExecutableFragments() []string {
 		"%kizu.selfhost.codegen.local_table = type { i64, " +
 			"%kizu.selfhost.codegen.local_binding, %kizu.selfhost.codegen.local_binding }",
 		"define i1 @kizu_selfhost__ir_codegen_local_table_contains",
+		// tracker 961 follow-up: run-AST local-binding lookup helpers compiled into
+		// stage2. empty_payload_span exercises the new Prefix(-Int) struct field
+		// lowering (i64 -1 sentinels); local_payload_span exercises nested field
+		// extraction plus an if-then struct-literal return with the empty_payload_span
+		// fallback. #1021 already unblocked the nested-field call arguments.
+		"%kizu.selfhost.codegen.payload_span = type { i64, i64 }",
+		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_empty_payload_span",
+		"define %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_empty_local",
+		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_local_payload_span",
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",

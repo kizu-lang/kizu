@@ -534,6 +534,8 @@ fn lower_multi_if_statement(
     var call_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var then_result = -1;
     var then_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    var then_struct_fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
+    var then_struct_strings = 0;
     if std::mem::equal_bytes(ret_kind, "Bool") {
         let token = try ir_contract::body_token_or_empty_from(
             ir_bytes, function_name, ret_value, bs
@@ -560,22 +562,35 @@ fn lower_multi_if_statement(
             );
             }
         } else {
-            then_result = try lower_expr_into(
-                ir_bytes,
-                function_name,
-                module_prefix,
-                locals_spec,
-                ret_value,
-                then_string_base,
-                then_base,
-                &var then_insts,
-                bs
-            );
+            if std::mem::equal_bytes(ret_kind, "StructLiteralExpr") {
+                // A struct-literal then-block such as a return of PayloadSpan { .. }
+                // reuses the generic struct-field lowering. The struct SSA and global
+                // names are seeded from then_string_base, and the string counter then
+                // advances by the field count so a later then-block in the same
+                // function never reuses the same per-field SSA names.
+                then_struct_fields = try compiled_mir_lower_struct::lower_struct_fields(
+                    ir_bytes, function_name, module_prefix, locals_spec, ret_value, bs
+                );
+                then_kind = compiled_mir::MirIfThenKind::ReturnStruct;
+                then_struct_strings = then_struct_fields.len();
+            } else {
+                then_result = try lower_expr_into(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    ret_value,
+                    then_string_base,
+                    then_base,
+                    &var then_insts,
+                    bs
+                );
+            }
         }
     }
     let then_call_strings = try count_string_args(&call_args);
     let then_expr_strings = try count_strings_in_insts(&then_insts);
-    let new_string_counter = then_string_base + then_call_strings + then_expr_strings;
+    let new_string_counter = then_string_base + then_call_strings + then_expr_strings + then_struct_strings;
     var next_temp = then_base;
     if then_kind == compiled_mir::MirIfThenKind::ReturnCall {
         next_temp = then_base + 1;
@@ -598,7 +613,9 @@ fn lower_multi_if_statement(
             callee_name,
             call_args,
             then_result,
-            then_insts
+            then_insts,
+            then_struct_fields,
+            then_string_base
     ));
     return MultiIfLowerResult {
         temp_counter: next_temp,
