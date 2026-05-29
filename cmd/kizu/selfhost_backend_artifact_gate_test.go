@@ -356,6 +356,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
 	fragments = append(fragments, requiredLLVMReturnErrorFragments()...)
+	fragments = append(fragments, requiredLLVMArrayGetFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -473,6 +474,39 @@ func requiredLLVMReturnErrorFragments() []string {
 		"%errfail3 = insertvalue %kizu.error.slice.u8 %errfail3_flag, %kizu.slice.u8 %t3, 2",
 		"  ret %kizu.error.slice.u8 %errfail3",
 		"%retwrap_val = insertvalue %kizu.error.slice.u8 %retwrap_ok, %kizu.slice.u8 %t4, 1",
+	}
+}
+
+// requiredLLVMArrayGetFragments returns the tracker-961 checked Array<T>.get
+// accessor compiled into stage2. std::kizu::diagnostic::Diagnostic.related_get reads
+// the related Array<RelatedSpan> field (struct field index 2) off the Diagnostic value
+// receiver, calls the self-contained @kizu_rt_array_at runtime helper (the same checked
+// element accessor std arrays use, returning a borrowed %kizu.error.slice.u8 view), and
+// branches on the ok flag: the success path loads the RelatedSpan element by value and
+// wraps it as the error-union success value (field 1); the failure path forwards the
+// runtime message as a real error-union failure return (field 2), never `unreachable`.
+func requiredLLVMArrayGetFragments() []string {
+	return []string{
+		"%kizu.kizu.diagnostic.file_span = type { i64, %kizu.slice.u8, i64, i64, i64, i64 }",
+		"%kizu.kizu.diagnostic.related_span = type { %kizu.kizu.diagnostic.file_span, " +
+			"%kizu.slice.u8 }",
+		"%kizu.kizu.diagnostic.diagnostic = type { %kizu.kizu.diagnostic.file_span, " +
+			"%kizu.slice.u8, %kizu.owned }",
+		"%kizu.error.related_span = type { i1, %kizu.kizu.diagnostic.related_span, " +
+			"%kizu.slice.u8 }",
+		"define %kizu.error.related_span @kizu_kizu__diagnostic_diagnostic_related_get",
+		"%array = extractvalue %kizu.kizu.diagnostic.diagnostic %self, 2",
+		"%view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index)",
+		"%view_ok = extractvalue %kizu.error.slice.u8 %view, 0",
+		"br i1 %view_ok, label %array_get_ok, label %array_get_fail",
+		"%elem = load %kizu.kizu.diagnostic.related_span, ptr %elem_ptr",
+		"%ok_value = insertvalue %kizu.error.related_span %ok_flag, " +
+			"%kizu.kizu.diagnostic.related_span %elem, 1",
+		"  ret %kizu.error.related_span %ok_value",
+		"%fail_value = insertvalue %kizu.error.related_span %fail_flag, " +
+			"%kizu.slice.u8 %fail_msg, 2",
+		"  ret %kizu.error.related_span %fail_value",
+		"define %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index)",
 	}
 }
 
