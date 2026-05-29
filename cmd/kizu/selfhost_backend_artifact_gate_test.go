@@ -354,6 +354,7 @@ func requiredLLVMExecutableFragments() []string {
 		"define i1 @kizu_selfhost__ir_codegen_program_supported",
 	}
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
+	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -430,6 +431,27 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 		"define %kizu.selfhost.codegen.int_env @kizu_selfhost__ir_codegen_empty_int_env",
 		"%v0_1 = insertvalue %kizu.selfhost.codegen.int_env %v0_0, " +
 			"%kizu.kizu.ast.child_range %decls, 1",
+	}
+}
+
+// requiredLLVMAstAccessorFragments returns the tracker-961 read-only AST accessor
+// members compiled into stage2. std::kizu::ast::Ast.len is the first one: the Ast
+// container value lowers with its nodes (Arena) and children (Array) fields as
+// %kizu.owned heap handles; the compiled define reads the children Array (struct
+// field index 1) and returns its length via the array_len builtin, which reads the
+// len field (index 2) out of the %kizu.rt.array record the handle wraps. No
+// AstNode/AstData union, Arena.get, array_get, or error-union return is touched.
+func requiredLLVMAstAccessorFragments() []string {
+	return []string{
+		"%kizu.kizu.ast.source_file = type { %kizu.slice.u8, %kizu.slice.u8 }",
+		"%kizu.kizu.ast.ast = type { %kizu.owned, %kizu.owned, " +
+			"%kizu.kizu.ast.source_file }",
+		"%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }",
+		"define i64 @kizu_kizu__ast_ast_len",
+		"%arg0_0_ex = extractvalue %kizu.kizu.ast.ast %self, 1",
+		"%result = call i64 @kizu_rt_array_len(%kizu.owned %arg0_0_ex)",
+		"define i64 @kizu_rt_array_len(%kizu.owned %array)",
+		"%len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2",
 	}
 }
 

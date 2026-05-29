@@ -15,10 +15,18 @@ pub fn append_facts(
     var hosted_found = false;
     var lexer_found = false;
     var loader_found = false;
+    var ast_found = false;
 
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
+        if file.kind == source::SourceKind::Std {
+            let std_module = source::module_path(file);
+            if std::mem::equal_bytes(std_module, "kizu/ast") {
+                try append_ast_function_facts(allocator, out, file);
+                ast_found = true;
+            }
+        }
         if file.kind == source::SourceKind::Selfhost {
             let module = source::module_path(file);
             if std::mem::equal_bytes(module, "cli/execute") {
@@ -73,6 +81,43 @@ pub fn append_facts(
     if !loader_found {
         return error("missing source loader source");
     }
+    if !ast_found {
+        return error("missing std kizu ast source");
+    }
+    return;
+}
+
+// append_ast_function_facts emits the facts backing the first read-only AST
+// accessor compiled into stage2: std::kizu::ast::Ast.len (tracker 961). It lands
+// the Ast struct field layout (so self.children resolves to field index 1) and the
+// Ast.len method signature + body, which lowers to an array_len builtin call over
+// the children Array. It deliberately touches neither the AstNode/AstData union nor
+// any Arena.get / array_get / error-union accessor.
+fn append_ast_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+    try append_selected_struct_field_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "Ast",
+        "std::kizu::ast::Ast"
+    );
+    try append_selected_impl_method_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "Ast",
+        "len",
+        "std::kizu::ast::ast_len",
+        "checked-ast-readonly"
+    );
     return;
 }
 
@@ -1003,6 +1048,114 @@ fn append_selected_helper_body(
     let body = try function_body_from_node(ast, function_node_id);
     try executable_body::append_helper_body_ir(out, text, ast, qualified_name, role, body);
     return;
+}
+
+// append_selected_impl_method_body emits the signature + body facts for a method
+// defined inside an 'impl <type_name>' block (rather than a top-level function). It
+// backs the read-only std::kizu::ast::Ast.len accessor, whose body is a single
+// 'return self.children.len();' (tracker 961).
+fn append_selected_impl_method_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    type_name: []u8,
+    method_name: []u8,
+    qualified_name: []u8,
+    role: []u8
+) -> !void {
+    let method_node_id = try impl_method_node(text, ast, root, type_name, method_name);
+    try function_signature::append(out, text, ast, method_node_id, qualified_name);
+    let body = try function_body_from_node(ast, method_node_id);
+    try executable_body::append_helper_body_ir(out, text, ast, qualified_name, role, body);
+    return;
+}
+
+// impl_method_node finds a method FnDecl named method_name inside the 'impl
+// <type_name>' block of the program. Methods live in ImplDecl.methods rather than
+// the top-level Program declarations, so function_node would not find them
+// (tracker 961).
+fn impl_method_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    type_name: []u8,
+    method_name: []u8
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return impl_method_node_in_program(
+            text,
+            ast,
+            program.declarations,
+            type_name,
+            method_name
+        );,
+        _ => return error("missing selected impl method");,
+    }
+}
+
+fn impl_method_node_in_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    type_name: []u8,
+    method_name: []u8
+) -> !std::kizu::ast::NodeId {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if impl_decl_type_matches(text, ast, child, type_name) {
+            let methods = try impl_decl_methods(ast, child);
+            return try function_node_in_range(text, ast, methods, method_name);
+        }
+        index = index + 1;
+    }
+    return error("missing selected impl method");
+}
+
+fn impl_decl_type_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    type_name: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        ImplDecl(impl_decl) => std::mem::equal_bytes(
+            ast_node_text(text, ast, impl_decl.type_name),
+            type_name
+        ),
+        _ => false,
+    };
+}
+
+fn impl_decl_methods(
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !std::kizu::ast::ChildRange {
+    let node = ast.get(node_id);
+    match node.data {
+        ImplDecl(impl_decl) => return impl_decl.methods;,
+        _ => return error("missing selected impl method");,
+    }
+}
+
+fn function_node_in_range(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    methods: std::kizu::ast::ChildRange,
+    method_name: []u8
+) -> !std::kizu::ast::NodeId {
+    var index = 0;
+    while index < methods.len {
+        let child = try ast.child_at(methods, index);
+        if function_node_matches(text, ast, child, method_name) {
+            return child;
+        }
+        index = index + 1;
+    }
+    return error("missing selected impl method");
 }
 
 fn function_body_node(

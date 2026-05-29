@@ -98,6 +98,20 @@ pub fn append_compiled_function_params(
             return;
         }
         if std::mem::equal_bytes(value_kind, "Call") {
+            // A Call whose callee is a FieldExpr is a method call (receiver.method()).
+            // The read-only AST accessor std::kizu::ast::Ast.len lowers through this
+            // path: self.children.len() reads the Array field off the struct value
+            // parameter and calls the array_len builtin (tracker 961).
+            if try compiled_mir_lower::callee_is_field_expr(
+                ir_bytes, function_name, value, bs
+            ) {
+                let method_mir = try compiled_mir_lower::lower_array_len_method_return(
+                    ir_bytes, function_name, llvm_symbol, params_spec, value, bs
+                );
+                defer method_mir.deinit();
+                try compiled_mir_llvm::append_function(out, &method_mir);
+                return;
+            }
             let mir = try compiled_mir_lower::lower_call_return_function(
                 ir_bytes, function_name, llvm_symbol, params_spec, value, bs
             );
