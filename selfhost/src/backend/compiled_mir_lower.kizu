@@ -205,11 +205,13 @@ pub fn lower_multi_statement_function(
                 locals_spec,
                 statement,
                 string_counter,
+                temp_counter,
                 &var stmts,
                 bs
             );
             locals_spec = let_result.locals_spec;
             string_counter = let_result.string_counter;
+            temp_counter = let_result.temp_counter;
         } else {
             if std::mem::equal_bytes(stmt_kind, "Return") {
                 try stmts.append(try lower_multi_return_statement(
@@ -257,6 +259,7 @@ pub fn lower_multi_statement_function(
 pub struct MultiLowerResult {
     pub locals_spec: []u8,
     pub string_counter: i64,
+    pub temp_counter: i64,
 }
 pub struct MultiIfLowerResult {
     pub temp_counter: i64,
@@ -269,6 +272,7 @@ fn lower_multi_let_statement(
     locals_spec: []u8,
     statement: i64,
     string_counter: i64,
+    temp_counter: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiLowerResult {
@@ -304,7 +308,8 @@ fn lower_multi_let_statement(
         ));
         return MultiLowerResult {
             locals_spec: new_locals,
-            string_counter: new_counter
+            string_counter: new_counter,
+            temp_counter: temp_counter
         };
     }
     if std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
@@ -323,10 +328,32 @@ fn lower_multi_let_statement(
         ));
         return MultiLowerResult {
             locals_spec: new_locals,
-            string_counter: string_counter + field_count
+            string_counter: string_counter + field_count,
+            temp_counter: temp_counter
         };
     }
-    return error("compiled mir: unsupported let value kind");
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let result_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        let_value,
+        string_counter,
+        temp_counter,
+        &var insts,
+        bs
+    );
+    let expr_strings = try count_strings_in_insts(&insts);
+    let next_temp = temp_counter + insts.len();
+    try stmts.append(compiled_mir::let_expr_stmt(
+        let_name, string_counter, result_id, insts
+    ));
+    return MultiLowerResult {
+        locals_spec: locals_spec,
+        string_counter: string_counter + expr_strings,
+        temp_counter: next_temp
+    };
 }
 fn lower_multi_return_statement(
     ir_bytes: []u8,
@@ -901,6 +928,48 @@ fn lower_expr_into(
             insts,
             bs
         );
+    }
+    if std::mem::equal_bytes(kind, "IndexExpr") {
+        let target_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "target", 0, bs
+        );
+        let target_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, target_node, bs
+        );
+        if !std::mem::equal_bytes(target_kind, "Var") {
+            return error("compiled mir: index target must be a var");
+        }
+        let target_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, target_node, bs
+        );
+        let end_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "end", 0, bs
+        );
+        let end_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, end_node, bs
+        );
+        if !std::mem::equal_bytes(end_kind, "Empty") {
+            return error("compiled mir: slice expression unsupported in expr context");
+        }
+        let index_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "start", 0, bs
+        );
+        let index_id = try lower_expr_into(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            index_node,
+            string_index,
+            id_base,
+            insts,
+            bs
+        );
+        let result_id = id_base + insts.len();
+        try insts.append(compiled_mir::index_load_expr_inst(
+            result_id, target_name, index_id
+        ));
+        return result_id;
     }
     if std::mem::equal_bytes(kind, "Call") {
         let callee_name = try ir_contract::body_call_callee_or_empty_from(

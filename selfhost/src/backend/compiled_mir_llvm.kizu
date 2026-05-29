@@ -133,6 +133,7 @@ fn append_multi_stmt(
     match stmt {
         LetCall(payload) => try append_multi_let_call(out, function, payload, local_prefix);,
         LetStruct(payload) => try append_multi_let_struct(out, function.name, payload);,
+        LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -227,6 +228,29 @@ fn append_multi_return_error(
     try out.append_byte(cast<u8>(10));
     return;
 }
+fn append_multi_let_expr(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirLetExprStmt
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    let result_type = try expr_inst_type_by_id(&stmt.expr_insts, stmt.expr_result_id);
+    if std::mem::len(result_type) == 0 {
+        return error("compiled mir llvm: let expr result type not found");
+    }
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes(" = select i1 true, ");
+    try out.append_bytes(result_type);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, stmt.expr_result_id);
+    try out.append_bytes(", ");
+    try out.append_bytes(result_type);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, stmt.expr_result_id);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
 fn append_multi_statement_globals(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction
@@ -248,6 +272,7 @@ fn append_stmt_globals(
     match stmt {
         LetCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         LetStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
+        LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
@@ -523,8 +548,34 @@ fn append_expr_inst(
         PrefixNot(payload) => try append_prefix_not_expr(out, payload);,
         Binary(payload) => try append_binary_expr_inst(out, payload, insts);,
         FieldAccess(payload) => try append_field_access_expr(out, payload);,
+        IndexLoad(payload) => try append_index_load_expr(out, payload);,
         Call(payload) => try append_call_expr(out, llvm_symbol, payload);,
     }
+    return;
+}
+fn append_index_load_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirIndexLoadExpr
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(inst.target);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_gep = getelementptr i8, ptr %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ptr, i64 %t");
+    try std::fmt::append_i64(out, inst.index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes(" = load i8, ptr %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_gep");
+    try out.append_byte(cast<u8>(10));
     return;
 }
 fn append_var_expr(

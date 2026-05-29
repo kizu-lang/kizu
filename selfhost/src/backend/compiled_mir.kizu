@@ -131,6 +131,16 @@ pub struct MirFieldAccessExpr {
     pub source_field_index: i64,
 }
 
+// Single-byte slice index load (path[i] in expression context). The renderer
+// extracts the slice data pointer from target, GEPs by the i64 index result,
+// and loads one i8. The instruction owns nothing, so it is copy-only.
+pub struct MirIndexLoadExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub target: []u8,
+    pub index: i64,
+}
+
 pub struct MirCallExpr {
     pub id: i64,
     pub llvm_type: []u8,
@@ -148,6 +158,7 @@ pub union MirExprInst {
     PrefixNot(MirPrefixNotExpr),
     Binary(MirBinaryExpr),
     FieldAccess(MirFieldAccessExpr),
+    IndexLoad(MirIndexLoadExpr),
     Call(MirCallExpr),
 }
 
@@ -197,6 +208,13 @@ pub struct MirReturnExprStmt {
     pub expr_insts: std::array::Array<MirExprInst>,
 }
 
+pub struct MirLetExprStmt {
+    pub name: []u8,
+    pub string_index: i64,
+    pub expr_result_id: i64,
+    pub expr_insts: std::array::Array<MirExprInst>,
+}
+
 pub struct MirIfStmt {
     pub if_index: i64,
     pub string_index: i64,
@@ -215,6 +233,7 @@ pub struct MirIfStmt {
 pub union MirStmt {
     LetCall(MirLetCallStmt),
     LetStruct(MirLetStructStmt),
+    LetExpr(MirLetExprStmt),
     ReturnCall(MirReturnCallStmt),
     ReturnStruct(MirReturnStructStmt),
     ReturnExpr(MirReturnExprStmt),
@@ -293,6 +312,7 @@ impl MirExprInst {
             PrefixNot(payload) => return;,
             Binary(payload) => return;,
             FieldAccess(payload) => return;,
+            IndexLoad(payload) => return;,
             Call(payload) => payload.deinit(),
         }
     }
@@ -333,6 +353,13 @@ impl MirReturnExprStmt {
     }
 }
 
+impl MirLetExprStmt {
+    fn deinit(self: MirLetExprStmt) -> void {
+        self.expr_insts.deinit();
+        return;
+    }
+}
+
 impl MirIfStmt {
     fn deinit(self: MirIfStmt) -> void {
         self.cond_insts.deinit();
@@ -351,6 +378,7 @@ impl MirStmt {
         match self {
             LetCall(payload) => payload.deinit(),
             LetStruct(payload) => payload.deinit(),
+            LetExpr(payload) => payload.deinit(),
             ReturnCall(payload) => payload.deinit(),
             ReturnStruct(payload) => payload.deinit(),
             ReturnExpr(payload) => payload.deinit(),
@@ -798,6 +826,15 @@ pub fn field_access_temp_expr_inst(
     });
 }
 
+pub fn index_load_expr_inst(id: i64, target: []u8, index: i64) -> MirExprInst {
+    return MirExprInst::IndexLoad(MirIndexLoadExpr {
+        id: id,
+        llvm_type: "i8",
+        target: target,
+        index: index
+    });
+}
+
 pub fn call_expr_inst(
     id: i64,
     llvm_type: []u8,
@@ -827,6 +864,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         PrefixNot(payload) => payload.id,
         Binary(payload) => payload.id,
         FieldAccess(payload) => payload.id,
+        IndexLoad(payload) => payload.id,
         Call(payload) => payload.id,
     };
 }
@@ -841,6 +879,7 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         PrefixNot(payload) => payload.llvm_type,
         Binary(payload) => payload.llvm_type,
         FieldAccess(payload) => payload.llvm_type,
+        IndexLoad(payload) => payload.llvm_type,
         Call(payload) => payload.llvm_type,
     };
 }
@@ -874,6 +913,20 @@ pub fn let_struct_stmt(
         llvm_type: llvm_type,
         string_index: string_index,
         struct_fields: fields
+    });
+}
+
+pub fn let_expr_stmt(
+    name: []u8,
+    string_index: i64,
+    result_id: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt::LetExpr(MirLetExprStmt {
+        name: name,
+        string_index: string_index,
+        expr_result_id: result_id,
+        expr_insts: insts
     });
 }
 
