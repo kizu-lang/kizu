@@ -375,6 +375,15 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.selfhost.codegen.local_table @kizu_selfhost__ir_codegen_empty_local_table",
 		"%vc0_1 = call %kizu.selfhost.codegen.local_binding " +
 			"@kizu_selfhost__ir_codegen_empty_local",
+		// tracker 961 follow-up: insert_local compiled into stage2. It exercises
+		// nested struct-literal field initializers (first/second: LocalBinding { ... })
+		// rendered in their own %v5000000+ insertvalue chains, alongside a call-valued
+		// field (second: empty_local(text)) in the count == 0 then-block. Both the
+		// count == 0 and count != 0 LocalTable shapes are preserved.
+		"define %kizu.selfhost.codegen.local_table @kizu_selfhost__ir_codegen_insert_local",
+		"%vc0_2 = call %kizu.selfhost.codegen.local_binding " +
+			"@kizu_selfhost__ir_codegen_empty_local",
+		"%v5000001_0 = insertvalue %kizu.selfhost.codegen.local_binding poison",
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",

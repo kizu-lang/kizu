@@ -2,6 +2,7 @@ import selfhost::backend::compiled_fact_lookup;
 import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_mir_lower_call;
 import selfhost::backend::compiled_mir_types;
+import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_util;
 import selfhost::backend::ir_contract;
 
@@ -183,6 +184,17 @@ fn lower_struct_field(
             bs
         );
     }
+    if std::mem::equal_bytes(field_value_kind, "StructLiteralExpr") {
+        return try lower_struct_field_struct(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            field_index,
+            field_value,
+            bs
+        );
+    }
     return error("compiled mir: unsupported struct field value kind");
 }
 
@@ -227,6 +239,34 @@ fn lower_struct_field_call(
         callee_module_prefix,
         callee_name,
         args
+    );
+}
+
+// lower_struct_field_struct lowers a nested struct literal used as a struct field
+// value (e.g. LocalTable { first: LocalBinding { name: ..., ... } }). It resolves
+// the nested struct's LLVM type and recursively lowers its fields, so the nested
+// fields support the same kinds as the outer struct (FieldExpr, Int, Call, even a
+// further nested struct literal). The renderer builds the nested struct in its own
+// insertvalue chain and feeds the result into the parent (tracker 961).
+fn lower_struct_field_struct(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    field_index: i64,
+    field_value: i64,
+    bs: i64
+) -> !compiled_mir::MirStructField {
+    let nested_type = try compiled_signature::resolve_struct_literal_type(
+        ir_bytes, function_name, module_prefix, field_value, bs
+    );
+    let nested_fields = try lower_struct_fields(
+        ir_bytes, function_name, module_prefix, params_spec, field_value, bs
+    );
+    return compiled_mir::struct_literal_struct_field(
+        field_index,
+        nested_type,
+        nested_fields
     );
 }
 
