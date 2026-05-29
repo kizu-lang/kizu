@@ -133,6 +133,7 @@ fn append_multi_stmt(
     match stmt {
         LetCall(payload) => try append_multi_let_call(out, function, payload, local_prefix);,
         LetStruct(payload) => try append_multi_let_struct(out, function.name, payload);,
+        LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -227,6 +228,29 @@ fn append_multi_return_error(
     try out.append_byte(cast<u8>(10));
     return;
 }
+fn append_multi_let_expr(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirLetExprStmt
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    let result_type = try expr_inst_type_by_id(&stmt.expr_insts, stmt.expr_result_id);
+    if std::mem::len(result_type) == 0 {
+        return error("compiled mir llvm: let expr result type not found");
+    }
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes(" = select i1 true, ");
+    try out.append_bytes(result_type);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, stmt.expr_result_id);
+    try out.append_bytes(", ");
+    try out.append_bytes(result_type);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, stmt.expr_result_id);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
 fn append_multi_statement_globals(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction
@@ -248,6 +272,7 @@ fn append_stmt_globals(
     match stmt {
         LetCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         LetStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
+        LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
@@ -262,6 +287,7 @@ fn append_if_globals(
     stmt: &compiled_mir::MirIfStmt
 ) -> !void {
     try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_rhs_insts);
     try compiled_mir_llvm_call::append_call_string_globals(
         out, llvm_symbol, &stmt.then_call_args
     );
@@ -386,6 +412,15 @@ fn append_multi_let_struct(
     try out.append_byte(cast<u8>(10));
     return;
 }
+// then_temp_base returns the first temp id available to the then-block, i.e.
+// one past the last condition temp. For a short-circuit if the rhs temps follow
+// the lhs temps, so the base is past the rhs result.
+fn then_temp_base(stmt: &compiled_mir::MirIfStmt) -> i64 {
+    if stmt.cond_short_circuit != 0 {
+        return stmt.cond_rhs_result_id + 1;
+    }
+    return stmt.cond_result_id + 1;
+}
 fn append_multi_if(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -393,14 +428,18 @@ fn append_multi_if(
     local_prefix: i64
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.cond_insts);
-    try out.append_bytes("  br i1 %t");
-    try std::fmt::append_i64(out, stmt.cond_result_id);
-    try out.append_bytes(", label %if");
-    try std::fmt::append_i64(out, stmt.if_index);
-    try out.append_bytes("_then, label %if");
-    try std::fmt::append_i64(out, stmt.if_index);
-    try out.append_bytes("_cont");
-    try out.append_byte(cast<u8>(10));
+    if stmt.cond_short_circuit == 0 {
+        try out.append_bytes("  br i1 %t");
+        try std::fmt::append_i64(out, stmt.cond_result_id);
+        try out.append_bytes(", label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_then, label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_cont");
+        try out.append_byte(cast<u8>(10));
+    } else {
+        try append_short_circuit_branches(out, function.name, stmt);
+    }
     try out.append_bytes("if");
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_then:");
@@ -421,7 +460,7 @@ fn append_multi_if(
             try out.append_bytes("  ret ");
             try out.append_bytes(stmt.llvm_type);
             try out.append_bytes(" %t");
-            try std::fmt::append_i64(out, stmt.cond_result_id + 1);
+            try std::fmt::append_i64(out, then_temp_base(stmt));
             try out.append_byte(cast<u8>(10));
         } else {
             if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
@@ -447,6 +486,45 @@ fn append_multi_if(
     try out.append_byte(cast<u8>(10));
     return;
 }
+// append_short_circuit_branches renders the guard branches for lhs and rhs
+// and lhs or rhs so the rhs is only evaluated when the lhs does not already
+// decide the result. The caller has already emitted the lhs (cond_insts).
+fn append_short_circuit_branches(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    try out.append_bytes("  br i1 %t");
+    try std::fmt::append_i64(out, stmt.cond_result_id);
+    if stmt.cond_short_circuit == 1 {
+        try out.append_bytes(", label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_rhs, label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_cont");
+    } else {
+        try out.append_bytes(", label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_then, label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_rhs");
+    }
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_rhs:");
+    try out.append_byte(cast<u8>(10));
+    try append_expr_insts(out, llvm_symbol, &stmt.cond_rhs_insts);
+    try out.append_bytes("  br i1 %t");
+    try std::fmt::append_i64(out, stmt.cond_rhs_result_id);
+    try out.append_bytes(", label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_then, label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_cont");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
 fn append_multi_then_call(
     out: &var std::string::String,
     llvm_symbol: []u8,
@@ -457,7 +535,7 @@ fn append_multi_then_call(
         out, llvm_symbol, &stmt.then_call_args, local_prefix
     );
     try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, stmt.cond_result_id + 1);
+    try std::fmt::append_i64(out, then_temp_base(stmt));
     try out.append_bytes(" = call ");
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
@@ -523,8 +601,34 @@ fn append_expr_inst(
         PrefixNot(payload) => try append_prefix_not_expr(out, payload);,
         Binary(payload) => try append_binary_expr_inst(out, payload, insts);,
         FieldAccess(payload) => try append_field_access_expr(out, payload);,
+        IndexLoad(payload) => try append_index_load_expr(out, payload);,
         Call(payload) => try append_call_expr(out, llvm_symbol, payload);,
     }
+    return;
+}
+fn append_index_load_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirIndexLoadExpr
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(inst.target);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_gep = getelementptr i8, ptr %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ptr, i64 %t");
+    try std::fmt::append_i64(out, inst.index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes(" = load i8, ptr %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_gep");
+    try out.append_byte(cast<u8>(10));
     return;
 }
 fn append_var_expr(
