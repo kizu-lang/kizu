@@ -329,7 +329,7 @@ func requiredLLVMCLICheckFragments() []string {
 
 // requiredLLVMExecutableFragments returns mandatory hosted executable fragments.
 func requiredLLVMExecutableFragments() []string {
-	return []string{
+	fragments := []string{
 		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
 		"%kizu.selfhost.codegen.binding = type { i1, %kizu.slice.u8, %kizu.slice.u8, i64 }",
 		"%kizu.selfhost.codegen.payload = type { i1, %kizu.slice.u8, i64 }",
@@ -352,6 +352,28 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.selfhost.codegen.binding @kizu_selfhost__cli_frontend_parse_let_binding",
 		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_frontend_parse_print_statement",
 		"define i1 @kizu_selfhost__ir_codegen_program_supported",
+	}
+	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
+	return append(fragments, []string{
+		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
+		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
+		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
+		"%payload = call %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
+		"%from_codegen_lowering = extractvalue %kizu.selfhost.codegen.program %program, 15",
+		"%shape_ok = and i1 %shape_12, %from_codegen_lowering",
+		"%escape_next_write = call i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
+		"define i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
+		"%run_emitted = call i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
+		"%run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
+		"%run_artifact_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
+	}...)
+}
+
+// requiredLLVMRunCodegenLoweringFragments returns the tracker-961 run-codegen
+// lowering members compiled into stage2.
+func requiredLLVMRunCodegenLoweringFragments() []string {
+	return []string{
 		// tracker 961: first AST-traversal lowering member compiled into stage2.
 		// This lands the run-AST local-binding model (LocalTable / LocalBinding)
 		// plus the duplicate-name membership check used inside lower_run_ast_block.
@@ -384,18 +406,19 @@ func requiredLLVMExecutableFragments() []string {
 		"%vc0_2 = call %kizu.selfhost.codegen.local_binding " +
 			"@kizu_selfhost__ir_codegen_empty_local",
 		"%v5000001_0 = insertvalue %kizu.selfhost.codegen.local_binding poison",
-		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
-		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
-		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
-		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
-		"%payload = call %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
-		"%from_codegen_lowering = extractvalue %kizu.selfhost.codegen.program %program, 15",
-		"%shape_ok = and i1 %shape_12, %from_codegen_lowering",
-		"%escape_next_write = call i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
-		"define i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
-		"%run_emitted = call i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
-		"%run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
-		"%run_artifact_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
+		// tracker 961 follow-up: is_payload_supported compiled into stage2 through the
+		// restricted bounded-counter while lowering. The loop emits a single loop-carried
+		// phi for the induction variable (%index), a comparison condition that branches to
+		// the loop body/exit, an index-plus-one latch increment, and an ADR-0053 checked
+		// payload index load (trap-guarded getelementptr) rather than an unchecked GEP.
+		// The three sequential early-return byte-range checks reject bytes outside
+		// 32..126 and the quote byte.
+		"define i1 @kizu_selfhost__ir_codegen_is_payload_supported",
+		"%index = phi i64 [ 0, %loop4_preheader ], [ %index_next, %loop4_latch ]",
+		", label %loop4_body, label %loop4_exit",
+		"%index_next = add i64 %index, 1",
+		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
+		"%t7_gep = getelementptr i8, ptr %t7_ptr, i64 %t6",
 	}
 }
 
