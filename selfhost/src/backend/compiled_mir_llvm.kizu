@@ -292,6 +292,9 @@ fn append_if_globals(
         out, llvm_symbol, &stmt.then_call_args
     );
     try append_expr_globals(out, llvm_symbol, &stmt.then_expr_insts);
+    try append_struct_globals_at(
+        out, llvm_symbol, &stmt.then_struct_fields, stmt.then_struct_string_index
+    );
     return;
 }
 fn append_expr_return_value(
@@ -471,11 +474,15 @@ fn append_multi_if(
                 try std::fmt::append_i64(out, stmt.then_expr_result_id);
                 try out.append_byte(cast<u8>(10));
             } else {
-                if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnError {
-                    try out.append_bytes("  unreachable");
-                    try out.append_byte(cast<u8>(10));
+                if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnStruct {
+                    try append_multi_then_struct(out, function, stmt);
                 } else {
-                    return error("compiled mir llvm: unsupported if then kind");
+                    if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnError {
+                        try out.append_bytes("  unreachable");
+                        try out.append_byte(cast<u8>(10));
+                    } else {
+                        return error("compiled mir llvm: unsupported if then kind");
+                    }
                 }
             }
         }
@@ -545,6 +552,36 @@ fn append_multi_then_call(
     try out.append_bytes("(");
     try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.then_call_args, local_prefix);
     try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+// append_multi_then_struct renders a ReturnStruct then-block: it builds the struct
+// value with the generic struct-body helper (seeded from then_struct_string_index)
+// and returns it. This mirrors append_multi_return_struct for the top-level case.
+fn append_multi_then_struct(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    try append_struct_body_at(
+        out,
+        function.name,
+        function.return_type.llvm_name,
+        &stmt.then_struct_fields,
+        stmt.then_struct_string_index
+    );
+    try out.append_bytes("  ret ");
+    try out.append_bytes(function.return_type.llvm_name);
+    let return_fields = &stmt.then_struct_fields;
+    if return_fields.len() == 0 {
+        try out.append_bytes(" poison");
+    } else {
+        let last_field = try return_fields.at(return_fields.len() - 1);
+        try out.append_bytes(" %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, last_field.index);
+    }
     try out.append_byte(cast<u8>(10));
     return;
 }

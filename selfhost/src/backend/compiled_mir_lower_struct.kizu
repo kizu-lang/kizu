@@ -108,6 +108,32 @@ fn lower_struct_field(
         );
         return compiled_mir::int_struct_field(field_index, int_value);
     }
+    if std::mem::equal_bytes(field_value_kind, "Prefix") {
+        // Only unary negation of an integer literal is supported, lowered to the
+        // existing ConstInt field with a negative int_value. This unblocks sentinel
+        // structs like PayloadSpan { start: -1, end: -1 } without adding arbitrary
+        // expression support in struct field position (tracker 961). It mirrors the
+        // neg handling already used by expression lowering.
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-prefix ", function_name, field_value, bs
+        );
+        if !std::mem::equal_bytes(op, "neg") {
+            return error("compiled mir: unsupported prefix op in struct field");
+        }
+        let right_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, field_value, "right", 0, bs
+        );
+        let right_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, right_node, bs
+        );
+        if !std::mem::equal_bytes(right_kind, "Int") {
+            return error("compiled mir: unsupported neg operand in struct field");
+        }
+        let int_value = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, right_node, bs
+        );
+        return compiled_mir::int_struct_field(field_index, 0 - int_value);
+    }
     if std::mem::equal_bytes(field_value_kind, "Bool") {
         let token = try ir_contract::body_token_or_empty_from(
             ir_bytes,
