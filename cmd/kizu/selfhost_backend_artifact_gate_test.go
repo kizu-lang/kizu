@@ -352,6 +352,13 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.selfhost.codegen.binding @kizu_selfhost__cli_frontend_parse_let_binding",
 		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_frontend_parse_print_statement",
 		"define i1 @kizu_selfhost__ir_codegen_program_supported",
+		// tracker 961: first AST-traversal lowering member compiled into stage2.
+		// This lands the run-AST local-binding model (LocalTable / LocalBinding)
+		// plus the duplicate-name membership check used inside lower_run_ast_block.
+		"%kizu.selfhost.codegen.local_binding = type { %kizu.slice.u8, i64, i64 }",
+		"%kizu.selfhost.codegen.local_table = type { i64, " +
+			"%kizu.selfhost.codegen.local_binding, %kizu.selfhost.codegen.local_binding }",
+		"define i1 @kizu_selfhost__ir_codegen_local_table_contains",
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
