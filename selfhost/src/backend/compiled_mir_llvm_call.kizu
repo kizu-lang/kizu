@@ -189,6 +189,7 @@ fn append_slice_arg_setup(
     try append_slice_arg_bound(
         out, call_prefix, index, "_send", arg.slice_end_base, arg.slice_end_offset
     );
+    try append_slice_arg_bounds_check(out, &arg, call_prefix, index);
     try out.append_bytes("  ");
     try append_arg_local_name(out, call_prefix, index);
     try out.append_bytes("_sgep = getelementptr i8, ptr ");
@@ -222,12 +223,102 @@ fn append_slice_arg_setup(
     return;
 }
 
+// append_slice_arg_bounds_check rejects an out-of-bounds byte slice before the
+// getelementptr that would compute an invalid base pointer. Per ADR-0053 safe
+// Kizu slicing must trap rather than read or point past the source buffer, so
+// it reads the source length and traps when start is negative, end is before
+// start, or end is past the source length. The branch shape mirrors the Go
+// reference compiler writeSliceSlice. Labels derive from the call-arg name,
+// which is already unique per call site within the function.
+fn append_slice_arg_bounds_check(
+    out: &var std::string::String,
+    arg: &compiled_mir::MirCallArg,
+    call_prefix: i64,
+    index: i64
+) -> !void {
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_srclen = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(arg.value);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_startneg = icmp slt i64 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_sstart, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_endbefore = icmp slt i64 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_send, ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_sstart");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_endhigh = icmp sgt i64 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_send, ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_srclen");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_badlower = or i1 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_startneg, ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_endbefore");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_bad = or i1 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_badlower, ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_endhigh");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br i1 ");
+    try append_arg_local_name(out, call_prefix, index);
+    try out.append_bytes("_bad, label %");
+    try append_arg_label_base(out, call_prefix, index);
+    try out.append_bytes("_slice_oob, label %");
+    try append_arg_label_base(out, call_prefix, index);
+    try out.append_bytes("_slice_ok");
+    try out.append_byte(cast<u8>(10));
+    try append_arg_label_base(out, call_prefix, index);
+    try out.append_bytes("_slice_oob:");
+    try out.append_byte(cast<u8>(10));
+    try compiled_util::append_trap_body(out);
+    try append_arg_label_base(out, call_prefix, index);
+    try out.append_bytes("_slice_ok:");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 fn append_arg_local_name(
     out: &var std::string::String,
     call_prefix: i64,
     index: i64
 ) -> !void {
     try out.append_bytes("%arg");
+    try std::fmt::append_i64(out, call_prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, index);
+    return;
+}
+
+// append_arg_label_base renders the call-arg name without the leading percent
+// so it can start a basic block label line. The percent-prefixed form from
+// append_arg_local_name is used wherever the same name appears as an operand.
+fn append_arg_label_base(
+    out: &var std::string::String,
+    call_prefix: i64,
+    index: i64
+) -> !void {
+    try out.append_bytes("arg");
     try std::fmt::append_i64(out, call_prefix);
     try out.append_bytes("_");
     try std::fmt::append_i64(out, index);
