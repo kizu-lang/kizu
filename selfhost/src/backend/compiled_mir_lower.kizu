@@ -125,6 +125,123 @@ pub fn lower_call_return_function(
         args
     );
 }
+// callee_is_field_expr reports whether the value node is a Call whose callee is a
+// FieldExpr, i.e. a method call (receiver.method()) rather than a free function
+// call. It distinguishes the read-only AST accessor lowering (self.children.len())
+// from the direct codegen-helper call lowering (tracker 961).
+pub fn callee_is_field_expr(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64
+) -> !bool {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let callee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, callee_node, bs
+    );
+    return std::mem::equal_bytes(callee_kind, "FieldExpr");
+}
+
+// is_array_field_type reports whether a recorded struct-field type token is a
+// std::array::Array<T>. The read-only Ast.len accessor only lowers Array.len(),
+// so this gates the array_len builtin call; any other receiver field type is
+// rejected rather than silently mis-lowered (tracker 961).
+fn is_array_field_type(field_type: []u8) -> bool {
+    return std::mem::starts_with(field_type, "std::array::Array<");
+}
+
+// lower_array_len_method_return lowers a single 'return self.<field>.len();' where
+// <field> is a std::array::Array<T> field of a struct value parameter. It is the
+// first AST read-only accessor compiled into stage2 (std::kizu::ast::Ast.len): it
+// lands the Ast struct value as a parameter, lowers the self.children field access
+// as an extractvalue, and lowers Array.len() to the array_len builtin runtime call
+// (@kizu_array_len). It deliberately does NOT touch the AstNode/AstData union,
+// Arena.get, array_get, or error-union return; those remain blocked in tracker 961.
+pub fn lower_array_len_method_return(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    // The callee FieldExpr names the method (len) and carries the array field
+    // expression (self.children) as its receiver.
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "len") {
+        return error("compiled mir: only Array.len method accessor is supported");
+    }
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 0 {
+        return error("compiled mir: Array.len accessor takes no arguments");
+    }
+    // The method receiver is the array field expression self.children.
+    let field_expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let field_expr_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, field_expr, bs
+    );
+    if !std::mem::equal_bytes(field_expr_kind, "FieldExpr") {
+        return error("compiled mir: Array.len receiver must be a struct field access");
+    }
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, field_expr, "field", bs
+    );
+    // The field expression's receiver must be a plain struct value parameter (self).
+    let var_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_expr, "receiver", 0, bs
+    );
+    let var_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, var_node, bs
+    );
+    if !std::mem::equal_bytes(var_kind, "Var") {
+        return error("compiled mir: Array.len field receiver must be a parameter");
+    }
+    let var_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, var_node, bs
+    );
+    let receiver_llvm_type = try compiled_signature::find_param_type(params_spec, var_name);
+    let struct_kizu_type = try compiled_signature::find_param_kizu_type(
+        ir_bytes, module_prefix, var_name, params_spec
+    );
+    let lookup_type = compiled_mir_types::struct_lookup_kizu_type(struct_kizu_type);
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+        ir_bytes, module_prefix, lookup_type, field_name
+    );
+    if !field.found {
+        return error("compiled mir: Array.len receiver field not found");
+    }
+    if !is_array_field_type(field.field_type) {
+        return error("compiled mir: Array.len receiver field is not a std::array::Array");
+    }
+    // Array<T> lowers to the %kizu.owned heap handle (the same { ptr } container the
+    // selfhost runtime uses), and Array.len() lowers to the array_len builtin runtime
+    // call @kizu_rt_array_len(%kizu.owned) returning i64. The only argument is the
+    // array field extracted out of the struct value parameter.
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    try args.append(compiled_mir::field_access_call_arg(
+        "%kizu.owned", receiver_llvm_type, var_name, field.index
+    ));
+    return compiled_mir_function::single_call_return_function(
+        llvm_symbol,
+        "i64",
+        params_spec,
+        "",
+        "kizu_rt_array_len",
+        args
+    );
+}
 pub fn lower_struct_return_function(
     ir_bytes: []u8,
     function_name: []u8,

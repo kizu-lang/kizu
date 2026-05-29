@@ -1374,6 +1374,22 @@ fn render_llvm_module(
         "%kizu.kizu.ast.child_range = type { i64, i64 }");
     try append_line(out,
         "%kizu.selfhost.codegen.int_env = type { i64, %kizu.kizu.ast.child_range, %kizu.slice.u8, i64, %kizu.slice.u8, i64, %kizu.slice.u8, i64 }");
+    // std::kizu::ast::Ast is the first AST container value pulled into stage2 for the
+    // read-only Ast.len accessor (tracker 961). Its nodes (Arena<AstNode>) and
+    // children (Array<NodeId>) fields lower to the %kizu.owned heap handle the
+    // selfhost runtime uses for owned containers; only the children field (index 1)
+    // is read by Ast.len. The AstNode/AstData union layout is intentionally NOT
+    // modelled here.
+    try append_line(out,
+        "%kizu.kizu.ast.source_file = type { %kizu.slice.u8, %kizu.slice.u8 }");
+    try append_line(out,
+        "%kizu.kizu.ast.ast = type { %kizu.owned, %kizu.owned, %kizu.kizu.ast.source_file }");
+    // kizu.rt.array mirrors the runtime storage Array<T> record layout
+    // { allocator, data, len, capacity, element_size }; the read-only Ast.len
+    // accessor reads its len field (index 2) through the array_len builtin
+    // (tracker 961).
+    try append_line(out,
+        "%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }");
     try append_line(out, "");
     try cli_llvm::append_globals(out, ir_bytes);
     try append_line(out, "");
@@ -1412,6 +1428,22 @@ fn render_llvm_module(
     try append_line(out, "declare void @kizu_rt_trap(%kizu.slice.u8) noreturn");
     try append_line(out, "declare i64 @kizu_selfhost__runtime_storage_smoke()");
     try append_line(out, "declare i64 @kizu_selfhost__host_capability_smoke()");
+    try append_line(out, "");
+    // array_len is the Array<T> length builtin backing the read-only
+    // std::kizu::ast::Ast.len accessor compiled into stage2 (tracker 961). The
+    // runtime storage module owns the canonical definition; the hosted compiler
+    // module carries its own self-contained copy (it never links the storage
+    // module), reading the len field (index 2) out of the %kizu.owned-wrapped
+    // %kizu.rt.array record. AstNode/AstData union access, Arena.get, and
+    // array_get remain out of scope.
+    try append_line(out, "define i64 @kizu_rt_array_len(%kizu.owned %array) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %len = load i64, ptr %len_field");
+    try append_line(out, "  ret i64 %len");
+    try append_line(out, "}");
     try append_line(out, "");
     try cli_llvm::append_functions(out, ir_bytes);
     try append_line(out, "");
