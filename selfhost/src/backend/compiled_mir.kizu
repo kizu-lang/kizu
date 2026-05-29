@@ -269,6 +269,24 @@ pub struct MirIfStmt {
     pub then_struct_string_index: i64,
 }
 
+// MirWhileStmt backs a restricted bounded counter loop (tracker 961): one mutable
+// i64 induction variable initialized before the loop, a condition that reads it,
+// a body of Let/If/Return statements, and a trailing 'var = var + step' increment
+// folded into induction_step. The renderer emits a single loop-carried phi for the
+// induction variable (named after it, so plain Var reads resolve to the phi) and a
+// preheader/head/body/latch/exit block layout. body_stmts holds the body minus the
+// increment; it references MirStmt through a heap-backed Array, the same self/mutual
+// recursion MirStructField.nested_fields already uses, so the union stays fixed-size.
+pub struct MirWhileStmt {
+    pub loop_index: i64,
+    pub induction_var: []u8,
+    pub induction_init: i64,
+    pub induction_step: i64,
+    pub cond_result_id: i64,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub body_stmts: std::array::Array<MirStmt>,
+}
+
 pub union MirStmt {
     LetCall(MirLetCallStmt),
     LetStruct(MirLetStructStmt),
@@ -278,6 +296,7 @@ pub union MirStmt {
     ReturnExpr(MirReturnExprStmt),
     ReturnError,
     If(MirIfStmt),
+    While(MirWhileStmt),
 }
 
 // Only the Call instruction reads a result value and callee symbol; the scalar
@@ -426,6 +445,14 @@ impl MirIfStmt {
 // payload as an owned local and frees it through its own deinit, so inactive
 // payload storage is never read or cleaned (issue 1010 cleanup contract). The
 // payload-free ReturnError variant owns nothing and needs no cleanup.
+impl MirWhileStmt {
+    fn deinit(self: MirWhileStmt) -> void {
+        self.cond_insts.deinit();
+        self.body_stmts.deinit();
+        return;
+    }
+}
+
 impl MirStmt {
     fn deinit(self: MirStmt) -> void {
         match self {
@@ -437,6 +464,7 @@ impl MirStmt {
             ReturnExpr(payload) => payload.deinit(),
             ReturnError => return;,
             If(payload) => payload.deinit(),
+            While(payload) => payload.deinit(),
         }
     }
 }
@@ -1157,6 +1185,26 @@ pub fn return_expr_stmt(
 
 pub fn return_error_stmt() -> MirStmt {
     return MirStmt::ReturnError;
+}
+
+pub fn while_stmt(
+    loop_index: i64,
+    induction_var: []u8,
+    induction_init: i64,
+    induction_step: i64,
+    cond_result_id: i64,
+    cond_insts: std::array::Array<MirExprInst>,
+    body_stmts: std::array::Array<MirStmt>
+) -> MirStmt {
+    return MirStmt::While(MirWhileStmt {
+        loop_index: loop_index,
+        induction_var: induction_var,
+        induction_init: induction_init,
+        induction_step: induction_step,
+        cond_result_id: cond_result_id,
+        cond_insts: cond_insts,
+        body_stmts: body_stmts
+    });
 }
 
 pub fn if_stmt(

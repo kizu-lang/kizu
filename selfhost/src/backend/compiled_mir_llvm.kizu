@@ -139,6 +139,7 @@ fn append_multi_stmt(
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
         ReturnError => try append_multi_return_error(out);,
         If(payload) => try append_multi_if(out, function, payload, local_prefix);,
+        While(payload) => try append_multi_while(out, function, payload);,
     }
     return;
 }
@@ -278,6 +279,22 @@ fn append_stmt_globals(
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnError => return;,
         If(payload) => try append_if_globals(out, llvm_symbol, payload);,
+        While(payload) => try append_while_globals(out, llvm_symbol, payload);,
+    }
+    return;
+}
+fn append_while_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirWhileStmt
+) -> !void {
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    let body_stmts = &stmt.body_stmts;
+    var index = 0;
+    while index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        index = index + 1;
     }
     return;
 }
@@ -490,6 +507,106 @@ fn append_multi_if(
     try out.append_bytes("if");
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_cont:");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+// append_multi_while renders a restricted bounded counter loop (tracker 961):
+//   <current block>            ; min/max/etc. lets already emitted here
+//     br label %loopL_preheader
+//   loopL_preheader:           ; single, deterministic phi entry predecessor
+//     br label %loopL_head
+//   loopL_head:
+//     %v = phi i64 [ init, %loopL_preheader ], [ %v_next, %loopL_latch ]
+//     <condition insts>        ; re-evaluated every iteration
+//     br i1 %tCOND, label %loopL_body, label %loopL_exit
+//   loopL_body:
+//     <body stmts: checked index loads, early-return ifs, ...>
+//     br label %loopL_latch
+//   loopL_latch:
+//     %v_next = add i64 %v, step
+//     br label %loopL_head
+//   loopL_exit:                ; left open; the next statement (the post-loop
+//                              ; return) terminates it
+// Plain Var reads of the induction variable resolve to %v because the phi is named
+// after the variable, so the loop-carried value flows without extra plumbing. The
+// single loop-carried phi is the only phi this lowering emits.
+fn append_multi_while(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirWhileStmt
+) -> !void {
+    try out.append_bytes("  br label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_preheader");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_preheader:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_head");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_head:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.induction_var);
+    try out.append_bytes(" = phi i64 [ ");
+    try std::fmt::append_i64(out, stmt.induction_init);
+    try out.append_bytes(", %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_preheader ], [ %");
+    try out.append_bytes(stmt.induction_var);
+    try out.append_bytes("_next, %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_latch ]");
+    try out.append_byte(cast<u8>(10));
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
+    try out.append_bytes("  br i1 %t");
+    try std::fmt::append_i64(out, stmt.cond_result_id);
+    try out.append_bytes(", label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_body, label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_exit");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_body:");
+    try out.append_byte(cast<u8>(10));
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(
+            out, function, body_stmt, stmt.loop_index * 1000 + body_index + 1
+        );
+        body_index = body_index + 1;
+    }
+    try out.append_bytes("  br label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_latch");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_latch:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.induction_var);
+    try out.append_bytes("_next = add i64 %");
+    try out.append_bytes(stmt.induction_var);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, stmt.induction_step);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_head");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_exit:");
     try out.append_byte(cast<u8>(10));
     return;
 }

@@ -199,6 +199,16 @@ pub fn lower_multi_statement_function(
         );
         let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
         if std::mem::equal_bytes(stmt_kind, "Let") {
+            // A 'var counter = <int>' that a later while increments is the loop
+            // induction initializer: it is not emitted as a let because the loop-head
+            // phi supplies the initial value on the preheader edge, so emitting it
+            // would redefine the induction SSA name (tracker 961).
+            if try statement_is_induction_init(
+                ir_bytes, function_name, statement, statement_count, bs
+            ) {
+                stmt_index = stmt_index + 1;
+                continue;
+            }
             let let_result = try lower_multi_let_statement(
                 ir_bytes,
                 function_name,
@@ -214,6 +224,24 @@ pub fn lower_multi_statement_function(
             string_counter = let_result.string_counter;
             temp_counter = let_result.temp_counter;
         } else {
+            if std::mem::equal_bytes(stmt_kind, "While") {
+                let while_result = try lower_multi_while_statement(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    statement,
+                    string_counter,
+                    temp_counter,
+                    stmt_index,
+                    statement_count,
+                    &var stmts,
+                    bs
+                );
+                temp_counter = while_result.temp_counter;
+                string_counter = while_result.string_counter;
+            } else {
             if std::mem::equal_bytes(stmt_kind, "Return") {
                 try stmts.append(try lower_multi_return_statement(
                     ir_bytes,
@@ -246,6 +274,7 @@ pub fn lower_multi_statement_function(
                 } else {
                     return error("compiled mir: unsupported statement kind");
                 }
+            }
             }
         }
         stmt_index = stmt_index + 1;
@@ -621,6 +650,289 @@ fn lower_multi_if_statement(
     return MultiIfLowerResult {
         temp_counter: next_temp,
         string_counter: new_string_counter
+    };
+}
+// while_body_statement_count counts the statements in a while body Block by walking
+// its "statement" child sequences until none remain.
+fn while_body_statement_count(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    bs: i64
+) -> !i64 {
+    var count = 0;
+    while true {
+        let child = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, body_node, "statement", count, bs
+        );
+        if child < 0 {
+            return count;
+        }
+        count = count + 1;
+    }
+    return count;
+}
+// while_induction_var returns the counter a while loop carries: the target of the
+// trailing 'name = name + step' increment that must close the loop body. The body's
+// last statement must be that Assign to a Var (tracker 961).
+fn while_induction_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_node, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 1 {
+        return error("compiled mir: while body must end with the induction increment");
+    }
+    let last_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let last_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, last_stmt, bs);
+    if !std::mem::equal_bytes(last_kind, "Assign") {
+        return error("compiled mir: while body must end with the induction increment");
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, last_stmt, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return error("compiled mir: induction increment target must be a var");
+    }
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
+}
+// statement_is_induction_init reports whether a top-level let declares the induction
+// counter of some while in the same function, by matching the let name against each
+// while's induction variable.
+fn statement_is_induction_init(
+    ir_bytes: []u8,
+    function_name: []u8,
+    let_statement: i64,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_statement, "name", 0, bs
+    );
+    let let_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, name_node, bs
+    );
+    var index = 0;
+    while index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(kind, "While") {
+            let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
+            if std::mem::equal_bytes(induction_var, let_name) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+// find_induction_init_value finds the 'var counter = <int>' initializer for an
+// induction variable and returns its integer literal (the loop-head phi seed).
+fn find_induction_init_value(
+    ir_bytes: []u8,
+    function_name: []u8,
+    induction_var: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !i64 {
+    var index = 0;
+    while index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(kind, "Let") {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
+            );
+            let name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, name_node, bs
+            );
+            if std::mem::equal_bytes(name, induction_var) {
+                let value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "value", 0, bs
+                );
+                let value_kind = try ir_contract::body_node_kind_from(
+                    ir_bytes, function_name, value, bs
+                );
+                if !std::mem::equal_bytes(value_kind, "Int") {
+                    return error("compiled mir: induction variable must be initialized to an integer");
+                }
+                return try ir_contract::body_int_value_from(ir_bytes, function_name, value, bs);
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled mir: induction variable initializer not found");
+}
+// parse_induction_step validates the trailing 'name = name + <int>' increment for
+// the induction variable and returns the integer step. Only this simple counter
+// increment shape is accepted; anything else is rejected so the restricted loop
+// support never silently lowers general assignment (tracker 961).
+fn parse_induction_step(
+    ir_bytes: []u8,
+    function_name: []u8,
+    assign_node: i64,
+    induction_var: []u8,
+    bs: i64
+) -> !i64 {
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "value", 0, bs
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if !std::mem::equal_bytes(value_kind, "Binary") {
+        return error("compiled mir: induction increment must be an addition");
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, value, bs
+    );
+    if !std::mem::equal_bytes(op, "add") {
+        return error("compiled mir: induction increment must be an addition");
+    }
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "left", 0, bs
+    );
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "right", 0, bs
+    );
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right_node, bs);
+    if !std::mem::equal_bytes(left_kind, "Var") or !std::mem::equal_bytes(right_kind, "Int") {
+        return error("compiled mir: induction increment must be name + integer");
+    }
+    let left_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, left_node, bs);
+    if !std::mem::equal_bytes(left_name, induction_var) {
+        return error("compiled mir: induction increment must add to the induction variable");
+    }
+    return try ir_contract::body_int_value_from(ir_bytes, function_name, right_node, bs);
+}
+// lower_multi_while_statement lowers a restricted bounded counter loop: a single i64
+// induction variable, a non-short-circuit comparison condition that reads it, a body
+// of Let/If statements, and a trailing 'name = name + step' increment. The body
+// statements reuse the same let/if lowering as the top level; body if labels are
+// offset by the loop index so they never collide with top-level if labels. The
+// induction increment is folded into induction_step and rendered in the loop latch.
+fn lower_multi_while_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    loop_index: i64,
+    statement_count: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    if (try short_circuit_kind(ir_bytes, function_name, cond_node, bs)) != 0 {
+        return error("compiled mir: while condition must be a single comparison");
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "body", 0, bs
+    );
+    let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
+    let induction_init = try find_induction_init_value(
+        ir_bytes, function_name, induction_var, statement_count, bs
+    );
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        bs
+    );
+    var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
+    var body_temp_counter = temp_counter + cond_insts.len();
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_index = 0;
+    while body_index < body_count - 1 {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                body_stmt,
+                body_string_counter,
+                body_temp_counter,
+                &var body_stmts,
+                bs
+            );
+            body_string_counter = let_result.string_counter;
+            body_temp_counter = let_result.temp_counter;
+        } else {
+            if std::mem::equal_bytes(body_kind, "If") {
+                let body_if_index = loop_index * 1000 + body_index + 1;
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    body_stmt,
+                    body_string_counter,
+                    body_temp_counter,
+                    body_if_index,
+                    &var body_stmts,
+                    bs
+                );
+                body_temp_counter = if_result.temp_counter;
+                body_string_counter = if_result.string_counter;
+            } else {
+                return error("compiled mir: unsupported while body statement");
+            }
+        }
+        body_index = body_index + 1;
+    }
+    let increment_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let increment_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, increment_stmt, bs
+    );
+    if !std::mem::equal_bytes(increment_kind, "Assign") {
+        return error("compiled mir: while body must end with the induction increment");
+    }
+    let step = try parse_induction_step(
+        ir_bytes, function_name, increment_stmt, induction_var, bs
+    );
+    try stmts.append(compiled_mir::while_stmt(
+        loop_index,
+        induction_var,
+        induction_init,
+        step,
+        cond_result,
+        cond_insts,
+        body_stmts
+    ));
+    return MultiIfLowerResult {
+        temp_counter: body_temp_counter,
+        string_counter: body_string_counter
     };
 }
 
