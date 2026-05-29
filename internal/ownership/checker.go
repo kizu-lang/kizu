@@ -1108,6 +1108,10 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 	if !ok {
 		return errorf("move error: match expects enum or union, got %s", valueType)
 	}
+	ownerDeinitDispatch := c.matchesOwnerUnionDeinit(stmt.Value, valueType)
+	if ownerDeinitDispatch {
+		c.consumeOwnerUnionReceiver(stmt.Value, env)
+	}
 	for _, arm := range stmt.Arms {
 		if arm.IsWildcard() {
 			if arm.Binding != "" {
@@ -1118,17 +1122,49 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 		}
 		armEnv := env.clone()
 		child := armEnv.child()
-		if payload := unionPayloads[arm.Tag]; !arm.IsWildcard() && payload != "" && arm.Binding != "" {
-			value := c.newBinding(arm.Binding, payload)
-			value.borrowedParam = true
-			child.define(value)
-		}
+		c.defineMatchArmPayload(arm, unionPayloads, ownerDeinitDispatch, child)
 		if err := c.checkStmt(arm.Body, child); err != nil {
 			return err
 		}
 		env.mergeMovedFrom(armEnv)
 	}
 	return nil
+}
+
+// consumeOwnerUnionReceiver marks an owner union's deinit receiver moved. The
+// dispatch moves the active payload out for cleanup, so `self` is unavailable
+// inside the arm bodies and after the match; a second read or re-match of the
+// deinitialized union is then a use-after-move.
+func (c *Checker) consumeOwnerUnionReceiver(value ast.Expression, env *scope) {
+	ident, ok := value.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	if self, found := env.lookup(ident.Name); found {
+		self.moved = true
+	}
+}
+
+// defineMatchArmPayload binds one union variant payload for a match arm. Inside
+// an owner union's own `deinit` the active owner payload is bound as an owned
+// local so it can be cleaned through its explicit `deinit`; every other match
+// keeps it borrowed so safe code cannot move out of a live union, and inactive
+// variants are never bound.
+func (c *Checker) defineMatchArmPayload(
+	arm ast.MatchArm,
+	unionPayloads map[string]string,
+	ownerDeinitDispatch bool,
+	child *scope,
+) {
+	payload := unionPayloads[arm.Tag]
+	if arm.IsWildcard() || payload == "" || arm.Binding == "" {
+		return
+	}
+	value := c.newBinding(arm.Binding, payload)
+	if !(ownerDeinitDispatch && !c.isCopyType(payload)) {
+		value.borrowedParam = true
+	}
+	child.define(value)
 }
 
 // matchTags returns known tags for enum and union match ownership checks.
@@ -5421,6 +5457,30 @@ func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
 		return false
 	}
 	return sameOwnershipType(fn.params[0].typeName, receiver.owner.typeName)
+}
+
+// matchesOwnerUnionDeinit reports whether a `match` consumes the active variant
+// of a union inside that union's own `deinit(self: T) -> void`. Only there is the
+// active payload owned and cleanable; everywhere else it stays a borrow.
+func (c *Checker) matchesOwnerUnionDeinit(value ast.Expression, valueType string) bool {
+	fn := c.currentFunction
+	if fn == nil || fn.decl == nil || fn.decl.Name != "deinit" || returnTypeName(fn) != "void" {
+		return false
+	}
+	if len(fn.params) == 0 || len(fn.decl.Params) == 0 {
+		return false
+	}
+	if fn.params[0].borrow || fn.params[0].mutBorrow {
+		return false
+	}
+	if !sameOwnershipType(fn.params[0].typeName, valueType) {
+		return false
+	}
+	ident, ok := value.(*ast.IdentExpr)
+	if !ok || ident.Name != fn.decl.Params[0].Name {
+		return false
+	}
+	return c.unions[valueType] != nil
 }
 
 // astFieldProvenance returns the Ast identity carried by ParseResult fields.
