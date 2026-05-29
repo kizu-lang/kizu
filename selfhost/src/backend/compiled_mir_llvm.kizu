@@ -1046,6 +1046,16 @@ fn append_struct_globals_at(
     var index = 0;
     while index < fields.len() {
         let field = try fields.at(index);
+        if field.kind == compiled_mir::MirStructFieldKind::Call {
+            try compiled_mir_llvm_call::append_call_string_globals(
+                out, llvm_symbol, &field.call_args
+            );
+        }
+        if field.kind == compiled_mir::MirStructFieldKind::StructLiteral {
+            try append_struct_globals_at(
+                out, llvm_symbol, &field.nested_fields, nested_struct_prefix(string_index, field.index)
+            );
+        }
         if field.kind == compiled_mir::MirStructFieldKind::ConstString {
             let quote = cast<u8>(34);
             let payload_len = try compiled_util::string_token_decoded_len(
@@ -1108,7 +1118,19 @@ fn append_struct_body_at(
                     string_index
                 );
             } else {
-                try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                if field.kind == compiled_mir::MirStructFieldKind::Call {
+                    try append_struct_call_field(
+                        out, llvm_symbol, llvm_return_type, field, string_index
+                    );
+                } else {
+                    if field.kind == compiled_mir::MirStructFieldKind::StructLiteral {
+                        try append_struct_nested_field(
+                            out, llvm_symbol, llvm_return_type, field, string_index
+                        );
+                    } else {
+                        try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                    }
+                }
             }
         }
         index = index + 1;
@@ -1152,6 +1174,103 @@ fn append_struct_simple_field(
                 }
             }
         }
+    }
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_struct_call_field renders a call-valued struct field: the call arg
+// setup and the call instruction first, then an insertvalue that feeds the call
+// result into the struct chain. The call result name uses the %vc namespace so
+// it never collides with the %v struct-chain temporaries. The arg-setup prefix
+// is offset past the let/return (small) and expr-context (1000000+) prefixes so
+// %arg names stay unique within the function (tracker 961).
+fn append_struct_call_field(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField,
+    prefix: i64
+) -> !void {
+    let call_prefix = 3000000 + prefix + field.index;
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, llvm_symbol, &field.call_args, call_prefix
+    );
+    try out.append_bytes("  %vc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(field.llvm_type);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, field.call_module_prefix, field.call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(
+        out, &field.call_args, call_prefix
+    );
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    try compiled_util::append_insertvalue_line_with_prefix(
+        out,
+        llvm_return_type,
+        field.index,
+        field.llvm_type,
+        field.index,
+        prefix
+    );
+    try out.append_bytes("%vc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// nested_struct_prefix derives the SSA/global prefix for a nested struct literal
+// field. prefix + field.index is unique per struct field across a function (the
+// string_index ranges reserved per struct are disjoint and field.index stays
+// within a struct's range), and the 5000000 offset keeps it clear of the
+// let/return (small), expr-context (1000000+) and call-field (3000000+) prefixes
+// (tracker 961).
+fn nested_struct_prefix(prefix: i64, field_index: i64) -> i64 {
+    return 5000000 + prefix + field_index;
+}
+
+// append_struct_nested_field renders a nested struct literal field: it builds the
+// nested struct in its own %v<nested_prefix>_* insertvalue chain, then feeds the
+// nested result into the parent struct's chain at field.index.
+fn append_struct_nested_field(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField,
+    prefix: i64
+) -> !void {
+    let nested_prefix = nested_struct_prefix(prefix, field.index);
+    let nested = &field.nested_fields;
+    try append_struct_body_at(out, llvm_symbol, field.llvm_type, nested, nested_prefix);
+    try compiled_util::append_insertvalue_line_with_prefix(
+        out,
+        llvm_return_type,
+        field.index,
+        field.llvm_type,
+        field.index,
+        prefix
+    );
+    if nested.len() == 0 {
+        try out.append_bytes("poison");
+    } else {
+        let last = try nested.at(nested.len() - 1);
+        try out.append_bytes("%v");
+        try std::fmt::append_i64(out, nested_prefix);
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, last.index);
     }
     try out.append_bytes(", ");
     try std::fmt::append_i64(out, field.index);

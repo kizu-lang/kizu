@@ -65,8 +65,18 @@ pub enum MirStructFieldKind {
     ConstEnumTag,
     FieldAccess,
     EmptySlice,
+    Call,
+    StructLiteral,
 }
 
+// A Call struct field carries a resolved direct call (callee + module prefix +
+// lowered args) whose result becomes the field value. The renderer emits the
+// call arg setup and call instruction before insertvalue-ing the result into the
+// struct, mirroring the let/return call lowering. A StructLiteral field carries a
+// nested struct literal's fields (nested_fields) and its struct type (llvm_type);
+// the renderer builds the nested struct in its own insertvalue chain and feeds
+// the result in. Non-nested fields keep call_callee_name empty and empty
+// call_args / nested_fields arrays (tracker 961).
 pub struct MirStructField {
     pub index: i64,
     pub kind: MirStructFieldKind,
@@ -77,6 +87,10 @@ pub struct MirStructField {
     pub source_type: []u8,
     pub source_field_index: i64,
     pub nested_source_type: []u8,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub call_args: std::array::Array<MirCallArg>,
+    pub nested_fields: std::array::Array<MirStructField>,
 }
 
 // Per-variant MirExprInst payloads. Each holds only the fields its variant
@@ -313,6 +327,18 @@ pub struct MirFunction {
     pub multi_stmts: std::array::Array<MirStmt>,
     pub block_count: i64,
     pub entry: MirBlock,
+}
+
+// MirStructField owns the call-argument Array of a call-valued field (Call kind);
+// non-call fields hold the empty array from empty_struct_call_args. It is only
+// ever stored in struct_fields Arrays, so this cleanup runs through structural
+// array drop, mirroring MirCallExpr (tracker 961).
+impl MirStructField {
+    fn deinit(self: MirStructField) -> void {
+        self.call_args.deinit();
+        self.nested_fields.deinit();
+        return;
+    }
 }
 
 // MirExprInst is the only block-level owner union: its Call variant owns the
@@ -660,6 +686,19 @@ pub fn slice_call_arg(
     };
 }
 
+// empty_struct_call_args backs the call_args field of non-call struct fields. It
+// allocates an empty Array so every MirStructField has a valid (if unused) args
+// array; only Call fields populate it (tracker 961).
+fn empty_struct_call_args() -> std::array::Array<MirCallArg> {
+    return std::array::Array<MirCallArg>(std::mem::page_allocator());
+}
+
+// empty_struct_nested_fields backs the nested_fields field of non-StructLiteral
+// struct fields; only StructLiteral fields populate it (tracker 961).
+fn empty_struct_nested_fields() -> std::array::Array<MirStructField> {
+    return std::array::Array<MirStructField>(std::mem::page_allocator());
+}
+
 pub fn var_struct_field(index: i64, ty: []u8, name: []u8) -> MirStructField {
     return MirStructField {
         index: index,
@@ -670,7 +709,11 @@ pub fn var_struct_field(index: i64, ty: []u8, name: []u8) -> MirStructField {
         bool_value: false,
         source_type: "",
         source_field_index: -1,
-        nested_source_type: ""
+        nested_source_type: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
     };
 }
 
@@ -684,7 +727,11 @@ pub fn string_struct_field(index: i64, payload: []u8) -> MirStructField {
         bool_value: false,
         source_type: "",
         source_field_index: -1,
-        nested_source_type: ""
+        nested_source_type: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
     };
 }
 
@@ -698,7 +745,11 @@ pub fn int_struct_field(index: i64, value: i64) -> MirStructField {
         bool_value: false,
         source_type: "",
         source_field_index: -1,
-        nested_source_type: ""
+        nested_source_type: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
     };
 }
 
@@ -712,7 +763,11 @@ pub fn bool_struct_field(index: i64, value: bool) -> MirStructField {
         bool_value: value,
         source_type: "",
         source_field_index: -1,
-        nested_source_type: ""
+        nested_source_type: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
     };
 }
 
@@ -726,7 +781,11 @@ pub fn enum_tag_struct_field(index: i64, tag: i64) -> MirStructField {
         bool_value: false,
         source_type: "",
         source_field_index: -1,
-        nested_source_type: ""
+        nested_source_type: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
     };
 }
 
@@ -746,7 +805,11 @@ pub fn field_access_struct_field(
         bool_value: false,
         source_type: receiver_type,
         source_field_index: source_field_index,
-        nested_source_type: ""
+        nested_source_type: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
     };
 }
 
@@ -768,7 +831,11 @@ pub fn nested_field_access_struct_field(
         bool_value: false,
         source_type: receiver_type,
         source_field_index: source_field_index,
-        nested_source_type: nested_type
+        nested_source_type: nested_type,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
     };
 }
 
@@ -782,7 +849,57 @@ pub fn empty_slice_struct_field(index: i64) -> MirStructField {
         bool_value: false,
         source_type: "",
         source_field_index: -1,
-        nested_source_type: ""
+        nested_source_type: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
+    };
+}
+
+pub fn call_struct_field(
+    index: i64,
+    field_type: []u8,
+    call_module_prefix: []u8,
+    call_callee_name: []u8,
+    call_args: std::array::Array<MirCallArg>
+) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::Call,
+        llvm_type: field_type,
+        value: "",
+        int_value: -1,
+        bool_value: false,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        call_module_prefix: call_module_prefix,
+        call_callee_name: call_callee_name,
+        call_args: call_args,
+        nested_fields: empty_struct_nested_fields()
+    };
+}
+
+pub fn struct_literal_struct_field(
+    index: i64,
+    nested_llvm_type: []u8,
+    nested_fields: std::array::Array<MirStructField>
+) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::StructLiteral,
+        llvm_type: nested_llvm_type,
+        value: "",
+        int_value: -1,
+        bool_value: false,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: nested_fields
     };
 }
 
