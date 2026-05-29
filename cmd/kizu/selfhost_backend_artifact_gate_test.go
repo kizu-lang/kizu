@@ -368,6 +368,13 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_empty_payload_span",
 		"define %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_empty_local",
 		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_local_payload_span",
+		// tracker 961 follow-up: empty_local_table compiled into stage2. It exercises
+		// the new call-valued struct field initializer lowering, where first/second
+		// are built by calling empty_local and feeding the result into the LocalTable
+		// insertvalue chain.
+		"define %kizu.selfhost.codegen.local_table @kizu_selfhost__ir_codegen_empty_local_table",
+		"%vc0_1 = call %kizu.selfhost.codegen.local_binding " +
+			"@kizu_selfhost__ir_codegen_empty_local",
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
