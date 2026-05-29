@@ -519,7 +519,24 @@ fn lower_multi_return_statement(
     let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
     if std::mem::equal_bytes(value_kind, "Call") {
         if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, value, bs) {
-            return compiled_mir::return_error_stmt();
+            let message_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, value, "arg", 0, bs
+            );
+            var message_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+            let message_result = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                message_node,
+                string_counter,
+                temp_counter,
+                &var message_insts,
+                bs
+            );
+            return compiled_mir::return_error_stmt(
+                string_counter, message_result, message_insts
+            );
         }
         let call_type = try compiled_mir_types::lower_call_return_type(
             ir_bytes, function_name, module_prefix, value, bs
@@ -693,6 +710,20 @@ fn lower_multi_if_statement(
         if std::mem::equal_bytes(ret_kind, "Call") {
             if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, ret_value, bs) {
                 then_kind = compiled_mir::MirIfThenKind::ReturnError;
+                let message_node = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, ret_value, "arg", 0, bs
+                );
+                then_result = try lower_expr_into(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    message_node,
+                    then_string_base,
+                    then_base,
+                    &var then_insts,
+                    bs
+                );
             } else {
             call_type = try compiled_mir_types::lower_call_return_type(
                 ir_bytes, function_name, module_prefix, ret_value, bs
@@ -743,6 +774,9 @@ fn lower_multi_if_statement(
         next_temp = then_base + 1;
     }
     if then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
+        next_temp = then_result + 1;
+    }
+    if then_kind == compiled_mir::MirIfThenKind::ReturnError {
         next_temp = then_result + 1;
     }
     try stmts.append(compiled_mir::if_stmt(

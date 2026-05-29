@@ -355,6 +355,7 @@ func requiredLLVMExecutableFragments() []string {
 	}
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
+	fragments = append(fragments, requiredLLVMReturnErrorFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -452,6 +453,26 @@ func requiredLLVMAstAccessorFragments() []string {
 		"%result = call i64 @kizu_rt_array_len(%kizu.owned %arg0_0_ex)",
 		"define i64 @kizu_rt_array_len(%kizu.owned %array)",
 		"%len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2",
+	}
+}
+
+// requiredLLVMReturnErrorFragments returns the tracker-961 `return error("...")`
+// lowering members compiled into stage2. stdout_payload's error branch is the
+// first compiled error-union failure return: instead of the prior `unreachable`
+// placeholder it materializes the "unsupported codegen stdout payload" message
+// global, builds the %kizu.error.slice.u8 failure value (i1 false ok flag at
+// field 0, success value left as zeroinitializer, the message %kizu.slice.u8 at
+// the failure index 2) and returns it. The success branch still wraps the
+// payload slice as the field-1 success value.
+func requiredLLVMReturnErrorFragments() []string {
+	return []string{
+		"@.kizu.compiled.kizu_selfhost__ir_codegen_stdout_payload.s0 = " +
+			"private unnamed_addr constant [34 x i8] c\"unsupported codegen stdout payload\"",
+		"%t3 = insertvalue %kizu.slice.u8 %t3_base, i64 34, 1",
+		"%errfail3_flag = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 false, 0",
+		"%errfail3 = insertvalue %kizu.error.slice.u8 %errfail3_flag, %kizu.slice.u8 %t3, 2",
+		"  ret %kizu.error.slice.u8 %errfail3",
+		"%retwrap_val = insertvalue %kizu.error.slice.u8 %retwrap_ok, %kizu.slice.u8 %t4, 1",
 	}
 }
 
