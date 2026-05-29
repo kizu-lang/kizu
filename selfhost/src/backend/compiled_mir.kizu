@@ -109,16 +109,6 @@ pub struct MirExprInst {
     pub call_args: std::array::Array<MirCallArg>,
 }
 
-pub enum MirStmtKind {
-    LetCall,
-    LetStruct,
-    ReturnCall,
-    ReturnStruct,
-    ReturnExpr,
-    ReturnError,
-    If,
-}
-
 pub enum MirIfThenKind {
     ReturnBool,
     ReturnCall,
@@ -126,25 +116,68 @@ pub enum MirIfThenKind {
     ReturnError,
 }
 
-pub struct MirStmt {
-    pub kind: MirStmtKind,
+// Per-variant MirStmt payloads. Each holds only the fields its variant needs and
+// owns its inline Array storage, so the union below never carries inactive owned
+// arrays (issue 1007/1011, ADR-0075 tagged-union payload ABI).
+pub struct MirLetCallStmt {
     pub name: []u8,
     pub llvm_type: []u8,
     pub string_index: i64,
-    pub if_index: i64,
-    pub expr_result_id: i64,
-    pub if_then_kind: MirIfThenKind,
-    pub bool_value: bool,
     pub call_module_prefix: []u8,
     pub call_callee_name: []u8,
     pub call_args: std::array::Array<MirCallArg>,
+}
+
+pub struct MirLetStructStmt {
+    pub name: []u8,
+    pub llvm_type: []u8,
+    pub string_index: i64,
     pub struct_fields: std::array::Array<MirStructField>,
+}
+
+pub struct MirReturnCallStmt {
+    pub name: []u8,
+    pub llvm_type: []u8,
+    pub string_index: i64,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub call_args: std::array::Array<MirCallArg>,
+}
+
+pub struct MirReturnStructStmt {
+    pub string_index: i64,
+    pub struct_fields: std::array::Array<MirStructField>,
+}
+
+pub struct MirReturnExprStmt {
+    pub string_index: i64,
+    pub expr_result_id: i64,
     pub expr_insts: std::array::Array<MirExprInst>,
+}
+
+pub struct MirIfStmt {
+    pub if_index: i64,
+    pub string_index: i64,
+    pub llvm_type: []u8,
+    pub cond_result_id: i64,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub if_then_kind: MirIfThenKind,
+    pub bool_value: bool,
     pub then_call_module_prefix: []u8,
     pub then_call_callee_name: []u8,
     pub then_call_args: std::array::Array<MirCallArg>,
     pub then_expr_result_id: i64,
     pub then_expr_insts: std::array::Array<MirExprInst>,
+}
+
+pub union MirStmt {
+    LetCall(MirLetCallStmt),
+    LetStruct(MirLetStructStmt),
+    ReturnCall(MirReturnCallStmt),
+    ReturnStruct(MirReturnStructStmt),
+    ReturnExpr(MirReturnExprStmt),
+    ReturnError,
+    If(MirIfStmt),
 }
 
 pub struct MirInstruction {
@@ -183,12 +216,13 @@ pub struct MirFunction {
     pub entry: MirBlock,
 }
 
-// Interim cleanup for the tag-plus-all-fields MIR records. Each deinit frees the
-// owned Array fields that are initialized in the current record representation.
+// Interim cleanup for the remaining tag-plus-all-fields MIR records. Each deinit
+// frees the owned Array fields initialized in the current record representation.
 // This is not union active-variant cleanup; issue 991 specifies a tagged-union
-// payload ABI and issue 1007 tracks implementing that codegen and migrating these
-// records onto it (the removal path for these interim deinit methods). Until then,
-// every constructed MIR owner aggregate must be deinitialized, moved, or returned.
+// payload ABI and issue 1007 tracks the migration. MirStmt has already moved onto
+// the union payload ABI (issue 1011); MirExprInst, MirInstruction, MirBlock, and
+// MirFunction stay on the interim records until issue 1012. Until then, every
+// constructed MIR owner aggregate must be deinitialized, moved, or returned.
 impl MirExprInst {
     fn deinit(self: MirExprInst) -> void {
         self.call_args.deinit();
@@ -210,14 +244,65 @@ impl MirBlock {
     }
 }
 
-impl MirStmt {
-    fn deinit(self: MirStmt) -> void {
+impl MirLetCallStmt {
+    fn deinit(self: MirLetCallStmt) -> void {
         self.call_args.deinit();
+        return;
+    }
+}
+
+impl MirLetStructStmt {
+    fn deinit(self: MirLetStructStmt) -> void {
         self.struct_fields.deinit();
+        return;
+    }
+}
+
+impl MirReturnCallStmt {
+    fn deinit(self: MirReturnCallStmt) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
+impl MirReturnStructStmt {
+    fn deinit(self: MirReturnStructStmt) -> void {
+        self.struct_fields.deinit();
+        return;
+    }
+}
+
+impl MirReturnExprStmt {
+    fn deinit(self: MirReturnExprStmt) -> void {
         self.expr_insts.deinit();
+        return;
+    }
+}
+
+impl MirIfStmt {
+    fn deinit(self: MirIfStmt) -> void {
+        self.cond_insts.deinit();
         self.then_call_args.deinit();
         self.then_expr_insts.deinit();
         return;
+    }
+}
+
+// Active-variant cleanup for the owner-payload union: match self binds the live
+// payload as an owned local and frees it through its own deinit, so inactive
+// payload storage is never read or cleaned (issue 1010 cleanup contract). The
+// payload-free ReturnError variant owns nothing and needs no cleanup.
+impl MirStmt {
+    fn deinit(self: MirStmt) -> void {
+        match self {
+            LetCall(payload) => payload.deinit(),
+            LetStruct(payload) => payload.deinit(),
+            ReturnCall(payload) => payload.deinit(),
+            ReturnStruct(payload) => payload.deinit(),
+            ReturnExpr(payload) => payload.deinit(),
+            ReturnError => return;,
+            If(payload) => payload.deinit(),
+        }
     }
 }
 
@@ -790,26 +875,14 @@ pub fn let_call_stmt(
     callee_name: []u8,
     args: std::array::Array<MirCallArg>
 ) -> MirStmt {
-    return MirStmt {
-        kind: MirStmtKind::LetCall,
+    return MirStmt::LetCall(MirLetCallStmt {
         name: name,
         llvm_type: llvm_type,
         string_index: string_index,
-        if_index: -1,
-        expr_result_id: -1,
-        if_then_kind: MirIfThenKind::ReturnBool,
-        bool_value: false,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
-        call_args: args,
-        struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
-        expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
-        then_call_module_prefix: "",
-        then_call_callee_name: "",
-        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        then_expr_result_id: -1,
-        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
-    };
+        call_args: args
+    });
 }
 
 pub fn let_struct_stmt(
@@ -818,26 +891,12 @@ pub fn let_struct_stmt(
     string_index: i64,
     fields: std::array::Array<MirStructField>
 ) -> MirStmt {
-    return MirStmt {
-        kind: MirStmtKind::LetStruct,
+    return MirStmt::LetStruct(MirLetStructStmt {
         name: name,
         llvm_type: llvm_type,
         string_index: string_index,
-        if_index: -1,
-        expr_result_id: -1,
-        if_then_kind: MirIfThenKind::ReturnBool,
-        bool_value: false,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        struct_fields: fields,
-        expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
-        then_call_module_prefix: "",
-        then_call_callee_name: "",
-        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        then_expr_result_id: -1,
-        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
-    };
+        struct_fields: fields
+    });
 }
 
 pub fn return_call_stmt(
@@ -847,52 +906,24 @@ pub fn return_call_stmt(
     callee_name: []u8,
     args: std::array::Array<MirCallArg>
 ) -> MirStmt {
-    return MirStmt {
-        kind: MirStmtKind::ReturnCall,
+    return MirStmt::ReturnCall(MirReturnCallStmt {
         name: "ret_val",
         llvm_type: llvm_type,
         string_index: string_index,
-        if_index: -1,
-        expr_result_id: -1,
-        if_then_kind: MirIfThenKind::ReturnBool,
-        bool_value: false,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
-        call_args: args,
-        struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
-        expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
-        then_call_module_prefix: "",
-        then_call_callee_name: "",
-        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        then_expr_result_id: -1,
-        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
-    };
+        call_args: args
+    });
 }
 
 pub fn return_struct_stmt(
     string_index: i64,
     fields: std::array::Array<MirStructField>
 ) -> MirStmt {
-    return MirStmt {
-        kind: MirStmtKind::ReturnStruct,
-        name: "",
-        llvm_type: "",
+    return MirStmt::ReturnStruct(MirReturnStructStmt {
         string_index: string_index,
-        if_index: -1,
-        expr_result_id: -1,
-        if_then_kind: MirIfThenKind::ReturnBool,
-        bool_value: false,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        struct_fields: fields,
-        expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
-        then_call_module_prefix: "",
-        then_call_callee_name: "",
-        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        then_expr_result_id: -1,
-        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
-    };
+        struct_fields: fields
+    });
 }
 
 pub fn return_expr_stmt(
@@ -900,54 +931,15 @@ pub fn return_expr_stmt(
     result_id: i64,
     insts: std::array::Array<MirExprInst>
 ) -> MirStmt {
-    return MirStmt {
-        kind: MirStmtKind::ReturnExpr,
-        name: "",
-        llvm_type: "",
+    return MirStmt::ReturnExpr(MirReturnExprStmt {
         string_index: string_index,
-        if_index: -1,
         expr_result_id: result_id,
-        if_then_kind: MirIfThenKind::ReturnBool,
-        bool_value: false,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
-        expr_insts: insts,
-        then_call_module_prefix: "",
-        then_call_callee_name: "",
-        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        then_expr_result_id: -1,
-        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
-    };
+        expr_insts: insts
+    });
 }
 
 pub fn return_error_stmt() -> MirStmt {
-    var fields = std::array::Array<MirStructField>(std::mem::page_allocator());
-    var args = std::array::Array<MirCallArg>(std::mem::page_allocator());
-    var then_args = std::array::Array<MirCallArg>(std::mem::page_allocator());
-    var expr_insts = std::array::Array<MirExprInst>(std::mem::page_allocator());
-    var then_expr_insts = std::array::Array<MirExprInst>(std::mem::page_allocator());
-    return MirStmt {
-        kind: MirStmtKind::ReturnError,
-        name: "",
-        llvm_type: "",
-        string_index: 0,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: args,
-        struct_fields: fields,
-        expr_result_id: -1,
-        expr_insts: expr_insts,
-        if_index: -1,
-        bool_value: false,
-        then_call_module_prefix: "",
-        then_call_callee_name: "",
-        then_call_args: then_args,
-        then_expr_result_id: -1,
-        then_expr_insts: then_expr_insts,
-        if_then_kind: MirIfThenKind::ReturnError
-    };
+    return MirStmt::ReturnError;
 }
 
 pub fn if_stmt(
@@ -964,26 +956,20 @@ pub fn if_stmt(
     then_result_id: i64,
     then_insts: std::array::Array<MirExprInst>
 ) -> MirStmt {
-    return MirStmt {
-        kind: MirStmtKind::If,
-        name: "",
-        llvm_type: call_type,
-        string_index: string_index,
+    return MirStmt::If(MirIfStmt {
         if_index: if_index,
-        expr_result_id: cond_result_id,
+        string_index: string_index,
+        llvm_type: call_type,
+        cond_result_id: cond_result_id,
+        cond_insts: cond_insts,
         if_then_kind: then_kind,
         bool_value: bool_value,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
-        expr_insts: cond_insts,
         then_call_module_prefix: module_prefix,
         then_call_callee_name: callee_name,
         then_call_args: call_args,
         then_expr_result_id: then_result_id,
         then_expr_insts: then_insts
-    };
+    });
 }
 
 pub fn mir_string_const_instruction(result: MirValue) -> MirInstruction {
