@@ -231,6 +231,18 @@ pub struct MirReturnExprStmt {
     pub expr_insts: std::array::Array<MirExprInst>,
 }
 
+// MirReturnErrorStmt backs a return error("literal") statement. It mirrors
+// MirReturnExprStmt: the error message literal is lowered as a single ConstString
+// in expr_insts (so the existing string-global emission applies) and
+// message_result_id names the temp holding the message %kizu.slice.u8. The
+// renderer builds the error-union failure value (i1 false, success zeroinitializer,
+// the message slice at the failure index) and returns it (tracker 961).
+pub struct MirReturnErrorStmt {
+    pub string_index: i64,
+    pub message_result_id: i64,
+    pub expr_insts: std::array::Array<MirExprInst>,
+}
+
 pub struct MirLetExprStmt {
     pub name: []u8,
     pub string_index: i64,
@@ -294,7 +306,7 @@ pub union MirStmt {
     ReturnCall(MirReturnCallStmt),
     ReturnStruct(MirReturnStructStmt),
     ReturnExpr(MirReturnExprStmt),
-    ReturnError,
+    ReturnError(MirReturnErrorStmt),
     If(MirIfStmt),
     While(MirWhileStmt),
 }
@@ -430,6 +442,13 @@ impl MirLetExprStmt {
     }
 }
 
+impl MirReturnErrorStmt {
+    fn deinit(self: MirReturnErrorStmt) -> void {
+        self.expr_insts.deinit();
+        return;
+    }
+}
+
 impl MirIfStmt {
     fn deinit(self: MirIfStmt) -> void {
         self.cond_insts.deinit();
@@ -444,7 +463,7 @@ impl MirIfStmt {
 // Active-variant cleanup for the owner-payload union: match self binds the live
 // payload as an owned local and frees it through its own deinit, so inactive
 // payload storage is never read or cleaned (issue 1010 cleanup contract). The
-// payload-free ReturnError variant owns nothing and needs no cleanup.
+// ReturnError variant owns its message expr_insts Array like ReturnExpr.
 impl MirWhileStmt {
     fn deinit(self: MirWhileStmt) -> void {
         self.cond_insts.deinit();
@@ -462,7 +481,7 @@ impl MirStmt {
             ReturnCall(payload) => payload.deinit(),
             ReturnStruct(payload) => payload.deinit(),
             ReturnExpr(payload) => payload.deinit(),
-            ReturnError => return;,
+            ReturnError(payload) => payload.deinit(),
             If(payload) => payload.deinit(),
             While(payload) => payload.deinit(),
         }
@@ -1183,8 +1202,16 @@ pub fn return_expr_stmt(
     });
 }
 
-pub fn return_error_stmt() -> MirStmt {
-    return MirStmt::ReturnError;
+pub fn return_error_stmt(
+    string_index: i64,
+    message_result_id: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt::ReturnError(MirReturnErrorStmt {
+        string_index: string_index,
+        message_result_id: message_result_id,
+        expr_insts: insts
+    });
 }
 
 pub fn while_stmt(

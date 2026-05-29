@@ -137,7 +137,7 @@ fn append_multi_stmt(
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
-        ReturnError => try append_multi_return_error(out);,
+        ReturnError(payload) => try append_multi_return_error(out, function, payload);,
         If(payload) => try append_multi_if(out, function, payload, local_prefix);,
         While(payload) => try append_multi_while(out, function, payload);,
     }
@@ -223,9 +223,47 @@ fn append_multi_return_expr(
     return;
 }
 fn append_multi_return_error(
-    out: &var std::string::String
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirReturnErrorStmt
 ) -> !void {
-    try out.append_bytes("  unreachable");
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    try append_error_union_failure_value(
+        out, function.return_type.llvm_name, stmt.message_result_id
+    );
+    return;
+}
+// append_error_union_failure_value renders a return error("...") failure value
+// for the %kizu.error.<success> ABI: field 0 is the i1 false ok flag, field 1 the
+// success value (left as zeroinitializer), and the error message %kizu.slice.u8 at
+// the failure index 2. The message must already be materialized in %t<message_id>
+// as a %kizu.slice.u8 by the caller (tracker 961). The %errfail<id> temps are keyed
+// off the unique message temp id so multiple return errors never collide.
+fn append_error_union_failure_value(
+    out: &var std::string::String,
+    return_type: []u8,
+    message_result_id: i64
+) -> !void {
+    try out.append_bytes("  %errfail");
+    try std::fmt::append_i64(out, message_result_id);
+    try out.append_bytes("_flag = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" zeroinitializer, i1 false, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %errfail");
+    try std::fmt::append_i64(out, message_result_id);
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %errfail");
+    try std::fmt::append_i64(out, message_result_id);
+    try out.append_bytes("_flag, %kizu.slice.u8 %t");
+    try std::fmt::append_i64(out, message_result_id);
+    try out.append_bytes(", 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %errfail");
+    try std::fmt::append_i64(out, message_result_id);
     try out.append_byte(cast<u8>(10));
     return;
 }
@@ -277,7 +315,7 @@ fn append_stmt_globals(
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
-        ReturnError => return;,
+        ReturnError(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         If(payload) => try append_if_globals(out, llvm_symbol, payload);,
         While(payload) => try append_while_globals(out, llvm_symbol, payload);,
     }
@@ -495,8 +533,10 @@ fn append_multi_if(
                     try append_multi_then_struct(out, function, stmt);
                 } else {
                     if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnError {
-                        try out.append_bytes("  unreachable");
-                        try out.append_byte(cast<u8>(10));
+                        try append_expr_insts(out, function.name, &stmt.then_expr_insts);
+                        try append_error_union_failure_value(
+                            out, function.return_type.llvm_name, stmt.then_expr_result_id
+                        );
                     } else {
                         return error("compiled mir llvm: unsupported if then kind");
                     }
