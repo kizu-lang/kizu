@@ -126,9 +126,12 @@ pub fn lower_call_return_function(
     );
 }
 // callee_is_field_expr reports whether the value node is a Call whose callee is a
-// FieldExpr, i.e. a method call (receiver.method()) rather than a free function
-// call. It distinguishes the read-only AST accessor lowering (self.children.len())
-// from the direct codegen-helper call lowering (tracker 961).
+// field-mode FieldExpr, i.e. a struct-field method call (receiver.method()) rather
+// than a free function or namespaced call. It distinguishes the read-only AST/array
+// accessor lowering (self.children.len() / self.children.get(...)) from the direct
+// codegen-helper call lowering and from namespaced calls (Foo::bar(), Variant::X())
+// whose callee is a namespace-mode FieldExpr, which must keep using the free-function
+// call path (tracker 961).
 pub fn callee_is_field_expr(
     ir_bytes: []u8,
     function_name: []u8,
@@ -141,7 +144,13 @@ pub fn callee_is_field_expr(
     let callee_kind = try ir_contract::body_node_kind_from(
         ir_bytes, function_name, callee_node, bs
     );
-    return std::mem::equal_bytes(callee_kind, "FieldExpr");
+    if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        return false;
+    }
+    let callee_mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, bs
+    );
+    return std::mem::equal_bytes(callee_mode, "field");
 }
 
 // is_array_field_type reports whether a recorded struct-field type token is a
@@ -681,6 +690,15 @@ fn lower_multi_return_statement(
                 string_counter, message_result, message_insts
             );
         }
+        // A Call whose callee is a FieldExpr is a struct-field method call. The only
+        // supported multi-statement method return is the checked Array<T>.get
+        // accessor (self.<field>.get(<expr>) -> !T), backing Ast.child_at (tracker 961).
+        if try callee_is_field_expr(ir_bytes, function_name, value, bs) {
+            return try lower_multi_return_array_get(
+                ir_bytes, function_name, module_prefix, llvm_return_type,
+                locals_spec, value, string_counter, temp_counter, bs
+            );
+        }
         let call_type = try compiled_mir_types::lower_call_return_type(
             ir_bytes, function_name, module_prefix, value, bs
         );
@@ -716,6 +734,108 @@ fn lower_multi_return_statement(
         bs
     );
     return compiled_mir::return_expr_stmt(string_counter, result_id, insts);
+}
+// lower_multi_return_array_get lowers a multi-statement
+// 'return self.<field>.get(<expr>);' (Array<T>.get -> !T, tracker 961). It lowers the
+// index expression (e.g. range.start + index) into expr_insts, resolves the Array<T>
+// field off the struct value receiver, and builds a ReturnArrayGet statement that the
+// renderer turns into the checked @kizu_rt_array_at call + ok-branch + by-value load +
+// error-union wrap. Ast.child_at is its first consumer.
+fn lower_multi_return_array_get(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    call_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    bs: i64
+) -> !compiled_mir::MirStmt {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "get") {
+        return error("compiled mir: only Array.get method return is supported");
+    }
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 1 {
+        return error("compiled mir: Array.get accessor takes one index argument");
+    }
+    // The method receiver is the array field expression self.<field>.
+    let field_expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let field_expr_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, field_expr, bs
+    );
+    if !std::mem::equal_bytes(field_expr_kind, "FieldExpr") {
+        return error("compiled mir: Array.get receiver must be a struct field access");
+    }
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, field_expr, "field", bs
+    );
+    let var_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_expr, "receiver", 0, bs
+    );
+    let var_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, var_node, bs
+    );
+    if !std::mem::equal_bytes(var_kind, "Var") {
+        return error("compiled mir: Array.get field receiver must be a parameter");
+    }
+    let var_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, var_node, bs
+    );
+    let receiver_llvm_type = try compiled_signature::find_param_type(locals_spec, var_name);
+    let struct_kizu_type = try compiled_signature::find_param_kizu_type(
+        ir_bytes, module_prefix, var_name, locals_spec
+    );
+    let lookup_type = compiled_mir_types::struct_lookup_kizu_type(struct_kizu_type);
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+        ir_bytes, module_prefix, lookup_type, field_name
+    );
+    if !field.found {
+        return error("compiled mir: Array.get receiver field not found");
+    }
+    if !is_array_field_type(field.field_type) {
+        return error("compiled mir: Array.get receiver field is not a std::array::Array");
+    }
+    let element_kizu_type = try array_element_kizu_type(field.field_type);
+    let element_llvm_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
+        ir_bytes, "", element_kizu_type
+    );
+    // Lower the index expression (e.g. range.start + index) into expr_insts; the
+    // result temp %t<index_result_id> feeds the checked array element accessor.
+    let index_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "arg", 0, bs
+    );
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let index_result_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        index_node,
+        string_counter,
+        temp_counter,
+        &var insts,
+        bs
+    );
+    return compiled_mir::return_array_get_stmt(
+        receiver_llvm_type,
+        var_name,
+        field.index,
+        element_llvm_type,
+        index_result_id,
+        string_counter,
+        insts
+    );
 }
 // short_circuit_kind classifies a condition node: 1 for and, 2 for or, 0
 // otherwise. SPEC 6.9.1 requires and/or to short-circuit, so the if lowering
