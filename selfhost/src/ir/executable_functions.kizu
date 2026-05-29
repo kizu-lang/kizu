@@ -16,6 +16,7 @@ pub fn append_facts(
     var lexer_found = false;
     var loader_found = false;
     var ast_found = false;
+    var diagnostic_found = false;
 
     var index = 0;
     while index < files.len() {
@@ -25,6 +26,10 @@ pub fn append_facts(
             if std::mem::equal_bytes(std_module, "kizu/ast") {
                 try append_ast_function_facts(allocator, out, file);
                 ast_found = true;
+            }
+            if std::mem::equal_bytes(std_module, "kizu/diagnostic") {
+                try append_diagnostic_function_facts(allocator, out, file);
+                diagnostic_found = true;
             }
         }
         if file.kind == source::SourceKind::Selfhost {
@@ -84,6 +89,49 @@ pub fn append_facts(
     if !ast_found {
         return error("missing std kizu ast source");
     }
+    if !diagnostic_found {
+        return error("missing std kizu diagnostic source");
+    }
+    return;
+}
+
+// append_diagnostic_function_facts emits the facts backing the first checked
+// Array<T>.get accessor compiled into stage2: std::kizu::diagnostic::Diagnostic.related_get
+// (tracker 961). It lands the Diagnostic struct field layout (so self.related resolves
+// to field index 2), the RelatedSpan element type-llvm mapping (so the get accessor can
+// load the element by value), and the related_get method signature + body, which lowers
+// to the checked @kizu_rt_array_at runtime call returning the element as !RelatedSpan. It
+// deliberately touches neither the AstNode/AstData union nor any Arena.get accessor.
+fn append_diagnostic_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+    try append_selected_struct_field_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "Diagnostic",
+        "std::kizu::diagnostic::Diagnostic"
+    );
+    try append_type_llvm_fact(
+        out,
+        "std::kizu::diagnostic::RelatedSpan",
+        "%kizu.kizu.diagnostic.related_span"
+    );
+    try append_selected_impl_method_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "Diagnostic",
+        "related_get",
+        "std::kizu::diagnostic::diagnostic_related_get",
+        "checked-ast-readonly"
+    );
     return;
 }
 

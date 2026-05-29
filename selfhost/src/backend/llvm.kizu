@@ -1390,6 +1390,19 @@ fn render_llvm_module(
     // (tracker 961).
     try append_line(out,
         "%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }");
+    // std::kizu::diagnostic value types back the first checked Array<T>.get accessor
+    // compiled into stage2: Diagnostic.related_get reads the related Array<RelatedSpan>
+    // field (index 2) and returns a single RelatedSpan by value as !RelatedSpan
+    // (tracker 961). FileSpan/RelatedSpan/Diagnostic mirror their declaration field
+    // order; []u8 fields lower to %kizu.slice.u8 and the related Array to %kizu.owned.
+    try append_line(out,
+        "%kizu.kizu.diagnostic.file_span = type { i64, %kizu.slice.u8, i64, i64, i64, i64 }");
+    try append_line(out,
+        "%kizu.kizu.diagnostic.related_span = type { %kizu.kizu.diagnostic.file_span, %kizu.slice.u8 }");
+    try append_line(out,
+        "%kizu.kizu.diagnostic.diagnostic = type { %kizu.kizu.diagnostic.file_span, %kizu.slice.u8, %kizu.owned }");
+    try append_line(out,
+        "%kizu.error.related_span = type { i1, %kizu.kizu.diagnostic.related_span, %kizu.slice.u8 }");
     try append_line(out, "");
     try cli_llvm::append_globals(out, ir_bytes);
     try append_line(out, "");
@@ -1443,6 +1456,67 @@ fn render_llvm_module(
         "  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2");
     try append_line(out, "  %len = load i64, ptr %len_field");
     try append_line(out, "  ret i64 %len");
+    try append_line(out, "}");
+    try append_line(out, "");
+    // The array bounds message global backs the @kizu_rt_array_at failure path; the
+    // hosted compiler module carries its own self-contained copy (tracker 961).
+    try out.append_bytes(
+        "@.kizu.rt.array_index_out_of_bounds = private unnamed_addr constant [25 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("array index out of bounds");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "");
+    // array_at is the checked Array<T> element accessor backing the read-only
+    // Diagnostic.related_get accessor compiled into stage2 (Array<T>.get -> !T,
+    // tracker 961). The runtime storage module owns the canonical definition; the
+    // hosted compiler module carries its own self-contained copy (it never links the
+    // storage module). It returns a borrowed view of the element as a
+    // %kizu.error.slice.u8 (ok flag, element view slice {ptr,element_size}, error
+    // message); out-of-bounds or unset storage returns the failure message.
+    try append_line(out,
+        "define %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  %data = load ptr, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %len = load i64, ptr %len_field");
+    try append_line(out,
+        "  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4");
+    try append_line(out, "  %element_size = load i64, ptr %element_size_field");
+    try append_line(out, "  %index_nonnegative = icmp sge i64 %index, 0");
+    try append_line(out, "  %index_in_bounds = icmp slt i64 %index, %len");
+    try append_line(out, "  %data_ok = icmp ne ptr %data, null");
+    try append_line(out, "  %size_ok = icmp sgt i64 %element_size, 0");
+    try append_line(out, "  %bounds_ok = and i1 %index_nonnegative, %index_in_bounds");
+    try append_line(out, "  %storage_ok = and i1 %data_ok, %size_ok");
+    try append_line(out, "  %ok = and i1 %bounds_ok, %storage_ok");
+    try append_line(out, "  br i1 %ok, label %valid, label %invalid");
+    try append_line(out, "valid:");
+    try append_line(out, "  %offset = mul i64 %index, %element_size");
+    try append_line(out, "  %element_ptr = getelementptr i8, ptr %data, i64 %offset");
+    try append_line(out, "  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %element_ptr, 0");
+    try append_line(out, "  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %element_size, 1");
+    try append_line(out, "  %valid_ok = insertvalue %kizu.error.slice.u8 poison, i1 true, 0");
+    try append_line(out,
+        "  %valid_value = insertvalue %kizu.error.slice.u8 %valid_ok, %kizu.slice.u8 %slice, 1");
+    try append_line(out,
+        "  %valid_result = insertvalue %kizu.error.slice.u8 %valid_value, %kizu.slice.u8 zeroinitializer, 2");
+    try append_line(out, "  ret %kizu.error.slice.u8 %valid_result");
+    try append_line(out, "invalid:");
+    try append_line(out,
+        "  %message_ptr = getelementptr inbounds [25 x i8], ptr @.kizu.rt.array_index_out_of_bounds, i64 0, i64 0");
+    try append_line(out, "  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0");
+    try append_line(out, "  %message = insertvalue %kizu.slice.u8 %message_base, i64 25, 1");
+    try append_line(out, "  %invalid_ok = insertvalue %kizu.error.slice.u8 poison, i1 false, 0");
+    try append_line(out,
+        "  %invalid_value = insertvalue %kizu.error.slice.u8 %invalid_ok, %kizu.slice.u8 zeroinitializer, 1");
+    try append_line(out,
+        "  %invalid_result = insertvalue %kizu.error.slice.u8 %invalid_value, %kizu.slice.u8 %message, 2");
+    try append_line(out, "  ret %kizu.error.slice.u8 %invalid_result");
     try append_line(out, "}");
     try append_line(out, "");
     try cli_llvm::append_functions(out, ir_bytes);

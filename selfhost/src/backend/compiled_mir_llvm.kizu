@@ -23,6 +23,7 @@ pub fn append_function(
         Expr => try append_expr_block(out, function);,
         MultiStatement => try append_multi_statement_block(out, function);,
         Call(payload) => try append_call_block(out, function, payload);,
+        ArrayGet(payload) => try append_array_get_block(out, function, payload);,
     }
     return;
 }
@@ -37,6 +38,85 @@ fn append_call_block(
     try compiled_mir_llvm_call::append_call_return(out, function, inst);
     return;
 }
+fn append_ll_line(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_array_get_block renders a read-only 'return self.<field>.get(index);'
+// accessor (Array<T>.get -> !T, tracker 961). It extracts the Array<T> %kizu.owned
+// handle off the struct value receiver, calls the checked @kizu_rt_array_at runtime
+// helper (the same one std arrays use, returning a borrowed %kizu.error.slice.u8
+// view), and branches on the ok flag: on success it loads the element value out of
+// the borrowed view and wraps it as the error-union success value (field 1); on
+// failure it forwards the runtime message as the error-union failure value (field 2).
+// The error branch is a real failure return, never 'unreachable'.
+fn append_array_get_block(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    inst: &compiled_mir::MirArrayGetInst
+) -> !void {
+    let error_union = function.return_type.llvm_name;
+    try out.append_bytes("define ");
+    try out.append_bytes(error_union);
+    try out.append_bytes(" @");
+    try out.append_bytes(function.name);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, function.params_spec);
+    try append_ll_line(out, ") {");
+    try append_ll_line(out, "entry:");
+    // Read the Array<T> handle off the struct value receiver.
+    try out.append_bytes("  %array = extractvalue ");
+    try out.append_bytes(inst.receiver_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(inst.receiver_name);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, inst.field_index);
+    try out.append_byte(cast<u8>(10));
+    // Call the checked array element accessor; it returns a borrowed view as a
+    // %kizu.error.slice.u8 (ok flag, element view slice, error message).
+    try out.append_bytes("  %view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %");
+    try out.append_bytes(inst.index_name);
+    try append_ll_line(out, ")");
+    try append_ll_line(out, "  %view_ok = extractvalue %kizu.error.slice.u8 %view, 0");
+    try append_ll_line(out,
+        "  br i1 %view_ok, label %array_get_ok, label %array_get_fail");
+    // Success: load the element value out of the borrowed view and wrap it.
+    try append_ll_line(out, "array_get_ok:");
+    try append_ll_line(out, "  %view_slice = extractvalue %kizu.error.slice.u8 %view, 1");
+    try append_ll_line(out, "  %elem_ptr = extractvalue %kizu.slice.u8 %view_slice, 0");
+    try out.append_bytes("  %elem = load ");
+    try out.append_bytes(inst.element_type);
+    try append_ll_line(out, ", ptr %elem_ptr");
+    try out.append_bytes("  %ok_flag = insertvalue ");
+    try out.append_bytes(error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %ok_value = insertvalue ");
+    try out.append_bytes(error_union);
+    try out.append_bytes(" %ok_flag, ");
+    try out.append_bytes(inst.element_type);
+    try append_ll_line(out, " %elem, 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(error_union);
+    try append_ll_line(out, " %ok_value");
+    // Failure: forward the runtime message as the error-union failure value.
+    try append_ll_line(out, "array_get_fail:");
+    try append_ll_line(out, "  %fail_msg = extractvalue %kizu.error.slice.u8 %view, 2");
+    try out.append_bytes("  %fail_flag = insertvalue ");
+    try out.append_bytes(error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %fail_value = insertvalue ");
+    try out.append_bytes(error_union);
+    try append_ll_line(out, " %fail_flag, %kizu.slice.u8 %fail_msg, 2");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(error_union);
+    try append_ll_line(out, " %fail_value");
+    try append_ll_line(out, "}");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 fn append_struct_literal_block(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction

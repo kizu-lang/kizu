@@ -152,6 +152,51 @@ fn is_array_field_type(field_type: []u8) -> bool {
     return std::mem::starts_with(field_type, "std::array::Array<");
 }
 
+// array_element_kizu_type strips the std::array::Array<...> wrapper off a recorded
+// field type token and returns the element type token (tracker 961). It backs the
+// Array<T>.get accessor, which needs the element type to lower the by-value load.
+fn array_element_kizu_type(field_type: []u8) -> ![]u8 {
+    let prefix = "std::array::Array<";
+    let prefix_len = std::mem::len(prefix);
+    let field_len = std::mem::len(field_type);
+    if field_len <= prefix_len or field_type[field_len - 1] != cast<u8>(62) {
+        return error("compiled mir: malformed std::array::Array element type");
+    }
+    return field_type[prefix_len..field_len - 1];
+}
+
+// lower_array_method_return dispatches a 'return self.<field>.<method>(...);' call
+// whose callee is a struct-field method to the matching Array accessor lowering:
+// len() -> array_len builtin call (Ast.len), get(index) -> the checked element
+// accessor (Array<T>.get -> !T). Unsupported methods fail explicitly (tracker 961).
+pub fn lower_array_method_return(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if std::mem::equal_bytes(method_name, "len") {
+        return try lower_array_len_method_return(
+            ir_bytes, function_name, llvm_symbol, params_spec, call_node, bs
+        );
+    }
+    if std::mem::equal_bytes(method_name, "get") {
+        return try lower_array_get_method_return(
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, call_node, bs
+        );
+    }
+    return error("compiled mir: unsupported array accessor method");
+}
+
 // lower_array_len_method_return lowers a single 'return self.<field>.len();' where
 // <field> is a std::array::Array<T> field of a struct value parameter. It is the
 // first AST read-only accessor compiled into stage2 (std::kizu::ast::Ast.len): it
@@ -240,6 +285,104 @@ pub fn lower_array_len_method_return(
         "",
         "kizu_rt_array_len",
         args
+    );
+}
+// lower_array_get_method_return lowers a single 'return self.<field>.get(index);'
+// where <field> is a std::array::Array<T> field of a struct value parameter and
+// index is an i64 parameter. It is the first checked Array<T>.get accessor compiled
+// into stage2 (std::kizu::diagnostic::Diagnostic.related_get, tracker 961): it reads
+// the Array field off the struct value parameter, calls the checked
+// @kizu_rt_array_at runtime helper, and on success loads the element value out of
+// the borrowed view and wraps it as the error-union success value; on failure it
+// forwards the runtime message as the error-union failure value. The error branch
+// is a real failure return, never 'unreachable'.
+pub fn lower_array_get_method_return(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 1 {
+        return error("compiled mir: Array.get accessor takes one index argument");
+    }
+    // The single argument is the i64 index parameter.
+    let index_arg = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "arg", 0, bs
+    );
+    let index_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, index_arg, bs
+    );
+    if !std::mem::equal_bytes(index_kind, "Var") {
+        return error("compiled mir: Array.get index must be a parameter");
+    }
+    let index_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, index_arg, bs
+    );
+    // The method receiver is the array field expression self.<field>.
+    let field_expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let field_expr_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, field_expr, bs
+    );
+    if !std::mem::equal_bytes(field_expr_kind, "FieldExpr") {
+        return error("compiled mir: Array.get receiver must be a struct field access");
+    }
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, field_expr, "field", bs
+    );
+    let var_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_expr, "receiver", 0, bs
+    );
+    let var_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, var_node, bs
+    );
+    if !std::mem::equal_bytes(var_kind, "Var") {
+        return error("compiled mir: Array.get field receiver must be a parameter");
+    }
+    let var_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, var_node, bs
+    );
+    let receiver_llvm_type = try compiled_signature::find_param_type(params_spec, var_name);
+    let struct_kizu_type = try compiled_signature::find_param_kizu_type(
+        ir_bytes, module_prefix, var_name, params_spec
+    );
+    let lookup_type = compiled_mir_types::struct_lookup_kizu_type(struct_kizu_type);
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+        ir_bytes, module_prefix, lookup_type, field_name
+    );
+    if !field.found {
+        return error("compiled mir: Array.get receiver field not found");
+    }
+    if !is_array_field_type(field.field_type) {
+        return error("compiled mir: Array.get receiver field is not a std::array::Array");
+    }
+    // The element type backs the by-value load out of the borrowed view. It is
+    // looked up by its own fully-qualified name (empty module prefix) so the lookup
+    // is independent of which module the accessor lives in.
+    let element_kizu_type = try array_element_kizu_type(field.field_type);
+    let element_llvm_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
+        ir_bytes, "", element_kizu_type
+    );
+    return compiled_mir_function::single_array_get_return_function(
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        receiver_llvm_type,
+        var_name,
+        field.index,
+        index_name,
+        element_llvm_type
     );
 }
 pub fn lower_struct_return_function(
