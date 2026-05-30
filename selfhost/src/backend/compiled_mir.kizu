@@ -33,6 +33,8 @@ pub enum MirCallArgKind {
     FieldAccess,
     EmptySlice,
     Slice,
+    IntLiteral,
+    Arith,
 }
 
 // A FieldAccess call arg mirrors MirStructField's nested layout: source_type /
@@ -41,12 +43,21 @@ pub enum MirCallArgKind {
 // nested_source_type (the intermediate field type). nested_field_index == -1
 // marks a single-level access (receiver.field) so the renderer skips the second
 // extractvalue (tracker 961, mirrors nested_field_access_struct_field).
+//
+// An IntLiteral arg renders its int_value inline as the argument operand (no
+// setup), and an Arith arg renders '<base> +/- int_value' into an %argN_arith
+// temp before the call: when source_field_index >= 0 the base is the
+// source_field_index field extracted off the Var receiver (source_type %value),
+// otherwise the base is the Var %value directly; bool_value true selects sub
+// over add. These back the lexer's position(initial.line + 1, 1) style calls
+// (tracker 961, scope 4 prerequisite).
 pub struct MirCallArg {
     pub ty: []u8,
     pub kind: MirCallArgKind,
     pub value: []u8,
     pub bool_value: bool,
     pub string_index: i64,
+    pub int_value: i64,
     pub source_type: []u8,
     pub source_field_index: i64,
     pub nested_source_type: []u8,
@@ -1095,6 +1106,7 @@ pub fn var_call_arg(ty: []u8, name: []u8) -> MirCallArg {
         value: name,
         bool_value: false,
         string_index: -1,
+        int_value: 0,
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
@@ -1113,6 +1125,7 @@ pub fn string_call_arg(ty: []u8, payload: []u8, string_index: i64) -> MirCallArg
         value: payload,
         bool_value: false,
         string_index: string_index,
+        int_value: 0,
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
@@ -1131,6 +1144,7 @@ pub fn bool_call_arg(ty: []u8, value: bool) -> MirCallArg {
         value: "",
         bool_value: value,
         string_index: -1,
+        int_value: 0,
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
@@ -1154,6 +1168,7 @@ pub fn field_access_call_arg(
         value: source_name,
         bool_value: false,
         string_index: -1,
+        int_value: 0,
         source_type: source_type,
         source_field_index: source_field_index,
         nested_source_type: "",
@@ -1184,6 +1199,7 @@ pub fn nested_field_access_call_arg(
         value: source_name,
         bool_value: false,
         string_index: -1,
+        int_value: 0,
         source_type: source_type,
         source_field_index: source_field_index,
         nested_source_type: nested_type,
@@ -1202,6 +1218,7 @@ pub fn empty_slice_call_arg(ty: []u8) -> MirCallArg {
         value: "",
         bool_value: false,
         string_index: -1,
+        int_value: 0,
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
@@ -1227,6 +1244,7 @@ pub fn slice_call_arg(
         value: target,
         bool_value: false,
         string_index: -1,
+        int_value: 0,
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
@@ -1235,6 +1253,85 @@ pub fn slice_call_arg(
         slice_start_offset: start_offset,
         slice_end_base: end_base,
         slice_end_offset: end_offset
+    };
+}
+
+// int_literal_call_arg passes an integer literal directly as a call operand
+// (e.g. the '1' in position(line, 1)); the renderer emits no setup and writes the
+// literal inline in the argument list (tracker 961, scope 4 prerequisite).
+pub fn int_literal_call_arg(ty: []u8, value: i64) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::IntLiteral,
+        value: "",
+        bool_value: false,
+        string_index: -1,
+        int_value: value,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: "",
+        slice_start_offset: 0,
+        slice_end_base: "",
+        slice_end_offset: 0
+    };
+}
+
+// arith_field_call_arg passes 'receiver.<field> +/- value' as a call operand: the
+// renderer extracts source_field_index off the Var receiver (source_type %name)
+// then adds (or subtracts when subtract is true) the literal into an %argN_arith
+// temp. Backs position(initial.line + 1, ...) (tracker 961, scope 4 prerequisite).
+pub fn arith_field_call_arg(
+    ty: []u8,
+    source_type: []u8,
+    source_name: []u8,
+    source_field_index: i64,
+    value: i64,
+    subtract: bool
+) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::Arith,
+        value: source_name,
+        bool_value: subtract,
+        string_index: -1,
+        int_value: value,
+        source_type: source_type,
+        source_field_index: source_field_index,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: "",
+        slice_start_offset: 0,
+        slice_end_base: "",
+        slice_end_offset: 0
+    };
+}
+
+// arith_var_call_arg passes '<var> +/- value' as a call operand: the renderer adds
+// (or subtracts) the literal off the Var %name directly into an %argN_arith temp.
+// source_field_index stays -1 to mark the var (no extractvalue) base (tracker 961).
+pub fn arith_var_call_arg(
+    ty: []u8,
+    var_name: []u8,
+    value: i64,
+    subtract: bool
+) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::Arith,
+        value: var_name,
+        bool_value: subtract,
+        string_index: -1,
+        int_value: value,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: "",
+        slice_start_offset: 0,
+        slice_end_base: "",
+        slice_end_offset: 0
     };
 }
 

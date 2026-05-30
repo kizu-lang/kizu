@@ -154,11 +154,58 @@ pub fn append_call_arg_setup_with_prefix(
             } else {
                 if arg.kind == compiled_mir::MirCallArgKind::Slice {
                     try append_slice_arg_setup(out, &arg, call_prefix, index);
+                } else {
+                    if arg.kind == compiled_mir::MirCallArgKind::Arith {
+                        try append_arith_arg_setup(out, &arg, call_prefix, index);
+                    }
                 }
             }
         }
         index = index + 1;
     }
+    return;
+}
+
+// append_arith_arg_setup emits the pre-call instructions for an Arith call arg
+// (tracker 961, scope 4 prerequisite). A field base extracts source_field_index off
+// the Var receiver into %argN_ex first; both bases then add (or sub when bool_value)
+// the literal into %argN_arith, which append_call_args references as the operand.
+fn append_arith_arg_setup(
+    out: &var std::string::String,
+    arg: &compiled_mir::MirCallArg,
+    call_prefix: i64,
+    index: i64
+) -> !void {
+    if arg.source_field_index >= 0 {
+        try out.append_bytes("  ");
+        try append_arg_local_name(out, call_prefix, index);
+        try out.append_bytes("_ex = extractvalue ");
+        try out.append_bytes(arg.source_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(arg.value);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, arg.source_field_index);
+        try out.append_byte(cast<u8>(10));
+    }
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, call_prefix, index);
+    if arg.bool_value {
+        try out.append_bytes("_arith = sub ");
+    } else {
+        try out.append_bytes("_arith = add ");
+    }
+    try out.append_bytes(arg.ty);
+    try out.append_bytes(" ");
+    if arg.source_field_index >= 0 {
+        try append_arg_local_name(out, call_prefix, index);
+        try out.append_bytes("_ex");
+    } else {
+        try out.append_bytes("%");
+        try out.append_bytes(arg.value);
+    }
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, arg.int_value);
+    try out.append_byte(cast<u8>(10));
     return;
 }
 
@@ -390,7 +437,16 @@ pub fn append_call_args_with_prefix(
                                 try append_arg_local_name(out, call_prefix, index);
                                 try out.append_bytes("_slice");
                             } else {
-                                return error("compiled mir llvm: unsupported call arg");
+                                if arg.kind == compiled_mir::MirCallArgKind::IntLiteral {
+                                    try std::fmt::append_i64(out, arg.int_value);
+                                } else {
+                                    if arg.kind == compiled_mir::MirCallArgKind::Arith {
+                                        try append_arg_local_name(out, call_prefix, index);
+                                        try out.append_bytes("_arith");
+                                    } else {
+                                        return error("compiled mir llvm: unsupported call arg");
+                                    }
+                                }
                             }
                         }
                     }
