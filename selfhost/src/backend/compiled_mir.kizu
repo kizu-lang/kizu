@@ -383,6 +383,22 @@ pub struct MirTraversalArm {
     pub args: std::array::Array<MirTraversalArg>,
 }
 
+// MirReturnTryBinaryStmt backs a 'return <literal> + try <callee>(<args>);' single return
+// (count_one / count_with_range, tracker 961). The renderer emits the call, branches on its
+// ok flag, propagates the failure as this function's own error union, and on success adds the
+// literal to the unwrapped value and returns it wrapped as the error-union success. It owns
+// the call-argument Array.
+pub struct MirReturnTryBinaryStmt {
+    pub literal: i64,
+    pub called_error_union: []u8,
+    pub own_error_union: []u8,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub string_index: i64,
+    pub try_index: i64,
+    pub call_args: std::array::Array<MirCallArg>,
+}
+
 // MirMatchTraversalStmt backs the node_count recursive AST-traversal accessor: 'let node =
 // tree.get(node_id); return match node.data { <44 arms> };' (tracker 961). The renderer binds
 // the AstNode by value off the Ast.get call, extracts the AstData union (field
@@ -405,6 +421,7 @@ pub union MirStmt {
     LetArenaAdd(MirLetArenaAddStmt),
     LetExpr(MirLetExprStmt),
     LetTryCall(MirLetTryCallStmt),
+    ReturnTryBinary(MirReturnTryBinaryStmt),
     ReturnCall(MirReturnCallStmt),
     ReturnStruct(MirReturnStructStmt),
     ReturnExpr(MirReturnExprStmt),
@@ -622,6 +639,13 @@ impl MirLetTryCallStmt {
     }
 }
 
+impl MirReturnTryBinaryStmt {
+    fn deinit(self: MirReturnTryBinaryStmt) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
 impl MirTraversalArm {
     fn deinit(self: MirTraversalArm) -> void {
         self.args.deinit();
@@ -681,6 +705,7 @@ impl MirStmt {
             LetArenaAdd(payload) => payload.deinit(),
             LetExpr(payload) => payload.deinit(),
             LetTryCall(payload) => payload.deinit(),
+            ReturnTryBinary(payload) => payload.deinit(),
             ReturnCall(payload) => payload.deinit(),
             ReturnStruct(payload) => payload.deinit(),
             ReturnExpr(payload) => payload.deinit(),
@@ -1405,6 +1430,28 @@ pub fn let_try_call_stmt(
         name: name,
         called_error_union: called_error_union,
         success_type: success_type,
+        own_error_union: own_error_union,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        string_index: string_index,
+        try_index: try_index,
+        call_args: args
+    });
+}
+
+pub fn return_try_binary_stmt(
+    literal: i64,
+    called_error_union: []u8,
+    own_error_union: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    string_index: i64,
+    try_index: i64,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::ReturnTryBinary(MirReturnTryBinaryStmt {
+        literal: literal,
+        called_error_union: called_error_union,
         own_error_union: own_error_union,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,

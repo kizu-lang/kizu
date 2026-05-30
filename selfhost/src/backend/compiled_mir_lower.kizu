@@ -1001,6 +1001,86 @@ fn build_traversal_arm(
     );
 }
 
+// return_value_is_literal_plus_try reports whether a single-return value is the shape
+// '<int literal> + try <call>' (count_one / count_with_range, tracker 961).
+pub fn return_value_is_literal_plus_try(
+    ir_bytes: []u8,
+    function_name: []u8,
+    value: i64,
+    bs: i64
+) -> !bool {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if !std::mem::equal_bytes(kind, "Binary") {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, value, bs
+    );
+    if !std::mem::equal_bytes(op, "add") {
+        return false;
+    }
+    let left = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "left", 0, bs
+    );
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left, bs);
+    if !std::mem::equal_bytes(left_kind, "Int") {
+        return false;
+    }
+    let right = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "right", 0, bs
+    );
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right, bs);
+    return std::mem::equal_bytes(right_kind, "TryExpr");
+}
+
+// lower_return_try_binary_function lowers 'return <int> + try <callee>(<args>);' into a
+// single ReturnTryBinary statement (count_one / count_with_range, tracker 961).
+pub fn lower_return_try_binary_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    value: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let left = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "left", 0, bs
+    );
+    let literal = try ir_contract::body_int_value_from(ir_bytes, function_name, left, bs);
+    let right = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "right", 0, bs
+    );
+    let inner_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, right, "value", 0, bs
+    );
+    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner_call, bs);
+    if !std::mem::equal_bytes(inner_kind, "Call") {
+        return error("compiled mir: return-try binary must wrap a call");
+    }
+    let called_error_union = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, inner_call, bs
+    );
+    let callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, inner_call, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, inner_call, bs
+    );
+    let args = try compiled_mir_lower_call::lower_call_args(
+        ir_bytes, function_name, module_prefix, params_spec, inner_call, 0, bs
+    );
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::return_try_binary_stmt(
+        literal, called_error_union, llvm_return_type,
+        callee_module_prefix, callee_name, 0, 0, args
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // match_union_arm_expr unwraps a match arm body to its value expression: the parser wraps
 // a bare expression arm body in an ExprStmt, so the field chain / integer literal lives at
 // the ExprStmt 'expr' child (tracker 961).

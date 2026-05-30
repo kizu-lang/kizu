@@ -398,6 +398,7 @@ fn append_multi_stmt(
         LetArenaAdd(payload) => try append_multi_let_arena_add(out, function.name, payload);,
         LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
         LetTryCall(payload) => try append_multi_let_try_call(out, function, payload, local_prefix);,
+        ReturnTryBinary(payload) => try append_multi_return_try_binary(out, function, payload, local_prefix);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -509,6 +510,65 @@ fn append_multi_let_try_call(
     try append_ll_line(out, "_call, 1");
     return;
 }
+// append_multi_return_try_binary renders 'return <literal> + try <callee>(<args>);'
+// (count_one / count_with_range, tracker 961): it emits the call, branches on its ok flag,
+// propagates the failure as this function's own error union, and on success adds the literal
+// to the unwrapped value and returns it wrapped as the error-union success.
+fn append_multi_return_try_binary(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirReturnTryBinaryStmt,
+    local_prefix: i64
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function.name, &stmt.call_args, local_prefix
+    );
+    try out.append_bytes("  %rettry_call = call ");
+    try out.append_bytes(stmt.called_error_union);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, stmt.call_module_prefix, stmt.call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %rettry_ok = extractvalue ");
+    try out.append_bytes(stmt.called_error_union);
+    try append_ll_line(out, " %rettry_call, 0");
+    try append_ll_line(out,
+        "  br i1 %rettry_ok, label %rettry_cont, label %rettry_fail");
+    try append_ll_line(out, "rettry_fail:");
+    try out.append_bytes("  %rettry_msg = extractvalue ");
+    try out.append_bytes(stmt.called_error_union);
+    try append_ll_line(out, " %rettry_call, 2");
+    try out.append_bytes("  %rettry_fail_flag = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %rettry_fail_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %rettry_fail_flag, %kizu.slice.u8 %rettry_msg, 2");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %rettry_fail_val");
+    try append_ll_line(out, "rettry_cont:");
+    try out.append_bytes("  %rettry_success = extractvalue ");
+    try out.append_bytes(stmt.called_error_union);
+    try append_ll_line(out, " %rettry_call, 1");
+    try out.append_bytes("  %rettry_sum = add i64 ");
+    try std::fmt::append_i64(out, stmt.literal);
+    try append_ll_line(out, ", %rettry_success");
+    try out.append_bytes("  %rettry_wrap_flag = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %rettry_wrap_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %rettry_wrap_flag, i64 %rettry_sum, 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %rettry_wrap_val");
+    return;
+}
+
 // append_match_traversal_globals: a node_count traversal arm forwards only the receiver and
 // payload-field arguments (no string literals), so there are no string-constant globals.
 fn append_match_traversal_globals(stmt: &compiled_mir::MirMatchTraversalStmt) -> !void {
@@ -855,6 +915,7 @@ fn append_stmt_globals(
         LetArenaAdd(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
