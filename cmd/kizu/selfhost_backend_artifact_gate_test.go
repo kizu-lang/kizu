@@ -359,6 +359,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMArrayGetFragments()...)
 	fragments = append(fragments, requiredLLVMChildAtFragments()...)
 	fragments = append(fragments, requiredLLVMUnionAbiFragments()...)
+	fragments = append(fragments, requiredLLVMArenaGetFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -570,6 +571,28 @@ func requiredLLVMUnionAbiFragments() []string {
 		"%raw = extractvalue %kizu.handle %raw_handle, 1",
 		"  ret %kizu.kizu.ast.node_id %v2_0",
 		"define %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %value)",
+	}
+}
+
+// requiredLLVMArenaGetFragments returns the tracker-961 std::kizu::ast::Ast.get
+// accessor compiled into stage2. It reads an AstNode back out of the nodes Arena by
+// value (self.nodes.get(id.raw)), reusing the AstNode/AstData union value-type ABI: it
+// computes the index from the NodeId.raw field, reads the Arena handle off the Ast
+// value, calls the checked self-contained @kizu_rt_arena_get, and on success loads the
+// AstNode element by value and returns it. An out-of-bounds index traps via
+// @kizu_rt_trap (Arena.get panics rather than returning an error union, so the trap is
+// the genuine failure semantics, not a stubbed-out branch).
+func requiredLLVMArenaGetFragments() []string {
+	return []string{
+		"define %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get",
+		"%index = extractvalue %kizu.kizu.ast.node_id %id, 0",
+		"%arena = extractvalue %kizu.kizu.ast.ast %self, 0",
+		"%view = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index)",
+		"br i1 %view_ok, label %arena_get_ok, label %arena_get_fail",
+		"%elem = load %kizu.kizu.ast.ast_node, ptr %elem_ptr",
+		"  ret %kizu.kizu.ast.ast_node %elem",
+		"call void @kizu_rt_trap(%kizu.slice.u8 %fail_msg)",
+		"define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index)",
 	}
 }
 
