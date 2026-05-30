@@ -1072,6 +1072,15 @@ func requiredLLVMLexerAdvanceFragments() []string {
 		// position(initial.line, initial.column + 1): plain field arg + field-arith arg.
 		"%arg1_1_ex = extractvalue %kizu.kizu.lexer.position %initial, 1",
 		"%arg1_1_arith = add i64 %arg1_1_ex, 1",
+		// advance_position(source, start, end, initial): a two-phi loop threading the i64 index
+		// and the Position struct current, folding advance_byte across source[start..end].
+		"define %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_position(",
+		"%ap_index = phi i64 [ %start, %entry ], [ %ap_index_next, %ap_loop_body ]",
+		"%ap_current = phi %kizu.kizu.lexer.position [ %initial, %entry ], " +
+			"[ %ap_next, %ap_loop_body ]",
+		"%ap_next = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_byte(" +
+			"i8 %ap_byte, %kizu.kizu.lexer.position %ap_current)",
+		"ret %kizu.kizu.lexer.position %ap_current",
 	}
 }
 

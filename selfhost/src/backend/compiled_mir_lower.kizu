@@ -1116,6 +1116,35 @@ pub fn lower_trim_ascii_function(
 // field 0) and its start/end, slices the text two-bound, and forwards the slice to trim_ascii
 // (tracker 961). The trim callee is std::mem::trim_ascii, passed as a fully-mangled std symbol
 // with an empty module prefix.
+// lower_advance_position_function lowers std::kizu::lexer::advance_position into a single
+// AdvancePosition statement: a two-phi loop threading the i64 index and the Position struct
+// current, feeding source[index] + current into the already-compiled advance_byte each iteration
+// (tracker 961, scope 4 prerequisite). Its struct loop-carried variable and struct-returning
+// call-in-loop the generic while machinery does not model, so it is dispatched by name.
+pub fn lower_advance_position_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let source_name = try nth_param_field(params_spec, 0, true);
+    let source_type = try nth_param_field(params_spec, 0, false);
+    let start_name = try nth_param_field(params_spec, 1, true);
+    let end_name = try nth_param_field(params_spec, 2, true);
+    let initial_name = try nth_param_field(params_spec, 3, true);
+    let position_type = try nth_param_field(params_spec, 3, false);
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::advance_position_stmt(
+        source_name, source_type, start_name, end_name, initial_name,
+        position_type, "kizu_kizu__lexer_advance_byte"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 pub fn lower_ast_node_text_function(
     ir_bytes: []u8,
     function_name: []u8,
