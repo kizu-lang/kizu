@@ -404,6 +404,7 @@ fn append_multi_stmt(
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
+        LowerPrintCall(payload) => try append_multi_lower_print_call(out, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -844,6 +845,153 @@ fn append_multi_print_payload(
     try compiled_mir_llvm_call::append_callee_symbol(out, stmt.callee_module, stmt.empty_name);
     try append_ll_line(out, "()");
     try append_ll_line(out, "  ret %kizu.selfhost.codegen.payload_span %pp_empty");
+    return;
+}
+
+// append_lower_print_call_string_globals emits the "print" literal constant used by the callee
+// comparison. It is threaded through the globals pass (which has the out buffer) rather than the
+// no-buffer per-statement globals hook (tracker 961, scope 4 prerequisite).
+fn append_lower_print_call_string_globals(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirLowerPrintCallStmt
+) -> !void {
+    let quote = cast<u8>(34);
+    try out.append_bytes("@.kizu.compiled.");
+    try out.append_bytes(stmt.print_global_symbol);
+    try out.append_bytes(".s0 = private unnamed_addr constant [5 x i8] c");
+    try out.append_byte(quote);
+    try out.append_bytes("print");
+    try out.append_byte(quote);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_multi_lower_print_call renders lower_print_call(text, ast, function_name,
+// statement_count, locals, callee, args): it compares the callee text against "print" and the
+// arity, propagates the checked Ast.child_at failure into the !RunAst error, extracts the
+// argument payload via print_payload, slices the source text, and wraps print_run_ast (on a
+// supported print) or unsupported_run_ast (on every rejection) into the !RunAst success
+// (tracker 961, scope 4 prerequisite). The callee text is computed once and reused for the
+// "print" comparison and the print_run_ast callee argument.
+fn append_multi_lower_print_call(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirLowerPrintCallStmt
+) -> !void {
+    // callee text + "print" comparison + arity check.
+    try out.append_bytes("  %lpc_callee_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.callee_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.callee_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %lpc_print_ptr = getelementptr [5 x i8], ptr @.kizu.compiled.");
+    try out.append_bytes(stmt.print_global_symbol);
+    try append_ll_line(out, ".s0, i64 0, i64 0");
+    try append_ll_line(out,
+        "  %lpc_print_base = insertvalue %kizu.slice.u8 poison, ptr %lpc_print_ptr, 0");
+    try append_ll_line(out,
+        "  %lpc_print_slice = insertvalue %kizu.slice.u8 %lpc_print_base, i64 5, 1");
+    try append_ll_line(out,
+        "  %lpc_is_print = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %lpc_callee_text, %kizu.slice.u8 %lpc_print_slice)");
+    try out.append_bytes("  %lpc_args_len = extractvalue ");
+    try out.append_bytes(stmt.args_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.args_name);
+    try append_ll_line(out, ", 1");
+    try append_ll_line(out, "  %lpc_len_ok = icmp eq i64 %lpc_args_len, 1");
+    try append_ll_line(out, "  %lpc_ok = and i1 %lpc_is_print, %lpc_len_ok");
+    try append_ll_line(out, "  br i1 %lpc_ok, label %lpc_arity_ok, label %lpc_unsupported");
+    // try ast.child_at(args, 0).
+    try append_ll_line(out, "lpc_arity_ok:");
+    try out.append_bytes("  %lpc_child = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.args_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.args_name);
+    try append_ll_line(out, ", i64 0)");
+    try append_ll_line(out, "  %lpc_child_ok = extractvalue %kizu.error.node_id %lpc_child, 0");
+    try append_ll_line(out, "  br i1 %lpc_child_ok, label %lpc_child_bound, label %lpc_child_fail");
+    // Propagate the child_at failure as this function's !RunAst error.
+    try append_ll_line(out, "lpc_child_fail:");
+    try append_ll_line(out, "  %lpc_child_err = extractvalue %kizu.error.node_id %lpc_child, 2");
+    try append_ll_line(out,
+        "  %lpc_fail0 = insertvalue %kizu.error.run_ast poison, i1 false, 0");
+    try append_ll_line(out,
+        "  %lpc_fail1 = insertvalue %kizu.error.run_ast %lpc_fail0, %kizu.selfhost.codegen.run_ast zeroinitializer, 1");
+    try append_ll_line(out,
+        "  %lpc_fail2 = insertvalue %kizu.error.run_ast %lpc_fail1, %kizu.slice.u8 %lpc_child_err, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lpc_fail2");
+    // print_payload + payload.start < 0 check.
+    try append_ll_line(out, "lpc_child_bound:");
+    try append_ll_line(out, "  %lpc_arg = extractvalue %kizu.error.node_id %lpc_child, 1");
+    try out.append_bytes("  %lpc_payload = call %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_print_payload(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.locals_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.locals_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.node_id %lpc_arg)");
+    try append_ll_line(out,
+        "  %lpc_payload_start = extractvalue %kizu.selfhost.codegen.payload_span %lpc_payload, 0");
+    try append_ll_line(out,
+        "  %lpc_payload_end = extractvalue %kizu.selfhost.codegen.payload_span %lpc_payload, 1");
+    try append_ll_line(out, "  %lpc_start_neg = icmp slt i64 %lpc_payload_start, 0");
+    try append_ll_line(out, "  br i1 %lpc_start_neg, label %lpc_unsupported, label %lpc_payload_ok");
+    // payload_text = text[start..end]; reject an empty payload.
+    try append_ll_line(out, "lpc_payload_ok:");
+    try out.append_bytes("  %lpc_text_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out,
+        "  %lpc_payload_ptr = getelementptr i8, ptr %lpc_text_ptr, i64 %lpc_payload_start");
+    try append_ll_line(out, "  %lpc_payload_len = sub i64 %lpc_payload_end, %lpc_payload_start");
+    try append_ll_line(out,
+        "  %lpc_pt0 = insertvalue %kizu.slice.u8 poison, ptr %lpc_payload_ptr, 0");
+    try append_ll_line(out,
+        "  %lpc_payload_text = insertvalue %kizu.slice.u8 %lpc_pt0, i64 %lpc_payload_len, 1");
+    try append_ll_line(out, "  %lpc_empty_text = icmp eq i64 %lpc_payload_len, 0");
+    try append_ll_line(out, "  br i1 %lpc_empty_text, label %lpc_unsupported, label %lpc_build");
+    // Build the supported RunAst and wrap it as the !RunAst success.
+    try append_ll_line(out, "lpc_build:");
+    try out.append_bytes("  %lpc_run = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_print_run_ast(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.function_name_name);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.statement_count_name);
+    try append_ll_line(out, ", %kizu.slice.u8 %lpc_callee_text, %kizu.slice.u8 %lpc_payload_text)");
+    try append_ll_line(out, "  %lpc_ok0 = insertvalue %kizu.error.run_ast poison, i1 true, 0");
+    try append_ll_line(out,
+        "  %lpc_ok1 = insertvalue %kizu.error.run_ast %lpc_ok0, %kizu.selfhost.codegen.run_ast %lpc_run, 1");
+    try append_ll_line(out,
+        "  %lpc_ok2 = insertvalue %kizu.error.run_ast %lpc_ok1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lpc_ok2");
+    // Every rejection returns unsupported_run_ast(text[0..0]) wrapped as the !RunAst success.
+    try append_ll_line(out, "lpc_unsupported:");
+    try out.append_bytes("  %lpc_us_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out,
+        "  %lpc_us0 = insertvalue %kizu.slice.u8 poison, ptr %lpc_us_ptr, 0");
+    try append_ll_line(out, "  %lpc_empty = insertvalue %kizu.slice.u8 %lpc_us0, i64 0, 1");
+    try append_ll_line(out,
+        "  %lpc_us = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lpc_empty)");
+    try append_ll_line(out, "  %lpc_uw0 = insertvalue %kizu.error.run_ast poison, i1 true, 0");
+    try append_ll_line(out,
+        "  %lpc_uw1 = insertvalue %kizu.error.run_ast %lpc_uw0, %kizu.selfhost.codegen.run_ast %lpc_us, 1");
+    try append_ll_line(out,
+        "  %lpc_uw2 = insertvalue %kizu.error.run_ast %lpc_uw1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lpc_uw2");
     return;
 }
 
@@ -1292,6 +1440,7 @@ fn append_stmt_globals(
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,
+        LowerPrintCall(payload) => try append_lower_print_call_string_globals(out, payload);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
