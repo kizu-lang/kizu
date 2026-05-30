@@ -369,6 +369,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMTextAccessorFragments()...)
 	fragments = append(fragments, requiredLLVMStringLiteralSpanFragments()...)
 	fragments = append(fragments, requiredLLVMPrintPayloadFragments()...)
+	fragments = append(fragments, requiredLLVMLowerPrintCallFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -851,6 +852,35 @@ func requiredLLVMPrintPayloadFragments() []string {
 			"%kizu.selfhost.codegen.local_table %locals, %kizu.slice.u8 %pp_name)",
 		"%pp_empty = call %kizu.selfhost.codegen.payload_span " +
 			"@kizu_selfhost__ir_codegen_empty_payload_span()",
+	}
+}
+
+// requiredLLVMLowerPrintCallFragments returns the tracker-961 scope-4 prerequisite
+// lower_print_call AST traversal lowering compiled into stage2: the first compiled !RunAst
+// error-union lowering. It compares the callee text against the "print" literal global, checks
+// the arity, propagates the checked Ast.child_at failure into the !RunAst error, extracts the
+// argument payload via print_payload, slices the source text, and wraps print_run_ast /
+// unsupported_run_ast into the !RunAst success. These fragments lock the lowered body shape.
+func requiredLLVMLowerPrintCallFragments() []string {
+	return []string{
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_call(",
+		"@.kizu.compiled.kizu_selfhost__ir_codegen_lower_print_call.s0 = " +
+			"private unnamed_addr constant [5 x i8] c\"print\"",
+		"%lpc_callee_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(",
+		"%lpc_is_print = call i1 @kizu_selfhost__slice_equal(" +
+			"%kizu.slice.u8 %lpc_callee_text, %kizu.slice.u8 %lpc_print_slice)",
+		"%lpc_args_len = extractvalue %kizu.kizu.ast.child_range %args, 1",
+		"%lpc_child = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(",
+		"%lpc_fail2 = insertvalue %kizu.error.run_ast %lpc_fail1, %kizu.slice.u8 %lpc_child_err, 2",
+		"%lpc_payload = call %kizu.selfhost.codegen.payload_span " +
+			"@kizu_selfhost__ir_codegen_print_payload(",
+		"%lpc_run = call %kizu.selfhost.codegen.run_ast " +
+			"@kizu_selfhost__ir_codegen_print_run_ast(%kizu.slice.u8 %function_name, " +
+			"i64 %statement_count, %kizu.slice.u8 %lpc_callee_text, %kizu.slice.u8 %lpc_payload_text)",
+		"%lpc_ok1 = insertvalue %kizu.error.run_ast %lpc_ok0, " +
+			"%kizu.selfhost.codegen.run_ast %lpc_run, 1",
+		"%lpc_us = call %kizu.selfhost.codegen.run_ast " +
+			"@kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lpc_empty)",
 	}
 }
 
