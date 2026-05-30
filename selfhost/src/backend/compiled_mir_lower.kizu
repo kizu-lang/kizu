@@ -174,6 +174,137 @@ fn array_element_kizu_type(field_type: []u8) -> ![]u8 {
     return field_type[prefix_len..field_len - 1];
 }
 
+// last_struct_field_index returns the struct-field index of the last lowered field,
+// used to name the struct insertvalue chain result (tracker 961). Reading it in a
+// helper keeps the borrow of the fields array from outliving the array move.
+fn last_struct_field_index(
+    fields: &std::array::Array<compiled_mir::MirStructField>
+) -> !i64 {
+    let last_field = try fields.at(fields.len() - 1);
+    return last_field.index;
+}
+
+// arena_element_kizu_type strips the std::arena::Arena<...> wrapper off a recorded
+// field type token and returns the element type token (tracker 961). It backs the
+// Arena<T>.add lowering, which needs the element type to construct and marshal it.
+fn arena_element_kizu_type(field_type: []u8) -> ![]u8 {
+    let prefix = "std::arena::Arena<";
+    let prefix_len = std::mem::len(prefix);
+    let field_len = std::mem::len(field_type);
+    if field_len <= prefix_len or field_type[field_len - 1] != cast<u8>(62) {
+        return error("compiled mir: malformed std::arena::Arena element type");
+    }
+    return field_type[prefix_len..field_len - 1];
+}
+
+// lower_multi_let_arena_add lowers a 'let <name> = self.<field>.add(<struct literal>);'
+// where <field> is a std::arena::Arena<T> field of a struct value parameter and the
+// argument is a struct literal of element type T (tracker 961). It resolves the Arena
+// field + element type, lowers the element struct literal fields, and builds a
+// LetArenaAdd statement. Ast.add_node is its first consumer.
+fn lower_multi_let_arena_add(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    let_name: []u8,
+    call_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiLowerResult {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "add") {
+        return error("compiled mir: only Arena.add method let is supported");
+    }
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 1 {
+        return error("compiled mir: Arena.add accessor takes one element argument");
+    }
+    let field_expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let field_expr_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, field_expr, bs
+    );
+    if !std::mem::equal_bytes(field_expr_kind, "FieldExpr") {
+        return error("compiled mir: Arena.add receiver must be a struct field access");
+    }
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, field_expr, "field", bs
+    );
+    let var_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_expr, "receiver", 0, bs
+    );
+    let var_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, var_node, bs
+    );
+    if !std::mem::equal_bytes(var_kind, "Var") {
+        return error("compiled mir: Arena.add field receiver must be a parameter");
+    }
+    let var_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, var_node, bs
+    );
+    let receiver_llvm_type = try compiled_signature::find_param_type(locals_spec, var_name);
+    let struct_kizu_type = try compiled_signature::find_param_kizu_type(
+        ir_bytes, module_prefix, var_name, locals_spec
+    );
+    let lookup_type = compiled_mir_types::struct_lookup_kizu_type(struct_kizu_type);
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+        ir_bytes, module_prefix, lookup_type, field_name
+    );
+    if !field.found {
+        return error("compiled mir: Arena.add receiver field not found");
+    }
+    if !std::mem::starts_with(field.field_type, "std::arena::Arena<") {
+        return error("compiled mir: Arena.add receiver field is not a std::arena::Arena");
+    }
+    let element_kizu_type = try arena_element_kizu_type(field.field_type);
+    let element_llvm_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
+        ir_bytes, "", element_kizu_type
+    );
+    let element_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "arg", 0, bs
+    );
+    let element_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, element_node, bs
+    );
+    if !std::mem::equal_bytes(element_kind, "StructLiteralExpr") {
+        return error("compiled mir: Arena.add argument must be a struct literal");
+    }
+    let fields = try compiled_mir_lower_struct::lower_struct_fields(
+        ir_bytes, function_name, module_prefix, locals_spec, element_node, bs
+    );
+    if fields.len() == 0 {
+        return error("compiled mir: Arena.add element struct has no fields");
+    }
+    let field_count = fields.len();
+    let last_field_index = try last_struct_field_index(&fields);
+    try stmts.append(compiled_mir::let_arena_add_stmt(
+        let_name,
+        receiver_llvm_type,
+        var_name,
+        field.index,
+        element_llvm_type,
+        last_field_index,
+        string_counter,
+        fields
+    ));
+    return MultiLowerResult {
+        locals_spec: locals_spec,
+        string_counter: string_counter + field_count,
+        temp_counter: temp_counter
+    };
+}
+
 // lower_array_method_return dispatches a 'return self.<field>.<method>(...);' call
 // whose callee is a struct-field method to the matching Array accessor lowering:
 // len() -> array_len builtin call (Ast.len), get(index) -> the checked element
@@ -586,6 +717,17 @@ fn lower_multi_let_statement(
     );
     let let_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, let_value, bs);
     if std::mem::equal_bytes(let_value_kind, "Call") {
+        // A Call whose callee is a field-mode method is the checked Arena<T>.add
+        // lowering (self.<field>.add(<struct literal>)), binding the appended slot
+        // index. Ast.add_node is its first consumer (tracker 961). The element struct
+        // consumes string_counter prefixes for its insertvalue chain, so the counter
+        // advances by the element field count to keep later struct temps distinct.
+        if try callee_is_field_expr(ir_bytes, function_name, let_value, bs) {
+            return try lower_multi_let_arena_add(
+                ir_bytes, function_name, module_prefix, locals_spec,
+                let_name, let_value, string_counter, temp_counter, stmts, bs
+            );
+        }
         let call_type = try compiled_mir_types::lower_call_return_type(
             ir_bytes, function_name, module_prefix, let_value, bs
         );

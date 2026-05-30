@@ -211,6 +211,24 @@ pub struct MirLetStructStmt {
     pub struct_fields: std::array::Array<MirStructField>,
 }
 
+// MirLetArenaAddStmt backs a 'let <name> = self.<field>.add(<struct literal>);'
+// (Arena<T>.add(T) -> handle index, tracker 961). It constructs the element struct
+// (T) from struct_fields, marshals it through stack storage as a %kizu.slice.u8
+// (ptr + sizeof(T)), reads the Arena<T> handle off the struct value receiver, calls
+// @kizu_rt_arena_add, and binds <name> to the appended slot index. Ast.add_node is
+// its first consumer: it constructs an AstNode (Span + AstData union) and appends it
+// to the nodes Arena, exercising the AstNode/AstData union value-type ABI.
+pub struct MirLetArenaAddStmt {
+    pub name: []u8,
+    pub receiver_type: []u8,
+    pub receiver_name: []u8,
+    pub arena_field_index: i64,
+    pub element_type: []u8,
+    pub last_field_index: i64,
+    pub string_index: i64,
+    pub struct_fields: std::array::Array<MirStructField>,
+}
+
 pub struct MirReturnCallStmt {
     pub name: []u8,
     pub llvm_type: []u8,
@@ -319,6 +337,7 @@ pub struct MirWhileStmt {
 pub union MirStmt {
     LetCall(MirLetCallStmt),
     LetStruct(MirLetStructStmt),
+    LetArenaAdd(MirLetArenaAddStmt),
     LetExpr(MirLetExprStmt),
     ReturnCall(MirReturnCallStmt),
     ReturnStruct(MirReturnStructStmt),
@@ -449,6 +468,13 @@ impl MirLetStructStmt {
     }
 }
 
+impl MirLetArenaAddStmt {
+    fn deinit(self: MirLetArenaAddStmt) -> void {
+        self.struct_fields.deinit();
+        return;
+    }
+}
+
 impl MirReturnCallStmt {
     fn deinit(self: MirReturnCallStmt) -> void {
         self.call_args.deinit();
@@ -519,6 +545,7 @@ impl MirStmt {
         match self {
             LetCall(payload) => payload.deinit(),
             LetStruct(payload) => payload.deinit(),
+            LetArenaAdd(payload) => payload.deinit(),
             LetExpr(payload) => payload.deinit(),
             ReturnCall(payload) => payload.deinit(),
             ReturnStruct(payload) => payload.deinit(),
@@ -1187,6 +1214,28 @@ pub fn let_struct_stmt(
     return MirStmt::LetStruct(MirLetStructStmt {
         name: name,
         llvm_type: llvm_type,
+        string_index: string_index,
+        struct_fields: fields
+    });
+}
+
+pub fn let_arena_add_stmt(
+    name: []u8,
+    receiver_type: []u8,
+    receiver_name: []u8,
+    arena_field_index: i64,
+    element_type: []u8,
+    last_field_index: i64,
+    string_index: i64,
+    fields: std::array::Array<MirStructField>
+) -> MirStmt {
+    return MirStmt::LetArenaAdd(MirLetArenaAddStmt {
+        name: name,
+        receiver_type: receiver_type,
+        receiver_name: receiver_name,
+        arena_field_index: arena_field_index,
+        element_type: element_type,
+        last_field_index: last_field_index,
         string_index: string_index,
         struct_fields: fields
     });

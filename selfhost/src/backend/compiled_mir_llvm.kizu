@@ -250,6 +250,7 @@ fn append_multi_stmt(
     match stmt {
         LetCall(payload) => try append_multi_let_call(out, function, payload, local_prefix);,
         LetStruct(payload) => try append_multi_let_struct(out, function.name, payload);,
+        LetArenaAdd(payload) => try append_multi_let_arena_add(out, function.name, payload);,
         LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
@@ -453,6 +454,7 @@ fn append_stmt_globals(
     match stmt {
         LetCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         LetStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
+        LetArenaAdd(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
@@ -583,6 +585,79 @@ fn append_call_inst(
     try out.append_byte(cast<u8>(10));
     return;
 }
+// append_multi_let_arena_add renders a 'let <name> = self.<field>.add(<struct
+// literal>);' (Arena<T>.add, tracker 961). It builds the element struct from the
+// literal fields (shared struct-body insertvalue chain), marshals it through stack
+// storage as a %kizu.slice.u8 (ptr + sizeof(T) via the getelementptr-null idiom),
+// reads the Arena<T> handle off the struct value receiver, calls the heap-backed
+// @kizu_rt_arena_add, and binds <name> to the appended slot index. Ast.add_node is
+// its first consumer.
+fn append_multi_let_arena_add(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirLetArenaAddStmt
+) -> !void {
+    // Build the element struct value as %v<string_index>_<last_field_index>.
+    try append_struct_body_at(
+        out,
+        llvm_symbol,
+        stmt.element_type,
+        &stmt.struct_fields,
+        stmt.string_index
+    );
+    // Marshal the element through stack storage into a %kizu.slice.u8.
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_slot = alloca ");
+    try out.append_bytes(stmt.element_type);
+    try append_ll_line(out, ", align 8");
+    try out.append_bytes("  store ");
+    try out.append_bytes(stmt.element_type);
+    try out.append_bytes(" %v");
+    try std::fmt::append_i64(out, stmt.string_index);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, stmt.last_field_index);
+    try out.append_bytes(", ptr %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_slot, align 8");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_slice_base = insertvalue %kizu.slice.u8 poison, ptr %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_slot, 0");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_slice = insertvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_slice_base, i64 ptrtoint (ptr getelementptr (");
+    try out.append_bytes(stmt.element_type);
+    try append_ll_line(out, ", ptr null, i32 1) to i64), 1");
+    // Read the Arena<T> handle off the struct value receiver.
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_arena = extractvalue ");
+    try out.append_bytes(stmt.receiver_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.receiver_name);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, stmt.arena_field_index);
+    try out.append_byte(cast<u8>(10));
+    // Append the element and bind the result name to the appended slot index.
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_handle = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_arena, %kizu.slice.u8 %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_slice)");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes(" = extractvalue %kizu.handle %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_handle, 1");
+    return;
+}
+
 fn append_multi_let_struct(
     out: &var std::string::String,
     llvm_symbol: []u8,
