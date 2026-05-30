@@ -1046,6 +1046,11 @@ func requiredLLVMLexerClassifierFragments() []string {
 		"%t2 = icmp sge i8 %t0, %t1",
 		"%t0 = call i1 @kizu_kizu__lexer_is_alpha(i8 %byte)",
 		"%t1 = call i1 @kizu_kizu__lexer_is_digit(i8 %byte)",
+		// position(line, column) builds the (line, column) Position cursor struct; its type is
+		// defined for the tokenizer's position-tracking helpers (tracker 961).
+		"%kizu.kizu.lexer.position = type { i64, i64 }",
+		"define %kizu.kizu.lexer.position @kizu_kizu__lexer_position(",
+		"insertvalue %kizu.kizu.lexer.position %v0_0, i64 %column, 1",
 	}
 }
 
