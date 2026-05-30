@@ -121,6 +121,19 @@ pub fn append_compiled_function_params(
             try compiled_mir_llvm::append_function(out, &mir);
             return;
         }
+        // 'return <int> + try <call>;' is the count_one / count_with_range single-return
+        // try-call accessor (tracker 961): it propagates the call's error union on failure
+        // and adds the literal to the unwrapped value on success.
+        if try compiled_mir_lower::return_value_is_literal_plus_try(
+            ir_bytes, function_name, value, bs
+        ) {
+            let try_mir = try compiled_mir_lower::lower_return_try_binary_function(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, value, bs
+            );
+            defer try_mir.deinit();
+            try compiled_mir_llvm::append_function(out, &try_mir);
+            return;
+        }
         if std::mem::len(llvm_return_type) == 0 {
             return error("compiled function: unsupported return value kind");
         }
@@ -140,11 +153,40 @@ pub fn append_compiled_function_params(
         if std::mem::len(llvm_return_type) == 0 {
             return error("compiled function: match-union accessor requires llvm_return_type");
         }
-        let match_mir = try compiled_mir_lower::lower_match_union_return_function(
+        // An exhaustive 'match node.data' with no '_' default arm is the node_count
+        // recursive AST-traversal accessor; a single matched variant + '_' default arm is
+        // the declaration_count shape (tracker 961).
+        if try compiled_mir_lower::match_union_has_default_arm(ir_bytes, function_name, bs) {
+            let match_mir = try compiled_mir_lower::lower_match_union_return_function(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            defer match_mir.deinit();
+            try compiled_mir_llvm::append_function(out, &match_mir);
+            return;
+        }
+        let traversal_mir = try compiled_mir_lower::lower_traversal_match_function(
             ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
-        defer match_mir.deinit();
-        try compiled_mir_llvm::append_function(out, &match_mir);
+        defer traversal_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &traversal_mir);
+        return;
+    }
+    // count_range is the recursive AST-traversal accumulator loop ('var count = 0; var
+    // index = 0; while index < range.len { let child = try tree.child_at(range, index);
+    // count = count + try node_count(tree, child); index = index + 1; } return count;'),
+    // lowered to a two-phi loop with try-propagation rather than the general while machinery
+    // (tracker 961).
+    if try compiled_mir_lower::is_count_range_function(
+        ir_bytes, function_name, statement_count, bs
+    ) {
+        if std::mem::len(llvm_return_type) == 0 {
+            return error("compiled function: count_range requires llvm_return_type");
+        }
+        let range_mir = try compiled_mir_lower::lower_count_range_function(
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+        defer range_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &range_mir);
         return;
     }
     let mir = try compiled_mir_lower::lower_multi_statement_function(
