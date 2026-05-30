@@ -785,6 +785,222 @@ pub fn lower_match_union_return_function(
     );
 }
 
+// match_union_has_default_arm reports whether the match in a 'let node = self.get(index);
+// return match node.data { ... };' body has a trailing '_' default arm. The single matched
+// variant + default arm shape (declaration_count) has one; the exhaustive node_count
+// traversal (one arm per variant) has none (tracker 961).
+pub fn match_union_has_default_arm(
+    ir_bytes: []u8,
+    function_name: []u8,
+    bs: i64
+) -> !bool {
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let match_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_stmt, "value", 0, bs
+    );
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, match_node, "arm", bs
+    );
+    var index = 0;
+    while index < arm_count {
+        let arm = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, match_node, "arm", index, bs
+        );
+        let pattern = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arm, "pattern", 0, bs
+        );
+        let name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, pattern, bs
+        );
+        if std::mem::equal_bytes(name, "_") {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// lower_traversal_match_function lowers the node_count recursive AST-traversal accessor:
+// 'let node = tree.get(node_id); return match node.data { <44 arms> };' where each arm is
+// either 'Variant(bind) => try count_X(tree, bind.f, ...)' or a leaf 'Variant(_) => 1' /
+// 'Empty => 1' (tracker 961). It binds the AstNode by value off the Ast.get call, then walks
+// every variant arm: a try-call arm resolves the discriminant tag + inline payload struct,
+// the count_* callee, and the forwarded payload-field args; a leaf arm carries the literal.
+// All arms return a real value through the exhaustive icmp/br chain the renderer emits.
+pub fn lower_traversal_match_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let ast_module_prefix = "std::kizu::ast::";
+    let union_qualified = "std::kizu::ast::AstData";
+    // Statement 0: let <node> = <tree>.get(<node_id>);
+    let let_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let let_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_stmt, "name", 0, bs
+    );
+    let let_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, let_name_node, bs
+    );
+    let call_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_stmt, "value", 0, bs
+    );
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let recv_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let recv_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, recv_node, bs
+    );
+    let index_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "arg", 0, bs
+    );
+    let index_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, index_node, bs
+    );
+    let receiver_type = try compiled_signature::find_param_type(params_spec, recv_name);
+    let index_type = try compiled_signature::find_param_type(params_spec, index_name);
+    // Statement 1: return match <node>.data { ... };
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let match_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_stmt, "value", 0, bs
+    );
+    let scrutinee = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_node, "value", 0, bs
+    );
+    let scrutinee_field = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, scrutinee, "field", bs
+    );
+    let data_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, ast_module_prefix, "AstNode", scrutinee_field
+    );
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, match_node, "arm", bs
+    );
+    var arms = std::array::Array<compiled_mir::MirTraversalArm>(std::mem::page_allocator());
+    var index = 0;
+    while index < arm_count {
+        let arm_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, match_node, "arm", index, bs
+        );
+        let arm = try build_traversal_arm(
+            ir_bytes, function_name, module_prefix, union_qualified, arm_node, bs
+        );
+        try arms.append(arm);
+        index = index + 1;
+    }
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::match_traversal_stmt(
+        receiver_type,
+        recv_name,
+        index_type,
+        index_name,
+        data_field_index,
+        llvm_return_type,
+        arms
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
+// build_traversal_arm lowers one node_count match arm into a MirTraversalArm: a leaf 'Int'
+// body becomes a literal arm; a 'try count_X(tree, bind.f, ...)' body becomes a try-call arm
+// carrying the discriminant tag, inline payload struct, count_* callee, and the forwarded
+// payload-field args resolved against the payload struct-field facts (tracker 961).
+fn build_traversal_arm(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    union_qualified: []u8,
+    arm_node: i64,
+    bs: i64
+) -> !compiled_mir::MirTraversalArm {
+    let pattern = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arm_node, "pattern", 0, bs
+    );
+    let variant_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, pattern, bs
+    );
+    let variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, ir_bytes[0..0], union_qualified, variant_name
+    );
+    if !variant.found {
+        return error("compiled mir: traversal arm variant not found");
+    }
+    let arm_body = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arm_node, "body", 0, bs
+    );
+    let arm_expr = try match_union_arm_expr(ir_bytes, function_name, arm_body, bs);
+    let arm_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arm_expr, bs);
+    if std::mem::equal_bytes(arm_kind, "Int") {
+        let value = try ir_contract::body_int_value_from(ir_bytes, function_name, arm_expr, bs);
+        return compiled_mir::traversal_literal_arm(variant.tag, value);
+    }
+    if !std::mem::equal_bytes(arm_kind, "TryExpr") {
+        return error("compiled mir: traversal arm must be 'try <call>' or an int literal");
+    }
+    let inner_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arm_expr, "value", 0, bs
+    );
+    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner_call, bs);
+    if !std::mem::equal_bytes(inner_kind, "Call") {
+        return error("compiled mir: traversal arm try must wrap a call");
+    }
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, inner_call, bs
+    );
+    let payload_kizu = variant.payload_kizu;
+    let payload_module = compiled_util::module_prefix_of(payload_kizu);
+    let payload_short = payload_kizu[std::mem::len(payload_module)..std::mem::len(payload_kizu)];
+    let payload_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, ir_bytes[0..0], payload_kizu
+    );
+    let call_arg_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, inner_call, "arg", bs
+    );
+    var args = std::array::Array<compiled_mir::MirTraversalArg>(std::mem::page_allocator());
+    var arg_index = 1;
+    while arg_index < call_arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, inner_call, "arg", arg_index, bs
+        );
+        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        if !std::mem::equal_bytes(arg_kind, "FieldExpr") {
+            return error("compiled mir: traversal arm arg must be a payload field access");
+        }
+        let field_name = try ir_contract::body_field_expr_name_from(
+            ir_bytes, function_name, arg_node, "field", bs
+        );
+        let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+            ir_bytes, payload_module, payload_short, field_name
+        );
+        if !field.found {
+            return error("compiled mir: traversal arm payload field not found");
+        }
+        let field_llvm = try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, payload_module, field.field_type
+        );
+        try args.append(compiled_mir::traversal_arg(field.index, field_llvm));
+        arg_index = arg_index + 1;
+    }
+    return compiled_mir::traversal_try_arm(
+        variant.tag, payload_llvm, module_prefix, callee_name, args
+    );
+}
+
 // match_union_arm_expr unwraps a match arm body to its value expression: the parser wraps
 // a bare expression arm body in an ExprStmt, so the field chain / integer literal lives at
 // the ExprStmt 'expr' child (tracker 961).

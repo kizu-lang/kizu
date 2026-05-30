@@ -140,11 +140,22 @@ pub fn append_compiled_function_params(
         if std::mem::len(llvm_return_type) == 0 {
             return error("compiled function: match-union accessor requires llvm_return_type");
         }
-        let match_mir = try compiled_mir_lower::lower_match_union_return_function(
+        // An exhaustive 'match node.data' with no '_' default arm is the node_count
+        // recursive AST-traversal accessor; a single matched variant + '_' default arm is
+        // the declaration_count shape (tracker 961).
+        if try compiled_mir_lower::match_union_has_default_arm(ir_bytes, function_name, bs) {
+            let match_mir = try compiled_mir_lower::lower_match_union_return_function(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            defer match_mir.deinit();
+            try compiled_mir_llvm::append_function(out, &match_mir);
+            return;
+        }
+        let traversal_mir = try compiled_mir_lower::lower_traversal_match_function(
             ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
-        defer match_mir.deinit();
-        try compiled_mir_llvm::append_function(out, &match_mir);
+        defer traversal_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &traversal_mir);
         return;
     }
     let mir = try compiled_mir_lower::lower_multi_statement_function(

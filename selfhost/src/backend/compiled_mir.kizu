@@ -356,6 +356,49 @@ pub struct MirWhileStmt {
     pub body_stmts: std::array::Array<MirStmt>,
 }
 
+// MirTraversalArg is one payload-field argument forwarded to a node_count traversal arm's
+// count_* callee: extractvalue field_index off the bound variant payload, typed arg_llvm_type
+// (tracker 961). The receiver (the Ast tree) is always the implicit first call argument and
+// is not modelled here. It owns nothing.
+pub struct MirTraversalArg {
+    pub field_index: i64,
+    pub arg_llvm_type: []u8,
+}
+
+// MirTraversalArm is one arm of the node_count match-over-AstData traversal (tracker 961).
+// A try-call arm ('Variant(bind) => try count_X(tree, bind.f, ...)') carries the discriminant
+// tag, the inline payload struct type, the count_* callee symbol, and the payload-field args;
+// the renderer extracts the payload, forwards the receiver + field args, calls count_X, and
+// returns its error union directly (the callee and node_count share the !i64 return type, so
+// the try is an identity tail return needing no ok/fail branch). A leaf arm ('Variant(_) => 1'
+// / 'Empty => 1') sets is_literal and returns the literal wrapped as the error-union success.
+// It owns the payload-field arg Array.
+pub struct MirTraversalArm {
+    pub tag: i64,
+    pub is_literal: bool,
+    pub literal_value: i64,
+    pub payload_type: []u8,
+    pub callee_module: []u8,
+    pub callee_name: []u8,
+    pub args: std::array::Array<MirTraversalArg>,
+}
+
+// MirMatchTraversalStmt backs the node_count recursive AST-traversal accessor: 'let node =
+// tree.get(node_id); return match node.data { <44 arms> };' (tracker 961). The renderer binds
+// the AstNode by value off the Ast.get call, extracts the AstData union (field
+// data_field_index) and its i64 tag, then emits an exhaustive icmp/br chain over the arms,
+// each arm returning a real value (no 'unreachable'). own_error_union is the node_count return
+// type the leaf arms wrap into. It owns the arm Array.
+pub struct MirMatchTraversalStmt {
+    pub receiver_type: []u8,
+    pub receiver_name: []u8,
+    pub index_type: []u8,
+    pub index_name: []u8,
+    pub data_field_index: i64,
+    pub own_error_union: []u8,
+    pub arms: std::array::Array<MirTraversalArm>,
+}
+
 pub union MirStmt {
     LetCall(MirLetCallStmt),
     LetStruct(MirLetStructStmt),
@@ -369,6 +412,7 @@ pub union MirStmt {
     ReturnArrayGet(MirReturnArrayGetStmt),
     If(MirIfStmt),
     While(MirWhileStmt),
+    MatchTraversal(MirMatchTraversalStmt),
 }
 
 // Only the Call instruction reads a result value and callee symbol; the scalar
@@ -578,6 +622,20 @@ impl MirLetTryCallStmt {
     }
 }
 
+impl MirTraversalArm {
+    fn deinit(self: MirTraversalArm) -> void {
+        self.args.deinit();
+        return;
+    }
+}
+
+impl MirMatchTraversalStmt {
+    fn deinit(self: MirMatchTraversalStmt) -> void {
+        self.arms.deinit();
+        return;
+    }
+}
+
 impl MirReturnErrorStmt {
     fn deinit(self: MirReturnErrorStmt) -> void {
         self.expr_insts.deinit();
@@ -630,6 +688,7 @@ impl MirStmt {
             ReturnArrayGet(payload) => payload.deinit(),
             If(payload) => payload.deinit(),
             While(payload) => payload.deinit(),
+            MatchTraversal(payload) => payload.deinit(),
         }
     }
 }
@@ -1352,6 +1411,66 @@ pub fn let_try_call_stmt(
         string_index: string_index,
         try_index: try_index,
         call_args: args
+    });
+}
+
+pub fn traversal_arg(field_index: i64, arg_llvm_type: []u8) -> MirTraversalArg {
+    return MirTraversalArg {
+        field_index: field_index,
+        arg_llvm_type: arg_llvm_type
+    };
+}
+
+pub fn traversal_try_arm(
+    tag: i64,
+    payload_type: []u8,
+    callee_module: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirTraversalArg>
+) -> MirTraversalArm {
+    return MirTraversalArm {
+        tag: tag,
+        is_literal: false,
+        literal_value: 0,
+        payload_type: payload_type,
+        callee_module: callee_module,
+        callee_name: callee_name,
+        args: args
+    };
+}
+
+pub fn traversal_literal_arm(
+    tag: i64,
+    literal_value: i64
+) -> MirTraversalArm {
+    return MirTraversalArm {
+        tag: tag,
+        is_literal: true,
+        literal_value: literal_value,
+        payload_type: "",
+        callee_module: "",
+        callee_name: "",
+        args: std::array::Array<MirTraversalArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn match_traversal_stmt(
+    receiver_type: []u8,
+    receiver_name: []u8,
+    index_type: []u8,
+    index_name: []u8,
+    data_field_index: i64,
+    own_error_union: []u8,
+    arms: std::array::Array<MirTraversalArm>
+) -> MirStmt {
+    return MirStmt::MatchTraversal(MirMatchTraversalStmt {
+        receiver_type: receiver_type,
+        receiver_name: receiver_name,
+        index_type: index_type,
+        index_name: index_name,
+        data_field_index: data_field_index,
+        own_error_union: own_error_union,
+        arms: arms
     });
 }
 

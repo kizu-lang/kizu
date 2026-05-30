@@ -405,6 +405,7 @@ fn append_multi_stmt(
         ReturnArrayGet(payload) => try append_multi_return_array_get(out, function, payload);,
         If(payload) => try append_multi_if(out, function, payload, local_prefix);,
         While(payload) => try append_multi_while(out, function, payload);,
+        MatchTraversal(payload) => try append_multi_match_traversal(out, payload);,
     }
     return;
 }
@@ -506,6 +507,175 @@ fn append_multi_let_try_call(
     try out.append_bytes(" %");
     try out.append_bytes(stmt.name);
     try append_ll_line(out, "_call, 1");
+    return;
+}
+// append_match_traversal_globals: a node_count traversal arm forwards only the receiver and
+// payload-field arguments (no string literals), so there are no string-constant globals.
+fn append_match_traversal_globals(stmt: &compiled_mir::MirMatchTraversalStmt) -> !void {
+    return;
+}
+
+// append_multi_match_traversal renders the node_count recursive AST-traversal accessor: it
+// binds the AstNode by value off the Ast.get call, extracts the AstData union + i64 tag, and
+// emits an exhaustive icmp/br chain over the arms. Each arm returns a real value: a try-call
+// arm extracts the variant payload, forwards the receiver + payload fields to count_*, and
+// returns its (identically-typed) error union directly; a leaf arm returns the literal wrapped
+// as the error-union success. No arm is 'unreachable' (tracker 961).
+fn append_multi_match_traversal(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirMatchTraversalStmt
+) -> !void {
+    try out.append_bytes("  %match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(stmt.receiver_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.receiver_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.index_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.index_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %match_data = extractvalue %kizu.kizu.ast.ast_node %match_node, ");
+    try std::fmt::append_i64(out, stmt.data_field_index);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  %match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0");
+    let arms = &stmt.arms;
+    let arm_count = arms.len();
+    // Phase 1: the icmp/br dispatch chain. The last arm is the exhaustive fallthrough.
+    var index = 0;
+    while index < arm_count {
+        let arm = try arms.at(index);
+        if index > 0 {
+            try out.append_bytes("match_check_");
+            try std::fmt::append_i64(out, index);
+            try append_ll_line(out, ":");
+        }
+        if index == arm_count - 1 {
+            try out.append_bytes("  br label %match_arm_");
+            try std::fmt::append_i64(out, index);
+            try out.append_byte(cast<u8>(10));
+        } else {
+            try out.append_bytes("  %match_is_");
+            try std::fmt::append_i64(out, index);
+            try out.append_bytes(" = icmp eq i64 %match_tag, ");
+            try std::fmt::append_i64(out, arm.tag);
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  br i1 %match_is_");
+            try std::fmt::append_i64(out, index);
+            try out.append_bytes(", label %match_arm_");
+            try std::fmt::append_i64(out, index);
+            try out.append_bytes(", label %match_check_");
+            try std::fmt::append_i64(out, index + 1);
+            try out.append_byte(cast<u8>(10));
+        }
+        index = index + 1;
+    }
+    // Phase 2: the arm blocks, each returning a real value.
+    var arm_index = 0;
+    while arm_index < arm_count {
+        let arm = try arms.at(arm_index);
+        try append_traversal_arm_block(out, stmt, arm, arm_index);
+        arm_index = arm_index + 1;
+    }
+    return;
+}
+
+fn append_traversal_arm_block(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirMatchTraversalStmt,
+    arm: &compiled_mir::MirTraversalArm,
+    arm_index: i64
+) -> !void {
+    try out.append_bytes("match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try append_ll_line(out, ":");
+    if arm.is_literal {
+        try out.append_bytes("  %match_arm_");
+        try std::fmt::append_i64(out, arm_index);
+        try out.append_bytes("_flag = insertvalue ");
+        try out.append_bytes(stmt.own_error_union);
+        try append_ll_line(out, " zeroinitializer, i1 true, 0");
+        try out.append_bytes("  %match_arm_");
+        try std::fmt::append_i64(out, arm_index);
+        try out.append_bytes("_val = insertvalue ");
+        try out.append_bytes(stmt.own_error_union);
+        try out.append_bytes(" %match_arm_");
+        try std::fmt::append_i64(out, arm_index);
+        try out.append_bytes("_flag, i64 ");
+        try std::fmt::append_i64(out, arm.literal_value);
+        try append_ll_line(out, ", 1");
+        try out.append_bytes("  ret ");
+        try out.append_bytes(stmt.own_error_union);
+        try out.append_bytes(" %match_arm_");
+        try std::fmt::append_i64(out, arm_index);
+        try append_ll_line(out, "_val");
+        return;
+    }
+    // Try-call arm: extract the variant payload out of the inline union storage.
+    try out.append_bytes("  %match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try append_ll_line(out, "_slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try out.append_bytes("  store %kizu.kizu.ast.ast_data %match_data, ptr %match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try append_ll_line(out, "_slot, align 8");
+    try out.append_bytes("  %match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try out.append_bytes("_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try append_ll_line(out, "_slot, i32 0, i32 1");
+    try out.append_bytes("  %match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try out.append_bytes("_payload = load ");
+    try out.append_bytes(arm.payload_type);
+    try out.append_bytes(", ptr %match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try append_ll_line(out, "_ptr, align 8");
+    // Extract each forwarded payload field.
+    let args = &arm.args;
+    let arg_count = args.len();
+    var arg_index = 0;
+    while arg_index < arg_count {
+        let arg = try args.at(arg_index);
+        try out.append_bytes("  %match_arm_");
+        try std::fmt::append_i64(out, arm_index);
+        try out.append_bytes("_a");
+        try std::fmt::append_i64(out, arg_index);
+        try out.append_bytes(" = extractvalue ");
+        try out.append_bytes(arm.payload_type);
+        try out.append_bytes(" %match_arm_");
+        try std::fmt::append_i64(out, arm_index);
+        try out.append_bytes("_payload, ");
+        try std::fmt::append_i64(out, arg.field_index);
+        try out.append_byte(cast<u8>(10));
+        arg_index = arg_index + 1;
+    }
+    // Call count_*(receiver, field args...) and return its error union directly.
+    try out.append_bytes("  %match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try out.append_bytes("_call = call ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, arm.callee_module, arm.callee_name);
+    try out.append_bytes("(");
+    try out.append_bytes(stmt.receiver_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.receiver_name);
+    var call_arg_index = 0;
+    while call_arg_index < arg_count {
+        let arg = try args.at(call_arg_index);
+        try out.append_bytes(", ");
+        try out.append_bytes(arg.arg_llvm_type);
+        try out.append_bytes(" %match_arm_");
+        try std::fmt::append_i64(out, arm_index);
+        try out.append_bytes("_a");
+        try std::fmt::append_i64(out, call_arg_index);
+        call_arg_index = call_arg_index + 1;
+    }
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %match_arm_");
+    try std::fmt::append_i64(out, arm_index);
+    try append_ll_line(out, "_call");
     return;
 }
 fn append_multi_return_call(
@@ -692,6 +862,7 @@ fn append_stmt_globals(
         ReturnArrayGet(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         If(payload) => try append_if_globals(out, llvm_symbol, payload);,
         While(payload) => try append_while_globals(out, llvm_symbol, payload);,
+        MatchTraversal(payload) => try append_match_traversal_globals(payload);,
     }
     return;
 }
