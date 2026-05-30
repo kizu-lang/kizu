@@ -1326,6 +1326,42 @@ pub fn lower_run_ast_block_function(
     );
 }
 
+// lower_run_ast_function_function lowers selfhost::ir::codegen::lower_run_ast_function into a
+// single LowerRunAstFunction statement: it requires the function name to be "main", binds the body
+// AstNode via Ast.get, and forwards lower_run_ast_block's !RunAst result on the Block variant
+// (tracker 961, scope 4 prerequisite). The Block discriminant tag comes from the union-variant
+// facts; the "main" literal global is named from the function's llvm_symbol.
+pub fn lower_run_ast_function_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let text_name = try nth_param_field(params_spec, 0, true);
+    let ast_type = try nth_param_field(params_spec, 1, false);
+    let ast_name = try nth_param_field(params_spec, 1, true);
+    let name_type = try nth_param_field(params_spec, 2, false);
+    let name_name = try nth_param_field(params_spec, 2, true);
+    let body_type = try nth_param_field(params_spec, 3, false);
+    let body_name = try nth_param_field(params_spec, 3, true);
+    let block_variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, ir_bytes[0..0], "std::kizu::ast::AstData", "Block"
+    );
+    if !block_variant.found {
+        return error("compiled mir: lower_run_ast_function Block variant not found");
+    }
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::lower_run_ast_function_stmt(
+        text_name, ast_name, ast_type, name_name, name_type, body_name, body_type,
+        llvm_symbol, block_variant.tag
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // return_value_is_literal_plus_try reports whether a single-return value is the shape
 // '<int literal> + try <call>' (count_one / count_with_range, tracker 961).
 pub fn return_value_is_literal_plus_try(
