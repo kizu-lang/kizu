@@ -361,6 +361,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMUnionAbiFragments()...)
 	fragments = append(fragments, requiredLLVMArenaGetFragments()...)
 	fragments = append(fragments, requiredLLVMMatchUnionFragments()...)
+	fragments = append(fragments, requiredLLVMNodeCountTypeFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -624,6 +625,73 @@ func requiredLLVMMatchUnionFragments() []string {
 		"  ret i64 %match_value",
 		"match_arm_default:",
 		"  ret i64 0",
+	}
+}
+
+// requiredLLVMNodeCountTypeFragments returns the tracker-961 type/facts foundation for the
+// node_count AST-traversal cluster: the AstData variant payload structs that node_count and
+// the count_* helpers read by value, modelled in stage2 as %kizu.kizu.ast.*_node value types
+// (bool -> i1, an enum tag -> i64, NodeId / ChildRange / Span -> their value types). The five
+// leaf variants and the payload-less Empty are not modelled here. This is the type-definition
+// foundation; the cluster's lowering lands in a later PR.
+func requiredLLVMNodeCountTypeFragments() []string {
+	return []string{
+		"%kizu.kizu.ast.prefix_node = type { i64, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.binary_node = type { i64, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.field_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, i1 }",
+		"%kizu.kizu.ast.deref_expr_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.call_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
+		"%kizu.kizu.ast.type_apply_expr_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.child_range }",
+		"%kizu.kizu.ast.cast_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.index_expr_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, i1 }",
+		"%kizu.kizu.ast.struct_literal_expr_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.child_range }",
+		"%kizu.kizu.ast.struct_field_init_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.arena_new_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.try_expr_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.comptime_expr_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.block_node = type { %kizu.kizu.ast.child_range }",
+		"%kizu.kizu.ast.if_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.let_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.assign_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.return_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.defer_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.expr_stmt_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.while_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.for_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.break_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.continue_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.import_decl_node = type { %kizu.kizu.ast.child_range }",
+		"%kizu.kizu.ast.param_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.field_node = type { i1, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.span }",
+		"%kizu.kizu.ast.struct_decl_node = type { i1, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, " +
+			"%kizu.kizu.ast.span }",
+		"%kizu.kizu.ast.enum_decl_node = type { i1, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.span }",
+		"%kizu.kizu.ast.union_decl_node = type { i1, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, " +
+			"%kizu.kizu.ast.span }",
+		"%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
+		"%kizu.kizu.ast.union_variant_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.span }",
+		"%kizu.kizu.ast.match_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
+		"%kizu.kizu.ast.match_arm_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.unsafe_node = type { %kizu.kizu.ast.child_range, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.comptime_if_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.fn_decl_node = type { i1, i1, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range, " +
+			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.span }",
 	}
 }
 

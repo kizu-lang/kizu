@@ -250,37 +250,291 @@ fn append_ast_function_facts(
         "std::kizu::ast::ast_get",
         "checked-ast-readonly"
     );
-    // ProgramNode is the first AstData variant payload struct modelled in stage2, backing
-    // the 'match node.data { Program(program) => program.declarations.len, _ => 0 }'
-    // accessor (selfhost::ast::declaration_count, tracker 961). Its struct fields
-    // (declarations = field 0) and type-llvm mapping let the active arm read the ProgramNode
-    // payload out of the inline AstData storage and follow declarations.len; the
-    // union-variant fact records the Program discriminant tag and payload type so the tag
-    // dispatch is driven by the real union declaration order, not a hardcoded index. The
-    // other 43 variant payload structs stay unmodelled.
-    try append_selected_struct_field_facts(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "ProgramNode",
-        "std::kizu::ast::ProgramNode"
-    );
-    try append_type_llvm_fact(
-        out,
-        "std::kizu::ast::ProgramNode",
-        "%kizu.kizu.ast.program_node"
-    );
-    try append_selected_union_variant_fact(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "AstData",
-        "Program",
-        "std::kizu::ast::AstData",
-        "std::kizu::ast::ProgramNode"
-    );
+    // The AstData variant payload structs backing the read-only match-over-AstData AST
+    // accessors compiled into stage2 (selfhost::ast::declaration_count and the node_count
+    // traversal cluster, tracker 961). append_ast_node_variant_facts walks the AstData
+    // union in declaration order and emits, for every variant, a union-variant fact whose
+    // discriminant tag is the real declaration index (never hardcoded); for each variant
+    // whose payload struct an accessor reads by value, it also emits the struct's type-llvm
+    // mapping and struct-field facts. The five leaf variants and the payload-less Empty are
+    // recorded as union-variant facts only: their arms return the literal 1.
+    try append_ast_node_variant_facts(out, file.text, parsed.ast, parsed.root);
+    return;
+}
+
+// append_ast_node_variant_facts walks the AstData union in declaration order and emits the
+// union-variant fact for every variant (the discriminant tag is the declaration index) plus
+// the type-llvm + struct-field facts for each variant whose payload struct the node_count
+// traversal cluster reads by value (tracker 961). Every fact is appended to out directly
+// from the variant's source name (a borrow of text) and string literals, so no intermediate
+// String value is constructed or threaded through the helper chain.
+fn append_ast_node_variant_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    let union_node_id = try union_node(text, ast, root, "AstData");
+    let node = ast.get(union_node_id);
+    match node.data {
+        UnionDecl(union_decl) => try append_ast_node_variants_loop(
+            out,
+            text,
+            ast,
+            root,
+            union_decl.variants
+        );,
+        _ => return error("missing AstData union");,
+    }
+    return;
+}
+
+fn append_ast_node_variants_loop(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    variants: std::kizu::ast::ChildRange
+) -> !void {
+    var index = 0;
+    while index < variants.len {
+        let child = try ast.child_at(variants, index);
+        let name = try union_variant_name_text(text, ast, child);
+        try emit_one_ast_node_variant(out, text, ast, root, name, index);
+        index = index + 1;
+    }
+    return;
+}
+
+// ast_node_variant_kind classifies an AstData variant: 0 = its payload struct is read by
+// the node_count cluster (modelled in stage2), 1 = a leaf variant whose arm returns the
+// literal 1 (payload struct unmodelled), 2 = the payload-less Empty variant.
+fn ast_node_variant_kind(name: []u8) -> i64 {
+    if std::mem::equal_bytes(name, "Empty") { return 2; }
+    if std::mem::equal_bytes(name, "Int") { return 1; }
+    if std::mem::equal_bytes(name, "String") { return 1; }
+    if std::mem::equal_bytes(name, "TypeName") { return 1; }
+    if std::mem::equal_bytes(name, "Var") { return 1; }
+    if std::mem::equal_bytes(name, "Bool") { return 1; }
+    return 0;
+}
+
+fn emit_one_ast_node_variant(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    name: []u8,
+    index: i64
+) -> !void {
+    let kind = ast_node_variant_kind(name);
+    try emit_ast_node_union_variant_fact(out, name, index, kind);
+    if kind == 0 {
+        try emit_ast_node_type_llvm_fact(out, name);
+        try emit_ast_node_struct_field_facts(out, text, ast, root, name);
+    }
+    return;
+}
+
+// emit_ast_node_union_variant_fact appends a 'union-variant std::kizu::ast::AstData <name>
+// <tag> <payload>' fact. The payload is the 'std::kizu::ast::<name>Node' qualified type, or
+// 'void' for the payload-less Empty variant (kind 2).
+fn emit_ast_node_union_variant_fact(
+    out: &var std::string::String,
+    name: []u8,
+    index: i64,
+    kind: i64
+) -> !void {
+    try out.append_bytes("union-variant std::kizu::ast::AstData ");
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    if kind == 2 {
+        try out.append_bytes("void");
+    } else {
+        try out.append_bytes("std::kizu::ast::");
+        try out.append_bytes(name);
+        try out.append_bytes("Node");
+    }
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// emit_ast_node_type_llvm_fact appends a 'type-llvm std::kizu::ast::<name>Node
+// %kizu.kizu.ast.<snake>_node' fact for a modelled variant payload struct.
+fn emit_ast_node_type_llvm_fact(out: &var std::string::String, name: []u8) -> !void {
+    try out.append_bytes("type-llvm std::kizu::ast::");
+    try out.append_bytes(name);
+    try out.append_bytes("Node %kizu.kizu.ast.");
+    try append_camel_to_snake(out, name);
+    try out.append_bytes("_node");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// emit_ast_node_struct_field_facts finds the StructDecl named '<name>Node' and emits a
+// 'struct-field std::kizu::ast::<name>Node <index> <field> <type>' fact per field, matching
+// the layout append_selected_struct_field_facts emits for the explicitly-named structs.
+fn emit_ast_node_struct_field_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    name: []u8
+) -> !void {
+    let struct_node_id = try find_ast_node_struct(text, ast, root, name);
+    let node = ast.get(struct_node_id);
+    match node.data {
+        StructDecl(struct_decl) => try emit_ast_node_struct_fields(
+            out,
+            text,
+            ast,
+            name,
+            struct_decl.fields
+        );,
+        _ => return error("missing AstData node struct");,
+    }
+    return;
+}
+
+fn emit_ast_node_struct_fields(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: []u8,
+    fields: std::kizu::ast::ChildRange
+) -> !void {
+    var index = 0;
+    while index < fields.len {
+        let field = try ast.child_at(fields, index);
+        let node = ast.get(field);
+        match node.data {
+            Field(field_node) => try emit_ast_node_struct_field(
+                out,
+                text,
+                ast,
+                name,
+                index,
+                field_node.name,
+                field_node.type_node
+            );,
+            _ => return error("missing AstData node struct field");,
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn emit_ast_node_struct_field(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: []u8,
+    index: i64,
+    field_name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId
+) -> !void {
+    try out.append_bytes("struct-field std::kizu::ast::");
+    try out.append_bytes(name);
+    try out.append_bytes("Node ");
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    let field_text = ast_node_text(text, ast, field_name);
+    try out.append_bytes(field_text);
+    try out.append_byte(cast<u8>(32));
+    try function_signature::append_type_token_pub(out, text, ast, type_node);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// find_ast_node_struct returns the StructDecl whose declared name is '<name>Node', comparing
+// bytes directly so no search string is allocated (tracker 961).
+fn find_ast_node_struct(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    name: []u8
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return find_ast_node_struct_in_program(
+            text,
+            ast,
+            program.declarations,
+            name
+        );,
+        _ => return error("missing AstData node struct");,
+    }
+}
+
+fn find_ast_node_struct_in_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !std::kizu::ast::NodeId {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if ast_node_struct_name_matches(text, ast, child, name) {
+            return child;
+        }
+        index = index + 1;
+    }
+    return error("missing AstData node struct");
+}
+
+fn ast_node_struct_name_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        StructDecl(struct_decl) => struct_name_is_variant_node(text, ast, struct_decl.name, name),
+        _ => false,
+    };
+}
+
+// struct_name_is_variant_node reports whether the struct name text equals name ++ "Node".
+fn struct_name_is_variant_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name_node: std::kizu::ast::NodeId,
+    name: []u8
+) -> bool {
+    let struct_name = ast_node_text(text, ast, name_node);
+    let struct_len = std::mem::len(struct_name);
+    let name_len = std::mem::len(name);
+    if struct_len != name_len + 4 {
+        return false;
+    }
+    if !std::mem::starts_with(struct_name, name) {
+        return false;
+    }
+    return std::mem::equal_bytes(struct_name[name_len..struct_len], "Node");
+}
+
+// append_camel_to_snake appends name to out converting CamelCase to snake_case: each
+// uppercase byte becomes '_' (skipped at the front) + its lowercase form. ProgramNode ->
+// program_node, FnDecl -> fn_decl, TypeApplyExpr -> type_apply_expr (tracker 961).
+fn append_camel_to_snake(out: &var std::string::String, name: []u8) -> !void {
+    let len = std::mem::len(name);
+    var i = 0;
+    while i < len {
+        let byte = name[i];
+        if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+            if i > 0 {
+                try out.append_byte(cast<u8>(95));
+            }
+            try out.append_byte(byte + cast<u8>(32));
+        } else {
+            try out.append_byte(byte);
+        }
+        i = i + 1;
+    }
     return;
 }
 
@@ -307,66 +561,86 @@ fn append_selfhost_ast_function_facts(
         "selfhost::ast::declaration_count",
         "checked-ast-match"
     );
+    // The node_count traversal cluster's function-signature facts (tracker 961). node_count
+    // and the count_* helpers form a mutually-recursive cluster; landing their signatures
+    // (return type + param types) here is the type/facts foundation the cluster's lowering
+    // will build on. Signature facts are lookup-only, so emitting them without bodies adds
+    // no defines and cannot affect linking.
+    try append_selected_function_signature(
+        out, file.text, parsed.ast, parsed.root, "node_count", "selfhost::ast::node_count"
+    );
+    try append_selected_function_signature(
+        out, file.text, parsed.ast, parsed.root, "count_range", "selfhost::ast::count_range"
+    );
+    try append_selected_function_signature(
+        out, file.text, parsed.ast, parsed.root, "count_one", "selfhost::ast::count_one"
+    );
+    try append_selected_function_signature(
+        out, file.text, parsed.ast, parsed.root, "count_two", "selfhost::ast::count_two"
+    );
+    try append_selected_function_signature(
+        out, file.text, parsed.ast, parsed.root, "count_three", "selfhost::ast::count_three"
+    );
+    try append_selected_function_signature(
+        out, file.text, parsed.ast, parsed.root, "count_five", "selfhost::ast::count_five"
+    );
+    try append_selected_function_signature(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "count_with_range",
+        "selfhost::ast::count_with_range"
+    );
+    try append_selected_function_signature(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "count_node_with_range",
+        "selfhost::ast::count_node_with_range"
+    );
+    try append_selected_function_signature(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "count_named_range",
+        "selfhost::ast::count_named_range"
+    );
+    try append_selected_function_signature(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "count_named_ranges",
+        "selfhost::ast::count_named_ranges"
+    );
+    try append_selected_function_signature(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "count_fn_decl_parts",
+        "selfhost::ast::count_fn_decl_parts"
+    );
     return;
 }
 
-// append_selected_union_variant_fact emits a 'union-variant <union> <variant> <tag>
-// <payload>' fact for one variant of a 'union <union_local_name>' declaration, reading the
-// discriminant tag from the real declaration order so the tag dispatch never hardcodes an
-// index (tracker 961).
-fn append_selected_union_variant_fact(
+// append_selected_function_signature emits only the function-signature facts (return type
+// + param types) for a top-level helper named local_name, without its body. It backs the
+// type/facts foundation for functions whose lowering lands in a later PR (tracker 961).
+fn append_selected_function_signature(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId,
-    union_local_name: []u8,
-    variant_name: []u8,
-    qualified_union: []u8,
-    payload_qualified: []u8
+    local_name: []u8,
+    qualified_name: []u8
 ) -> !void {
-    let union_node_id = try union_node(text, ast, root, union_local_name);
-    let node = ast.get(union_node_id);
-    match node.data {
-        UnionDecl(union_decl) => try append_union_variant_fact_for(
-            out,
-            text,
-            ast,
-            union_decl.variants,
-            variant_name,
-            qualified_union,
-            payload_qualified
-        );,
-        _ => return error("missing selected executable union");,
-    }
+    let function_node_id = try function_node(text, ast, root, local_name);
+    try function_signature::append(out, text, ast, function_node_id, qualified_name);
     return;
-}
-
-fn append_union_variant_fact_for(
-    out: &var std::string::String,
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    variants: std::kizu::ast::ChildRange,
-    target_name: []u8,
-    qualified_union: []u8,
-    payload_qualified: []u8
-) -> !void {
-    var index = 0;
-    while index < variants.len {
-        let child = try ast.child_at(variants, index);
-        let name = try union_variant_name_text(text, ast, child);
-        if std::mem::equal_bytes(name, target_name) {
-            try emit_union_variant_fact(
-                out,
-                qualified_union,
-                target_name,
-                index,
-                payload_qualified
-            );
-            return;
-        }
-        index = index + 1;
-    }
-    return error("missing selected union variant");
 }
 
 fn union_variant_name_text(
