@@ -17,6 +17,7 @@ pub fn append_facts(
     var loader_found = false;
     var ast_found = false;
     var diagnostic_found = false;
+    var mem_found = false;
     var selfhost_ast_found = false;
 
     var index = 0;
@@ -31,6 +32,10 @@ pub fn append_facts(
             if std::mem::equal_bytes(std_module, "kizu/diagnostic") {
                 try append_diagnostic_function_facts(allocator, out, file);
                 diagnostic_found = true;
+            }
+            if std::mem::equal_bytes(std_module, "mem") {
+                try append_mem_function_facts(allocator, out, file);
+                mem_found = true;
             }
         }
         if file.kind == source::SourceKind::Selfhost {
@@ -97,9 +102,44 @@ pub fn append_facts(
     if !diagnostic_found {
         return error("missing std kizu diagnostic source");
     }
+    if !mem_found {
+        return error("missing std mem source");
+    }
     if !selfhost_ast_found {
         return error("missing selfhost ast source");
     }
+    return;
+}
+
+// append_mem_function_facts emits the signature + body facts for the std::mem text helpers the
+// ast_node_text span accessor depends on (tracker 961): is_ascii_space (an or-chain byte
+// classifier) and trim_ascii (two break-on-condition search loops over a []u8 slice). They are
+// compiled together with ast_node_text so the call chain links.
+fn append_mem_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "is_ascii_space",
+        "std::mem::is_ascii_space",
+        "checked-text-accessor"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "trim_ascii",
+        "std::mem::trim_ascii",
+        "checked-text-accessor"
+    );
     return;
 }
 
@@ -1286,6 +1326,19 @@ fn append_codegen_function_facts(
         "unsupported_run_ast",
         "selfhost::ir::codegen::unsupported_run_ast",
         "checked-run-codegen-consumer"
+    );
+    // ast_node_text is the span-based text slicing accessor the run-codegen AST traversal
+    // depends on (tracker 961): it binds an AstNode via Ast.get, slices the source text by the
+    // node's span, and trims the slice via std::mem::trim_ascii. It is registered in the codegen
+    // module so the run path's recursive callee symbol resolves once the scanner is removed.
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "ast_node_text",
+        "selfhost::ir::codegen::ast_node_text",
+        "checked-text-accessor"
     );
     return;
 }

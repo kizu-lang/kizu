@@ -363,6 +363,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMMatchUnionFragments()...)
 	fragments = append(fragments, requiredLLVMNodeCountTypeFragments()...)
 	fragments = append(fragments, requiredLLVMNodeCountLoweringFragments()...)
+	fragments = append(fragments, requiredLLVMTextAccessorFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -751,6 +752,42 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"%rettry_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %first)",
 		"%rettry_sum = add i64 1, %rettry_success",
+	}
+}
+
+// requiredLLVMTextAccessorFragments returns the tracker-961 span-based text slicing accessor
+// chain compiled into stage2: the run-codegen AST traversal binds source text by reading a
+// node's span (ast_node_text), trims the slice (std::mem::trim_ascii), and classifies bytes
+// (std::mem::is_ascii_space). The three defines are emitted together so selfhost.ll links with
+// no undefined symbol; these fragments lock each lowered body shape.
+func requiredLLVMTextAccessorFragments() []string {
+	return []string{
+		// All three chain defines are present (linkage invariant).
+		"define i1 @kizu_std__mem_is_ascii_space(",
+		"define %kizu.slice.u8 @kizu_std__mem_trim_ascii(",
+		"define %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(",
+		// trim_ascii: a front loop advancing %start past leading ASCII spaces and a back loop
+		// retreating %end past trailing ones, returning the trimmed two-bound slice.
+		"%trim_bytes_len = extractvalue %kizu.slice.u8 %bytes, 1",
+		"%trim_start = phi i64 [ 0, %entry ], [ %trim_start_next, %trim_front_inc ]",
+		"%trim_front_cond = icmp slt i64 %trim_start, %trim_bytes_len",
+		"%trim_front_space = call i1 @kizu_std__mem_is_ascii_space(i8 %trim_front_byte)",
+		"%trim_end = phi i64 [ %trim_bytes_len, %trim_front_head ], " +
+			"[ %trim_bytes_len, %trim_front_body ], [ %trim_end_next, %trim_back_inc ]",
+		"%trim_back_cond = icmp sgt i64 %trim_end, %trim_start",
+		"%trim_back_space = call i1 @kizu_std__mem_is_ascii_space(i8 %trim_back_byte)",
+		"%trim_slice_len = sub i64 %trim_end, %trim_start",
+		"  ret %kizu.slice.u8 %trim_s1",
+		// ast_node_text: bind the AstNode via Ast.get, extract its Span (field 0) start/end,
+		// slice the text two-bound, and forward the slice to trim_ascii.
+		"%ant_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %node_id)",
+		"%ant_span = extractvalue %kizu.kizu.ast.ast_node %ant_node, 0",
+		"%ant_start = extractvalue %kizu.kizu.ast.span %ant_span, 0",
+		"%ant_end = extractvalue %kizu.kizu.ast.span %ant_span, 1",
+		"%ant_slice_len = sub i64 %ant_end, %ant_start",
+		"%ant_trimmed = call %kizu.slice.u8 @kizu_std__mem_trim_ascii(%kizu.slice.u8 %ant_s1)",
+		"  ret %kizu.slice.u8 %ant_trimmed",
 	}
 }
 

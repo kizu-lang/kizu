@@ -398,6 +398,31 @@ pub struct MirCountRangeStmt {
     pub own_error_union: []u8,
 }
 
+// MirTrimAsciiStmt backs std::mem::trim_ascii: 'var start = 0; var end = len(bytes); while
+// start < end { if !is_ascii_space(bytes[start]) break; start += 1; } while end > start { if
+// !is_ascii_space(bytes[end-1]) break; end -= 1; } return bytes[start..end];' (tracker 961).
+// The renderer emits two search loops that break on the first non-space byte and return the
+// trimmed two-bound slice. is_ascii_module/name name the byte classifier callee.
+pub struct MirTrimAsciiStmt {
+    pub bytes_name: []u8,
+    pub is_ascii_module: []u8,
+    pub is_ascii_name: []u8,
+}
+
+// MirAstNodeTextStmt backs ast_node_text(text, ast, node_id): 'let node = ast.get(node_id);
+// let span = &node.span; return trim_ascii(text[span.start..span.end]);' (tracker 961). The
+// renderer binds the AstNode by value off the Ast.get call, extracts the Span (AstNode field
+// 0) and its start/end, slices text two-bound, and forwards the slice to trim_ascii.
+pub struct MirAstNodeTextStmt {
+    pub text_name: []u8,
+    pub ast_name: []u8,
+    pub ast_type: []u8,
+    pub node_id_name: []u8,
+    pub node_id_type: []u8,
+    pub trim_module: []u8,
+    pub trim_name: []u8,
+}
+
 // MirReturnTryBinaryStmt backs a 'return <literal> + try <callee>(<args>);' single return
 // (count_one / count_with_range, tracker 961). The renderer emits the call, branches on its
 // ok flag, propagates the failure as this function's own error union, and on success adds the
@@ -438,6 +463,8 @@ pub union MirStmt {
     LetTryCall(MirLetTryCallStmt),
     ReturnTryBinary(MirReturnTryBinaryStmt),
     CountRange(MirCountRangeStmt),
+    TrimAscii(MirTrimAsciiStmt),
+    AstNodeText(MirAstNodeTextStmt),
     ReturnCall(MirReturnCallStmt),
     ReturnStruct(MirReturnStructStmt),
     ReturnExpr(MirReturnExprStmt),
@@ -668,6 +695,18 @@ impl MirCountRangeStmt {
     }
 }
 
+impl MirTrimAsciiStmt {
+    fn deinit(self: MirTrimAsciiStmt) -> void {
+        return;
+    }
+}
+
+impl MirAstNodeTextStmt {
+    fn deinit(self: MirAstNodeTextStmt) -> void {
+        return;
+    }
+}
+
 impl MirTraversalArm {
     fn deinit(self: MirTraversalArm) -> void {
         self.args.deinit();
@@ -729,6 +768,8 @@ impl MirStmt {
             LetTryCall(payload) => payload.deinit(),
             ReturnTryBinary(payload) => payload.deinit(),
             CountRange(payload) => payload.deinit(),
+            TrimAscii(payload) => payload.deinit(),
+            AstNodeText(payload) => payload.deinit(),
             ReturnCall(payload) => payload.deinit(),
             ReturnStruct(payload) => payload.deinit(),
             ReturnExpr(payload) => payload.deinit(),
@@ -1499,6 +1540,38 @@ pub fn count_range_stmt(
         node_count_module: node_count_module,
         node_count_name: node_count_name,
         own_error_union: own_error_union
+    });
+}
+
+pub fn trim_ascii_stmt(
+    bytes_name: []u8,
+    is_ascii_module: []u8,
+    is_ascii_name: []u8
+) -> MirStmt {
+    return MirStmt::TrimAscii(MirTrimAsciiStmt {
+        bytes_name: bytes_name,
+        is_ascii_module: is_ascii_module,
+        is_ascii_name: is_ascii_name
+    });
+}
+
+pub fn ast_node_text_stmt(
+    text_name: []u8,
+    ast_name: []u8,
+    ast_type: []u8,
+    node_id_name: []u8,
+    node_id_type: []u8,
+    trim_module: []u8,
+    trim_name: []u8
+) -> MirStmt {
+    return MirStmt::AstNodeText(MirAstNodeTextStmt {
+        text_name: text_name,
+        ast_name: ast_name,
+        ast_type: ast_type,
+        node_id_name: node_id_name,
+        node_id_type: node_id_type,
+        trim_module: trim_module,
+        trim_name: trim_name
     });
 }
 

@@ -1088,6 +1088,57 @@ pub fn lower_count_range_function(
     );
 }
 
+// lower_trim_ascii_function lowers std::mem::trim_ascii into a single TrimAscii statement: two
+// break-on-condition search loops that advance %start past leading ASCII spaces and retreat
+// %end past trailing ones, returning the trimmed two-bound slice (tracker 961). The byte
+// classifier callee is std::mem::is_ascii_space; std symbols are not derivable through the
+// selfhost-prefixed callee mangler, so the fully-mangled symbol is passed with an empty module.
+pub fn lower_trim_ascii_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let bytes_name = try nth_param_field(params_spec, 0, true);
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::trim_ascii_stmt(
+        bytes_name, "", "kizu_std__mem_is_ascii_space"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
+// lower_ast_node_text_function lowers selfhost::ir::codegen::ast_node_text into a single
+// AstNodeText statement: it binds the AstNode by value off Ast.get, extracts the Span (AstNode
+// field 0) and its start/end, slices the text two-bound, and forwards the slice to trim_ascii
+// (tracker 961). The trim callee is std::mem::trim_ascii, passed as a fully-mangled std symbol
+// with an empty module prefix.
+pub fn lower_ast_node_text_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let text_name = try nth_param_field(params_spec, 0, true);
+    let ast_type = try nth_param_field(params_spec, 1, false);
+    let ast_name = try nth_param_field(params_spec, 1, true);
+    let node_id_type = try nth_param_field(params_spec, 2, false);
+    let node_id_name = try nth_param_field(params_spec, 2, true);
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::ast_node_text_stmt(
+        text_name, ast_name, ast_type, node_id_name, node_id_type,
+        "", "kizu_std__mem_trim_ascii"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // return_value_is_literal_plus_try reports whether a single-return value is the shape
 // '<int literal> + try <call>' (count_one / count_with_range, tracker 961).
 pub fn return_value_is_literal_plus_try(

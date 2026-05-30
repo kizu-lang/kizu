@@ -400,6 +400,8 @@ fn append_multi_stmt(
         LetTryCall(payload) => try append_multi_let_try_call(out, function, payload, local_prefix);,
         ReturnTryBinary(payload) => try append_multi_return_try_binary(out, function, payload, local_prefix);,
         CountRange(payload) => try append_multi_count_range(out, payload);,
+        TrimAscii(payload) => try append_multi_trim_ascii(out, payload);,
+        AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -567,6 +569,117 @@ fn append_multi_return_try_binary(
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.own_error_union);
     try append_ll_line(out, " %rettry_wrap_val");
+    return;
+}
+
+// append_trim_ascii_globals / append_ast_node_text_globals: these accessors forward only value
+// arguments, so they emit no string-constant globals (tracker 961).
+fn append_trim_ascii_globals(stmt: &compiled_mir::MirTrimAsciiStmt) -> !void {
+    return;
+}
+fn append_ast_node_text_globals(stmt: &compiled_mir::MirAstNodeTextStmt) -> !void {
+    return;
+}
+
+// append_multi_trim_ascii renders std::mem::trim_ascii as two break-on-condition search loops:
+// the front loop advances %start past leading ASCII spaces, the back loop retreats %end past
+// trailing ones, and the exit returns the trimmed two-bound slice (tracker 961).
+fn append_multi_trim_ascii(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirTrimAsciiStmt
+) -> !void {
+    try out.append_bytes("  %trim_bytes_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.bytes_name);
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  %trim_bytes_len = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.bytes_name);
+    try append_ll_line(out, ", 1");
+    try append_ll_line(out, "  br label %trim_front_head");
+    // Front loop: advance start past leading spaces.
+    try append_ll_line(out, "trim_front_head:");
+    try append_ll_line(out,
+        "  %trim_start = phi i64 [ 0, %entry ], [ %trim_start_next, %trim_front_inc ]");
+    try append_ll_line(out, "  %trim_front_cond = icmp slt i64 %trim_start, %trim_bytes_len");
+    try append_ll_line(out,
+        "  br i1 %trim_front_cond, label %trim_front_body, label %trim_back_head");
+    try append_ll_line(out, "trim_front_body:");
+    try append_ll_line(out,
+        "  %trim_front_ptr = getelementptr i8, ptr %trim_bytes_ptr, i64 %trim_start");
+    try append_ll_line(out, "  %trim_front_byte = load i8, ptr %trim_front_ptr");
+    try out.append_bytes("  %trim_front_space = call i1 @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, stmt.is_ascii_module, stmt.is_ascii_name);
+    try append_ll_line(out, "(i8 %trim_front_byte)");
+    try append_ll_line(out,
+        "  br i1 %trim_front_space, label %trim_front_inc, label %trim_back_head");
+    try append_ll_line(out, "trim_front_inc:");
+    try append_ll_line(out, "  %trim_start_next = add i64 %trim_start, 1");
+    try append_ll_line(out, "  br label %trim_front_head");
+    // Back loop: retreat end past trailing spaces.
+    try append_ll_line(out, "trim_back_head:");
+    try out.append_bytes("  %trim_end = phi i64 [ %trim_bytes_len, %trim_front_head ], ");
+    try append_ll_line(out,
+        "[ %trim_bytes_len, %trim_front_body ], [ %trim_end_next, %trim_back_inc ]");
+    try append_ll_line(out, "  %trim_back_cond = icmp sgt i64 %trim_end, %trim_start");
+    try append_ll_line(out,
+        "  br i1 %trim_back_cond, label %trim_back_body, label %trim_exit");
+    try append_ll_line(out, "trim_back_body:");
+    try append_ll_line(out, "  %trim_prev = sub i64 %trim_end, 1");
+    try append_ll_line(out,
+        "  %trim_back_ptr = getelementptr i8, ptr %trim_bytes_ptr, i64 %trim_prev");
+    try append_ll_line(out, "  %trim_back_byte = load i8, ptr %trim_back_ptr");
+    try out.append_bytes("  %trim_back_space = call i1 @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, stmt.is_ascii_module, stmt.is_ascii_name);
+    try append_ll_line(out, "(i8 %trim_back_byte)");
+    try append_ll_line(out,
+        "  br i1 %trim_back_space, label %trim_back_inc, label %trim_exit");
+    try append_ll_line(out, "trim_back_inc:");
+    try append_ll_line(out, "  %trim_end_next = sub i64 %trim_end, 1");
+    try append_ll_line(out, "  br label %trim_back_head");
+    // Exit: return bytes[start..end].
+    try append_ll_line(out, "trim_exit:");
+    try append_ll_line(out,
+        "  %trim_slice_ptr = getelementptr i8, ptr %trim_bytes_ptr, i64 %trim_start");
+    try append_ll_line(out, "  %trim_slice_len = sub i64 %trim_end, %trim_start");
+    try append_ll_line(out,
+        "  %trim_s0 = insertvalue %kizu.slice.u8 poison, ptr %trim_slice_ptr, 0");
+    try append_ll_line(out,
+        "  %trim_s1 = insertvalue %kizu.slice.u8 %trim_s0, i64 %trim_slice_len, 1");
+    try append_ll_line(out, "  ret %kizu.slice.u8 %trim_s1");
+    return;
+}
+
+// append_multi_ast_node_text renders ast_node_text(text, ast, node_id): it binds the AstNode by
+// value off the Ast.get call, extracts the Span (AstNode field 0) and its start/end, slices the
+// text two-bound, and forwards the slice to trim_ascii (tracker 961).
+fn append_multi_ast_node_text(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirAstNodeTextStmt
+) -> !void {
+    try out.append_bytes("  %ant_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.node_id_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.node_id_name);
+    try append_ll_line(out, ")");
+    try append_ll_line(out, "  %ant_span = extractvalue %kizu.kizu.ast.ast_node %ant_node, 0");
+    try append_ll_line(out, "  %ant_start = extractvalue %kizu.kizu.ast.span %ant_span, 0");
+    try append_ll_line(out, "  %ant_end = extractvalue %kizu.kizu.ast.span %ant_span, 1");
+    try out.append_bytes("  %ant_text_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out,
+        "  %ant_slice_ptr = getelementptr i8, ptr %ant_text_ptr, i64 %ant_start");
+    try append_ll_line(out, "  %ant_slice_len = sub i64 %ant_end, %ant_start");
+    try append_ll_line(out,
+        "  %ant_s0 = insertvalue %kizu.slice.u8 poison, ptr %ant_slice_ptr, 0");
+    try append_ll_line(out, "  %ant_s1 = insertvalue %kizu.slice.u8 %ant_s0, i64 %ant_slice_len, 1");
+    try out.append_bytes("  %ant_trimmed = call %kizu.slice.u8 @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, stmt.trim_module, stmt.trim_name);
+    try append_ll_line(out, "(%kizu.slice.u8 %ant_s1)");
+    try append_ll_line(out, "  ret %kizu.slice.u8 %ant_trimmed");
     return;
 }
 
@@ -1011,6 +1124,8 @@ fn append_stmt_globals(
         LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         CountRange(payload) => try append_count_range_globals(payload);,
+        TrimAscii(payload) => try append_trim_ascii_globals(payload);,
+        AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
