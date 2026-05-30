@@ -334,6 +334,9 @@ func requiredLLVMExecutableFragments() []string {
 		"%kizu.selfhost.codegen.binding = type { i1, %kizu.slice.u8, %kizu.slice.u8, i64 }",
 		"%kizu.selfhost.codegen.payload = type { i1, %kizu.slice.u8, i64 }",
 		"%kizu.selfhost.codegen.run_ast = type { i1, i64, %kizu.slice.u8",
+		// !RunAst error union backs the run-codegen AST traversal lowering cluster compiled
+		// into stage2 (tracker 961, scope 4 prerequisite): { ok, RunAst value, diagnostic }.
+		"%kizu.error.run_ast = type { i1, %kizu.selfhost.codegen.run_ast, %kizu.slice.u8 }",
 		"%kizu.selfhost.codegen.value = type { i64, %kizu.slice.u8, %kizu.slice.u8 }",
 		"%kizu.selfhost.codegen.instruction = type { i64, i64, %kizu.slice.u8",
 		"%kizu.selfhost.codegen.block = type { %kizu.slice.u8, i64 }",
