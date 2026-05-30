@@ -35,6 +35,11 @@ pub fn kizu_type_to_llvm(
         if std::mem::equal_bytes(inner, "NodeId") {
             return "%kizu.error.node_id";
         }
+        // !i64 backs the node_count recursive AST-traversal cluster (node_count + the count_*
+        // helpers, tracker 961): every one returns !i64 = %kizu.error.i64.
+        if std::mem::equal_bytes(inner, "i64") {
+            return "%kizu.error.i64";
+        }
         return error("compiled function: unsupported error type");
     }
     if std::mem::equal_bytes(kizu_type, "i64") {
@@ -55,5 +60,28 @@ pub fn kizu_type_to_llvm(
     if compiled_fact_lookup::is_enum_type(ir_bytes, module_prefix, kizu_type) {
         return "i64";
     }
+    // A fully-qualified type (one carrying a '::' path, e.g. a recursive node_count cluster
+    // call forwarding a std::kizu::ast::Ast receiver across the module-local callee) already
+    // names its whole module in the type-llvm fact, so look it up with an empty module prefix
+    // rather than concatenating the caller's module onto it (tracker 961).
+    if type_is_qualified(kizu_type) {
+        return try compiled_fact_lookup::lookup_type_llvm_by_prefix(
+            ir_bytes, ir_bytes[0..0], kizu_type
+        );
+    }
     return try compiled_fact_lookup::lookup_type_llvm_by_prefix(ir_bytes, module_prefix, kizu_type);
+}
+
+// type_is_qualified reports whether a kizu type spelling carries a '::' module path, i.e. it
+// is already fully qualified (tracker 961).
+fn type_is_qualified(kizu_type: []u8) -> bool {
+    let len = std::mem::len(kizu_type);
+    var index = 0;
+    while index < len {
+        if kizu_type[index] == cast<u8>(58) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }

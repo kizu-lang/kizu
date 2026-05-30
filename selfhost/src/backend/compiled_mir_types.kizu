@@ -481,6 +481,27 @@ fn resolve_let_value_kizu_type(
     if std::mem::equal_bytes(value_kind, "IndexExpr") {
         return "u8";
     }
+    // 'let x = try <callee>(...)' (a node_count cluster let-try) binds the callee's unwrapped
+    // success type: the callee returns '!T', so strip the leading '!' (tracker 961).
+    if std::mem::equal_bytes(value_kind, "TryExpr") {
+        let inner = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, value, "value", 0, bs
+        );
+        let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+        if std::mem::equal_bytes(inner_kind, "Call") {
+            let try_callee = try ir_contract::body_call_callee_or_empty_from(
+                ir_bytes, function_name, inner, bs
+            );
+            let try_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+                ir_bytes, "function-signature-return ", module_prefix, try_callee
+            );
+            let try_ret_len = std::mem::len(try_ret);
+            if try_ret_len > 0 and try_ret[0] == cast<u8>(33) {
+                return try_ret[1..try_ret_len];
+            }
+            return try_ret;
+        }
+    }
     return error("compiled mir: unsupported local type value");
 }
 
