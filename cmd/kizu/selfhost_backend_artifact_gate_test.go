@@ -374,6 +374,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLowerLetBindingFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstBlockFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstFunctionFragments()...)
+	fragments = append(fragments, requiredLLVMLowerRunAstDeclarationsFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -980,6 +981,30 @@ func requiredLLVMLowerRunAstFunctionFragments() []string {
 			"%kizu.kizu.ast.ast %ast, %kizu.slice.u8 %lraf_name_text, " +
 			"%kizu.kizu.ast.child_range %lraf_stmts)",
 		"  ret %kizu.error.run_ast %lraf_result",
+	}
+}
+
+// requiredLLVMLowerRunAstDeclarationsFragments returns the tracker-961 scope-4 prerequisite
+// lower_run_ast_declarations AST traversal lowering compiled into stage2: it scans the program
+// declarations for the first FnDecl (tag 42, name field 3 / body field 8) whose
+// lower_run_ast_function produces a run_ast_supported RunAst, returning it wrapped, propagating the
+// checked Ast.child_at / lower_run_ast_function failure, and falling through to the wrapped
+// unsupported_run_ast(). These fragments lock the lowered body shape.
+func requiredLLVMLowerRunAstDeclarationsFragments() []string {
+	return []string{
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_declarations(",
+		"%lrad_index = phi i64 [ 0, %entry ], [ %lrad_index_next, %lrad_advance ]",
+		"%lrad_is_fndecl = icmp eq i64 %lrad_tag, 42",
+		"%lrad_name = extractvalue %kizu.kizu.ast.fn_decl_node %lrad_fn_node, 3",
+		"%lrad_fn_body = extractvalue %kizu.kizu.ast.fn_decl_node %lrad_fn_node, 8",
+		"%lrad_fcall = call %kizu.error.run_ast " +
+			"@kizu_selfhost__ir_codegen_lower_run_ast_function(",
+		"%lrad_run_ast = phi %kizu.selfhost.codegen.run_ast " +
+			"[ %lrad_run_ast_fn, %lrad_fcall_ready ], [ %lrad_run_ast_us, %lrad_not_fndecl ]",
+		"%lrad_supported = call i1 @kizu_selfhost__ir_codegen_run_ast_supported(" +
+			"%kizu.selfhost.codegen.run_ast %lrad_run_ast)",
+		"%lrad_r1 = insertvalue %kizu.error.run_ast %lrad_r0, " +
+			"%kizu.selfhost.codegen.run_ast %lrad_run_ast, 1",
 	}
 }
 

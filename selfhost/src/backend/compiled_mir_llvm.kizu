@@ -408,6 +408,7 @@ fn append_multi_stmt(
         LowerPrintStatement(payload) => try append_multi_lower_print_statement(out, payload);,
         LowerRunAstBlock(payload) => try append_multi_lower_run_ast_block(out, payload);,
         LowerRunAstFunction(payload) => try append_multi_lower_run_ast_function(out, payload);,
+        LowerRunAstDeclarations(payload) => try append_multi_lower_run_ast_declarations(out, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -1334,6 +1335,143 @@ fn append_multi_lower_run_ast_function(
     return;
 }
 
+// append_lower_run_ast_declarations_globals: lower_run_ast_declarations forwards only value
+// arguments and emits no string-constant globals (tracker 961, scope 4 prerequisite).
+fn append_lower_run_ast_declarations_globals(stmt: &compiled_mir::MirLowerRunAstDeclarationsStmt) -> !void {
+    return;
+}
+
+// append_multi_lower_run_ast_declarations renders lower_run_ast_declarations(text, ast,
+// declarations): it scans the declarations for the first FnDecl whose lower_run_ast_function
+// produces a run_ast_supported RunAst (tracker 961, scope 4 prerequisite). Each declaration binds
+// via Ast.get; a FnDecl (field 3 name / field 8 body) forwards through lower_run_ast_function with
+// try-propagation, any other declaration yields unsupported_run_ast(); a supported RunAst is
+// returned wrapped, otherwise the scan advances and falls through to the wrapped
+// unsupported_run_ast(). The FnDeclNode payload slot is hoisted to entry.
+fn append_multi_lower_run_ast_declarations(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirLowerRunAstDeclarationsStmt
+) -> !void {
+    try out.append_bytes("  %lrad_decls_len = extractvalue ");
+    try out.append_bytes(stmt.declarations_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.declarations_name);
+    try append_ll_line(out, ", 1");
+    try append_ll_line(out, "  %lrad_slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_ll_line(out, "  br label %lrad_head");
+    try append_ll_line(out, "lrad_head:");
+    try append_ll_line(out,
+        "  %lrad_index = phi i64 [ 0, %entry ], [ %lrad_index_next, %lrad_advance ]");
+    try append_ll_line(out, "  %lrad_cond = icmp slt i64 %lrad_index, %lrad_decls_len");
+    try append_ll_line(out, "  br i1 %lrad_cond, label %lrad_body, label %lrad_unsupported");
+    try append_ll_line(out, "lrad_body:");
+    try out.append_bytes("  %lrad_child = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.declarations_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.declarations_name);
+    try append_ll_line(out, ", i64 %lrad_index)");
+    try append_ll_line(out, "  %lrad_child_ok = extractvalue %kizu.error.node_id %lrad_child, 0");
+    try append_ll_line(out, "  br i1 %lrad_child_ok, label %lrad_child_bound, label %lrad_child_fail");
+    try append_ll_line(out, "lrad_child_fail:");
+    try append_ll_line(out, "  %lrad_child_err = extractvalue %kizu.error.node_id %lrad_child, 2");
+    try append_ll_line(out, "  %lrad_cf0 = insertvalue %kizu.error.run_ast poison, i1 false, 0");
+    try append_ll_line(out,
+        "  %lrad_cf1 = insertvalue %kizu.error.run_ast %lrad_cf0, %kizu.selfhost.codegen.run_ast zeroinitializer, 1");
+    try append_ll_line(out,
+        "  %lrad_cf2 = insertvalue %kizu.error.run_ast %lrad_cf1, %kizu.slice.u8 %lrad_child_err, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrad_cf2");
+    try append_ll_line(out, "lrad_child_bound:");
+    try append_ll_line(out, "  %lrad_decl = extractvalue %kizu.error.node_id %lrad_child, 1");
+    try out.append_bytes("  %lrad_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.node_id %lrad_decl)");
+    try append_ll_line(out, "  %lrad_data = extractvalue %kizu.kizu.ast.ast_node %lrad_node, 1");
+    try append_ll_line(out, "  %lrad_tag = extractvalue %kizu.kizu.ast.ast_data %lrad_data, 0");
+    try out.append_bytes("  %lrad_is_fndecl = icmp eq i64 %lrad_tag, ");
+    try std::fmt::append_i64(out, stmt.fn_decl_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  br i1 %lrad_is_fndecl, label %lrad_fndecl, label %lrad_not_fndecl");
+    // FnDecl: forward lower_run_ast_function, propagating its failure.
+    try append_ll_line(out, "lrad_fndecl:");
+    try append_ll_line(out, "  store %kizu.kizu.ast.ast_data %lrad_data, ptr %lrad_slot, align 8");
+    try append_ll_line(out,
+        "  %lrad_payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %lrad_slot, i32 0, i32 1");
+    try append_ll_line(out,
+        "  %lrad_fn_node = load %kizu.kizu.ast.fn_decl_node, ptr %lrad_payload_ptr, align 8");
+    try append_ll_line(out, "  %lrad_name = extractvalue %kizu.kizu.ast.fn_decl_node %lrad_fn_node, 3");
+    try append_ll_line(out, "  %lrad_fn_body = extractvalue %kizu.kizu.ast.fn_decl_node %lrad_fn_node, 8");
+    try out.append_bytes("  %lrad_fcall = call %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_function(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.node_id %lrad_name, %kizu.kizu.ast.node_id %lrad_fn_body)");
+    try append_ll_line(out, "  %lrad_fcall_ok = extractvalue %kizu.error.run_ast %lrad_fcall, 0");
+    try append_ll_line(out, "  br i1 %lrad_fcall_ok, label %lrad_fcall_ready, label %lrad_fcall_fail");
+    try append_ll_line(out, "lrad_fcall_fail:");
+    try append_ll_line(out, "  %lrad_fcall_err = extractvalue %kizu.error.run_ast %lrad_fcall, 2");
+    try append_ll_line(out, "  %lrad_ff0 = insertvalue %kizu.error.run_ast poison, i1 false, 0");
+    try append_ll_line(out,
+        "  %lrad_ff1 = insertvalue %kizu.error.run_ast %lrad_ff0, %kizu.selfhost.codegen.run_ast zeroinitializer, 1");
+    try append_ll_line(out,
+        "  %lrad_ff2 = insertvalue %kizu.error.run_ast %lrad_ff1, %kizu.slice.u8 %lrad_fcall_err, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrad_ff2");
+    try append_ll_line(out, "lrad_fcall_ready:");
+    try append_ll_line(out,
+        "  %lrad_run_ast_fn = extractvalue %kizu.error.run_ast %lrad_fcall, 1");
+    try append_ll_line(out, "  br label %lrad_have");
+    // Non-FnDecl declaration: yields the unsupported sentinel for the supported check.
+    try append_ll_line(out, "lrad_not_fndecl:");
+    try out.append_bytes("  %lrad_us_ptr0 = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  %lrad_e0 = insertvalue %kizu.slice.u8 poison, ptr %lrad_us_ptr0, 0");
+    try append_ll_line(out, "  %lrad_empty0 = insertvalue %kizu.slice.u8 %lrad_e0, i64 0, 1");
+    try append_ll_line(out,
+        "  %lrad_run_ast_us = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lrad_empty0)");
+    try append_ll_line(out, "  br label %lrad_have");
+    // Supported check: return the RunAst wrapped, else advance the scan.
+    try append_ll_line(out, "lrad_have:");
+    try append_ll_line(out,
+        "  %lrad_run_ast = phi %kizu.selfhost.codegen.run_ast [ %lrad_run_ast_fn, %lrad_fcall_ready ], [ %lrad_run_ast_us, %lrad_not_fndecl ]");
+    try append_ll_line(out,
+        "  %lrad_supported = call i1 @kizu_selfhost__ir_codegen_run_ast_supported(%kizu.selfhost.codegen.run_ast %lrad_run_ast)");
+    try append_ll_line(out, "  br i1 %lrad_supported, label %lrad_return, label %lrad_advance");
+    try append_ll_line(out, "lrad_return:");
+    try append_ll_line(out, "  %lrad_r0 = insertvalue %kizu.error.run_ast poison, i1 true, 0");
+    try append_ll_line(out,
+        "  %lrad_r1 = insertvalue %kizu.error.run_ast %lrad_r0, %kizu.selfhost.codegen.run_ast %lrad_run_ast, 1");
+    try append_ll_line(out,
+        "  %lrad_r2 = insertvalue %kizu.error.run_ast %lrad_r1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrad_r2");
+    try append_ll_line(out, "lrad_advance:");
+    try append_ll_line(out, "  %lrad_index_next = add i64 %lrad_index, 1");
+    try append_ll_line(out, "  br label %lrad_head");
+    // Scan exhausted: the wrapped unsupported_run_ast(text[0..0]).
+    try append_ll_line(out, "lrad_unsupported:");
+    try out.append_bytes("  %lrad_us_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  %lrad_us0 = insertvalue %kizu.slice.u8 poison, ptr %lrad_us_ptr, 0");
+    try append_ll_line(out, "  %lrad_empty = insertvalue %kizu.slice.u8 %lrad_us0, i64 0, 1");
+    try append_ll_line(out,
+        "  %lrad_us = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lrad_empty)");
+    try append_ll_line(out, "  %lrad_uw0 = insertvalue %kizu.error.run_ast poison, i1 true, 0");
+    try append_ll_line(out,
+        "  %lrad_uw1 = insertvalue %kizu.error.run_ast %lrad_uw0, %kizu.selfhost.codegen.run_ast %lrad_us, 1");
+    try append_ll_line(out,
+        "  %lrad_uw2 = insertvalue %kizu.error.run_ast %lrad_uw1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrad_uw2");
+    return;
+}
+
 // append_count_range_globals: count_range forwards only value arguments, so no string globals.
 fn append_count_range_globals(stmt: &compiled_mir::MirCountRangeStmt) -> !void {
     return;
@@ -1783,6 +1921,7 @@ fn append_stmt_globals(
         LowerPrintStatement(payload) => try append_lower_print_statement_globals(payload);,
         LowerRunAstBlock(payload) => try append_lower_run_ast_block_globals(payload);,
         LowerRunAstFunction(payload) => try append_lower_run_ast_function_string_globals(out, payload);,
+        LowerRunAstDeclarations(payload) => try append_lower_run_ast_declarations_globals(payload);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
