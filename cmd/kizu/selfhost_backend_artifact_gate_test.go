@@ -371,6 +371,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMPrintPayloadFragments()...)
 	fragments = append(fragments, requiredLLVMLowerPrintCallFragments()...)
 	fragments = append(fragments, requiredLLVMLowerPrintStatementFragments()...)
+	fragments = append(fragments, requiredLLVMLowerLetBindingFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -904,6 +905,26 @@ func requiredLLVMLowerPrintStatementFragments() []string {
 		"  ret %kizu.error.run_ast %lps_result",
 		"%lps_us = call %kizu.selfhost.codegen.run_ast " +
 			"@kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lps_empty)",
+	}
+}
+
+// requiredLLVMLowerLetBindingFragments returns the tracker-961 scope-4 prerequisite
+// lower_let_binding AST traversal lowering compiled into stage2 (through the generic
+// multi-statement path): it reads the binding name text, rejects a duplicate / over-capacity
+// local, slices the string-literal payload via string_literal_span, and returns the LocalBinding
+// or empty_local() on rejection. These fragments lock the lowered body shape.
+func requiredLLVMLowerLetBindingFragments() []string {
+	return []string{
+		"define %kizu.selfhost.codegen.local_binding " +
+			"@kizu_selfhost__ir_codegen_lower_let_binding(",
+		"%local_name = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(",
+		"call i1 @kizu_selfhost__ir_codegen_local_table_contains(" +
+			"%kizu.selfhost.codegen.local_table %locals, %kizu.slice.u8 %local_name)",
+		"%payload = call %kizu.selfhost.codegen.payload_span " +
+			"@kizu_selfhost__ir_codegen_string_literal_span(",
+		"call %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_empty_local(" +
+			"%kizu.slice.u8 %text)",
+		"insertvalue %kizu.selfhost.codegen.local_binding poison, %kizu.slice.u8 %local_name, 0",
 	}
 }
 
