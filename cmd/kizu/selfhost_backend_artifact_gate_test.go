@@ -372,6 +372,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLowerPrintCallFragments()...)
 	fragments = append(fragments, requiredLLVMLowerPrintStatementFragments()...)
 	fragments = append(fragments, requiredLLVMLowerLetBindingFragments()...)
+	fragments = append(fragments, requiredLLVMLowerRunAstBlockFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -925,6 +926,35 @@ func requiredLLVMLowerLetBindingFragments() []string {
 		"call %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_empty_local(" +
 			"%kizu.slice.u8 %text)",
 		"insertvalue %kizu.selfhost.codegen.local_binding poison, %kizu.slice.u8 %local_name, 0",
+	}
+}
+
+// requiredLLVMLowerRunAstBlockFragments returns the tracker-961 scope-4 prerequisite
+// lower_run_ast_block AST traversal lowering compiled into stage2: the stateful run-block
+// traversal. It threads a mutable LocalTable + index through a bounded loop (two head phis),
+// lowering non-terminal Let bindings (lower_let_binding + insert_local) and the terminal ExprStmt
+// (lower_print_statement), propagating the checked Ast.child_at failure and returning the wrapped
+// unsupported_run_ast() on rejection. These fragments lock the lowered body shape.
+func requiredLLVMLowerRunAstBlockFragments() []string {
+	return []string{
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_block(",
+		"%lrb_locals0 = call %kizu.selfhost.codegen.local_table " +
+			"@kizu_selfhost__ir_codegen_empty_local_table(%kizu.slice.u8 %text)",
+		"%lrb_locals = phi %kizu.selfhost.codegen.local_table " +
+			"[ %lrb_locals0, %entry ], [ %lrb_locals_next, %lrb_insert ]",
+		"%lrb_index = phi i64 [ 0, %entry ], [ %lrb_index_next, %lrb_insert ]",
+		"%lrb_child = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(",
+		"%lrb_terminal = icmp eq i64 %lrb_index1, %lrb_stmts_len",
+		"%lrb_is_let = icmp eq i64 %lrb_tag, 21",
+		"%lrb_let_node = load %kizu.kizu.ast.let_node, ptr %lrb_let_ptr, align 8",
+		"%lrb_binding_let = call %kizu.selfhost.codegen.local_binding " +
+			"@kizu_selfhost__ir_codegen_lower_let_binding(",
+		"%lrb_locals_next = call %kizu.selfhost.codegen.local_table " +
+			"@kizu_selfhost__ir_codegen_insert_local(",
+		"%lrb_is_exprstmt = icmp eq i64 %lrb_tag, 25",
+		"%lrb_ps = call %kizu.error.run_ast " +
+			"@kizu_selfhost__ir_codegen_lower_print_statement(",
+		"  ret %kizu.error.run_ast %lrb_ps",
 	}
 }
 
