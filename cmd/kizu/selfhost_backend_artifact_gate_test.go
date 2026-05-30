@@ -362,6 +362,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMArenaGetFragments()...)
 	fragments = append(fragments, requiredLLVMMatchUnionFragments()...)
 	fragments = append(fragments, requiredLLVMNodeCountTypeFragments()...)
+	fragments = append(fragments, requiredLLVMNodeCountLoweringFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -692,6 +693,64 @@ func requiredLLVMNodeCountTypeFragments() []string {
 			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range, " +
 			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.span }",
+	}
+}
+
+// requiredLLVMNodeCountLoweringFragments returns the tracker-961 node_count recursive
+// AST-traversal cluster compiled into stage2: node_count (the 44-arm match-over-AstData
+// traversal), count_range (the two-phi accumulator loop calling Ast.child_at + node_count),
+// and the count_* helpers (let-try / return-try arithmetic). The whole mutually-recursive
+// cluster is defined so selfhost.ll links with no undefined symbol; every arm returns a real
+// value (no 'unreachable'). These fragments lock each lowered body shape.
+func requiredLLVMNodeCountLoweringFragments() []string {
+	return []string{
+		// All eleven cluster defines are present (linkage invariant).
+		"define %kizu.error.i64 @kizu_selfhost__ast_node_count(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_range(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_one(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_two(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_three(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_five(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_with_range(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_node_with_range(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_range(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_ranges(",
+		"define %kizu.error.i64 @kizu_selfhost__ast_count_fn_decl_parts(",
+		// node_count: bind the AstNode via Ast.get, extract the union tag, and dispatch over
+		// the exhaustive icmp/br arm chain (Program tag 0 first, FnDecl tag 42, ...).
+		"%match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %node_id)",
+		"%match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0",
+		"%match_is_0 = icmp eq i64 %match_tag, 0",
+		"br i1 %match_is_0, label %match_arm_0, label %match_check_1",
+		// node_count Program arm: load the ProgramNode payload, forward declarations to
+		// count_with_range, and return its (identically-typed) error union directly.
+		"%match_arm_0_payload = load %kizu.kizu.ast.program_node, " +
+			"ptr %match_arm_0_ptr, align 8",
+		"%match_arm_0_a0 = extractvalue %kizu.kizu.ast.program_node %match_arm_0_payload, 0",
+		"%match_arm_0_call = call %kizu.error.i64 @kizu_selfhost__ast_count_with_range(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %match_arm_0_a0)",
+		"  ret %kizu.error.i64 %match_arm_0_call",
+		// count_range: a two-phi accumulator loop over the range calling the checked
+		// Ast.child_at and the recursive node_count, propagating either failure and returning
+		// the accumulated count wrapped as the success.
+		"%range_len = extractvalue %kizu.kizu.ast.child_range %range, 1",
+		"%count = phi i64 [ 0, %entry ], [ %count_next, %count_nc_cont ]",
+		"%index = phi i64 [ 0, %entry ], [ %index_next, %count_nc_cont ]",
+		"%child_call = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %range, i64 %index)",
+		"%nc_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %child)",
+		"%count_next = add i64 %count, %nc",
+		// count_two: let-try the recursive node_count, propagate failure, bind the success,
+		// then return the arithmetic wrapped as the error-union success.
+		"%first_count_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %first)",
+		"%first_count = extractvalue %kizu.error.i64 %first_count_call, 1",
+		// count_one: return '1 + try node_count(...)' as a single return-try-binary.
+		"%rettry_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %first)",
+		"%rettry_sum = add i64 1, %rettry_success",
 	}
 }
 
