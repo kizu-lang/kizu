@@ -1362,6 +1362,38 @@ pub fn lower_run_ast_function_function(
     );
 }
 
+// lower_run_ast_declarations_function lowers selfhost::ir::codegen::lower_run_ast_declarations into
+// a single LowerRunAstDeclarations statement: it scans the program declarations for the first
+// FnDecl whose lower_run_ast_function produces a supported RunAst (tracker 961, scope 4
+// prerequisite). The FnDecl discriminant tag comes from the union-variant facts.
+pub fn lower_run_ast_declarations_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let text_name = try nth_param_field(params_spec, 0, true);
+    let ast_type = try nth_param_field(params_spec, 1, false);
+    let ast_name = try nth_param_field(params_spec, 1, true);
+    let declarations_type = try nth_param_field(params_spec, 2, false);
+    let declarations_name = try nth_param_field(params_spec, 2, true);
+    let fn_decl_variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, ir_bytes[0..0], "std::kizu::ast::AstData", "FnDecl"
+    );
+    if !fn_decl_variant.found {
+        return error("compiled mir: lower_run_ast_declarations FnDecl variant not found");
+    }
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::lower_run_ast_declarations_stmt(
+        text_name, ast_name, ast_type, declarations_name, declarations_type, fn_decl_variant.tag
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // return_value_is_literal_plus_try reports whether a single-return value is the shape
 // '<int literal> + try <call>' (count_one / count_with_range, tracker 961).
 pub fn return_value_is_literal_plus_try(
