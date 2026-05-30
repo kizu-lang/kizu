@@ -397,6 +397,7 @@ fn append_multi_stmt(
         LetStruct(payload) => try append_multi_let_struct(out, function.name, payload);,
         LetArenaAdd(payload) => try append_multi_let_arena_add(out, function.name, payload);,
         LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
+        LetTryCall(payload) => try append_multi_let_try_call(out, function, payload, local_prefix);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -423,6 +424,88 @@ fn append_multi_let_call(
         &stmt.call_args,
         local_prefix
     );
+    return;
+}
+// append_multi_let_try_call renders a 'let <name> = try <callee>(<args>);' try-call over
+// an error-union-returning free function (the node_count traversal cluster, tracker 961).
+// It emits the call into %<name>_call, extracts the ok flag (field 0), and branches on a
+// try_index-suffixed label pair: try<N>_fail re-wraps the callee message (field 2) into
+// this function's own error-union failure value and returns it (propagation, never
+// 'unreachable'); try<N>_cont extracts the success value (field 1) into %<name> and the
+// following statements continue in it.
+fn append_multi_let_try_call(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirLetTryCallStmt,
+    local_prefix: i64
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function.name, &stmt.call_args, local_prefix
+    );
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_call = call ");
+    try out.append_bytes(stmt.called_error_union);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, stmt.call_module_prefix, stmt.call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_ok = extractvalue ");
+    try out.append_bytes(stmt.called_error_union);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_call, 0");
+    try out.append_bytes("  br i1 %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_ok, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_cont, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail");
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_msg = extractvalue ");
+    try out.append_bytes(stmt.called_error_union);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_call, 2");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_fail_flag = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_fail_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_fail_flag, %kizu.slice.u8 %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_msg, 2");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_fail_val");
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_cont:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(stmt.called_error_union);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_call, 1");
     return;
 }
 fn append_multi_return_call(
@@ -601,6 +684,7 @@ fn append_stmt_globals(
         LetStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         LetArenaAdd(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
+        LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,

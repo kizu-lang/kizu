@@ -268,6 +268,28 @@ pub struct MirLetExprStmt {
     pub expr_insts: std::array::Array<MirExprInst>,
 }
 
+// MirLetTryCallStmt backs a 'let <name> = try <callee>(<args>);' statement: a try-call
+// over a free function whose return type is an error union (the node_count traversal
+// cluster, tracker 961). The renderer emits the call into called_error_union, extracts the
+// ok flag (field 0), and branches on a try_index-suffixed label pair: the fail block
+// re-wraps the callee's message (field 2) into this function's own_error_union failure
+// value and returns it (propagation, never 'unreachable'); the ok block extracts the
+// success value (field 1, success_type) and binds it to <name>. called_error_union and
+// own_error_union may differ (e.g. a !NodeId child_at call inside a !i64 counter), so the
+// fail path always rebuilds the message rather than forwarding the callee union whole. It
+// owns the call-argument Array, mirroring MirLetCallStmt.
+pub struct MirLetTryCallStmt {
+    pub name: []u8,
+    pub called_error_union: []u8,
+    pub success_type: []u8,
+    pub own_error_union: []u8,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub string_index: i64,
+    pub try_index: i64,
+    pub call_args: std::array::Array<MirCallArg>,
+}
+
 // MirReturnArrayGetStmt backs a multi-statement 'return self.<field>.get(<expr>);'
 // (Array<T>.get -> !T, tracker 961). It composes the ArrayGet body with an arbitrary
 // index expression: expr_insts/index_result_id lower the index (e.g. range.start +
@@ -339,6 +361,7 @@ pub union MirStmt {
     LetStruct(MirLetStructStmt),
     LetArenaAdd(MirLetArenaAddStmt),
     LetExpr(MirLetExprStmt),
+    LetTryCall(MirLetTryCallStmt),
     ReturnCall(MirReturnCallStmt),
     ReturnStruct(MirReturnStructStmt),
     ReturnExpr(MirReturnExprStmt),
@@ -548,6 +571,13 @@ impl MirLetExprStmt {
     }
 }
 
+impl MirLetTryCallStmt {
+    fn deinit(self: MirLetTryCallStmt) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
 impl MirReturnErrorStmt {
     fn deinit(self: MirReturnErrorStmt) -> void {
         self.expr_insts.deinit();
@@ -592,6 +622,7 @@ impl MirStmt {
             LetStruct(payload) => payload.deinit(),
             LetArenaAdd(payload) => payload.deinit(),
             LetExpr(payload) => payload.deinit(),
+            LetTryCall(payload) => payload.deinit(),
             ReturnCall(payload) => payload.deinit(),
             ReturnStruct(payload) => payload.deinit(),
             ReturnExpr(payload) => payload.deinit(),
@@ -1297,6 +1328,30 @@ pub fn let_expr_stmt(
         string_index: string_index,
         expr_result_id: result_id,
         expr_insts: insts
+    });
+}
+
+pub fn let_try_call_stmt(
+    name: []u8,
+    called_error_union: []u8,
+    success_type: []u8,
+    own_error_union: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    string_index: i64,
+    try_index: i64,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::LetTryCall(MirLetTryCallStmt {
+        name: name,
+        called_error_union: called_error_union,
+        success_type: success_type,
+        own_error_union: own_error_union,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        string_index: string_index,
+        try_index: try_index,
+        call_args: args
     });
 }
 
