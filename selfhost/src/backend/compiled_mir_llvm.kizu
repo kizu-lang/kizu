@@ -403,6 +403,7 @@ fn append_multi_stmt(
         TrimAscii(payload) => try append_multi_trim_ascii(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
+        PrintPayload(payload) => try append_multi_print_payload(out, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -760,6 +761,89 @@ fn append_multi_string_literal_span(
     try compiled_mir_llvm_call::append_callee_symbol(out, stmt.callee_module, stmt.empty_name);
     try append_ll_line(out, "()");
     try append_ll_line(out, "  ret %kizu.selfhost.codegen.payload_span %sls_empty_call");
+    return;
+}
+
+// append_print_payload_globals: print_payload forwards only value arguments, so no string globals.
+fn append_print_payload_globals(stmt: &compiled_mir::MirPrintPayloadStmt) -> !void {
+    return;
+}
+
+// append_multi_print_payload renders print_payload(text, ast, locals, arg): it binds the AstNode
+// off Ast.get, reads the AstData tag (AstNode field 1, tag field 0), and dispatches by tag - the
+// String variant returns string_literal_span(text, ast, arg), the Var variant returns
+// local_payload_span(locals, ast_node_text(text, ast, arg)), and every other variant returns the
+// shared empty_payload_span() sentinel (tracker 961, scope 4 prerequisite). The arms ignore the
+// bound payload (the bodies re-derive from the arg NodeId), so no union payload load is emitted.
+fn append_multi_print_payload(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirPrintPayloadStmt
+) -> !void {
+    try out.append_bytes("  %pp_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.arg_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.arg_name);
+    try append_ll_line(out, ")");
+    try append_ll_line(out, "  %pp_data = extractvalue %kizu.kizu.ast.ast_node %pp_node, 1");
+    try append_ll_line(out, "  %pp_tag = extractvalue %kizu.kizu.ast.ast_data %pp_data, 0");
+    try out.append_bytes("  %pp_is_string = icmp eq i64 %pp_tag, ");
+    try std::fmt::append_i64(out, stmt.string_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  br i1 %pp_is_string, label %pp_string, label %pp_check_var");
+    // String variant: return string_literal_span(text, ast, arg).
+    try append_ll_line(out, "pp_string:");
+    try out.append_bytes("  %pp_string_result = call %kizu.selfhost.codegen.payload_span @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, stmt.callee_module, stmt.string_literal_span_name);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.arg_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.arg_name);
+    try append_ll_line(out, ")");
+    try append_ll_line(out, "  ret %kizu.selfhost.codegen.payload_span %pp_string_result");
+    // Var variant: return local_payload_span(locals, ast_node_text(text, ast, arg)).
+    try append_ll_line(out, "pp_check_var:");
+    try out.append_bytes("  %pp_is_var = icmp eq i64 %pp_tag, ");
+    try std::fmt::append_i64(out, stmt.var_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  br i1 %pp_is_var, label %pp_var, label %pp_default");
+    try append_ll_line(out, "pp_var:");
+    try out.append_bytes("  %pp_name = call %kizu.slice.u8 @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, stmt.callee_module, stmt.ast_node_text_name);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.arg_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.arg_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %pp_var_result = call %kizu.selfhost.codegen.payload_span @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, stmt.callee_module, stmt.local_payload_span_name);
+    try out.append_bytes("(");
+    try out.append_bytes(stmt.locals_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.locals_name);
+    try append_ll_line(out, ", %kizu.slice.u8 %pp_name)");
+    try append_ll_line(out, "  ret %kizu.selfhost.codegen.payload_span %pp_var_result");
+    // Every other variant: forward the shared empty_payload_span() sentinel.
+    try append_ll_line(out, "pp_default:");
+    try out.append_bytes("  %pp_empty = call %kizu.selfhost.codegen.payload_span @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, stmt.callee_module, stmt.empty_name);
+    try append_ll_line(out, "()");
+    try append_ll_line(out, "  ret %kizu.selfhost.codegen.payload_span %pp_empty");
     return;
 }
 
@@ -1207,6 +1291,7 @@ fn append_stmt_globals(
         TrimAscii(payload) => try append_trim_ascii_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
+        PrintPayload(payload) => try append_print_payload_globals(payload);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,

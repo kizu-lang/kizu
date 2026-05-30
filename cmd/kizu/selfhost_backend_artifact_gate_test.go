@@ -365,6 +365,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMNodeCountLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMTextAccessorFragments()...)
 	fragments = append(fragments, requiredLLVMStringLiteralSpanFragments()...)
+	fragments = append(fragments, requiredLLVMPrintPayloadFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -817,6 +818,35 @@ func requiredLLVMStringLiteralSpanFragments() []string {
 		"%sls_r1 = insertvalue %kizu.selfhost.codegen.payload_span %sls_r0, " +
 			"i64 %sls_payload_end, 1",
 		"%sls_empty_call = call %kizu.selfhost.codegen.payload_span " +
+			"@kizu_selfhost__ir_codegen_empty_payload_span()",
+	}
+}
+
+// requiredLLVMPrintPayloadFragments returns the tracker-961 scope-4 prerequisite print_payload
+// AST traversal accessor compiled into stage2: it binds the print argument node via Ast.get,
+// reads the AstData tag (AstNode field 1, tag field 0), and dispatches by variant - String
+// (tag 2) returns string_literal_span, Var (tag 4) returns local_payload_span(locals,
+// ast_node_text(...)), and every other variant returns the shared empty_payload_span() sentinel.
+// Its callees are already compiled so selfhost.ll links. These fragments lock the lowered shape.
+func requiredLLVMPrintPayloadFragments() []string {
+	return []string{
+		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_print_payload(",
+		"%pp_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg)",
+		"%pp_data = extractvalue %kizu.kizu.ast.ast_node %pp_node, 1",
+		"%pp_tag = extractvalue %kizu.kizu.ast.ast_data %pp_data, 0",
+		"%pp_is_string = icmp eq i64 %pp_tag, 2",
+		"  br i1 %pp_is_string, label %pp_string, label %pp_check_var",
+		"%pp_string_result = call %kizu.selfhost.codegen.payload_span " +
+			"@kizu_selfhost__ir_codegen_string_literal_span(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg)",
+		"%pp_is_var = icmp eq i64 %pp_tag, 4",
+		"%pp_name = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(" +
+			"%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg)",
+		"%pp_var_result = call %kizu.selfhost.codegen.payload_span " +
+			"@kizu_selfhost__ir_codegen_local_payload_span(" +
+			"%kizu.selfhost.codegen.local_table %locals, %kizu.slice.u8 %pp_name)",
+		"%pp_empty = call %kizu.selfhost.codegen.payload_span " +
 			"@kizu_selfhost__ir_codegen_empty_payload_span()",
 	}
 }
