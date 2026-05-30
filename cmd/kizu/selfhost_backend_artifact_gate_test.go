@@ -431,6 +431,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLowerRunAstFragments()...)
 	fragments = append(fragments, requiredLLVMLexerClassifierFragments()...)
 	fragments = append(fragments, requiredLLVMLexerAdvanceFragments()...)
+	fragments = append(fragments, requiredLLVMLexerTokenFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -1134,6 +1135,23 @@ func requiredLLVMLexerAdvanceFragments() []string {
 		"%ap_next = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_byte(" +
 			"i8 %ap_byte, %kizu.kizu.lexer.position %ap_current)",
 		"ret %kizu.kizu.lexer.position %ap_current",
+	}
+}
+
+// requiredLLVMLexerTokenFragments pins the leaf Token constructors token / attach_doc: token
+// reads current.line / current.column off the Position param into a Token struct literal, and
+// attach_doc rebuilds the raw Token reading every field off it (tracker 961, scope 4
+// prerequisite). Both lower through the struct-return path.
+func requiredLLVMLexerTokenFragments() []string {
+	return []string{
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_token(",
+		// token reads current.line (field 0) and current.column (field 1) off the Position param.
+		"extractvalue %kizu.kizu.lexer.position %current, 0",
+		"extractvalue %kizu.kizu.lexer.position %current, 1",
+		"ret %kizu.kizu.lexer.token ",
+		// attach_doc rebuilds the raw Token, reading raw.kind (field 0) off the Token param.
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_attach_doc(",
+		"extractvalue %kizu.kizu.lexer.token %raw, 0",
 	}
 }
 
