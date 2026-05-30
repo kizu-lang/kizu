@@ -211,6 +211,7 @@ fn lower_multi_let_arena_add(
     call_node: i64,
     string_counter: i64,
     temp_counter: i64,
+    try_counter: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiLowerResult {
@@ -301,7 +302,8 @@ fn lower_multi_let_arena_add(
     return MultiLowerResult {
         locals_spec: locals_spec,
         string_counter: string_counter + field_count,
-        temp_counter: temp_counter
+        temp_counter: temp_counter,
+        try_counter: try_counter
     };
 }
 
@@ -1056,6 +1058,7 @@ pub fn lower_multi_statement_function(
     var locals_spec = params_spec;
     var string_counter = 0;
     var temp_counter = 0;
+    var try_counter = 0;
     var stmt_index = 0;
     while stmt_index < statement_count {
         let statement = try ir_contract::body_child_sequence_from(
@@ -1077,16 +1080,19 @@ pub fn lower_multi_statement_function(
                 ir_bytes,
                 function_name,
                 module_prefix,
+                llvm_return_type,
                 locals_spec,
                 statement,
                 string_counter,
                 temp_counter,
+                try_counter,
                 &var stmts,
                 bs
             );
             locals_spec = let_result.locals_spec;
             string_counter = let_result.string_counter;
             temp_counter = let_result.temp_counter;
+            try_counter = let_result.try_counter;
         } else {
             if std::mem::equal_bytes(stmt_kind, "While") {
                 let while_result = try lower_multi_while_statement(
@@ -1154,6 +1160,7 @@ pub struct MultiLowerResult {
     pub locals_spec: []u8,
     pub string_counter: i64,
     pub temp_counter: i64,
+    pub try_counter: i64,
 }
 pub struct MultiIfLowerResult {
     pub temp_counter: i64,
@@ -1163,10 +1170,12 @@ fn lower_multi_let_statement(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
+    llvm_return_type: []u8,
     locals_spec: []u8,
     statement: i64,
     string_counter: i64,
     temp_counter: i64,
+    try_counter: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiLowerResult {
@@ -1180,6 +1189,23 @@ fn lower_multi_let_statement(
         ir_bytes, function_name, statement, "value", 0, bs
     );
     let let_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, let_value, bs);
+    // A 'let <name> = try <callee>(<args>);' try-call over an error-union-returning free
+    // function (the node_count traversal cluster, tracker 961). It lowers to a LetTryCall
+    // statement: call the error union, branch on its ok flag, propagate the failure as this
+    // function's own error union, and bind the success value.
+    if std::mem::equal_bytes(let_value_kind, "TryExpr") {
+        let inner = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, let_value, "value", 0, bs
+        );
+        let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+        if !std::mem::equal_bytes(inner_kind, "Call") {
+            return error("compiled mir: try let value must wrap a call");
+        }
+        return try lower_multi_let_try_call(
+            ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+            let_name, inner, string_counter, temp_counter, try_counter, stmts, bs
+        );
+    }
     if std::mem::equal_bytes(let_value_kind, "Call") {
         // A Call whose callee is a field-mode method is the checked Arena<T>.add
         // lowering (self.<field>.add(<struct literal>)), binding the appended slot
@@ -1189,7 +1215,7 @@ fn lower_multi_let_statement(
         if try callee_is_field_expr(ir_bytes, function_name, let_value, bs) {
             return try lower_multi_let_arena_add(
                 ir_bytes, function_name, module_prefix, locals_spec,
-                let_name, let_value, string_counter, temp_counter, stmts, bs
+                let_name, let_value, string_counter, temp_counter, try_counter, stmts, bs
             );
         }
         let call_type = try compiled_mir_types::lower_call_return_type(
@@ -1214,7 +1240,8 @@ fn lower_multi_let_statement(
         return MultiLowerResult {
             locals_spec: new_locals,
             string_counter: new_counter,
-            temp_counter: temp_counter
+            temp_counter: temp_counter,
+            try_counter: try_counter
         };
     }
     if std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
@@ -1234,7 +1261,8 @@ fn lower_multi_let_statement(
         return MultiLowerResult {
             locals_spec: new_locals,
             string_counter: string_counter + field_count,
-            temp_counter: temp_counter
+            temp_counter: temp_counter,
+            try_counter: try_counter
         };
     }
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
@@ -1257,8 +1285,84 @@ fn lower_multi_let_statement(
     return MultiLowerResult {
         locals_spec: locals_spec,
         string_counter: string_counter + expr_strings,
-        temp_counter: next_temp
+        temp_counter: next_temp,
+        try_counter: try_counter
     };
+}
+
+// lower_multi_let_try_call lowers a 'let <name> = try <callee>(<args>);' try-call into a
+// LetTryCall statement (tracker 961). It resolves the callee's error-union return type
+// (called_error_union), the unwrapped success type the bind takes, the callee symbol +
+// args, and threads this function's own error-union return type for the failure
+// propagation. try_counter advances so each try-call gets a distinct block-label pair.
+fn lower_multi_let_try_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    let_name: []u8,
+    call_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiLowerResult {
+    let called_error_union = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let success_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let args = try compiled_mir_lower_call::lower_call_args(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, bs
+    );
+    let new_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, locals_spec, let_name, success_type
+    );
+    let new_counter = string_counter + try compiled_mir_lower_call::count_string_args(&args);
+    try stmts.append(compiled_mir::let_try_call_stmt(
+        let_name, called_error_union, success_type, llvm_return_type,
+        callee_module_prefix, callee_name, string_counter, try_counter, args
+    ));
+    return MultiLowerResult {
+        locals_spec: new_locals,
+        string_counter: new_counter,
+        temp_counter: temp_counter,
+        try_counter: try_counter + 1
+    };
+}
+
+// try_call_success_type resolves the unwrapped success type a 'try <callee>(...)' binds:
+// it reads the callee's '!T' signature-return token, strips the leading '!', and lowers T.
+fn try_call_success_type(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    call_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
+    );
+    let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+        ir_bytes, "function-signature-return ", module_prefix, callee_name
+    );
+    if std::mem::len(ret_kizu) == 0 {
+        return error("compiled mir: try-call callee return type not found");
+    }
+    if ret_kizu[0] != cast<u8>(33) {
+        return error("compiled mir: try-call callee must return an error union");
+    }
+    let success_kizu = ret_kizu[1..std::mem::len(ret_kizu)];
+    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, success_kizu);
 }
 fn lower_multi_return_statement(
     ir_bytes: []u8,
@@ -1883,6 +1987,7 @@ fn lower_multi_while_statement(
     );
     var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
     var body_temp_counter = temp_counter + cond_insts.len();
+    var body_try_counter = loop_index * 1000;
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var body_index = 0;
@@ -1896,15 +2001,18 @@ fn lower_multi_while_statement(
                 ir_bytes,
                 function_name,
                 module_prefix,
+                llvm_return_type,
                 locals_spec,
                 body_stmt,
                 body_string_counter,
                 body_temp_counter,
+                body_try_counter,
                 &var body_stmts,
                 bs
             );
             body_string_counter = let_result.string_counter;
             body_temp_counter = let_result.temp_counter;
+            body_try_counter = let_result.try_counter;
         } else {
             if std::mem::equal_bytes(body_kind, "If") {
                 let body_if_index = loop_index * 1000 + body_index + 1;
