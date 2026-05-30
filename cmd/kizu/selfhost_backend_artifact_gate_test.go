@@ -2,16 +2,15 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/kizu-lang/kizu/internal/interp"
 )
 
-// TestSelfhostBackendArtifactGate executes the Kizu-owned LLVM artifact smoke.
+// TestSelfhostBackendArtifactGate executes the stage0-native LLVM artifact smoke.
 func TestSelfhostBackendArtifactGate(t *testing.T) {
 	requireSelfhostGate(t)
 	if failures := countWithIsolatedSelfhostTarget(
@@ -30,6 +29,23 @@ func TestSelfhostRuntimeStorageGate(t *testing.T) {
 	if failures := countSelfhostRuntimeStorageGateFailures(t); failures > 0 {
 		t.Fatalf("selfhost runtime storage gate failures=%d", failures)
 	}
+}
+
+// TestSelfhostBackendArtifactGateRecipes keeps backend artifact timing explicit.
+func TestSelfhostBackendArtifactGateRecipes(t *testing.T) {
+	bytes, err := os.ReadFile("../../justfile")
+	if err != nil {
+		t.Fatalf("read justfile: %v", err)
+	}
+	content := string(bytes)
+	gate := justRecipe(content, "selfhost-backend-artifact-gate")
+	requireRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_GATES=1 go test")
+	requireRecipeFragment(t, gate, "TestSelfhostBackendArtifactGate$")
+	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_ORACLE=1")
+
+	integration := justRecipe(content, "selfhost-integration-gates")
+	requireNoRecipeFragment(t, integration, "BackendArtifactGate")
 }
 
 // countSelfhostRuntimeStorageGateFailures validates the runtime template directly.
@@ -129,6 +145,43 @@ func countSelfhostBackendArtifactGateFailures(t *testing.T) int {
 		}
 	}
 	return countSelfhostBackendArtifactFileFailures(t)
+}
+
+// appendSelfhostBackendArtifactReport writes the legacy gate contract from files.
+func appendSelfhostBackendArtifactReport(t *testing.T, out *strings.Builder) int {
+	t.Helper()
+	files := []struct {
+		pathLabel  string
+		bytesLabel string
+		path       string
+	}{
+		{"llvm-artifact-path", "llvm-artifact-bytes", "target/selfhost/selfhost.ll"},
+		{"llvm-metadata-path", "llvm-metadata-bytes", "target/selfhost/selfhost.ll.meta"},
+		{"runtime-storage-path", "runtime-storage-bytes", "target/selfhost/selfhost.storage.ll"},
+		{
+			"runtime-storage-metadata-path",
+			"runtime-storage-metadata-bytes",
+			"target/selfhost/selfhost.storage.ll.meta",
+		},
+		{"host-capability-path", "host-capability-bytes", "target/selfhost/selfhost.host.ll"},
+		{
+			"host-capability-metadata-path",
+			"host-capability-metadata-bytes",
+			"target/selfhost/selfhost.host.ll.meta",
+		},
+	}
+	failures := 0
+	for _, file := range files {
+		size, err := fileSize(file.path)
+		if err != nil {
+			t.Errorf("read staged backend artifact %s: %v", file.path, err)
+			failures++
+			continue
+		}
+		fmt.Fprintf(out, "%s\n%s\n", file.pathLabel, file.path)
+		fmt.Fprintf(out, "%s\n%d\n", file.bytesLabel, size)
+	}
+	return failures
 }
 
 // countSelfhostBackendArtifactFileFailures validates deterministic LLVM artifacts.
@@ -2549,27 +2602,3 @@ int main(int argc, char **argv) {
     return (int)kizu_selfhost__cli_main();
 }
 `
-
-// runSelfhostBackendArtifactGate loads the selfhost package and runs the backend gate.
-func runSelfhostBackendArtifactGate(t *testing.T) (string, error) {
-	t.Helper()
-	if err := os.RemoveAll("../../target/selfhost"); err != nil {
-		return "", err
-	}
-	restore, err := chdirRepoRoot()
-	if err != nil {
-		return "", err
-	}
-	defer restore()
-
-	_, program, err := loadPackageProgram("selfhost")
-	if err != nil {
-		return "", err
-	}
-	if err := checkProgram(program); err != nil {
-		return "", err
-	}
-	var out bytes.Buffer
-	err = interp.New(&out).RunEntry(program, "selfhost::backend_artifact_gate")
-	return out.String(), err
-}

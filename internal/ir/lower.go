@@ -104,11 +104,15 @@ func (l *lowerer) collectDecls() {
 			l.module.Enums[d.Name] = lowerEnum(d)
 		case *ast.UnionDecl:
 			l.module.Unions[d.Name] = lowerUnion(d)
+		}
+	}
+	for _, decl := range l.program.Decls {
+		switch d := decl.(type) {
 		case *ast.FunctionDecl:
-			l.signatures[d.Name] = lowerSignature(d)
+			l.signatures[d.Name] = l.lowerSignature(d)
 		case *ast.ImplDecl:
 			for _, method := range d.Methods {
-				l.signatures[implMethodName(d.TypeName, method.Name)] = lowerSignature(method)
+				l.signatures[implMethodName(d.TypeName, method.Name)] = l.lowerSignature(method)
 			}
 		}
 	}
@@ -144,10 +148,10 @@ func lowerStruct(decl *ast.StructDecl) Struct {
 }
 
 // lowerSignature extracts the callable type of a function declaration.
-func lowerSignature(fn *ast.FunctionDecl) Signature {
+func (l *lowerer) lowerSignature(fn *ast.FunctionDecl) Signature {
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		params = append(params, param.TypeName)
+		params = append(params, l.paramIRTypeName(param))
 	}
 	return Signature{Params: params, Return: returnType(fn.ReturnType)}
 }
@@ -166,7 +170,7 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 	l.loops = nil
 	l.deferFrames = nil
 	for _, param := range fn.Params {
-		value := Value{Name: "%" + param.Name, Type: param.TypeName}
+		value := Value{Name: "%" + param.Name, Type: l.paramIRTypeName(param)}
 		l.current.Params = append(l.current.Params, value)
 		l.env[param.Name] = value
 	}
@@ -178,6 +182,20 @@ func (l *lowerer) lowerFunctionNamed(fn *ast.FunctionDecl, name string) (*Functi
 		l.block.Terminator = Terminator{Op: "return", Value: Value{Name: "void", Type: "void"}}
 	}
 	return l.current, nil
+}
+
+// paramIRTypeName preserves borrow ABI only for unions that need pointer matching.
+func (l *lowerer) paramIRTypeName(param ast.Param) string {
+	if !param.Borrow && !param.MutBorrow {
+		return param.TypeName
+	}
+	if _, ok := l.module.Unions[param.TypeName]; !ok {
+		return param.TypeName
+	}
+	if param.MutBorrow {
+		return "&var " + param.TypeName
+	}
+	return "&" + param.TypeName
 }
 
 // lowerBlock lowers statements into the current block.

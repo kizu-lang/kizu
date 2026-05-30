@@ -18,6 +18,12 @@ const (
 		"selfhost::backend::executable checked-ast\n"
 )
 
+type nativeSelfhostBuildConfig struct {
+	name       string
+	outputPath string
+	cacheDir   string
+}
+
 // TestSelfhostNativeSourceExecutableGate builds selfhost from source and runs
 // executable artifacts through the Kizu-owned checked-AST lowering path.
 func TestSelfhostNativeSourceExecutableGate(t *testing.T) {
@@ -113,6 +119,19 @@ func prepareNativeSourceExecutableDir() error {
 // buildNativeSourceSelfhost compiles the selfhost package into a native executable.
 func buildNativeSourceSelfhost(t *testing.T) bootstrapCommandResult {
 	t.Helper()
+	return buildNativeSelfhost(t, nativeSelfhostBuildConfig{
+		name:       "native-source selfhost",
+		outputPath: nativeSourceRunnerPath,
+		cacheDir:   "target/selfhost/native-source-cache",
+	})
+}
+
+// buildNativeSelfhost compiles the selfhost package through the Go native compiler.
+func buildNativeSelfhost(
+	t *testing.T,
+	config nativeSelfhostBuildConfig,
+) bootstrapCommandResult {
+	t.Helper()
 	start := time.Now()
 	build := exec.Command(
 		"go",
@@ -130,17 +149,17 @@ func buildNativeSourceSelfhost(t *testing.T) bootstrapCommandResult {
 		"--linker",
 		"clang",
 		"-o",
-		nativeSourceRunnerPath,
+		config.outputPath,
 		"selfhost",
 	)
-	build.Env = append(os.Environ(), "KIZU_CACHE_DIR=target/selfhost/native-source-cache")
+	build.Env = append(os.Environ(), "KIZU_CACHE_DIR="+config.cacheDir)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	build.Stdout = &stdout
 	build.Stderr = &stderr
 	err := build.Run()
 	return bootstrapCommandResult{
-		name:    "build native-source selfhost",
+		name:    "build " + config.name,
 		command: strings.Join(build.Args, " "),
 		stdout:  stdout.String(),
 		stderr:  stderr.String(),
@@ -156,13 +175,29 @@ func runNativeSourceCommand(
 	args ...string,
 ) bootstrapCommandResult {
 	t.Helper()
+	return runNativeSelfhostCommand(
+		t,
+		exePath,
+		"target/selfhost/native-source-cache",
+		args...,
+	)
+}
+
+// runNativeSelfhostCommand runs one command through a native selfhost executable.
+func runNativeSelfhostCommand(
+	t *testing.T,
+	exePath string,
+	cacheDir string,
+	args ...string,
+) bootstrapCommandResult {
+	t.Helper()
 	start := time.Now()
 	absExe, err := filepath.Abs(exePath)
 	if err != nil {
 		t.Errorf("resolve %s: %v", exePath, err)
 	}
 	run := exec.Command(absExe, args...)
-	run.Env = append(os.Environ(), "KIZU_CACHE_DIR=target/selfhost/native-source-cache")
+	run.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	run.Stdout = &stdout
@@ -305,11 +340,8 @@ func runNativeSourceRunCase(
 		return result, compareRunCompilerResult(t, item, result.compiler, expectedOut, expectedErr) +
 			countUnexpectedRunArtifacts(t, item)
 	}
-	if result.compiler.stdout != "" || result.compiler.stderr != "" {
-		t.Errorf("native source run %s compiler output mismatch", item.name)
-		return result, 1
-	}
-	failures := fillNativeSourceArtifactResult(t, "run", item, &result)
+	failures := compareRunCompilerResult(t, item, result.compiler, expectedOut, expectedErr)
+	failures += fillNativeSourceArtifactResult(t, "run", item, &result)
 	if failures > 0 {
 		return result, failures
 	}
@@ -418,9 +450,10 @@ func fillNativeSourceArtifactResult(
 	result *runParityResult,
 ) int {
 	t.Helper()
-	result.llPath = filepath.Join("target/selfhost", command, item.artifactStem+".ll")
+	dir := nativeSourceArtifactDir(command)
+	result.llPath = filepath.Join(dir, item.artifactStem+".ll")
 	result.metadataPath = result.llPath + ".meta"
-	result.exePath = filepath.Join("target/selfhost", command, item.name)
+	result.exePath = nativeSourceExecutablePath(command, dir, item)
 	var err error
 	result.llBytes, err = fileSize(result.llPath)
 	if err != nil {
@@ -433,6 +466,22 @@ func fillNativeSourceArtifactResult(
 		return 1
 	}
 	return countNativeSourceExecutableMetadataFailures(t, command, result.metadataPath)
+}
+
+// nativeSourceArtifactDir returns the selfhost-owned artifact directory.
+func nativeSourceArtifactDir(command string) string {
+	if command == "run" {
+		return "target/selfhost/cache/run"
+	}
+	return filepath.Join("target/selfhost", command)
+}
+
+// nativeSourceExecutablePath keeps linked verification executables out of artifact names.
+func nativeSourceExecutablePath(command string, dir string, item runParityCase) string {
+	if command == "run" {
+		return filepath.Join(dir, item.name+".check")
+	}
+	return filepath.Join(dir, item.name)
 }
 
 // countNativeSourceExecutableMetadataFailures validates source-path metadata.

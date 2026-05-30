@@ -27,8 +27,8 @@ The current hosted stage2 artifact supports these command slices:
 | `parse <moved-value declarations source file>` | #600 positive declaration, record-literal, field-access, and call source-shape slice | `just selfhost-parse-parity-gate` |
 | `parse <missing-expression source file>` | #586 negative source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `parse <missing-assign source file>` | #646 negative binding source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
-| `fmt <source file>` | #648/#650 stdout formatter slice routed through the hosted selfhost formatter path | `KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -v` |
-| `fmt --write <source file>` | #629 bounded formatter mutation slice using the same hosted formatter bytes and `fs_write_file` | `KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -v` |
+| `fmt <source file>` | #648/#650 stdout formatter slice routed through the hosted selfhost formatter path | `just selfhost-backend-artifact-gate` |
+| `fmt --write <source file>` | #629 bounded formatter mutation slice using the same hosted formatter bytes and `fs_write_file` | `just selfhost-backend-artifact-gate` |
 | `run <top-level main print-string source file>` | #588/#752 positive source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-run-parity-gate` |
 | `run <top-level main return-only source file>` | #752 positive no-output executable slice lowered to the same bounded executable model before canonical artifact emission | `just selfhost-run-parity-gate` |
 | `run <missing-expression source file>` | #588 negative source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |

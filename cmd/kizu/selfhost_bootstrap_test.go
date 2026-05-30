@@ -337,9 +337,10 @@ func formatBootstrapReport(
 func appendBootstrapHeader(out *strings.Builder, start time.Time) {
 	cacheSize := directorySize("target/selfhost/bootstrap-cache")
 	fmt.Fprintf(out, "kizu-selfhost-bootstrap-v0\n")
-	fmt.Fprintf(out, "stage0.compiler go-test-bootstrap-oracle\n")
-	fmt.Fprintf(out, "stage0.mode explicit-bootstrap-oracle\n")
+	fmt.Fprintf(out, "stage0.compiler go-native-source-bootstrap\n")
+	fmt.Fprintf(out, "stage0.mode explicit-bootstrap\n")
 	fmt.Fprintf(out, "stage0.command TestSelfhostBackendArtifactGate\n")
+	fmt.Fprintf(out, "stage0.report target/selfhost/reports/backend-artifact-stage0-native.txt\n")
 	fmt.Fprintf(out, "cache.dir target/selfhost/bootstrap-cache\n")
 	fmt.Fprintf(out, "cache.bytes %d\n", cacheSize)
 	fmt.Fprintf(out, "elapsed.ms %d\n", time.Since(start).Milliseconds())

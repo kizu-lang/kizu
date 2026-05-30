@@ -770,9 +770,14 @@ func TestEmitUnionInlinePayloadLayout(t *testing.T) {
 		"store i64 1, ptr %kizu.2.tag.ptr, align 8",
 		"%kizu.2.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.2.slot, i32 0, i32 1",
 		"store i64 10, ptr %kizu.2.payload.ptr, align 8",
+		// Borrowed union parameters are passed as pointers, including implicit
+		// borrows from local union values.
+		"%kizu.arg.0.1 = alloca %kizu.union.Shape, align 8",
+		"store %kizu.union.Shape %kizu.2, ptr %kizu.arg.0.1, align 8",
+		"call void @describe(ptr %kizu.arg.0.1)",
 		// match payload access projects only the active variant payload.
-		"%kizu.6.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.6.slot, i32 0, i32 1",
-		"%kizu.6 = load i64, ptr %kizu.6.payload.ptr, align 8",
+		"%kizu.7.payload.ptr = getelementptr %kizu.union.Shape, ptr %kizu.7.slot, i32 0, i32 1",
+		"%kizu.7 = load i64, ptr %kizu.7.payload.ptr, align 8",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)

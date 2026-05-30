@@ -70,14 +70,17 @@ Validate this CLI contract with:
 
 ```sh
 just selfhost-cli-gate
-KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostBackendArtifactGate
+just selfhost-backend-artifact-gate
 ```
 
 `just selfhost-cli-gate` validates the Kizu source CLI through the stage0
-interpreter. `TestSelfhostBackendArtifactGate` also links the generated
-`selfhost.ll` artifact with the hosted runtime and runs the artifact CLI entry
-for `check selfhost`, `stage selfhost`, and unsupported command diagnostics.
-The latter is the no-Go smoke for the #458 artifact CLI path.
+interpreter. `just selfhost-backend-artifact-gate` builds a native selfhost
+executable with the Go compiler only as the explicit stage0 bootstrap, runs
+that executable's `stage selfhost`, then links the generated `selfhost.ll`
+artifact with the hosted runtime and runs the artifact CLI entry for `check
+selfhost`, `stage selfhost`, and unsupported command diagnostics. The latter is
+the no-Go smoke for the #458 artifact CLI path; it no longer renders the backend
+artifact through the Go interpreter.
 
 `just selfhost-parse-parity-gate` validates the #525 `parse <file>` slice
 through `target/selfhost/stage2/selfhost` after `just selfhost-bootstrap`. It
@@ -92,8 +95,9 @@ just selfhost-bootstrap
 
 The runner performs these logical steps internally:
 
-1. stage0 uses the explicit Go bootstrap/oracle gate to emit the supported
-   selfhost LLVM artifact set.
+1. stage0 uses the explicit Go native bootstrap compiler to build a selfhost
+   executable from source and emit the supported LLVM artifact set with
+   `stage selfhost`.
 2. stage1 links the emitted Kizu-built artifact and runs `check selfhost` plus
    `stage selfhost`.
 3. stage1 materializes the supported stage2 artifact set through the hosted
@@ -119,10 +123,11 @@ The durable report is:
 target/selfhost/reports/bootstrap.txt
 ```
 
-It records the stage0 compiler mode, stage1/stage2 executables, command output
-fingerprints, artifact fingerprints, cache directory and size, elapsed time, and
-comparison status. Stage1 and stage2 are required to run in `hosted-artifact
-no-go` mode; stage0 is the only explicit Go bootstrap/oracle boundary.
+It records the stage0 compiler mode, the stage0 backend artifact report,
+stage1/stage2 executables, command output fingerprints, artifact fingerprints,
+cache directory and size, elapsed time, and comparison status. Stage1 and
+stage2 are required to run in `hosted-artifact no-go` mode; stage0 is the only
+explicit Go bootstrap boundary and is not a production fallback.
 
 During the current transition, run this preflight before starting stage work:
 
@@ -199,7 +204,7 @@ go test ./...
 ```
 
 `just selfhost-production-from-scratch` builds the stage2 hosted artifact
-through the explicit stage0 bootstrap/oracle boundary, then runs the #458
+through the explicit stage0 native bootstrap boundary, then runs the #458
 production command path, the supported corpus, parse parity, check parity, run
 parity, and test parity through that artifact.
 
@@ -256,7 +261,7 @@ Use the narrowest gate that proves the changed boundary:
 | --- | --- | --- |
 | selfhost source without backend/runtime changes | `just selfhost-fast-gate` when `target/selfhost/stage2/selfhost` exists | `just selfhost-production-from-scratch` before merge |
 | executable run/test lowering | targeted Go test or `just selfhost-run-parity-gate` / `just selfhost-test-parity-gate` | `just selfhost-native-source-gate` and `just selfhost-fast-gate` |
-| backend/native/runtime artifact behavior | focused backend artifact test or native source gate | `just selfhost-production-from-scratch` |
+| backend/native/runtime artifact behavior | `just selfhost-backend-artifact-gate` or `just selfhost-native-source-gate` | `just selfhost-production-from-scratch` |
 | frontend parity or oracle evidence | affected parity gate | `just selfhost-oracle` when the PR claims Go/Kizu oracle parity |
 | gate timing budget work | targeted timing command | `just selfhost-oracle-budget` |
 
@@ -269,7 +274,7 @@ When a selfhost gate fails, classify it before rebuilding everything:
 | stage1/stage2 fingerprint mismatch | IR, backend, runtime, or nondeterministic artifact metadata | inspect `target/selfhost/reports/bootstrap.txt` and rerun `just selfhost-bootstrap` from a clean `target/selfhost` |
 | hosted artifact links but CLI exits 64 | executable lowering or supported block shape | run the affected run/test parity case and inspect emitted `.ll.meta` |
 | artifact contains a forbidden fallback marker | production boundary regression | remove the fallback path; do not add dispatch to Go |
-| runtime storage or host capability smoke fails | runtime ABI or host wrapper | run the focused backend artifact gate before broader gates |
+| runtime storage or host capability smoke fails | runtime ABI or host wrapper | run `just selfhost-backend-artifact-gate` before broader gates |
 
 If artifact staleness is suspected, remove only `target/selfhost` and rebuild
 with `just selfhost-production-from-scratch`. Do not add automatic fallback from

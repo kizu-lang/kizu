@@ -87,6 +87,14 @@ func (l *lowerer) lowerMatchValue(expr ast.Expression) (matchSubject, error) {
 		tag := l.emit("union.tag", "i64", []Value{value}, "")
 		return matchSubject{value: tag, unionValue: value, union: unionType}, nil
 	}
+	if isReferenceType(value.Type) {
+		unionName := derefType(value.Type)
+		if unionType, ok := l.module.Unions[unionName]; ok {
+			unionValue := l.emit("union.load", unionName, []Value{value}, "")
+			tag := l.emit("union.tag", "i64", []Value{unionValue}, "")
+			return matchSubject{value: tag, unionValue: unionValue, union: unionType}, nil
+		}
+	}
 	return matchSubject{}, fmt.Errorf("ir error: match lowering supports enums and unions, got `%s`",
 		value.Type)
 }

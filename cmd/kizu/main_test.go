@@ -1569,6 +1569,165 @@ fn main() -> !void {
 	}
 }
 
+// TestBuildTargetNativeProcessSpawnCommandSmoke checks the hosted native runtime spawn shim.
+func TestBuildTargetNativeProcessSpawnCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	truePath := "/usr/bin/true"
+	if _, err := os.Stat(truePath); err != nil {
+		t.Skipf("%s is required for native process spawn smoke", truePath)
+	}
+	source := filepath.Join(t.TempDir(), "spawn.kizu")
+	code := []byte(`fn main() -> !void {
+    let code = try std::process::spawn_wait8(1, "/usr/bin/true", "", "", "", "", "", "", "");
+    print(code);
+    return;
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "spawn")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output)
+	runOut, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, runOut)
+	}
+	if got := string(runOut); got != "0\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// TestBuildTargetNativeReturnedArrayFieldCommandSmoke keeps runtime-backed Array
+// handles intact when they are stored in a struct returned from a native function.
+func TestBuildTargetNativeReturnedArrayFieldCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	source := filepath.Join(t.TempDir(), "returned_array_field.kizu")
+	code := []byte(`struct Bag { values: std::array::Array<i64>, }
+impl Bag {
+    fn deinit(self: Bag) -> void {
+        self.values.deinit();
+        return;
+    }
+}
+fn make_bag() -> !Bag {
+    var values = std::array::Array<i64>(std::mem::page_allocator());
+    try values.append(10);
+    try values.append(20);
+    return Bag { values: values };
+}
+fn print_bag_len(bag: &Bag) -> void {
+    print(bag.values.len());
+    return;
+}
+fn main() -> !void {
+    let bag = try make_bag();
+    print(bag.values.len());
+    print_bag_len(&bag);
+    bag.deinit();
+    return;
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "returned_array_field")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output)
+	runOut, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, runOut)
+	}
+	if got := string(runOut); got != "2\n2\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// TestBuildTargetNativeReturnedUnionArrayBorrowCommandSmoke keeps Array.at()
+// borrows as pointer values when dispatching on owner-union elements.
+func TestBuildTargetNativeReturnedUnionArrayBorrowCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	source := filepath.Join(t.TempDir(), "returned_union_array_borrow.kizu")
+	code := []byte(`union Stmt { Add(i64), Done(i64), }
+struct Bag { stmts: std::array::Array<Stmt>, }
+impl Bag {
+    fn deinit(self: Bag) -> void {
+        self.stmts.deinit();
+        return;
+    }
+}
+fn make_bag() -> !Bag {
+    var stmts = std::array::Array<Stmt>(std::mem::page_allocator());
+    try stmts.append(Stmt::Add(10));
+    try stmts.append(Stmt::Done(20));
+    return Bag { stmts: stmts };
+}
+fn print_stmt(stmt: &Stmt) -> void {
+    match stmt {
+        Add(value) => print(value),
+        Done(value) => print(value),
+    }
+    return;
+}
+fn render_bag(bag: &Bag) -> !void {
+    let stmts = &bag.stmts;
+    var index = 0;
+    while index < stmts.len() {
+        let stmt = try stmts.at(index);
+        print_stmt(stmt);
+        index = index + 1;
+    }
+    return;
+}
+fn main() -> !void {
+    let bag = try make_bag();
+    try render_bag(&bag);
+    bag.deinit();
+    return;
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "returned_union_array_borrow")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output)
+	runOut, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, runOut)
+	}
+	if got := string(runOut); got != "10\n20\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // TestBuildTargetNativeRejectsUnsupportedModes checks planned Zig-style modes are explicit.
 func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
 	cases := []struct {
