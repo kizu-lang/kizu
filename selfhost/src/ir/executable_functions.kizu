@@ -148,10 +148,10 @@ fn append_mem_function_facts(
 
 // append_kizu_lexer_function_facts emits the signature + body facts for the std::kizu::lexer leaf
 // byte classifiers the tokenizer depends on (tracker 961, scope 4 prerequisite): is_alpha /
-// is_digit / is_space, all or-chain / range byte predicates over a single i8 returning bool. They
-// are the bottom of the lexer compile chain the eventual scanner removal needs (source -> Ast
-// requires the compiled tokenizer). is_word (which calls is_alpha / is_digit) waits on i8-argument
-// call lowering and lands with the tokenizer body.
+// is_digit / is_space (or-chain / range byte predicates over a single i8) and is_word (which
+// or-combines is_alpha / is_digit). They are the bottom of the lexer compile chain the eventual
+// scanner removal needs (source -> Ast requires the compiled tokenizer). is_word's calls resolve
+// their i8 argument type through the is_alpha / is_digit stdlib-symbol arg-type facts.
 fn append_kizu_lexer_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
@@ -159,6 +159,12 @@ fn append_kizu_lexer_function_facts(
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
+    try append_stdlib_symbol_fact_arg(
+        out, "std::kizu::lexer::is_alpha", "kizu_kizu__lexer_is_alpha", "bool", "i8"
+    );
+    try append_stdlib_symbol_fact_arg(
+        out, "std::kizu::lexer::is_digit", "kizu_kizu__lexer_is_digit", "bool", "i8"
+    );
     try append_selected_helper_body(
         out, file.text, parsed.ast, parsed.root,
         "is_alpha", "std::kizu::lexer::is_alpha", "checked-lexer-classifier"
@@ -166,6 +172,10 @@ fn append_kizu_lexer_function_facts(
     try append_selected_helper_body(
         out, file.text, parsed.ast, parsed.root,
         "is_digit", "std::kizu::lexer::is_digit", "checked-lexer-classifier"
+    );
+    try append_selected_helper_body(
+        out, file.text, parsed.ast, parsed.root,
+        "is_word", "std::kizu::lexer::is_word", "checked-lexer-classifier"
     );
     try append_selected_helper_body(
         out, file.text, parsed.ast, parsed.root,
@@ -1454,12 +1464,28 @@ fn append_stdlib_symbol_fact(
     llvm_symbol: []u8,
     return_type: []u8
 ) -> !void {
+    try append_stdlib_symbol_fact_arg(out, qualified_name, llvm_symbol, return_type, "%kizu.slice.u8");
+    return;
+}
+
+// append_stdlib_symbol_fact_arg emits a stdlib-symbol fact carrying an explicit LLVM argument type
+// as the fourth token (tracker 961, scope 4 prerequisite). The byte-slice helpers use the slice
+// default via append_stdlib_symbol_fact; byte classifiers pass i8.
+fn append_stdlib_symbol_fact_arg(
+    out: &var std::string::String,
+    qualified_name: []u8,
+    llvm_symbol: []u8,
+    return_type: []u8,
+    arg_llvm_type: []u8
+) -> !void {
     try out.append_bytes("stdlib-symbol ");
     try out.append_bytes(qualified_name);
     try out.append_byte(cast<u8>(32));
     try out.append_bytes(llvm_symbol);
     try out.append_byte(cast<u8>(32));
     try out.append_bytes(return_type);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(arg_llvm_type);
     try out.append_byte(cast<u8>(10));
     return;
 }

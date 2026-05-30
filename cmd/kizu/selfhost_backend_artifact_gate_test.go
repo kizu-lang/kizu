@@ -1032,16 +1032,20 @@ func requiredLLVMLowerRunAstFragments() []string {
 }
 
 // requiredLLVMLexerClassifierFragments returns the tracker-961 scope-4 prerequisite
-// std::kizu::lexer leaf byte classifiers compiled into stage2: is_alpha / is_digit / is_space,
-// range/or-chain byte predicates over a single i8. They are the bottom of the lexer compile chain
-// the eventual scanner removal needs (source -> Ast requires the compiled tokenizer). These
-// fragments lock the signatures.
+// std::kizu::lexer leaf byte classifiers compiled into stage2: is_alpha / is_digit / is_space
+// (range/or-chain byte predicates over a single i8) and is_word (which or-combines is_alpha /
+// is_digit). They are the bottom of the lexer compile chain the eventual scanner removal needs
+// (source -> Ast requires the compiled tokenizer). is_word's i8 call arguments are resolved via the
+// stdlib-symbol arg-type facts rather than the default slice type. These fragments lock the shapes.
 func requiredLLVMLexerClassifierFragments() []string {
 	return []string{
 		"define i1 @kizu_kizu__lexer_is_alpha(",
 		"define i1 @kizu_kizu__lexer_is_digit(",
 		"define i1 @kizu_kizu__lexer_is_space(",
+		"define i1 @kizu_kizu__lexer_is_word(",
 		"%t2 = icmp sge i8 %t0, %t1",
+		"%t0 = call i1 @kizu_kizu__lexer_is_alpha(i8 %byte)",
+		"%t1 = call i1 @kizu_kizu__lexer_is_digit(i8 %byte)",
 	}
 }
 

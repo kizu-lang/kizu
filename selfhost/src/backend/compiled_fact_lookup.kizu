@@ -282,14 +282,70 @@ pub fn lookup_stdlib_return(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
                 while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
                     pos = pos + 1;
                 }
+                // The return type is the third token; an optional fourth arg-type token may
+                // follow, so stop at the next space rather than the line end (tracker 961).
                 let ret_start = pos;
-                let ret_end = compiled_util::find_line_end(ir_bytes, pos);
+                let line_end = compiled_util::find_line_end(ir_bytes, pos);
+                var ret_end = ret_start;
+                while ret_end < line_end and ir_bytes[ret_end] != cast<u8>(32) {
+                    ret_end = ret_end + 1;
+                }
                 return ir_bytes[ret_start..ret_end];
             }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return error("compiled function: stdlib return not found");
+}
+
+// lookup_stdlib_arg_type resolves the LLVM argument type of a stdlib callee from the optional
+// fourth token of its 'stdlib-symbol <name> <symbol> <return> <arg-llvm-type>' fact (tracker 961,
+// scope 4 prerequisite). Stdlib callees take uniform argument types, so the single arg type
+// applies to every argument. When the fourth token is absent the callee takes byte slices, so the
+// default is the canonical %kizu.slice.u8 (preserving equal_bytes / len lowering).
+pub fn lookup_stdlib_arg_type(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "stdlib-symbol ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(callee_name);
+    var index = 0;
+    while index + prefix_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[name_start..name_end], callee_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                let line_end = compiled_util::find_line_end(ir_bytes, name_end);
+                var pos = name_end;
+                // Skip the symbol token, the return-type token, then read the arg-type token.
+                var token = 0;
+                while token < 2 {
+                    while pos < line_end and ir_bytes[pos] == cast<u8>(32) {
+                        pos = pos + 1;
+                    }
+                    while pos < line_end and ir_bytes[pos] != cast<u8>(32) {
+                        pos = pos + 1;
+                    }
+                    token = token + 1;
+                }
+                while pos < line_end and ir_bytes[pos] == cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                if pos >= line_end {
+                    return "%kizu.slice.u8";
+                }
+                let arg_start = pos;
+                while pos < line_end and ir_bytes[pos] != cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                return ir_bytes[arg_start..pos];
+            }
+        }
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return "%kizu.slice.u8";
 }
 
 pub fn enum_variant_tag_by_prefix(
