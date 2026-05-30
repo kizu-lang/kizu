@@ -171,6 +171,24 @@ pub fn append_compiled_function_params(
         try compiled_mir_llvm::append_function(out, &traversal_mir);
         return;
     }
+    // count_range is the recursive AST-traversal accumulator loop ('var count = 0; var
+    // index = 0; while index < range.len { let child = try tree.child_at(range, index);
+    // count = count + try node_count(tree, child); index = index + 1; } return count;'),
+    // lowered to a two-phi loop with try-propagation rather than the general while machinery
+    // (tracker 961).
+    if try compiled_mir_lower::is_count_range_function(
+        ir_bytes, function_name, statement_count, bs
+    ) {
+        if std::mem::len(llvm_return_type) == 0 {
+            return error("compiled function: count_range requires llvm_return_type");
+        }
+        let range_mir = try compiled_mir_lower::lower_count_range_function(
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+        defer range_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &range_mir);
+        return;
+    }
     let mir = try compiled_mir_lower::lower_multi_statement_function(
         ir_bytes,
         function_name,

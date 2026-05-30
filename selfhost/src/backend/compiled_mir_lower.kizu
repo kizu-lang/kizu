@@ -1001,6 +1001,93 @@ fn build_traversal_arm(
     );
 }
 
+// is_count_range_function reports whether a function is count_range's accumulator shape:
+// 'var count = 0; var index = 0; while ... { ... } return count;' (4 statements, two leading
+// Let inits, a While, then a Return, tracker 961).
+pub fn is_count_range_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 4 {
+        return false;
+    }
+    let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
+    let k0 = try ir_contract::body_node_kind_from(ir_bytes, function_name, s0, bs);
+    if !std::mem::equal_bytes(k0, "Let") {
+        return false;
+    }
+    let s1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 1, bs);
+    let k1 = try ir_contract::body_node_kind_from(ir_bytes, function_name, s1, bs);
+    if !std::mem::equal_bytes(k1, "Let") {
+        return false;
+    }
+    let s2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 2, bs);
+    let k2 = try ir_contract::body_node_kind_from(ir_bytes, function_name, s2, bs);
+    if !std::mem::equal_bytes(k2, "While") {
+        return false;
+    }
+    let s3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 3, bs);
+    let k3 = try ir_contract::body_node_kind_from(ir_bytes, function_name, s3, bs);
+    return std::mem::equal_bytes(k3, "Return");
+}
+
+// nth_param_field returns the name (want_name true) or LLVM type (false) of the index-th
+// param in a 'type name;type name;...' params_spec.
+fn nth_param_field(params_spec: []u8, index: i64, want_name: bool) -> ![]u8 {
+    let spec_len = std::mem::len(params_spec);
+    let semicolon = cast<u8>(59);
+    let space = cast<u8>(32);
+    var pos = 0;
+    var current = 0;
+    while pos < spec_len {
+        let entry_end = compiled_util::find_byte(params_spec, semicolon, pos);
+        let space_pos = compiled_util::find_byte(params_spec, space, pos);
+        if space_pos < entry_end {
+            if current == index {
+                if want_name {
+                    return params_spec[space_pos + 1..entry_end];
+                }
+                return params_spec[pos..space_pos];
+            }
+            current = current + 1;
+        }
+        if entry_end < spec_len {
+            pos = entry_end + 1;
+        } else {
+            pos = spec_len;
+        }
+    }
+    return error("compiled mir: count_range param index out of range");
+}
+
+// lower_count_range_function lowers count_range into a single CountRange statement: a two-phi
+// accumulator loop over the range that calls Ast.child_at and the recursive node_count with
+// try-propagation (tracker 961). The receiver (tree) and range are the first two params; the
+// recursive callee is this module's node_count.
+pub fn lower_count_range_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let receiver_type = try nth_param_field(params_spec, 0, false);
+    let receiver_name = try nth_param_field(params_spec, 0, true);
+    let range_name = try nth_param_field(params_spec, 1, true);
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::count_range_stmt(
+        receiver_name, receiver_type, range_name,
+        module_prefix, "node_count", llvm_return_type
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // return_value_is_literal_plus_try reports whether a single-return value is the shape
 // '<int literal> + try <call>' (count_one / count_with_range, tracker 961).
 pub fn return_value_is_literal_plus_try(

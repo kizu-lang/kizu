@@ -399,6 +399,7 @@ fn append_multi_stmt(
         LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
         LetTryCall(payload) => try append_multi_let_try_call(out, function, payload, local_prefix);,
         ReturnTryBinary(payload) => try append_multi_return_try_binary(out, function, payload, local_prefix);,
+        CountRange(payload) => try append_multi_count_range(out, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -566,6 +567,99 @@ fn append_multi_return_try_binary(
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.own_error_union);
     try append_ll_line(out, " %rettry_wrap_val");
+    return;
+}
+
+// append_count_range_globals: count_range forwards only value arguments, so no string globals.
+fn append_count_range_globals(stmt: &compiled_mir::MirCountRangeStmt) -> !void {
+    return;
+}
+
+// append_multi_count_range renders count_range as a two-phi accumulator loop (count + index):
+// it reads range.len, and each iteration calls the checked Ast.child_at and the recursive
+// node_count, propagating either error union as this function's own !i64 failure, and on the
+// exhausted loop returns the accumulated count wrapped as the success (tracker 961).
+fn append_multi_count_range(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirCountRangeStmt
+) -> !void {
+    try out.append_bytes("  %range_len = extractvalue %kizu.kizu.ast.child_range %");
+    try out.append_bytes(stmt.range_name);
+    try append_ll_line(out, ", 1");
+    try append_ll_line(out, "  br label %count_head");
+    try append_ll_line(out, "count_head:");
+    try append_ll_line(out,
+        "  %count = phi i64 [ 0, %entry ], [ %count_next, %count_nc_cont ]");
+    try append_ll_line(out,
+        "  %index = phi i64 [ 0, %entry ], [ %index_next, %count_nc_cont ]");
+    try append_ll_line(out, "  %count_cond = icmp slt i64 %index, %range_len");
+    try append_ll_line(out,
+        "  br i1 %count_cond, label %count_body, label %count_exit");
+    // Body: child = try tree.child_at(range, index).
+    try append_ll_line(out, "count_body:");
+    try out.append_bytes("  %child_call = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(");
+    try out.append_bytes(stmt.receiver_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.receiver_name);
+    try out.append_bytes(", %kizu.kizu.ast.child_range %");
+    try out.append_bytes(stmt.range_name);
+    try append_ll_line(out, ", i64 %index)");
+    try append_ll_line(out, "  %child_ok = extractvalue %kizu.error.node_id %child_call, 0");
+    try append_ll_line(out,
+        "  br i1 %child_ok, label %count_child_cont, label %count_child_fail");
+    try append_ll_line(out, "count_child_fail:");
+    try append_ll_line(out, "  %child_msg = extractvalue %kizu.error.node_id %child_call, 2");
+    try out.append_bytes("  %child_fail_flag = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %child_fail_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %child_fail_flag, %kizu.slice.u8 %child_msg, 2");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %child_fail_val");
+    // child success: nc = try node_count(tree, child).
+    try append_ll_line(out, "count_child_cont:");
+    try append_ll_line(out, "  %child = extractvalue %kizu.error.node_id %child_call, 1");
+    try out.append_bytes("  %nc_call = call ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, stmt.node_count_module, stmt.node_count_name
+    );
+    try out.append_bytes("(");
+    try out.append_bytes(stmt.receiver_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.receiver_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.node_id %child)");
+    try out.append_bytes("  %nc_ok = extractvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %nc_call, 0");
+    try append_ll_line(out,
+        "  br i1 %nc_ok, label %count_nc_cont, label %count_nc_fail");
+    try append_ll_line(out, "count_nc_fail:");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %nc_call");
+    // nc success: count_next = count + nc; index_next = index + 1; loop back.
+    try append_ll_line(out, "count_nc_cont:");
+    try out.append_bytes("  %nc = extractvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %nc_call, 1");
+    try append_ll_line(out, "  %count_next = add i64 %count, %nc");
+    try append_ll_line(out, "  %index_next = add i64 %index, 1");
+    try append_ll_line(out, "  br label %count_head");
+    // Exit: return the accumulated count wrapped as the error-union success.
+    try append_ll_line(out, "count_exit:");
+    try out.append_bytes("  %count_ret_flag = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %count_ret_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %count_ret_flag, i64 %count, 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %count_ret_val");
     return;
 }
 
@@ -916,6 +1010,7 @@ fn append_stmt_globals(
         LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        CountRange(payload) => try append_count_range_globals(payload);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
