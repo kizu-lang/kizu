@@ -330,6 +330,114 @@ pub fn enum_variant_tag_by_prefix(
     return error("compiled function: enum variant not found");
 }
 
+// UnionVariantLookup carries the discriminant tag and the qualified kizu payload type
+// of a tagged-union variant resolved from a 'union-variant <union> <variant> <tag>
+// <payload-kizu>' fact (tracker 961). It backs the first 'match node.data' AST accessor;
+// the payload's llvm type and struct-field layout are resolved from payload_kizu.
+pub struct UnionVariantLookup {
+    pub found: bool,
+    pub tag: i64,
+    pub payload_kizu: []u8,
+}
+
+// lookup_union_variant_by_prefix resolves the tag + qualified kizu payload type of a
+// tagged-union variant. The fact line is 'union-variant <module_prefix><short_union>
+// <variant> <tag> <payload-kizu>'; pass an empty module_prefix with a fully qualified
+// short_union to match the whole name (tracker 961).
+pub fn lookup_union_variant_by_prefix(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_union: []u8,
+    variant: []u8
+) -> !UnionVariantLookup {
+    let prefix_len = std::mem::len(module_prefix);
+    let short_len = std::mem::len(short_union);
+    let qualified_len = prefix_len + short_len;
+    let byte_len = std::mem::len(ir_bytes);
+    let marker = "union-variant ";
+    let marker_len = std::mem::len(marker);
+    var index = 0;
+    while index + marker_len + qualified_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + marker_len], marker) {
+            let name_start = index + marker_len;
+            let prefix_end = name_start + prefix_len;
+            let union_end = prefix_end + short_len;
+            if union_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[name_start..prefix_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[prefix_end..union_end], short_union) and
+                ir_bytes[union_end] == cast<u8>(32) {
+                let lookup = try match_union_variant_suffix(ir_bytes, union_end, variant);
+                if lookup.found {
+                    return lookup;
+                }
+            }
+        }
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return error("compiled function: union variant not found");
+}
+
+fn match_union_variant_suffix(
+    ir_bytes: []u8,
+    after_union: i64,
+    variant: []u8
+) -> !UnionVariantLookup {
+    let byte_len = std::mem::len(ir_bytes);
+    let variant_len = std::mem::len(variant);
+    var pos = after_union;
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    let variant_end = pos + variant_len;
+    if variant_end >= byte_len {
+        return empty_union_variant_lookup(ir_bytes);
+    }
+    if !std::mem::equal_bytes(ir_bytes[pos..variant_end], variant) {
+        return empty_union_variant_lookup(ir_bytes);
+    }
+    if ir_bytes[variant_end] != cast<u8>(32) {
+        return empty_union_variant_lookup(ir_bytes);
+    }
+    var tag_start = variant_end;
+    while tag_start < byte_len and ir_bytes[tag_start] == cast<u8>(32) {
+        tag_start = tag_start + 1;
+    }
+    var tag_value = 0;
+    var found = false;
+    var tag_pos = tag_start;
+    while tag_pos < byte_len {
+        let byte = ir_bytes[tag_pos];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            break;
+        }
+        tag_value = tag_value * 10 + cast<i64>(byte) - 48;
+        found = true;
+        tag_pos = tag_pos + 1;
+    }
+    if !found {
+        return empty_union_variant_lookup(ir_bytes);
+    }
+    var payload_start = tag_pos;
+    while payload_start < byte_len and ir_bytes[payload_start] == cast<u8>(32) {
+        payload_start = payload_start + 1;
+    }
+    let payload_end = compiled_util::find_line_end(ir_bytes, payload_start);
+    return UnionVariantLookup {
+        found: true,
+        tag: tag_value,
+        payload_kizu: ir_bytes[payload_start..payload_end]
+    };
+}
+
+fn empty_union_variant_lookup(ir_bytes: []u8) -> UnionVariantLookup {
+    return UnionVariantLookup {
+        found: false,
+        tag: -1,
+        payload_kizu: ir_bytes[0..0]
+    };
+}
+
 pub fn is_stdlib_callee(callee_name: []u8) -> bool {
     let len = std::mem::len(callee_name);
     if len > 5 and std::mem::equal_bytes(callee_name[0..5], "std::") {

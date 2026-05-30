@@ -360,6 +360,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMChildAtFragments()...)
 	fragments = append(fragments, requiredLLVMUnionAbiFragments()...)
 	fragments = append(fragments, requiredLLVMArenaGetFragments()...)
+	fragments = append(fragments, requiredLLVMMatchUnionFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -593,6 +594,36 @@ func requiredLLVMArenaGetFragments() []string {
 		"  ret %kizu.kizu.ast.ast_node %elem",
 		"call void @kizu_rt_trap(%kizu.slice.u8 %fail_msg)",
 		"define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index)",
+	}
+}
+
+// requiredLLVMMatchUnionFragments returns the tracker-961 selfhost::ast::declaration_count
+// accessor compiled into stage2: the first 'match node.data' over the AstNode/AstData
+// tagged union. It binds an AstNode by value via the checked @kizu_kizu__ast_ast_get call,
+// extracts the AstData union (AstNode field 1) and its i64 tag (field 0), and dispatches on
+// the Program discriminant: the active arm reads the ProgramNode payload out of the inline
+// union storage (alloca + store + gep field 1 + load) and returns program.declarations.len
+// (a two-level extractvalue), while the default arm returns the literal 0 (a real value,
+// not 'unreachable'). The %kizu.kizu.ast.program_node payload struct is the only modelled
+// AstData variant payload.
+func requiredLLVMMatchUnionFragments() []string {
+	return []string{
+		"%kizu.kizu.ast.program_node = type { %kizu.kizu.ast.child_range }",
+		"define i64 @kizu_selfhost__ast_declaration_count",
+		"%match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %root)",
+		"%match_data = extractvalue %kizu.kizu.ast.ast_node %match_node, 1",
+		"%match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0",
+		"%match_is_variant = icmp eq i64 %match_tag, 0",
+		"br i1 %match_is_variant, label %match_arm_variant, label %match_arm_default",
+		"%match_payload_ptr = getelementptr %kizu.kizu.ast.ast_data, " +
+			"ptr %match_payload_slot, i32 0, i32 1",
+		"%match_payload = load %kizu.kizu.ast.program_node, ptr %match_payload_ptr, align 8",
+		"%match_field0 = extractvalue %kizu.kizu.ast.program_node %match_payload, 0",
+		"%match_value = extractvalue %kizu.kizu.ast.child_range %match_field0, 1",
+		"  ret i64 %match_value",
+		"match_arm_default:",
+		"  ret i64 0",
 	}
 }
 

@@ -491,6 +491,316 @@ pub fn lower_arena_get_method_return(
     );
 }
 
+// is_match_union_function reports whether a function body is the 'let node =
+// self.get(index); return match node.data { ... };' read-only AST accessor shape that
+// lower_match_union_return_function compiles (tracker 961): two statements, a let bound
+// to a field-mode method call, followed by a return whose value is a match.
+pub fn is_match_union_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 2 {
+        return false;
+    }
+    let let_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let let_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, let_stmt, bs);
+    if !std::mem::equal_bytes(let_kind, "Let") {
+        return false;
+    }
+    let let_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_stmt, "value", 0, bs
+    );
+    let let_value_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, let_value, bs
+    );
+    if !std::mem::equal_bytes(let_value_kind, "Call") {
+        return false;
+    }
+    if !try callee_is_field_expr(ir_bytes, function_name, let_value, bs) {
+        return false;
+    }
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let return_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, return_stmt, bs
+    );
+    if !std::mem::equal_bytes(return_kind, "Return") {
+        return false;
+    }
+    let return_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_stmt, "value", 0, bs
+    );
+    let return_value_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, return_value, bs
+    );
+    return std::mem::equal_bytes(return_value_kind, "Match");
+}
+
+// lower_match_union_return_function lowers the first 'let node = self.get(index);
+// return match node.data { Variant(bind) => bind.<field>.<field>, _ => <int> };'
+// read-only AST accessor compiled into stage2 (selfhost::ast::declaration_count -> i64,
+// tracker 961). It binds an AstNode by value off an Ast.get method call, then matches on
+// the AstNode/AstData tagged-union value: it resolves the AstNode data field index, the
+// matched variant's discriminant tag + inline payload type (from the union-variant fact),
+// and the two-level field access off the bound payload; the default arm returns a literal.
+// It deliberately models only the single matched variant payload struct, not the 44 union
+// variants, and never lowers an arm to 'unreachable'.
+pub fn lower_match_union_return_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let ast_module_prefix = "std::kizu::ast::";
+    let union_qualified = "std::kizu::ast::AstData";
+    // Statement 0: let <node> = <receiver>.get(<index>);
+    let let_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let let_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_stmt, "name", 0, bs
+    );
+    let let_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, let_name_node, bs
+    );
+    let call_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_stmt, "value", 0, bs
+    );
+    let call_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, call_node, bs);
+    if !std::mem::equal_bytes(call_kind, "Call") {
+        return error("compiled mir: match-union let must bind a method call");
+    }
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "get") {
+        return error("compiled mir: match-union accessor binds an Ast.get call");
+    }
+    let recv_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let recv_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, recv_node, bs);
+    if !std::mem::equal_bytes(recv_kind, "Var") {
+        return error("compiled mir: match-union get receiver must be a parameter");
+    }
+    let recv_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, recv_node, bs
+    );
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 1 {
+        return error("compiled mir: match-union get takes one index argument");
+    }
+    let index_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "arg", 0, bs
+    );
+    let index_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, index_node, bs);
+    if !std::mem::equal_bytes(index_kind, "Var") {
+        return error("compiled mir: match-union get index must be a parameter");
+    }
+    let index_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, index_node, bs
+    );
+    let receiver_type = try compiled_signature::find_param_type(params_spec, recv_name);
+    let index_type = try compiled_signature::find_param_type(params_spec, index_name);
+    // Statement 1: return match <node>.data { ... };
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let return_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, return_stmt, bs);
+    if !std::mem::equal_bytes(return_kind, "Return") {
+        return error("compiled mir: match-union second statement must be a return");
+    }
+    let match_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_stmt, "value", 0, bs
+    );
+    let match_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, match_node, bs);
+    if !std::mem::equal_bytes(match_kind, "Match") {
+        return error("compiled mir: match-union return value must be a match");
+    }
+    // Scrutinee: <node>.data resolves the AstNode union field index.
+    let scrutinee = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_node, "value", 0, bs
+    );
+    let scrutinee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, scrutinee, bs
+    );
+    if !std::mem::equal_bytes(scrutinee_kind, "FieldExpr") {
+        return error("compiled mir: match-union scrutinee must be a field access");
+    }
+    let scrutinee_field = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, scrutinee, "field", bs
+    );
+    let scrutinee_var = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, scrutinee, "receiver", 0, bs
+    );
+    let scrutinee_var_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, scrutinee_var, bs
+    );
+    if !std::mem::equal_bytes(scrutinee_var_name, let_name) {
+        return error("compiled mir: match-union scrutinee must read the bound node");
+    }
+    let data_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, ast_module_prefix, "AstNode", scrutinee_field
+    );
+    // Two arms: index 0 is the variant arm, index 1 is the default '_' arm.
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, match_node, "arm", bs
+    );
+    if arm_count != 2 {
+        return error("compiled mir: match-union accessor expects two arms");
+    }
+    let variant_arm = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_node, "arm", 0, bs
+    );
+    let variant_pattern = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, variant_arm, "pattern", 0, bs
+    );
+    let variant_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, variant_pattern, bs
+    );
+    let binding_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, variant_arm, "binding", 0, bs
+    );
+    let binding_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, binding_node, bs
+    );
+    // The variant arm body is 'bind.<field0>.<field1>' (an ExprStmt-wrapped field chain).
+    let variant_body = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, variant_arm, "body", 0, bs
+    );
+    let outer_field_expr = try match_union_arm_expr(ir_bytes, function_name, variant_body, bs);
+    let outer_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, outer_field_expr, bs
+    );
+    if !std::mem::equal_bytes(outer_kind, "FieldExpr") {
+        return error("compiled mir: match-union arm body must be a field access chain");
+    }
+    let field1_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, outer_field_expr, "field", bs
+    );
+    let inner_field_expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, outer_field_expr, "receiver", 0, bs
+    );
+    let inner_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, inner_field_expr, bs
+    );
+    if !std::mem::equal_bytes(inner_kind, "FieldExpr") {
+        return error("compiled mir: match-union arm body must chain two field accesses");
+    }
+    let field0_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, inner_field_expr, "field", bs
+    );
+    let inner_recv = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, inner_field_expr, "receiver", 0, bs
+    );
+    let inner_recv_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, inner_recv, bs
+    );
+    if !std::mem::equal_bytes(inner_recv_name, binding_name) {
+        return error("compiled mir: match-union arm body must read the bound payload");
+    }
+    // Default arm: '_ => <int>'.
+    let default_arm = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_node, "arm", 1, bs
+    );
+    let default_pattern = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, default_arm, "pattern", 0, bs
+    );
+    let default_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, default_pattern, bs
+    );
+    if !std::mem::equal_bytes(default_name, "_") {
+        return error("compiled mir: match-union accessor default arm must be '_'");
+    }
+    let default_body = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, default_arm, "body", 0, bs
+    );
+    let default_int_node = try match_union_arm_expr(ir_bytes, function_name, default_body, bs);
+    let default_int_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, default_int_node, bs
+    );
+    if !std::mem::equal_bytes(default_int_kind, "Int") {
+        return error("compiled mir: match-union default arm must return an integer literal");
+    }
+    let default_value = try ir_contract::body_int_value_from(
+        ir_bytes, function_name, default_int_node, bs
+    );
+    // Resolve the matched variant's tag + inline payload struct, then the field chain.
+    let variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, ir_bytes[0..0], union_qualified, variant_name
+    );
+    if !variant.found {
+        return error("compiled mir: match-union variant not found");
+    }
+    let payload_kizu = variant.payload_kizu;
+    let payload_module = compiled_util::module_prefix_of(payload_kizu);
+    let payload_short = payload_kizu[std::mem::len(payload_module)..std::mem::len(payload_kizu)];
+    let payload_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, ir_bytes[0..0], payload_kizu
+    );
+    let field0 = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+        ir_bytes, payload_module, payload_short, field0_name
+    );
+    if !field0.found {
+        return error("compiled mir: match-union arm payload field not found");
+    }
+    let field0_type_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, payload_module, field0.field_type
+    );
+    let field1 = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+        ir_bytes, payload_module, field0.field_type, field1_name
+    );
+    if !field1.found {
+        return error("compiled mir: match-union arm payload subfield not found");
+    }
+    return compiled_mir_function::single_match_union_return_function(
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        receiver_type,
+        recv_name,
+        index_type,
+        index_name,
+        data_field_index,
+        variant.tag,
+        payload_llvm,
+        field0.index,
+        field0_type_llvm,
+        field1.index,
+        default_value
+    );
+}
+
+// match_union_arm_expr unwraps a match arm body to its value expression: the parser wraps
+// a bare expression arm body in an ExprStmt, so the field chain / integer literal lives at
+// the ExprStmt 'expr' child (tracker 961).
+fn match_union_arm_expr(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arm_body: i64,
+    bs: i64
+) -> !i64 {
+    let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arm_body, bs);
+    if std::mem::equal_bytes(body_kind, "ExprStmt") {
+        return try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arm_body, "expr", 0, bs
+        );
+    }
+    return arm_body;
+}
+
 // lower_array_len_method_return lowers a single 'return self.<field>.len();' where
 // <field> is a std::array::Array<T> field of a struct value parameter. It is the
 // first AST read-only accessor compiled into stage2 (std::kizu::ast::Ast.len): it
