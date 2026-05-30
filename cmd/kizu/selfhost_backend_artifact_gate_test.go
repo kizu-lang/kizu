@@ -375,6 +375,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLowerRunAstBlockFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstFunctionFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstDeclarationsFragments()...)
+	fragments = append(fragments, requiredLLVMLowerRunAstFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -1005,6 +1006,27 @@ func requiredLLVMLowerRunAstDeclarationsFragments() []string {
 			"%kizu.selfhost.codegen.run_ast %lrad_run_ast)",
 		"%lrad_r1 = insertvalue %kizu.error.run_ast %lrad_r0, " +
 			"%kizu.selfhost.codegen.run_ast %lrad_run_ast, 1",
+	}
+}
+
+// requiredLLVMLowerRunAstFragments returns the tracker-961 scope-4 prerequisite lower_run_ast AST
+// traversal root compiled into stage2: it binds the root AstNode via Ast.get and on the Program
+// variant (tag 0) loads the ProgramNode declarations (field 0) and forwards
+// lower_run_ast_declarations' !RunAst result, while every other root returns the wrapped
+// unsupported_run_ast(). With this the whole lower_run_ast traversal cluster is compiled. These
+// fragments lock the lowered body shape.
+func requiredLLVMLowerRunAstFragments() []string {
+	return []string{
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast(",
+		"%lra_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %root)",
+		"%lra_is_program = icmp eq i64 %lra_tag, 0",
+		"%lra_program_node = load %kizu.kizu.ast.program_node, ptr %lra_payload_ptr, align 8",
+		"%lra_decls = extractvalue %kizu.kizu.ast.program_node %lra_program_node, 0",
+		"%lra_result = call %kizu.error.run_ast " +
+			"@kizu_selfhost__ir_codegen_lower_run_ast_declarations(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %lra_decls)",
+		"  ret %kizu.error.run_ast %lra_result",
 	}
 }
 
