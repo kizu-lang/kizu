@@ -407,6 +407,7 @@ fn append_multi_stmt(
         LowerPrintCall(payload) => try append_multi_lower_print_call(out, payload);,
         LowerPrintStatement(payload) => try append_multi_lower_print_statement(out, payload);,
         LowerRunAstBlock(payload) => try append_multi_lower_run_ast_block(out, payload);,
+        LowerRunAstFunction(payload) => try append_multi_lower_run_ast_function(out, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -1231,6 +1232,108 @@ fn append_multi_lower_run_ast_block(
     return;
 }
 
+// append_lower_run_ast_function_string_globals emits the "main" literal constant
+// lower_run_ast_function requires the function name to equal (tracker 961, scope 4 prerequisite).
+fn append_lower_run_ast_function_string_globals(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirLowerRunAstFunctionStmt
+) -> !void {
+    let quote = cast<u8>(34);
+    try out.append_bytes("@.kizu.compiled.");
+    try out.append_bytes(stmt.main_global_symbol);
+    try out.append_bytes(".s0 = private unnamed_addr constant [4 x i8] c");
+    try out.append_byte(quote);
+    try out.append_bytes("main");
+    try out.append_byte(quote);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_multi_lower_run_ast_function renders lower_run_ast_function(text, ast, name, body): it
+// requires the function name text to equal "main", binds the body AstNode off Ast.get, and on the
+// Block variant forwards lower_run_ast_block's !RunAst result (passing the block statements and the
+// recomputed name text); a non-main name or non-Block body returns the wrapped
+// unsupported_run_ast() (tracker 961, scope 4 prerequisite). The name text is computed once and
+// reused for the "main" comparison and the lower_run_ast_block function_name argument.
+fn append_multi_lower_run_ast_function(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirLowerRunAstFunctionStmt
+) -> !void {
+    try out.append_bytes("  %lraf_name_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.name_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %lraf_main_ptr = getelementptr [4 x i8], ptr @.kizu.compiled.");
+    try out.append_bytes(stmt.main_global_symbol);
+    try append_ll_line(out, ".s0, i64 0, i64 0");
+    try append_ll_line(out,
+        "  %lraf_main_base = insertvalue %kizu.slice.u8 poison, ptr %lraf_main_ptr, 0");
+    try append_ll_line(out,
+        "  %lraf_main_slice = insertvalue %kizu.slice.u8 %lraf_main_base, i64 4, 1");
+    try append_ll_line(out,
+        "  %lraf_is_main = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %lraf_name_text, %kizu.slice.u8 %lraf_main_slice)");
+    try append_ll_line(out, "  br i1 %lraf_is_main, label %lraf_body, label %lraf_unsupported");
+    // Bind the body node and dispatch on its tag.
+    try append_ll_line(out, "lraf_body:");
+    try out.append_bytes("  %lraf_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.body_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.body_name);
+    try append_ll_line(out, ")");
+    try append_ll_line(out, "  %lraf_data = extractvalue %kizu.kizu.ast.ast_node %lraf_node, 1");
+    try append_ll_line(out, "  %lraf_tag = extractvalue %kizu.kizu.ast.ast_data %lraf_data, 0");
+    try out.append_bytes("  %lraf_is_block = icmp eq i64 %lraf_tag, ");
+    try std::fmt::append_i64(out, stmt.block_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  br i1 %lraf_is_block, label %lraf_block, label %lraf_unsupported");
+    // Block variant: forward lower_run_ast_block's !RunAst result.
+    try append_ll_line(out, "lraf_block:");
+    try append_ll_line(out, "  %lraf_slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_ll_line(out, "  store %kizu.kizu.ast.ast_data %lraf_data, ptr %lraf_slot, align 8");
+    try append_ll_line(out,
+        "  %lraf_payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %lraf_slot, i32 0, i32 1");
+    try append_ll_line(out,
+        "  %lraf_block_node = load %kizu.kizu.ast.block_node, ptr %lraf_payload_ptr, align 8");
+    try append_ll_line(out,
+        "  %lraf_stmts = extractvalue %kizu.kizu.ast.block_node %lraf_block_node, 0");
+    try out.append_bytes("  %lraf_result = call %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_block(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try append_ll_line(out,
+        ", %kizu.slice.u8 %lraf_name_text, %kizu.kizu.ast.child_range %lraf_stmts)");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lraf_result");
+    // Non-main name or non-Block body: return the wrapped unsupported_run_ast(text[0..0]).
+    try append_ll_line(out, "lraf_unsupported:");
+    try out.append_bytes("  %lraf_us_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  %lraf_us0 = insertvalue %kizu.slice.u8 poison, ptr %lraf_us_ptr, 0");
+    try append_ll_line(out, "  %lraf_empty = insertvalue %kizu.slice.u8 %lraf_us0, i64 0, 1");
+    try append_ll_line(out,
+        "  %lraf_us = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lraf_empty)");
+    try append_ll_line(out, "  %lraf_uw0 = insertvalue %kizu.error.run_ast poison, i1 true, 0");
+    try append_ll_line(out,
+        "  %lraf_uw1 = insertvalue %kizu.error.run_ast %lraf_uw0, %kizu.selfhost.codegen.run_ast %lraf_us, 1");
+    try append_ll_line(out,
+        "  %lraf_uw2 = insertvalue %kizu.error.run_ast %lraf_uw1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lraf_uw2");
+    return;
+}
+
 // append_count_range_globals: count_range forwards only value arguments, so no string globals.
 fn append_count_range_globals(stmt: &compiled_mir::MirCountRangeStmt) -> !void {
     return;
@@ -1679,6 +1782,7 @@ fn append_stmt_globals(
         LowerPrintCall(payload) => try append_lower_print_call_string_globals(out, payload);,
         LowerPrintStatement(payload) => try append_lower_print_statement_globals(payload);,
         LowerRunAstBlock(payload) => try append_lower_run_ast_block_globals(payload);,
+        LowerRunAstFunction(payload) => try append_lower_run_ast_function_string_globals(out, payload);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,

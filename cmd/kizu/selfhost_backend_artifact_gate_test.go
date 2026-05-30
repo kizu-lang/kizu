@@ -373,6 +373,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLowerPrintStatementFragments()...)
 	fragments = append(fragments, requiredLLVMLowerLetBindingFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstBlockFragments()...)
+	fragments = append(fragments, requiredLLVMLowerRunAstFunctionFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -955,6 +956,30 @@ func requiredLLVMLowerRunAstBlockFragments() []string {
 		"%lrb_ps = call %kizu.error.run_ast " +
 			"@kizu_selfhost__ir_codegen_lower_print_statement(",
 		"  ret %kizu.error.run_ast %lrb_ps",
+	}
+}
+
+// requiredLLVMLowerRunAstFunctionFragments returns the tracker-961 scope-4 prerequisite
+// lower_run_ast_function AST traversal lowering compiled into stage2: it requires the function
+// name text to equal the "main" literal global, binds the body AstNode via Ast.get, and on the
+// Block variant (tag 19) forwards lower_run_ast_block's !RunAst result (passing the block
+// statements and the recomputed name text); a non-main name or non-Block body returns the wrapped
+// unsupported_run_ast(). These fragments lock the lowered body shape.
+func requiredLLVMLowerRunAstFunctionFragments() []string {
+	return []string{
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_function(",
+		"@.kizu.compiled.kizu_selfhost__ir_codegen_lower_run_ast_function.s0 = " +
+			"private unnamed_addr constant [4 x i8] c\"main\"",
+		"%lraf_is_main = call i1 @kizu_selfhost__slice_equal(" +
+			"%kizu.slice.u8 %lraf_name_text, %kizu.slice.u8 %lraf_main_slice)",
+		"%lraf_is_block = icmp eq i64 %lraf_tag, 19",
+		"%lraf_block_node = load %kizu.kizu.ast.block_node, ptr %lraf_payload_ptr, align 8",
+		"%lraf_stmts = extractvalue %kizu.kizu.ast.block_node %lraf_block_node, 0",
+		"%lraf_result = call %kizu.error.run_ast " +
+			"@kizu_selfhost__ir_codegen_lower_run_ast_block(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.slice.u8 %lraf_name_text, " +
+			"%kizu.kizu.ast.child_range %lraf_stmts)",
+		"  ret %kizu.error.run_ast %lraf_result",
 	}
 }
 
