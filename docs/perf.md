@@ -84,9 +84,13 @@ selfhost backend(`compiled_*` を mini MIR 経由で LLVM に落とす経路)は
 書かれた compiler を Go インタプリタが実行する。インタプリタの 1 命令あたりの
 オーバーヘッドが、巨大な selfhost source を回すことで支配的コストとして顕在化する。
 
-ground truth は `TestSelfhostBackendArtifactGate`(`KIZU_RUN_SELFHOST_GATES=1`、
-約 350s)だが、反復には重すぎる。秒単位で回せる proxy を併用し、最後に gate で
-確認する二段ループにする。
+interpreter hot path の ground truth は `just selfhost-oracle` または focused な
+`just selfhost-integration-gates` で確認する。`TestSelfhostBackendArtifactGate` は
+2026-05-31 時点で stage0 native bootstrap + `stage selfhost` の artifact contract
+gate になり、backend artifact rendering を Go interpreter 上で走らせない。秒単位で
+回せる proxy を併用し、最後に該当する oracle / integration gate で確認する二段
+ループにする。2026-05-31 の `just selfhost-backend-artifact-gate` 実測は 10.14s real
+(9.97s in `go test`)。
 
 ### 計測ツール
 
@@ -128,12 +132,11 @@ ground truth は `TestSelfhostBackendArtifactGate`(`KIZU_RUN_SELFHOST_GATES=1`�
    go run golang.org/x/perf/cmd/benchstat@latest before.txt after.txt
    ```
 
-5. ground truth で wall-time を確認する。
+5. 該当する ground truth で wall-time を確認する。
 
    ```sh
-   KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu \
-     -run '^TestSelfhostBackendArtifactGate$' \
-     -cpuprofile /tmp/kizu-gate.prof -timeout 20m -count=1 -v
+   just selfhost-oracle
+   just selfhost-integration-gates
    ```
 
 6. gate で改善が確定したらコミットする。1 コミット 1 最適化を原則とし、commit

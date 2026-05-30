@@ -29,6 +29,7 @@ type emitter struct {
 	strings         map[string]string
 	values          map[string]valueInfo
 	functionNames   map[string]bool
+	functionParams  map[string][]ir.Value
 	currentReturn   string
 	mainReturnsInt  bool
 	nextLabel       int
@@ -62,8 +63,10 @@ func (e *emitter) emit() error {
 // collectFunctionNames records module-local functions before call emission.
 func (e *emitter) collectFunctionNames() {
 	e.functionNames = map[string]bool{}
+	e.functionParams = map[string][]ir.Value{}
 	for _, fn := range e.module.Functions {
 		e.functionNames[fn.Name] = true
+		e.functionParams[fn.Name] = fn.Params
 	}
 }
 
@@ -793,8 +796,13 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 // byval pointer ABI, avoiding target-dependent aggregate argument lowering.
 func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 	args := make([]string, 0, len(instr.Args))
+	params := e.functionParams[name]
 	for index, arg := range instr.Args {
-		callArg, err := e.internalCallArg(arg, index)
+		targetType := ""
+		if index < len(params) {
+			targetType = params[index].Type
+		}
+		callArg, err := e.internalCallArg(arg, targetType, index)
 		if err != nil {
 			return err
 		}
@@ -817,9 +825,19 @@ func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
 }
 
 // internalCallArg returns one module-local call argument in functionParamABI form.
-func (e *emitter) internalCallArg(arg ir.Value, index int) (string, error) {
+func (e *emitter) internalCallArg(arg ir.Value, targetType string, index int) (string, error) {
 	value := e.value(arg)
 	argType := e.llvmType(arg.Type)
+	if targetType != "" && derefLLVMType(targetType) == arg.Type {
+		if _, ok := e.module.Unions[arg.Type]; ok && derefLLVMType(targetType) != targetType {
+			slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
+			fmt.Fprintf(&e.out, "  %s = alloca %s, align %d\n",
+				slotName, argType, maxInlinePayloadAlign)
+			fmt.Fprintf(&e.out, "  store %s %s, ptr %s, align %d\n",
+				argType, value.operand, slotName, maxInlinePayloadAlign)
+			return "ptr " + slotName, nil
+		}
+	}
 	if !e.usesIndirectStructParamABI(arg.Type) {
 		return argType + " " + value.operand, nil
 	}

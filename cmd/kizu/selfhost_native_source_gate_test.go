@@ -18,6 +18,12 @@ const (
 		"selfhost::backend::executable checked-ast\n"
 )
 
+type nativeSelfhostBuildConfig struct {
+	name       string
+	outputPath string
+	cacheDir   string
+}
+
 // TestSelfhostNativeSourceExecutableGate builds selfhost from source and runs
 // executable artifacts through the Kizu-owned checked-AST lowering path.
 func TestSelfhostNativeSourceExecutableGate(t *testing.T) {
@@ -113,6 +119,19 @@ func prepareNativeSourceExecutableDir() error {
 // buildNativeSourceSelfhost compiles the selfhost package into a native executable.
 func buildNativeSourceSelfhost(t *testing.T) bootstrapCommandResult {
 	t.Helper()
+	return buildNativeSelfhost(t, nativeSelfhostBuildConfig{
+		name:       "native-source selfhost",
+		outputPath: nativeSourceRunnerPath,
+		cacheDir:   "target/selfhost/native-source-cache",
+	})
+}
+
+// buildNativeSelfhost compiles the selfhost package through the Go native compiler.
+func buildNativeSelfhost(
+	t *testing.T,
+	config nativeSelfhostBuildConfig,
+) bootstrapCommandResult {
+	t.Helper()
 	start := time.Now()
 	build := exec.Command(
 		"go",
@@ -130,17 +149,17 @@ func buildNativeSourceSelfhost(t *testing.T) bootstrapCommandResult {
 		"--linker",
 		"clang",
 		"-o",
-		nativeSourceRunnerPath,
+		config.outputPath,
 		"selfhost",
 	)
-	build.Env = append(os.Environ(), "KIZU_CACHE_DIR=target/selfhost/native-source-cache")
+	build.Env = append(os.Environ(), "KIZU_CACHE_DIR="+config.cacheDir)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	build.Stdout = &stdout
 	build.Stderr = &stderr
 	err := build.Run()
 	return bootstrapCommandResult{
-		name:    "build native-source selfhost",
+		name:    "build " + config.name,
 		command: strings.Join(build.Args, " "),
 		stdout:  stdout.String(),
 		stderr:  stderr.String(),
@@ -156,13 +175,29 @@ func runNativeSourceCommand(
 	args ...string,
 ) bootstrapCommandResult {
 	t.Helper()
+	return runNativeSelfhostCommand(
+		t,
+		exePath,
+		"target/selfhost/native-source-cache",
+		args...,
+	)
+}
+
+// runNativeSelfhostCommand runs one command through a native selfhost executable.
+func runNativeSelfhostCommand(
+	t *testing.T,
+	exePath string,
+	cacheDir string,
+	args ...string,
+) bootstrapCommandResult {
+	t.Helper()
 	start := time.Now()
 	absExe, err := filepath.Abs(exePath)
 	if err != nil {
 		t.Errorf("resolve %s: %v", exePath, err)
 	}
 	run := exec.Command(absExe, args...)
-	run.Env = append(os.Environ(), "KIZU_CACHE_DIR=target/selfhost/native-source-cache")
+	run.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	run.Stdout = &stdout

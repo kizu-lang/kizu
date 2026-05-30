@@ -11,6 +11,8 @@ func (e *emitter) writeUnionInstr(instr *ir.Instr) error {
 	switch instr.Op {
 	case "union.new":
 		return e.writeUnionNew(instr)
+	case "union.load":
+		return e.writeUnionLoad(instr)
 	case "union.tag":
 		return e.writeUnionTag(instr)
 	case "union.payload":
@@ -90,6 +92,26 @@ func (e *emitter) writeInlineUnion(
 	}
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s, align %d\n",
 		resultName, unionType, slotName, maxInlinePayloadAlign)
+	return nil
+}
+
+// writeUnionLoad materializes a borrowed union value for tag/payload matching.
+func (e *emitter) writeUnionLoad(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: union.load expects one borrowed union argument")
+	}
+	unionName := derefLLVMType(instr.Args[0].Type)
+	if instr.Result.Type != unionName {
+		return fmt.Errorf("llvm error: union.load returns %s, got %s", unionName, instr.Result.Type)
+	}
+	if _, ok := e.module.Unions[unionName]; !ok {
+		return fmt.Errorf("llvm error: union.load expects borrowed union, got `%s`", instr.Args[0].Type)
+	}
+	value := e.value(instr.Args[0])
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s, align %d\n",
+		resultName, e.llvmType(unionName), value.operand, maxInlinePayloadAlign)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 

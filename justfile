@@ -43,9 +43,13 @@ selfhost-oracle:
 selfhost-oracle-budget:
     GOGC=1000 KIZU_RUN_SELFHOST_ORACLE=1 KIZU_ENFORCE_SELFHOST_ORACLE_BUDGET=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -count=1 -v
 
-# Run direct heavyweight selfhost gates for focused debugging.
+# Run the stage0-native backend artifact contract gate.
+selfhost-backend-artifact-gate:
+    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostBackendArtifactGate$' -count=1 -v
+
+# Run direct heavyweight interpreted selfhost gates for focused debugging.
 selfhost-integration-gates:
-    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|BackendArtifactGate|PipelineGate)$' -v
+    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|PipelineGate)$' -v
 
 # Run the focused selfhost CLI contract gate.
 selfhost-cli-gate:

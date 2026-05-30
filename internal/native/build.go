@@ -135,6 +135,7 @@ const runtimeSource = `
 #include <dirent.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 typedef struct {
@@ -170,6 +171,12 @@ typedef struct {
     _Bool value;
     KizuSliceU8 error;
 } KizuErrorBool;
+
+typedef struct {
+    _Bool ok;
+    int64_t value;
+    KizuSliceU8 error;
+} KizuErrorI64;
 
 typedef struct {
     _Bool ok;
@@ -257,6 +264,22 @@ static KizuErrorBool kizu_err_bool(const char *message) {
     KizuErrorBool out;
     out.ok = 0;
     out.value = 0;
+    out.error = kizu_error_message(message);
+    return out;
+}
+
+static KizuErrorI64 kizu_ok_i64(int64_t value) {
+    KizuErrorI64 out;
+    out.ok = 1;
+    out.value = value;
+    out.error = kizu_slice_from_cstr("");
+    return out;
+}
+
+static KizuErrorI64 kizu_err_i64(const char *message) {
+    KizuErrorI64 out;
+    out.ok = 0;
+    out.value = 1;
     out.error = kizu_error_message(message);
     return out;
 }
@@ -485,6 +508,71 @@ static KizuErrorSliceU8 kizu_std_builtin_process_env_result(KizuSliceU8 name) {
 
 void std_builtin_process_env(KizuErrorSliceU8 *out, const KizuSliceU8 *name) {
     *out = kizu_std_builtin_process_env_result(*name);
+}
+
+static int kizu_run_child_process(char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        return 127;
+    }
+    if (pid == 0) {
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return 127;
+        }
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return 127;
+}
+
+void std_builtin_process_spawn_wait8(
+    KizuErrorI64 *out,
+    int64_t argc,
+    const KizuSliceU8 *arg0,
+    const KizuSliceU8 *arg1,
+    const KizuSliceU8 *arg2,
+    const KizuSliceU8 *arg3,
+    const KizuSliceU8 *arg4,
+    const KizuSliceU8 *arg5,
+    const KizuSliceU8 *arg6,
+    const KizuSliceU8 *arg7
+) {
+    KizuSliceU8 raw_args[] = {*arg0, *arg1, *arg2, *arg3, *arg4, *arg5, *arg6, *arg7};
+    char *owned_args[8] = {0};
+    char *argv[9] = {0};
+    if (argc < 1 || argc > 8) {
+        *out = kizu_err_i64("invalid process argument count");
+        return;
+    }
+    if (raw_args[0].len == 0) {
+        *out = kizu_err_i64("missing process executable");
+        return;
+    }
+    for (int index = 0; index < argc; index++) {
+        owned_args[index] = kizu_slice_to_cstr(raw_args[index]);
+        if (!owned_args[index]) {
+            for (int free_index = 0; free_index < 8; free_index++) {
+                free(owned_args[free_index]);
+            }
+            *out = kizu_err_i64("allocation failed");
+            return;
+        }
+        argv[index] = owned_args[index];
+    }
+    int code = kizu_run_child_process(argv);
+    for (int free_index = 0; free_index < 8; free_index++) {
+        free(owned_args[free_index]);
+    }
+    *out = kizu_ok_i64((int64_t)code);
 }
 
 static KizuErrorSliceU8 kizu_std_builtin_fs_read_file_result(void *io, KizuSliceU8 path) {

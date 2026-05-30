@@ -76,7 +76,7 @@ Go-owned production boundary:
 | type checker | Go type checker | `selfhost::types` | type oracle plus check CLI parity gate | full expression/type surface and structured diagnostics |
 | ownership checker | Go ownership and borrow checker | `selfhost::ownership` | ownership oracle plus negative check parity for the switched shape | array/field/mutable borrow coverage |
 | IR handoff | Go IR construction | `selfhost::ir` | `just selfhost-native-source-gate` for executable handoff; backend fingerprint gate for broader IR | package IR boundary after hosted executable mode |
-| backend artifact | Go backend/cache for general builds | `selfhost::backend` | backend artifact gate plus `just selfhost-production-from-scratch` | first real codegen slice after hosted artifact mode |
+| backend artifact | Go backend/cache for general builds | `selfhost::backend` | `just selfhost-backend-artifact-gate` plus `just selfhost-production-from-scratch` | first real codegen slice after hosted artifact mode |
 | CLI parse/check/run/test | Go `cmd/kizu` dispatch for the general CLI | `selfhost::cli` and stage2 hosted artifact | matching CLI parity gate and no `go.cmd-kizu-fallback` marker except `none` | unsupported source shapes remain issue-linked |
 
 ## Issue 927 Closeout Inventory
@@ -109,7 +109,7 @@ any additional production behavior by itself.
 | `run <file>` | mixed: Go general CLI, hosted artifact for bounded run rows | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows | `just selfhost-run-parity-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader execution is deferred until package IR and backend slices expand |
 | `test <file>` | mixed: Go general CLI, hosted artifact for bounded test rows | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows | `just selfhost-test-parity-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader discovery and execution are deferred |
 | `stage selfhost` | hosted stage2 artifact | `selfhost::backend`, hosted runtime ABI | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
-| `fmt <file>` / `fmt --write <file>` | mixed: Go general CLI, hosted artifact for bounded formatter rows | selfhost formatter writer | no fallback in hosted rows | `TestSelfhostBackendArtifactGate` | broader formatter preservation is deferred |
+| `fmt <file>` / `fmt --write <file>` | mixed: Go general CLI, hosted artifact for bounded formatter rows | selfhost formatter writer | no fallback in hosted rows | `just selfhost-backend-artifact-gate` | broader formatter preservation is deferred |
 | `build`, `ir`, `wasm`, `native` | Go general CLI | no production selfhost owner yet | no hidden fallback because no selfhost switch is claimed | Go tests and backend-specific gates | explicit deferral until package/codegen IR replaces the Go backend boundary |
 | `cache`, `why-rebuild` | Go build cache | none | no hidden fallback because no selfhost switch is claimed | cache smoke/perf commands when cache behavior changes | explicit deferral until a selfhost build-cache design issue exists |
 

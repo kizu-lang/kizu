@@ -689,7 +689,7 @@ Until CI requires an LLVM verifier binary, #454 uses this repository command as
 the documented textual-IR validation gate:
 
 ```sh
-go test ./cmd/kizu -run TestSelfhostBackendArtifactGate
+just selfhost-backend-artifact-gate
 ```
 
 The gate checks that `target/selfhost/selfhost.ll`:
