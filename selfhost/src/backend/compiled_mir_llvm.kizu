@@ -401,6 +401,7 @@ fn append_multi_stmt(
         ReturnTryBinary(payload) => try append_multi_return_try_binary(out, function, payload, local_prefix);,
         CountRange(payload) => try append_multi_count_range(out, payload);,
         TrimAscii(payload) => try append_multi_trim_ascii(out, payload);,
+        AdvancePosition(payload) => try append_multi_advance_position(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
@@ -659,6 +660,58 @@ fn append_multi_trim_ascii(
 // append_multi_ast_node_text renders ast_node_text(text, ast, node_id): it binds the AstNode by
 // value off the Ast.get call, extracts the Span (AstNode field 0) and its start/end, slices the
 // text two-bound, and forwards the slice to trim_ascii (tracker 961).
+// append_advance_position_globals: advance_position forwards only value arguments, so it emits
+// no string-constant globals (tracker 961).
+fn append_advance_position_globals(stmt: &compiled_mir::MirAdvancePositionStmt) -> !void {
+    return;
+}
+
+// append_multi_advance_position renders advance_position(source, start, end, initial): a two-phi
+// loop threading the i64 index (seeded from start) and the Position struct current (seeded from
+// initial). Each iteration loads source[index] as an i8 and feeds it with current into the
+// already-compiled advance_byte, whose Position result becomes the next current; the loop exits
+// when index reaches end and returns the final current (tracker 961, scope 4 prerequisite).
+fn append_multi_advance_position(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirAdvancePositionStmt
+) -> !void {
+    try out.append_bytes("  %ap_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  br label %ap_loop_head");
+    try append_ll_line(out, "ap_loop_head:");
+    try out.append_bytes("  %ap_index = phi i64 [ %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", %entry ], [ %ap_index_next, %ap_loop_body ]");
+    try out.append_bytes("  %ap_current = phi ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(stmt.initial_name);
+    try append_ll_line(out, ", %entry ], [ %ap_next, %ap_loop_body ]");
+    try out.append_bytes("  %ap_cond = icmp slt i64 %ap_index, %");
+    try append_ll_line(out, stmt.end_name);
+    try append_ll_line(out,
+        "  br i1 %ap_cond, label %ap_loop_body, label %ap_loop_exit");
+    try append_ll_line(out, "ap_loop_body:");
+    try append_ll_line(out,
+        "  %ap_byte_ptr = getelementptr i8, ptr %ap_source_ptr, i64 %ap_index");
+    try append_ll_line(out, "  %ap_byte = load i8, ptr %ap_byte_ptr");
+    try out.append_bytes("  %ap_next = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.advance_byte_symbol);
+    try out.append_bytes("(i8 %ap_byte, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %ap_current)");
+    try append_ll_line(out, "  %ap_index_next = add i64 %ap_index, 1");
+    try append_ll_line(out, "  br label %ap_loop_head");
+    try append_ll_line(out, "ap_loop_exit:");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %ap_current");
+    return;
+}
+
 fn append_multi_ast_node_text(
     out: &var std::string::String,
     stmt: &compiled_mir::MirAstNodeTextStmt
@@ -1981,6 +2034,7 @@ fn append_stmt_globals(
         ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         CountRange(payload) => try append_count_range_globals(payload);,
         TrimAscii(payload) => try append_trim_ascii_globals(payload);,
+        AdvancePosition(payload) => try append_advance_position_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,

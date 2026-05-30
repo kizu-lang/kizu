@@ -218,6 +218,20 @@ pub fn append_compiled_function_params(
         try compiled_mir_llvm::append_function(out, &decls_mir);
         return;
     }
+    // advance_position threads the lexer cursor over a source range: 'var index = start; var
+    // current = initial; while index < end { current = advance_byte(source[index], current);
+    // index = index + 1; } return current;'. Its second loop-carried variable (the Position
+    // struct current, reassigned from a struct-returning call) the generic while machinery does
+    // not model and the count_range shape would mis-detect, so it is intercepted by name ahead of
+    // all shape detection (tracker 961, scope 4 prerequisite).
+    if std::mem::equal_bytes(function_name, "std::kizu::lexer::advance_position") {
+        let advance_mir = try compiled_mir_lower::lower_advance_position_function(
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+        defer advance_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &advance_mir);
+        return;
+    }
     // 'let node = self.get(index); return match node.data { ... };' is the first
     // match-over-AstData-union read-only AST accessor compiled into stage2 (tracker 961).
     if try compiled_mir_lower::is_match_union_function(
