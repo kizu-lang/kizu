@@ -402,6 +402,7 @@ fn append_multi_stmt(
         CountRange(payload) => try append_multi_count_range(out, payload);,
         TrimAscii(payload) => try append_multi_trim_ascii(out, payload);,
         AdvancePosition(payload) => try append_multi_advance_position(out, payload);,
+        NumberToken(payload) => try append_multi_number_token(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
@@ -663,6 +664,63 @@ fn append_multi_trim_ascii(
 // append_advance_position_globals: advance_position forwards only value arguments, so it emits
 // no string-constant globals (tracker 961).
 fn append_advance_position_globals(stmt: &compiled_mir::MirAdvancePositionStmt) -> !void {
+    return;
+}
+
+// append_number_token_globals: number_token forwards only value arguments, so it emits no
+// string-constant globals (tracker 961).
+fn append_number_token_globals(stmt: &compiled_mir::MirNumberTokenStmt) -> !void {
+    return;
+}
+
+// append_multi_number_token renders number_token(source, start, current): an i64 end phi seeded
+// from start that scans forward while end is in bounds and source[end] is a digit (via the
+// already-compiled is_digit), then builds the Number Token off token(...) (tracker 961, scope 4
+// prerequisite). len(source) is the slice length field read inline as extractvalue field 1.
+fn append_multi_number_token(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirNumberTokenStmt
+) -> !void {
+    try out.append_bytes("  %nt_length = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %nt_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  br label %nt_head");
+    try append_ll_line(out, "nt_head:");
+    try out.append_bytes("  %nt_end = phi i64 [ %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", %entry ], [ %nt_next, %nt_body ]");
+    try append_ll_line(out, "  %nt_inb = icmp slt i64 %nt_end, %nt_length");
+    try append_ll_line(out, "  br i1 %nt_inb, label %nt_check, label %nt_exit");
+    try append_ll_line(out, "nt_check:");
+    try append_ll_line(out, "  %nt_bptr = getelementptr i8, ptr %nt_source_ptr, i64 %nt_end");
+    try append_ll_line(out, "  %nt_byte = load i8, ptr %nt_bptr");
+    try out.append_bytes("  %nt_isd = call i1 @");
+    try out.append_bytes(stmt.is_digit_symbol);
+    try append_ll_line(out, "(i8 %nt_byte)");
+    try append_ll_line(out, "  br i1 %nt_isd, label %nt_body, label %nt_exit");
+    try append_ll_line(out, "nt_body:");
+    try append_ll_line(out, "  %nt_next = add i64 %nt_end, 1");
+    try append_ll_line(out, "  br label %nt_head");
+    try append_ll_line(out, "nt_exit:");
+    try out.append_bytes("  %nt_tok = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.token_symbol);
+    try out.append_bytes("(i64 ");
+    try std::fmt::append_i64(out, stmt.number_tag);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.start_name);
+    try out.append_bytes(", i64 %nt_end, ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.current_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %nt_tok");
     return;
 }
 
@@ -2035,6 +2093,7 @@ fn append_stmt_globals(
         CountRange(payload) => try append_count_range_globals(payload);,
         TrimAscii(payload) => try append_trim_ascii_globals(payload);,
         AdvancePosition(payload) => try append_advance_position_globals(payload);,
+        NumberToken(payload) => try append_number_token_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,

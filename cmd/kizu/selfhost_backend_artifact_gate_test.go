@@ -1152,6 +1152,12 @@ func requiredLLVMLexerTokenFragments() []string {
 		// attach_doc rebuilds the raw Token, reading raw.kind (field 0) off the Token param.
 		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_attach_doc(",
 		"extractvalue %kizu.kizu.lexer.token %raw, 0",
+		// number_token scans a digit run: an i64 end phi advancing while source[end] is a digit,
+		// then building the Number Token off token(...).
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_number_token(",
+		"%nt_end = phi i64 [ %start, %entry ], [ %nt_next, %nt_body ]",
+		"%nt_isd = call i1 @kizu_kizu__lexer_is_digit(i8 %nt_byte)",
+		"i64 %start, i64 %nt_end, %kizu.kizu.lexer.position %current)",
 	}
 }
 
