@@ -376,6 +376,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLowerRunAstFunctionFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstDeclarationsFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstFragments()...)
+	fragments = append(fragments, requiredLLVMLexerClassifierFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -1027,6 +1028,20 @@ func requiredLLVMLowerRunAstFragments() []string {
 			"@kizu_selfhost__ir_codegen_lower_run_ast_declarations(%kizu.slice.u8 %text, " +
 			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %lra_decls)",
 		"  ret %kizu.error.run_ast %lra_result",
+	}
+}
+
+// requiredLLVMLexerClassifierFragments returns the tracker-961 scope-4 prerequisite
+// std::kizu::lexer leaf byte classifiers compiled into stage2: is_alpha / is_digit / is_space,
+// range/or-chain byte predicates over a single i8. They are the bottom of the lexer compile chain
+// the eventual scanner removal needs (source -> Ast requires the compiled tokenizer). These
+// fragments lock the signatures.
+func requiredLLVMLexerClassifierFragments() []string {
+	return []string{
+		"define i1 @kizu_kizu__lexer_is_alpha(",
+		"define i1 @kizu_kizu__lexer_is_digit(",
+		"define i1 @kizu_kizu__lexer_is_space(",
+		"%t2 = icmp sge i8 %t0, %t1",
 	}
 }
 
