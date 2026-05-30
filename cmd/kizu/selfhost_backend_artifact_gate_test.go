@@ -358,6 +358,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMReturnErrorFragments()...)
 	fragments = append(fragments, requiredLLVMArrayGetFragments()...)
 	fragments = append(fragments, requiredLLVMChildAtFragments()...)
+	fragments = append(fragments, requiredLLVMUnionAbiFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -540,6 +541,35 @@ func requiredLLVMChildAtFragments() []string {
 		"%ok_value = insertvalue %kizu.error.node_id %ok_flag, %kizu.kizu.ast.node_id %elem, 1",
 		"  ret %kizu.error.node_id %ok_value",
 		"  ret %kizu.error.node_id %fail_value",
+	}
+}
+
+// requiredLLVMUnionAbiFragments returns the tracker-961 AstNode/AstData tagged-union
+// value-type ABI compiled into stage2. std::kizu::ast::Ast.add_node constructs an
+// AstNode (a Span plus the AstData union value forwarded whole) and appends it to the
+// nodes Arena. AstData is the #991 inline layout { i64 tag, [96 x i8] payload storage }
+// where 96 is the largest variant payload capacity; the 44 variant payload structs are
+// not modelled because add_node forwards the union value without inspecting it. The
+// element is marshalled through stack storage as a %kizu.slice.u8 (ptr + sizeof via the
+// getelementptr-null idiom) and appended through the heap-backed @kizu_rt_arena_add,
+// which returns a %kizu.handle whose index field becomes the NodeId.
+func requiredLLVMUnionAbiFragments() []string {
+	return []string{
+		"%kizu.kizu.ast.span = type { i64, i64 }",
+		"%kizu.kizu.ast.ast_data = type { i64, [96 x i8] }",
+		"%kizu.kizu.ast.ast_node = type { %kizu.kizu.ast.span, %kizu.kizu.ast.ast_data }",
+		"define %kizu.kizu.ast.node_id @kizu_kizu__ast_ast_add_node",
+		"%v0_0 = insertvalue %kizu.kizu.ast.ast_node poison, %kizu.kizu.ast.span %span_value, 0",
+		"%v0_1 = insertvalue %kizu.kizu.ast.ast_node %v0_0, %kizu.kizu.ast.ast_data %data, 1",
+		"store %kizu.kizu.ast.ast_node %v0_1, ptr %raw_slot, align 8",
+		"%raw_slice = insertvalue %kizu.slice.u8 %raw_slice_base, i64 ptrtoint (ptr getelementptr (" +
+			"%kizu.kizu.ast.ast_node, ptr null, i32 1) to i64), 1",
+		"%raw_arena = extractvalue %kizu.kizu.ast.ast %self, 0",
+		"%raw_handle = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %raw_arena, " +
+			"%kizu.slice.u8 %raw_slice)",
+		"%raw = extractvalue %kizu.handle %raw_handle, 1",
+		"  ret %kizu.kizu.ast.node_id %v2_0",
+		"define %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %value)",
 	}
 }
 
