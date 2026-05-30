@@ -377,6 +377,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLowerRunAstDeclarationsFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstFragments()...)
 	fragments = append(fragments, requiredLLVMLexerClassifierFragments()...)
+	fragments = append(fragments, requiredLLVMLexerAdvanceFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -1051,6 +1052,23 @@ func requiredLLVMLexerClassifierFragments() []string {
 		"%kizu.kizu.lexer.position = type { i64, i64 }",
 		"define %kizu.kizu.lexer.position @kizu_kizu__lexer_position(",
 		"insertvalue %kizu.kizu.lexer.position %v0_0, i64 %column, 1",
+	}
+}
+
+// requiredLLVMLexerAdvanceFragments pins advance_byte(byte, initial): the lexer cursor
+// step that calls position(...) in both the newline and same-line arms, exercising the
+// int-literal and field-arith call args added for the run-codegen frontend (tracker 961,
+// scope 4 prerequisite).
+func requiredLLVMLexerAdvanceFragments() []string {
+	return []string{
+		"define %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_byte(",
+		// position(initial.line + 1, 1): field-arith arg (extract line, add 1) + int literal.
+		"%arg0_0_ex = extractvalue %kizu.kizu.lexer.position %initial, 0",
+		"%arg0_0_arith = add i64 %arg0_0_ex, 1",
+		"call %kizu.kizu.lexer.position @kizu_kizu__lexer_position(i64 %arg0_0_arith, i64 1)",
+		// position(initial.line, initial.column + 1): plain field arg + field-arith arg.
+		"%arg1_1_ex = extractvalue %kizu.kizu.lexer.position %initial, 1",
+		"%arg1_1_arith = add i64 %arg1_1_ex, 1",
 	}
 }
 

@@ -74,7 +74,23 @@ pub fn lower_call_args(
                                 std::mem::equal_bytes(token, "true")
                             ));
                         } else {
-                            return error("compiled mir: unsupported call arg kind");
+                            if std::mem::equal_bytes(arg_kind, "Int") {
+                                let literal = try ir_contract::body_int_value_from(
+                                    ir_bytes, function_name, arg_node, bs
+                                );
+                                try args.append(compiled_mir::int_literal_call_arg(
+                                    arg_type, literal
+                                ));
+                            } else {
+                                if std::mem::equal_bytes(arg_kind, "Binary") {
+                                    try args.append(try lower_call_arith_arg(
+                                        ir_bytes, function_name, module_prefix,
+                                        params_spec, arg_type, arg_node, bs
+                                    ));
+                                } else {
+                                    return error("compiled mir: unsupported call arg kind");
+                                }
+                            }
                         }
                     }
                 }
@@ -188,6 +204,69 @@ fn lower_call_index_arg(
         start_bound.offset,
         end_bound.base,
         end_bound.offset
+    );
+}
+
+// lower_call_arith_arg lowers a 'Binary' call argument of the form '<base> +/- <int>'
+// where the base is either a Var or a single-level FieldExpr (receiver.field) and the
+// right operand is an integer literal. It backs the lexer's position(initial.line + 1,
+// ...) calls (tracker 961, scope 4 prerequisite). Other binary shapes stay rejected.
+fn lower_call_arith_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    bs: i64
+) -> !compiled_mir::MirCallArg {
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, arg_node, bs
+    );
+    var subtract = false;
+    if std::mem::equal_bytes(op, "sub") {
+        subtract = true;
+    } else {
+        if !std::mem::equal_bytes(op, "add") {
+            return error("compiled mir: unsupported arith call arg op");
+        }
+    }
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "left", 0, bs
+    );
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "right", 0, bs
+    );
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right_node, bs);
+    if !std::mem::equal_bytes(right_kind, "Int") {
+        return error("compiled mir: arith call arg right operand must be an int literal");
+    }
+    let literal = try ir_contract::body_int_value_from(ir_bytes, function_name, right_node, bs);
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
+    if std::mem::equal_bytes(left_kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, left_node, bs
+        );
+        return compiled_mir::arith_var_call_arg(arg_type, var_name, literal, subtract);
+    }
+    if !std::mem::equal_bytes(left_kind, "FieldExpr") {
+        return error("compiled mir: arith call arg base must be a var or field access");
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, left_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, receiver, bs);
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: arith call arg field receiver must be a var");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    let field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, left_node, bs
+    );
+    return compiled_mir::arith_field_call_arg(
+        arg_type, field.receiver_llvm_type, receiver_name, field.field_index, literal, subtract
     );
 }
 
