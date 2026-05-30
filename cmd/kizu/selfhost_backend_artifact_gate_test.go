@@ -364,6 +364,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMNodeCountTypeFragments()...)
 	fragments = append(fragments, requiredLLVMNodeCountLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMTextAccessorFragments()...)
+	fragments = append(fragments, requiredLLVMStringLiteralSpanFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -788,6 +789,35 @@ func requiredLLVMTextAccessorFragments() []string {
 		"%ant_slice_len = sub i64 %ant_end, %ant_start",
 		"%ant_trimmed = call %kizu.slice.u8 @kizu_std__mem_trim_ascii(%kizu.slice.u8 %ant_s1)",
 		"  ret %kizu.slice.u8 %ant_trimmed",
+	}
+}
+
+// requiredLLVMStringLiteralSpanFragments returns the tracker-961 scope-4 prerequisite
+// string_literal_span AST traversal accessor compiled into stage2: it binds an AstNode via
+// Ast.get, reads the Span start/end, rejects spans shorter than the two surrounding quotes,
+// checks the leading/trailing double-quote bytes, forwards the inner payload slice to
+// is_payload_supported, and returns the trimmed PayloadSpan or the shared empty_payload_span()
+// sentinel. Its callees are already compiled so selfhost.ll links. These fragments lock the
+// lowered body shape.
+func requiredLLVMStringLiteralSpanFragments() []string {
+	return []string{
+		"define %kizu.selfhost.codegen.payload_span " +
+			"@kizu_selfhost__ir_codegen_string_literal_span(",
+		"%sls_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %node_id)",
+		"%sls_span = extractvalue %kizu.kizu.ast.ast_node %sls_node, 0",
+		"%sls_length = sub i64 %sls_end, %sls_start",
+		"%sls_too_short = icmp slt i64 %sls_length, 2",
+		"  br i1 %sls_too_short, label %sls_empty, label %sls_check_quotes",
+		"%sls_first_q = icmp eq i8 %sls_first, 34",
+		"%sls_last_q = icmp eq i8 %sls_last, 34",
+		"%sls_both_q = and i1 %sls_first_q, %sls_last_q",
+		"%sls_supported = call i1 @kizu_selfhost__ir_codegen_is_payload_supported(" +
+			"%kizu.slice.u8 %sls_p1)",
+		"%sls_r1 = insertvalue %kizu.selfhost.codegen.payload_span %sls_r0, " +
+			"i64 %sls_payload_end, 1",
+		"%sls_empty_call = call %kizu.selfhost.codegen.payload_span " +
+			"@kizu_selfhost__ir_codegen_empty_payload_span()",
 	}
 }
 
