@@ -17,6 +17,7 @@ pub fn append_facts(
     var loader_found = false;
     var ast_found = false;
     var diagnostic_found = false;
+    var selfhost_ast_found = false;
 
     var index = 0;
     while index < files.len() {
@@ -62,6 +63,10 @@ pub fn append_facts(
                 try append_loader_function_facts(allocator, out, file);
                 loader_found = true;
             }
+            if std::mem::equal_bytes(module, "ast") {
+                try append_selfhost_ast_function_facts(allocator, out, file);
+                selfhost_ast_found = true;
+            }
         }
         index = index + 1;
     }
@@ -91,6 +96,9 @@ pub fn append_facts(
     }
     if !diagnostic_found {
         return error("missing std kizu diagnostic source");
+    }
+    if !selfhost_ast_found {
+        return error("missing selfhost ast source");
     }
     return;
 }
@@ -242,7 +250,205 @@ fn append_ast_function_facts(
         "std::kizu::ast::ast_get",
         "checked-ast-readonly"
     );
+    // ProgramNode is the first AstData variant payload struct modelled in stage2, backing
+    // the 'match node.data { Program(program) => program.declarations.len, _ => 0 }'
+    // accessor (selfhost::ast::declaration_count, tracker 961). Its struct fields
+    // (declarations = field 0) and type-llvm mapping let the active arm read the ProgramNode
+    // payload out of the inline AstData storage and follow declarations.len; the
+    // union-variant fact records the Program discriminant tag and payload type so the tag
+    // dispatch is driven by the real union declaration order, not a hardcoded index. The
+    // other 43 variant payload structs stay unmodelled.
+    try append_selected_struct_field_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "ProgramNode",
+        "std::kizu::ast::ProgramNode"
+    );
+    try append_type_llvm_fact(
+        out,
+        "std::kizu::ast::ProgramNode",
+        "%kizu.kizu.ast.program_node"
+    );
+    try append_selected_union_variant_fact(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "AstData",
+        "Program",
+        "std::kizu::ast::AstData",
+        "std::kizu::ast::ProgramNode"
+    );
     return;
+}
+
+// append_selfhost_ast_function_facts emits the facts backing the first match-over-AstData
+// read-only AST accessor compiled into stage2: selfhost::ast::declaration_count (tracker
+// 961). Its body is 'let node = tree.get(root); return match node.data {
+// Program(program) => program.declarations.len, _ => 0 };', which lowers to an Ast.get
+// call binding an AstNode, a union tag dispatch on AstData, and the active arm's payload
+// field access. The AstData/ProgramNode/ChildRange struct, type-llvm, and union-variant
+// facts it consumes are emitted alongside std::kizu::ast above.
+fn append_selfhost_ast_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "declaration_count",
+        "selfhost::ast::declaration_count",
+        "checked-ast-match"
+    );
+    return;
+}
+
+// append_selected_union_variant_fact emits a 'union-variant <union> <variant> <tag>
+// <payload>' fact for one variant of a 'union <union_local_name>' declaration, reading the
+// discriminant tag from the real declaration order so the tag dispatch never hardcodes an
+// index (tracker 961).
+fn append_selected_union_variant_fact(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    union_local_name: []u8,
+    variant_name: []u8,
+    qualified_union: []u8,
+    payload_qualified: []u8
+) -> !void {
+    let union_node_id = try union_node(text, ast, root, union_local_name);
+    let node = ast.get(union_node_id);
+    match node.data {
+        UnionDecl(union_decl) => try append_union_variant_fact_for(
+            out,
+            text,
+            ast,
+            union_decl.variants,
+            variant_name,
+            qualified_union,
+            payload_qualified
+        );,
+        _ => return error("missing selected executable union");,
+    }
+    return;
+}
+
+fn append_union_variant_fact_for(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    variants: std::kizu::ast::ChildRange,
+    target_name: []u8,
+    qualified_union: []u8,
+    payload_qualified: []u8
+) -> !void {
+    var index = 0;
+    while index < variants.len {
+        let child = try ast.child_at(variants, index);
+        let name = try union_variant_name_text(text, ast, child);
+        if std::mem::equal_bytes(name, target_name) {
+            try emit_union_variant_fact(
+                out,
+                qualified_union,
+                target_name,
+                index,
+                payload_qualified
+            );
+            return;
+        }
+        index = index + 1;
+    }
+    return error("missing selected union variant");
+}
+
+fn union_variant_name_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> ![]u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        UnionVariant(variant) => return ast_node_text(text, ast, variant.name);,
+        _ => return error("expected union variant");,
+    }
+}
+
+fn emit_union_variant_fact(
+    out: &var std::string::String,
+    qualified_union: []u8,
+    variant_name: []u8,
+    index: i64,
+    payload_qualified: []u8
+) -> !void {
+    try out.append_bytes("union-variant ");
+    try out.append_bytes(qualified_union);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(variant_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(payload_qualified);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn union_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    union_name: []u8
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return union_node_in_program(
+            text,
+            ast,
+            program.declarations,
+            union_name
+        );,
+        _ => return error("missing selected executable union");,
+    }
+}
+
+fn union_node_in_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    union_name: []u8
+) -> !std::kizu::ast::NodeId {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if union_node_matches(text, ast, child, union_name) {
+            return child;
+        }
+        index = index + 1;
+    }
+    return error("missing selected executable union");
+}
+
+fn union_node_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        UnionDecl(union_decl) => std::mem::equal_bytes(
+            ast_node_text(text, ast, union_decl.name),
+            name
+        ),
+        _ => false,
+    };
 }
 
 fn append_loader_function_facts(

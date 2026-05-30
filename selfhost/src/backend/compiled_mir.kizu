@@ -393,6 +393,32 @@ pub struct MirArenaGetInst {
     pub index_field_index: i64,
 }
 
+// MirMatchUnionInst backs the first 'match <ast node>.data { Variant(bind) =>
+// bind.<field>.<field>, _ => <int> }' accessor compiled into stage2 (tracker 961).
+// It is a read-only AST accessor whose body first binds an AstNode by value from an
+// Ast.get method call (self_name.get(index_name)), then matches on the AstNode/AstData
+// tagged-union value: the renderer extracts the AstData union (AstNode field
+// data_field_index), reads its i64 tag (field 0), and dispatches on variant_tag. The
+// active arm extracts the variant payload out of the inline union storage (the canonical
+// alloca+store+gep field 1+load ABI) and returns a two-level field access off it
+// (payload field0_index : field0_type, then field1_index : the i64 return type). The
+// default arm returns default_value. The Ast.get callee symbol and the AstNode/AstData
+// llvm types are the fixed AstData match ABI, so the renderer hardcodes them; everything
+// variant-specific flows through this instruction. It owns nothing, so it is copy-only.
+pub struct MirMatchUnionInst {
+    pub receiver_type: []u8,
+    pub receiver_name: []u8,
+    pub index_type: []u8,
+    pub index_name: []u8,
+    pub data_field_index: i64,
+    pub variant_tag: i64,
+    pub payload_type: []u8,
+    pub field0_index: i64,
+    pub field0_type: []u8,
+    pub field1_index: i64,
+    pub default_value: i64,
+}
+
 pub union MirInstruction {
     ConstString,
     ConstInt,
@@ -402,6 +428,7 @@ pub union MirInstruction {
     Call(MirCallInst),
     ArrayGet(MirArrayGetInst),
     ArenaGet(MirArenaGetInst),
+    MatchUnion(MirMatchUnionInst),
 }
 
 pub enum MirTerminatorKind {
@@ -1472,6 +1499,34 @@ pub fn arena_get_instruction(
         index_param_type: index_param_type,
         index_param_name: index_param_name,
         index_field_index: index_field_index
+    });
+}
+
+pub fn match_union_instruction(
+    receiver_type: []u8,
+    receiver_name: []u8,
+    index_type: []u8,
+    index_name: []u8,
+    data_field_index: i64,
+    variant_tag: i64,
+    payload_type: []u8,
+    field0_index: i64,
+    field0_type: []u8,
+    field1_index: i64,
+    default_value: i64
+) -> MirInstruction {
+    return MirInstruction::MatchUnion(MirMatchUnionInst {
+        receiver_type: receiver_type,
+        receiver_name: receiver_name,
+        index_type: index_type,
+        index_name: index_name,
+        data_field_index: data_field_index,
+        variant_tag: variant_tag,
+        payload_type: payload_type,
+        field0_index: field0_index,
+        field0_type: field0_type,
+        field1_index: field1_index,
+        default_value: default_value
     });
 }
 

@@ -25,6 +25,7 @@ pub fn append_function(
         Call(payload) => try append_call_block(out, function, payload);,
         ArrayGet(payload) => try append_array_get_block(out, function, payload);,
         ArenaGet(payload) => try append_arena_get_block(out, function, payload);,
+        MatchUnion(payload) => try append_match_union_block(out, function, payload);,
     }
     return;
 }
@@ -213,6 +214,86 @@ fn append_arena_get_block(
     try append_ll_line(out, "  %fail_msg = extractvalue %kizu.error.slice.u8 %view, 2");
     try append_ll_line(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %fail_msg)");
     try append_ll_line(out, "  unreachable");
+    try append_ll_line(out, "}");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_match_union_block renders the first 'let node = self.get(index); return match
+// node.data { Variant(bind) => bind.<field>.<field>, _ => <int> };' read-only AST
+// accessor (-> i64, tracker 961). It binds an AstNode by value from the Ast.get method
+// call, extracts the AstData tagged-union value (AstNode field data_field_index) and its
+// i64 tag (field 0), and dispatches on variant_tag: the active arm extracts the variant
+// payload out of the inline union storage (the canonical alloca+store+gep field 1+load
+// ABI) and returns a two-level field access off it; the default arm returns the literal
+// default value, so neither arm is a stubbed-out 'unreachable'. The Ast.get callee symbol
+// and the AstNode/AstData llvm types are the fixed AstData match ABI, so they are emitted
+// literally here.
+fn append_match_union_block(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    inst: &compiled_mir::MirMatchUnionInst
+) -> !void {
+    let return_type = function.return_type.llvm_name;
+    try out.append_bytes("define ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(function.name);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, function.params_spec);
+    try append_ll_line(out, ") {");
+    try append_ll_line(out, "entry:");
+    // Bind the AstNode by value from the Ast.get method call (self.get(index)).
+    try out.append_bytes("  %match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(inst.receiver_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(inst.receiver_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(inst.index_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(inst.index_name);
+    try append_ll_line(out, ")");
+    // Extract the AstData union value off the AstNode and read its i64 discriminant.
+    try out.append_bytes("  %match_data = extractvalue %kizu.kizu.ast.ast_node %match_node, ");
+    try std::fmt::append_i64(out, inst.data_field_index);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  %match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0");
+    try out.append_bytes("  %match_is_variant = icmp eq i64 %match_tag, ");
+    try std::fmt::append_i64(out, inst.variant_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out,
+        "  br i1 %match_is_variant, label %match_arm_variant, label %match_arm_default");
+    // Active arm: extract the variant payload out of the inline union storage.
+    try append_ll_line(out, "match_arm_variant:");
+    try append_ll_line(out, "  %match_payload_slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_ll_line(out,
+        "  store %kizu.kizu.ast.ast_data %match_data, ptr %match_payload_slot, align 8");
+    try append_ll_line(out,
+        "  %match_payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %match_payload_slot, i32 0, i32 1");
+    try out.append_bytes("  %match_payload = load ");
+    try out.append_bytes(inst.payload_type);
+    try append_ll_line(out, ", ptr %match_payload_ptr, align 8");
+    // Two-level field access off the bound payload (bind.<field0>.<field1>).
+    try out.append_bytes("  %match_field0 = extractvalue ");
+    try out.append_bytes(inst.payload_type);
+    try out.append_bytes(" %match_payload, ");
+    try std::fmt::append_i64(out, inst.field0_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %match_value = extractvalue ");
+    try out.append_bytes(inst.field0_type);
+    try out.append_bytes(" %match_field0, ");
+    try std::fmt::append_i64(out, inst.field1_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try append_ll_line(out, " %match_value");
+    // Default arm: return the literal default value (a real value, not 'unreachable').
+    try append_ll_line(out, "match_arm_default:");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, inst.default_value);
+    try out.append_byte(cast<u8>(10));
     try append_ll_line(out, "}");
     try out.append_byte(cast<u8>(10));
     return;
