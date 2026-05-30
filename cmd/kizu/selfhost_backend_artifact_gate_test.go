@@ -1158,6 +1158,12 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%nt_end = phi i64 [ %start, %entry ], [ %nt_next, %nt_body ]",
 		"%nt_isd = call i1 @kizu_kizu__lexer_is_digit(i8 %nt_byte)",
 		"i64 %start, i64 %nt_end, %kizu.kizu.lexer.position %current)",
+		// string_token scans to the closing quote: an i64 end phi (seeded start + 1) advancing
+		// while source[end] != 34, then token(String, ...) over the terminated/unterminated run.
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_string_token(",
+		"%st_end = phi i64 [ %st_init, %entry ], [ %st_next, %st_body ]",
+		"%st_notq = icmp ne i8 %st_byte, 34",
+		"%st_endp1 = add i64 %st_end, 1",
 	}
 }
 
