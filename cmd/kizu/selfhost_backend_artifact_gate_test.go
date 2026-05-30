@@ -1052,6 +1052,9 @@ func requiredLLVMLexerClassifierFragments() []string {
 		"%kizu.kizu.lexer.position = type { i64, i64 }",
 		"define %kizu.kizu.lexer.position @kizu_kizu__lexer_position(",
 		"insertvalue %kizu.kizu.lexer.position %v0_0, i64 %column, 1",
+		// Token is the tokenizer's output record; its type definition is the base the
+		// first_token / next_token / token_at cluster will consume (tracker 961).
+		"%kizu.kizu.lexer.token = type { i64, i64, i64, i64, i64, i64, i64 }",
 	}
 }
 
