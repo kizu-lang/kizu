@@ -370,6 +370,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMStringLiteralSpanFragments()...)
 	fragments = append(fragments, requiredLLVMPrintPayloadFragments()...)
 	fragments = append(fragments, requiredLLVMLowerPrintCallFragments()...)
+	fragments = append(fragments, requiredLLVMLowerPrintStatementFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -881,6 +882,28 @@ func requiredLLVMLowerPrintCallFragments() []string {
 			"%kizu.selfhost.codegen.run_ast %lpc_run, 1",
 		"%lpc_us = call %kizu.selfhost.codegen.run_ast " +
 			"@kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lpc_empty)",
+	}
+}
+
+// requiredLLVMLowerPrintStatementFragments returns the tracker-961 scope-4 prerequisite
+// lower_print_statement AST traversal lowering compiled into stage2: it binds the AstNode via
+// Ast.get, and on the Call variant (tag 10) loads the CallNode payload, extracts callee/args, and
+// forwards lower_print_call's !RunAst result, while every other variant returns the wrapped
+// unsupported_run_ast(). These fragments lock the lowered body shape.
+func requiredLLVMLowerPrintStatementFragments() []string {
+	return []string{
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_statement(",
+		"%lps_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %expr)",
+		"%lps_data = extractvalue %kizu.kizu.ast.ast_node %lps_node, 1",
+		"%lps_is_call = icmp eq i64 %lps_tag, 10",
+		"%lps_call_node = load %kizu.kizu.ast.call_node, ptr %lps_payload_ptr, align 8",
+		"%lps_callee = extractvalue %kizu.kizu.ast.call_node %lps_call_node, 0",
+		"%lps_args = extractvalue %kizu.kizu.ast.call_node %lps_call_node, 1",
+		"%lps_result = call %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_call(",
+		"  ret %kizu.error.run_ast %lps_result",
+		"%lps_us = call %kizu.selfhost.codegen.run_ast " +
+			"@kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lps_empty)",
 	}
 }
 

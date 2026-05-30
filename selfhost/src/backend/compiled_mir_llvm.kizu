@@ -405,6 +405,7 @@ fn append_multi_stmt(
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
         LowerPrintCall(payload) => try append_multi_lower_print_call(out, payload);,
+        LowerPrintStatement(payload) => try append_multi_lower_print_statement(out, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
@@ -995,6 +996,84 @@ fn append_multi_lower_print_call(
     return;
 }
 
+// append_lower_print_statement_globals: lower_print_statement forwards only value arguments and
+// emits no string-constant globals (tracker 961, scope 4 prerequisite).
+fn append_lower_print_statement_globals(stmt: &compiled_mir::MirLowerPrintStatementStmt) -> !void {
+    return;
+}
+
+// append_multi_lower_print_statement renders lower_print_statement(text, ast, function_name,
+// statement_count, locals, expr): it binds the AstNode off Ast.get, reads the AstData tag, and on
+// the Call variant loads the CallNode payload, extracts its callee (field 0) and args (field 1),
+// and forwards lower_print_call's !RunAst result directly (the source 'return try
+// lower_print_call(...)' is identity on the same error-union type); every other variant returns
+// the wrapped unsupported_run_ast() (tracker 961, scope 4 prerequisite).
+fn append_multi_lower_print_statement(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirLowerPrintStatementStmt
+) -> !void {
+    try out.append_bytes("  %lps_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.expr_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.expr_name);
+    try append_ll_line(out, ")");
+    try append_ll_line(out, "  %lps_data = extractvalue %kizu.kizu.ast.ast_node %lps_node, 1");
+    try append_ll_line(out, "  %lps_tag = extractvalue %kizu.kizu.ast.ast_data %lps_data, 0");
+    try out.append_bytes("  %lps_is_call = icmp eq i64 %lps_tag, ");
+    try std::fmt::append_i64(out, stmt.call_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  br i1 %lps_is_call, label %lps_call, label %lps_default");
+    // Call variant: load the CallNode payload and forward lower_print_call's !RunAst result.
+    try append_ll_line(out, "lps_call:");
+    try append_ll_line(out, "  %lps_slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_ll_line(out,
+        "  store %kizu.kizu.ast.ast_data %lps_data, ptr %lps_slot, align 8");
+    try append_ll_line(out,
+        "  %lps_payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %lps_slot, i32 0, i32 1");
+    try append_ll_line(out,
+        "  %lps_call_node = load %kizu.kizu.ast.call_node, ptr %lps_payload_ptr, align 8");
+    try append_ll_line(out,
+        "  %lps_callee = extractvalue %kizu.kizu.ast.call_node %lps_call_node, 0");
+    try append_ll_line(out,
+        "  %lps_args = extractvalue %kizu.kizu.ast.call_node %lps_call_node, 1");
+    try out.append_bytes("  %lps_result = call %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_call(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", %kizu.slice.u8 %");
+    try out.append_bytes(stmt.function_name_name);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.statement_count_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.locals_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.locals_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.node_id %lps_callee, %kizu.kizu.ast.child_range %lps_args)");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lps_result");
+    // Every other variant: return the wrapped unsupported_run_ast(text[0..0]).
+    try append_ll_line(out, "lps_default:");
+    try out.append_bytes("  %lps_us_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  %lps_us0 = insertvalue %kizu.slice.u8 poison, ptr %lps_us_ptr, 0");
+    try append_ll_line(out, "  %lps_empty = insertvalue %kizu.slice.u8 %lps_us0, i64 0, 1");
+    try append_ll_line(out,
+        "  %lps_us = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lps_empty)");
+    try append_ll_line(out, "  %lps_uw0 = insertvalue %kizu.error.run_ast poison, i1 true, 0");
+    try append_ll_line(out,
+        "  %lps_uw1 = insertvalue %kizu.error.run_ast %lps_uw0, %kizu.selfhost.codegen.run_ast %lps_us, 1");
+    try append_ll_line(out,
+        "  %lps_uw2 = insertvalue %kizu.error.run_ast %lps_uw1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lps_uw2");
+    return;
+}
+
 // append_count_range_globals: count_range forwards only value arguments, so no string globals.
 fn append_count_range_globals(stmt: &compiled_mir::MirCountRangeStmt) -> !void {
     return;
@@ -1441,6 +1520,7 @@ fn append_stmt_globals(
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,
         LowerPrintCall(payload) => try append_lower_print_call_string_globals(out, payload);,
+        LowerPrintStatement(payload) => try append_lower_print_statement_globals(payload);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
