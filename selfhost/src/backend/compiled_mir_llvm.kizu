@@ -24,6 +24,7 @@ pub fn append_function(
         MultiStatement => try append_multi_statement_block(out, function);,
         Call(payload) => try append_call_block(out, function, payload);,
         ArrayGet(payload) => try append_array_get_block(out, function, payload);,
+        ArenaGet(payload) => try append_arena_get_block(out, function, payload);,
     }
     return;
 }
@@ -149,6 +150,69 @@ fn append_array_get_block(
         inst.index_name,
         0
     );
+    try append_ll_line(out, "}");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_arena_get_block renders a read-only 'return self.<field>.get(<param>.<field>);'
+// accessor (Arena<T>.get -> T, tracker 961). It reads the Arena<T> %kizu.owned handle
+// off the struct value receiver, computes the index (a field access on a value
+// parameter, e.g. id.raw), calls the checked @kizu_rt_arena_get runtime helper, and
+// branches on the ok flag: on success it loads the element value out of the borrowed
+// view and returns it; out of bounds traps via @kizu_rt_trap (Arena.get panics rather
+// than returning an error union, so the trap is the genuine failure semantics, not a
+// stubbed-out branch).
+fn append_arena_get_block(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    inst: &compiled_mir::MirArenaGetInst
+) -> !void {
+    let element_type = function.return_type.llvm_name;
+    try out.append_bytes("define ");
+    try out.append_bytes(element_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(function.name);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, function.params_spec);
+    try append_ll_line(out, ") {");
+    try append_ll_line(out, "entry:");
+    // Compute the index as a field access off the value parameter (id.raw).
+    try out.append_bytes("  %index = extractvalue ");
+    try out.append_bytes(inst.index_param_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(inst.index_param_name);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, inst.index_field_index);
+    try out.append_byte(cast<u8>(10));
+    // Read the Arena<T> handle off the struct value receiver.
+    try out.append_bytes("  %arena = extractvalue ");
+    try out.append_bytes(inst.receiver_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(inst.receiver_name);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, inst.arena_field_index);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out,
+        "  %view = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index)");
+    try append_ll_line(out, "  %view_ok = extractvalue %kizu.error.slice.u8 %view, 0");
+    try append_ll_line(out,
+        "  br i1 %view_ok, label %arena_get_ok, label %arena_get_fail");
+    // Success: load the element value out of the borrowed view and return it.
+    try append_ll_line(out, "arena_get_ok:");
+    try append_ll_line(out, "  %view_slice = extractvalue %kizu.error.slice.u8 %view, 1");
+    try append_ll_line(out, "  %elem_ptr = extractvalue %kizu.slice.u8 %view_slice, 0");
+    try out.append_bytes("  %elem = load ");
+    try out.append_bytes(element_type);
+    try append_ll_line(out, ", ptr %elem_ptr");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(element_type);
+    try append_ll_line(out, " %elem");
+    // Failure: Arena.get panics on an out-of-bounds index; trap with the message.
+    try append_ll_line(out, "arena_get_fail:");
+    try append_ll_line(out, "  %fail_msg = extractvalue %kizu.error.slice.u8 %view, 2");
+    try append_ll_line(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %fail_msg)");
+    try append_ll_line(out, "  unreachable");
     try append_ll_line(out, "}");
     try out.append_byte(cast<u8>(10));
     return;
