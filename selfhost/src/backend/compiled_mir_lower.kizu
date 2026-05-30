@@ -1394,6 +1394,38 @@ pub fn lower_run_ast_declarations_function(
     );
 }
 
+// lower_run_ast_function_root lowers selfhost::ir::codegen::lower_run_ast into a single LowerRunAst
+// statement: the run-codegen AST traversal root that binds the root AstNode via Ast.get and
+// forwards lower_run_ast_declarations' !RunAst result on the Program variant (tracker 961, scope 4
+// prerequisite). The Program discriminant tag comes from the union-variant facts.
+pub fn lower_run_ast_function_root(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let text_name = try nth_param_field(params_spec, 0, true);
+    let ast_type = try nth_param_field(params_spec, 1, false);
+    let ast_name = try nth_param_field(params_spec, 1, true);
+    let root_type = try nth_param_field(params_spec, 2, false);
+    let root_name = try nth_param_field(params_spec, 2, true);
+    let program_variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, ir_bytes[0..0], "std::kizu::ast::AstData", "Program"
+    );
+    if !program_variant.found {
+        return error("compiled mir: lower_run_ast Program variant not found");
+    }
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::lower_run_ast_stmt(
+        text_name, ast_name, ast_type, root_name, root_type, program_variant.tag
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // return_value_is_literal_plus_try reports whether a single-return value is the shape
 // '<int literal> + try <call>' (count_one / count_with_range, tracker 961).
 pub fn return_value_is_literal_plus_try(
