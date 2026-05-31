@@ -3560,36 +3560,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     // position(line, column) builds the lexer's (line, column) Position cursor struct (tracker
     // 961, scope 4 prerequisite): the leaf of the tokenizer's position-tracking helpers. It lowers
     // through the single-statement struct-return path.
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "std::kizu::lexer::position",
-        "kizu_kizu__lexer_position",
-        "i64 line;i64 column"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "std::kizu::lexer::is_alpha",
-        "kizu_kizu__lexer_is_alpha",
-        "i8 byte"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "std::kizu::lexer::is_digit",
-        "kizu_kizu__lexer_is_digit",
-        "i8 byte"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "std::kizu::lexer::is_word",
-        "kizu_kizu__lexer_is_word",
-        "i8 byte"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "std::kizu::lexer::is_space",
-        "kizu_kizu__lexer_is_space",
-        "i8 byte"
-    );
+    try append_kizu_lexer_leaf_reachable_compiled_functions(out, ir_bytes);
     // advance_byte(byte, initial) advances the (line, column) cursor past one source
     // byte, calling position(...) in both the newline and same-line arms (tracker 961,
     // scope 4 prerequisite). It lowers through the multi-statement if + return-call path
@@ -4068,6 +4039,153 @@ fn source_compiled_params_spec(local_name: []u8) -> ![]u8 {
         return "%kizu.selfhost.source.source_file file;%kizu.slice.u8 name";
     }
     return error("source compiled closure: unsupported local helper");
+}
+
+fn append_kizu_lexer_leaf_reachable_compiled_functions(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("position");
+    try pending.append("is_word");
+    try pending.append("is_space");
+    var index = 0;
+    while index < pending.len() {
+        let local_name = try pending.get(index);
+        if !(try compiled_closure_name_seen(&emitted, local_name)) {
+            try append_kizu_lexer_leaf_compiled_function(out, ir_bytes, local_name);
+            try collect_kizu_lexer_leaf_compiled_callees(ir_bytes, local_name, &var pending);
+            try emitted.append(local_name);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_kizu_lexer_leaf_compiled_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    local_name: []u8
+) -> !void {
+    try compiled_llvm::append_compiled_function_auto(
+        out,
+        ir_bytes,
+        try kizu_lexer_leaf_compiled_qualified_name(local_name),
+        try kizu_lexer_leaf_compiled_llvm_symbol(local_name),
+        try kizu_lexer_leaf_compiled_params_spec(local_name)
+    );
+    return;
+}
+
+fn collect_kizu_lexer_leaf_compiled_callees(
+    ir_bytes: []u8,
+    local_name: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let function_name = try kizu_lexer_leaf_compiled_qualified_name(local_name);
+    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var sequence = 0;
+    while sequence < count {
+        let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+        if std::mem::equal_bytes(kind, "Call") {
+            let callee = try ir_contract::body_call_callee_or_empty(
+                ir_bytes,
+                function_name,
+                sequence
+            );
+            try collect_kizu_lexer_leaf_compiled_callee(callee, pending);
+        }
+        sequence = sequence + 1;
+    }
+    return;
+}
+
+fn collect_kizu_lexer_leaf_compiled_callee(
+    callee: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    if std::mem::starts_with(callee, "std::mem::") {
+        return;
+    }
+    if std::mem::starts_with(callee, "std::kizu::lexer::") {
+        let prefix = "std::kizu::lexer::";
+        let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
+        if !kizu_lexer_leaf_compiled_supported_local(local) {
+            return error("std lexer leaf compiled closure: unsupported local helper");
+        }
+        try pending.append(local);
+        return;
+    }
+    if std::mem::starts_with(callee, "std::kizu::") {
+        return error("std lexer leaf compiled closure: unsupported std callee");
+    }
+    if kizu_lexer_leaf_compiled_supported_local(callee) {
+        try pending.append(callee);
+        return;
+    }
+    return error("std lexer leaf compiled closure: unsupported callee");
+}
+
+fn kizu_lexer_leaf_compiled_supported_local(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "position") or
+        std::mem::equal_bytes(name, "is_alpha") or
+        std::mem::equal_bytes(name, "is_digit") or
+        std::mem::equal_bytes(name, "is_word") or
+        std::mem::equal_bytes(name, "is_space");
+}
+
+fn kizu_lexer_leaf_compiled_qualified_name(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "position") {
+        return "std::kizu::lexer::position";
+    }
+    if std::mem::equal_bytes(local_name, "is_alpha") {
+        return "std::kizu::lexer::is_alpha";
+    }
+    if std::mem::equal_bytes(local_name, "is_digit") {
+        return "std::kizu::lexer::is_digit";
+    }
+    if std::mem::equal_bytes(local_name, "is_word") {
+        return "std::kizu::lexer::is_word";
+    }
+    if std::mem::equal_bytes(local_name, "is_space") {
+        return "std::kizu::lexer::is_space";
+    }
+    return error("std lexer leaf compiled closure: unsupported local helper");
+}
+
+fn kizu_lexer_leaf_compiled_llvm_symbol(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "position") {
+        return "kizu_kizu__lexer_position";
+    }
+    if std::mem::equal_bytes(local_name, "is_alpha") {
+        return "kizu_kizu__lexer_is_alpha";
+    }
+    if std::mem::equal_bytes(local_name, "is_digit") {
+        return "kizu_kizu__lexer_is_digit";
+    }
+    if std::mem::equal_bytes(local_name, "is_word") {
+        return "kizu_kizu__lexer_is_word";
+    }
+    if std::mem::equal_bytes(local_name, "is_space") {
+        return "kizu_kizu__lexer_is_space";
+    }
+    return error("std lexer leaf compiled closure: unsupported local helper");
+}
+
+fn kizu_lexer_leaf_compiled_params_spec(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "position") {
+        return "i64 line;i64 column";
+    }
+    if std::mem::equal_bytes(local_name, "is_alpha") or
+        std::mem::equal_bytes(local_name, "is_digit") or
+        std::mem::equal_bytes(local_name, "is_word") or
+        std::mem::equal_bytes(local_name, "is_space") {
+        return "i8 byte";
+    }
+    return error("std lexer leaf compiled closure: unsupported local helper");
 }
 
 fn append_lexer_reachable_compiled_functions(

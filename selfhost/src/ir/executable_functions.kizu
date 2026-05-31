@@ -218,25 +218,11 @@ fn append_kizu_lexer_function_facts(
         out, "std::kizu::lexer::position", "kizu_kizu__lexer_position",
         "std::kizu::lexer::Position", "i64"
     );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "position", "std::kizu::lexer::position", "checked-lexer-position"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "is_alpha", "std::kizu::lexer::is_alpha", "checked-lexer-classifier"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "is_digit", "std::kizu::lexer::is_digit", "checked-lexer-classifier"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "is_word", "std::kizu::lexer::is_word", "checked-lexer-classifier"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "is_space", "std::kizu::lexer::is_space", "checked-lexer-classifier"
+    try append_kizu_lexer_leaf_reachable_helper_bodies(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root
     );
     try append_selected_helper_body(
         out, file.text, parsed.ast, parsed.root,
@@ -314,6 +300,96 @@ fn append_kizu_lexer_function_facts(
         "tokenize", "std::kizu::lexer::tokenize", "checked-lexer-scan"
     );
     return;
+}
+
+fn append_kizu_lexer_leaf_reachable_helper_bodies(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("position");
+    try pending.append("is_word");
+    try pending.append("is_space");
+    var index = 0;
+    while index < pending.len() {
+        let local_name = try pending.get(index);
+        if !(try closure_name_seen(&emitted, local_name)) {
+            try append_kizu_lexer_leaf_closure_helper_body(
+                out,
+                text,
+                ast,
+                root,
+                local_name,
+                &var pending
+            );
+            try emitted.append(local_name);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_kizu_lexer_leaf_closure_helper_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    local_name: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let qualified_name = try kizu_lexer_leaf_closure_qualified_name(local_name);
+    let function_node_id = try function_node(text, ast, root, local_name);
+    try function_signature::append(out, text, ast, function_node_id, qualified_name);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_helper_body_ir(
+        out,
+        text,
+        ast,
+        qualified_name,
+        kizu_lexer_leaf_closure_role(local_name),
+        body
+    );
+    try collect_kizu_lexer_direct_callees(text, ast, root, body, pending);
+    return;
+}
+
+fn kizu_lexer_leaf_closure_supported_local(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "position") or
+        std::mem::equal_bytes(name, "is_alpha") or
+        std::mem::equal_bytes(name, "is_digit") or
+        std::mem::equal_bytes(name, "is_word") or
+        std::mem::equal_bytes(name, "is_space");
+}
+
+fn kizu_lexer_leaf_closure_qualified_name(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "position") {
+        return "std::kizu::lexer::position";
+    }
+    if std::mem::equal_bytes(local_name, "is_alpha") {
+        return "std::kizu::lexer::is_alpha";
+    }
+    if std::mem::equal_bytes(local_name, "is_digit") {
+        return "std::kizu::lexer::is_digit";
+    }
+    if std::mem::equal_bytes(local_name, "is_word") {
+        return "std::kizu::lexer::is_word";
+    }
+    if std::mem::equal_bytes(local_name, "is_space") {
+        return "std::kizu::lexer::is_space";
+    }
+    return error("std lexer leaf closure: unsupported local helper");
+}
+
+fn kizu_lexer_leaf_closure_role(local_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(local_name, "position") {
+        return "checked-lexer-position";
+    }
+    return "checked-lexer-classifier";
 }
 
 // append_kizu_parser_function_facts emits the signature + body facts for the std::kizu::parser
@@ -1317,6 +1393,17 @@ fn collect_lexer_direct_callees(
     return;
 }
 
+fn collect_kizu_lexer_direct_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    try collect_frontend_direct_callees(text, ast, root, node_id, pending, "std-lexer");
+    return;
+}
+
 fn collect_frontend_direct_callees(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -1524,6 +1611,9 @@ fn frontend_closure_supported_local(component: []u8, name: []u8) -> bool {
     if std::mem::equal_bytes(component, "lexer") {
         return lexer_closure_supported_local(name);
     }
+    if std::mem::equal_bytes(component, "std-lexer") {
+        return kizu_lexer_leaf_closure_supported_local(name);
+    }
     return false;
 }
 
@@ -1536,6 +1626,9 @@ fn frontend_closure_qualified_prefix(component: []u8) -> ![]u8 {
     }
     if std::mem::equal_bytes(component, "lexer") {
         return "selfhost::lexer::";
+    }
+    if std::mem::equal_bytes(component, "std-lexer") {
+        return "std::kizu::lexer::";
     }
     return error("frontend closure: unsupported component");
 }
