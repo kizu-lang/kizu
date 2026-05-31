@@ -440,6 +440,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLexerTokenFragments()...)
 	fragments = append(fragments, requiredLLVMTokenizerFragments()...)
 	fragments = append(fragments, requiredLLVMParserPredicateFragments()...)
+	fragments = append(fragments, requiredLLVMSourcePredicateFragments()...)
 	fragments = append(fragments, requiredLLVMSourceLoaderFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
@@ -455,6 +456,22 @@ func requiredLLVMExecutableFragments() []string {
 		"%run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
 		"%run_artifact_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
 	}...)
+}
+
+// requiredLLVMSourcePredicateFragments locks SourceKind predicates compiled through
+// mini MIR enum tag comparisons. The SourceKind discriminants come from source.kizu
+// enum facts rather than hardcoded codegen branches.
+func requiredLLVMSourcePredicateFragments() []string {
+	return []string{
+		"define i1 @kizu_selfhost__source_is_source_code",
+		"%t2 = icmp ne i64 %kind, 0",
+		"ret i1 %t2",
+		"define i1 @kizu_selfhost__source_is_frontend_source",
+		"%t2 = icmp eq i64 %kind, 1",
+		"%t5 = icmp eq i64 %kind, 3",
+		"%t6 = or i1 %t2, %t5",
+		"ret i1 %t6",
+	}
 }
 
 // requiredLLVMSourceLoaderFragments locks source-loader helpers compiled through
