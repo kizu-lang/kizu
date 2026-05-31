@@ -106,3 +106,62 @@ pub fn append_params_spec(
     }
     return;
 }
+
+// gate is the compiled_abi_params behavior gate (Agent B, tracker 1069). It
+// feeds fake 'function-signature-param' facts through append_params_spec and
+// asserts the derived compiled params_spec matches the layout the backend
+// consumes: '<abi-type> <name>' entries joined by ';'. Every supported Kizu
+// parameter type is exercised (u8, usize, i64, []u8, lexer Position/Token) plus
+// a leading-'&' borrow marker, which is stripped before mapping. Facts for an
+// unrelated function and a non-param line are interleaved to confirm the parser
+// only consumes the requested signature's parameters in order. The facts are an
+// owned multi-line string literal (newlines embedded directly) so the parsed
+// param-name slices can be copied into 'out' without a borrow escape; the
+// trailing 'function-body' line keeps the final param inside the parser's loop
+// bound.
+pub fn gate() -> !void {
+    let allocator = std::mem::page_allocator();
+
+    let facts = "function-signature demo
+function-signature-param other 0 ignored:runtime:u8
+function-signature-param demo 0 byte:runtime:u8
+function-signature-param demo 1 count:runtime:usize
+function-signature-param demo 2 offset:runtime:i64
+function-signature-param demo 3 source:runtime:[]u8
+function-signature-param demo 4 pos:runtime:std::kizu::lexer::Position
+function-signature-param demo 5 tok:runtime:std::kizu::lexer::Token
+function-signature-param demo 6 ref:runtime:&u8
+function-body demo";
+
+    var spec = std::string::String(allocator);
+    try append_params_spec(spec, facts, "demo");
+
+    let expected = "i8 byte;i64 count;i64 offset;%kizu.slice.u8 source;%kizu.kizu.lexer.position pos;%kizu.kizu.lexer.token tok;i8 ref";
+    let spec_bytes = spec.as_bytes();
+    std::testing::expect_equal<[]u8>(expected, spec_bytes);
+
+    // Spot-check the scalar mapper directly, including a borrowed slice.
+    std::testing::expect_equal<[]u8>("i8", try kizu_type_to_abi("u8"));
+    std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("usize"));
+    std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("i64"));
+    std::testing::expect_equal<[]u8>("%kizu.slice.u8", try kizu_type_to_abi("[]u8"));
+    std::testing::expect_equal<[]u8>("%kizu.slice.u8", try kizu_type_to_abi("&[]u8"));
+
+    spec.deinit();
+
+    print("abi-params-spec");
+    print(expected);
+    print("abi-params-count");
+    print(7);
+    return;
+}
+
+// gate_unsupported_type asserts that an unknown Kizu parameter type is an
+// explicit error rather than a silently-resolved guess (no fact-lookup
+// fallback). The 'try' propagates the mapper's error so RunEntry surfaces it as
+// a runtime error to the Go gate.
+pub fn gate_unsupported_type() -> !void {
+    let abi = try kizu_type_to_abi("f32");
+    print(abi);
+    return;
+}
