@@ -92,6 +92,17 @@ pub fn append_compiled_function_params(
             ir_bytes, function_name, statement, "value", 0, bs
         );
         let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+        // 'return match token.kind { <Variant> => true, _ => false };' is a parser single-variant
+        // token predicate (e.g. is_left_brace_token): a match over an enum field returning bool,
+        // which the generic expression path does not model (tracker 961, scope 4 prerequisite).
+        if std::mem::equal_bytes(value_kind, "Match") {
+            let predicate_mir = try compiled_mir_lower::lower_token_kind_predicate_function(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            defer predicate_mir.deinit();
+            try compiled_mir_llvm::append_function(out, &predicate_mir);
+            return;
+        }
         if std::mem::equal_bytes(value_kind, "String") {
             let mir = try compiled_mir_lower::lower_string_return_function(
                 ir_bytes, function_name, llvm_symbol, llvm_return_type, value, bs

@@ -1307,6 +1307,64 @@ pub fn lower_raw_token_function(
     );
 }
 
+// lower_token_kind_predicate_function lowers a parser single-variant token predicate of the form
+// 'return match token.kind { <Variant> => true, _ => false };' (e.g. is_left_brace_token) into a
+// single TokenKindPredicate statement (tracker 961, scope 4 prerequisite). It reads the scrutinee
+// field off the Token param and the matched TokenKind variant from the first arm's pattern; the
+// enum-over-bool match the generic path does not model, so it is dispatched from the single-return
+// shape. The field index comes from the Token facts, the variant tag from the TokenKind facts.
+pub fn lower_token_kind_predicate_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let match_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_stmt, "value", 0, bs
+    );
+    let scrutinee = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_node, "value", 0, bs
+    );
+    let scrutinee_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, scrutinee, bs);
+    if !std::mem::equal_bytes(scrutinee_kind, "FieldExpr") {
+        return error("compiled mir: token-kind predicate scrutinee must be a field access");
+    }
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, scrutinee, "field", bs
+    );
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, scrutinee, "receiver", 0, bs
+    );
+    let token_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, receiver, bs);
+    let kind_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "Token", field_name
+    );
+    let variant_arm = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_node, "arm", 0, bs
+    );
+    let variant_pattern = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, variant_arm, "pattern", 0, bs
+    );
+    let variant_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, variant_pattern, bs
+    );
+    let variant_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", variant_name
+    );
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::token_kind_predicate_stmt(
+        token_name, "%kizu.kizu.lexer.token", kind_field_index, variant_tag
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // lower_tokenize_function lowers std::kizu::lexer::tokenize into a single Tokenize statement: it
 // builds a dynamic Array<Token> and fills it from first_token / next_token until Eof, returning the
 // array as the !Array success (tracker 961, scope 4 prerequisite). Its dynamic array construction,
