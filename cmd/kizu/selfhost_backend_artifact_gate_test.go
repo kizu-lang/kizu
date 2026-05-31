@@ -138,6 +138,7 @@ func countSelfhostBackendArtifactGateFailures(t *testing.T) int {
 		"host-capability-bytes\n",
 		"host-capability-metadata-bytes\n",
 	}
+	required = append(required, backendArtifactContractInventory...)
 	for _, fragment := range required {
 		if !strings.Contains(out, fragment) {
 			t.Errorf("backend artifact gate output missing %q\ngot:\n%s", fragment, out)

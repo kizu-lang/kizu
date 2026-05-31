@@ -16,6 +16,17 @@ const (
 	stage0BackendArtifactReportPath = "target/selfhost/reports/backend-artifact-stage0-native.txt"
 )
 
+var backendArtifactContractInventory = []string{
+	"contract.report artifact-paths-and-byte-counts",
+	"contract.textual-llvm required-runtime-cli-executable-fragments",
+	"contract.textual-llvm forbids-fixed-cli-fixture-paths",
+	"contract.textual-llvm forbids-source-shape-dispatch",
+	"contract.metadata selfhost-checked-package-no-go-fallback",
+	"contract.runtime-storage textual-metadata-link-smoke",
+	"contract.host-capability textual-metadata-link-smoke",
+	"contract.hosted-cli link-and-smoke",
+}
+
 // runSelfhostBackendArtifactGate builds stage0 natively and stages backend artifacts.
 func runSelfhostBackendArtifactGate(t *testing.T) (string, error) {
 	t.Helper()
@@ -139,6 +150,14 @@ func appendStage0BackendArtifactHeader(out *strings.Builder) {
 	fmt.Fprintf(out, "interpreter.backend-artifact-gate none\n")
 	fmt.Fprintf(out, "go.production none\n")
 	fmt.Fprintf(out, "go.cmd-kizu-fallback none\n")
+	appendBackendArtifactContractInventory(out)
+}
+
+// appendBackendArtifactContractInventory lists the legacy gate responsibilities.
+func appendBackendArtifactContractInventory(out *strings.Builder) {
+	for _, line := range backendArtifactContractInventory {
+		fmt.Fprintf(out, "%s\n", line)
+	}
 }
 
 // finishStage0BackendArtifactReport writes the stage0 native artifact report.
