@@ -67,56 +67,84 @@ func (s *Server) handleMessage(body []byte) (bool, error) {
 
 // handleRequest responds to LSP requests that expect a JSON-RPC response.
 func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
-	switch msg.Method {
-	case "initialize":
-		return false, s.respond(msg.ID, initializeResult{
-			Capabilities: serverCapabilities{
-				TextDocumentSync:           textDocumentSyncKindFull,
-				DocumentFormattingProvider: true,
-				CompletionProvider: &completionOptions{
-					TriggerCharacters: []string{":", ".", "@"},
-				},
-				InlayHintProvider:      true,
-				DefinitionProvider:     true,
-				HoverProvider:          true,
-				DocumentSymbolProvider: true,
-				ReferencesProvider:     true,
-				SignatureHelpProvider: &signatureOptions{
-					TriggerCharacters: []string{"(", ","},
-				},
-				SemanticTokensProvider: &semanticTokensOptions{
-					Legend: semanticTokenLegend(),
-					Full:   true,
-				},
-				WorkspaceSymbolProvider: true,
-			},
-			ServerInfo: serverInfo{Name: "kizu-lsp"},
-		})
-	case "shutdown":
-		return false, s.respond(msg.ID, nil)
-	case "textDocument/formatting":
-		return false, s.handleFormattingRequest(msg)
-	case "textDocument/completion":
-		return false, s.handleCompletionRequest(msg)
-	case "textDocument/inlayHint":
-		return false, s.handleInlayHintRequest(msg)
-	case "textDocument/definition":
-		return false, s.handleDefinitionRequest(msg)
-	case "textDocument/hover":
-		return false, s.handleHoverRequest(msg)
-	case "textDocument/documentSymbol":
-		return false, s.handleDocumentSymbolRequest(msg)
-	case "textDocument/references":
-		return false, s.handleReferencesRequest(msg)
-	case "textDocument/signatureHelp":
-		return false, s.handleSignatureHelpRequest(msg)
-	case "textDocument/semanticTokens/full":
-		return false, s.handleSemanticTokensRequest(msg)
-	case "workspace/symbol":
-		return false, s.handleWorkspaceSymbolRequest(msg)
-	default:
-		return false, s.respondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
+	if handler, ok := s.requestHandlers()[msg.Method]; ok {
+		return false, handler(msg)
 	}
+	return false, s.respondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
+}
+
+// requestHandlers maps each supported request method to its handler. Splitting
+// the dispatch into a table keeps handleRequest flat instead of a large switch.
+func (s *Server) requestHandlers() map[string]func(incomingMessage) error {
+	return map[string]func(incomingMessage) error{
+		"initialize":                        s.handleInitializeRequest,
+		"shutdown":                          s.handleShutdownRequest,
+		"textDocument/formatting":           s.handleFormattingRequest,
+		"textDocument/completion":           s.handleCompletionRequest,
+		"textDocument/inlayHint":            s.handleInlayHintRequest,
+		"textDocument/definition":           s.handleDefinitionRequest,
+		"textDocument/typeDefinition":       s.handleTypeDefinitionRequest,
+		"textDocument/implementation":       s.handleImplementationRequest,
+		"textDocument/prepareCallHierarchy": s.handlePrepareCallHierarchyRequest,
+		"callHierarchy/incomingCalls":       s.handleIncomingCallsRequest,
+		"callHierarchy/outgoingCalls":       s.handleOutgoingCallsRequest,
+		"textDocument/hover":                s.handleHoverRequest,
+		"textDocument/documentSymbol":       s.handleDocumentSymbolRequest,
+		"textDocument/references":           s.handleReferencesRequest,
+		"textDocument/signatureHelp":        s.handleSignatureHelpRequest,
+		"textDocument/semanticTokens/full":  s.handleSemanticTokensRequest,
+		"textDocument/documentHighlight":    s.handleDocumentHighlightRequest,
+		"textDocument/prepareRename":        s.handlePrepareRenameRequest,
+		"textDocument/rename":               s.handleRenameRequest,
+		"textDocument/foldingRange":         s.handleFoldingRangeRequest,
+		"textDocument/codeLens":             s.handleCodeLensRequest,
+		"textDocument/codeAction":           s.handleCodeActionRequest,
+		"textDocument/selectionRange":       s.handleSelectionRangeRequest,
+		"workspace/symbol":                  s.handleWorkspaceSymbolRequest,
+	}
+}
+
+// handleShutdownRequest acknowledges a shutdown request with a null result.
+func (s *Server) handleShutdownRequest(msg incomingMessage) error {
+	return s.respond(msg.ID, nil)
+}
+
+// handleInitializeRequest advertises the server's capabilities to the client.
+func (s *Server) handleInitializeRequest(msg incomingMessage) error {
+	return s.respond(msg.ID, initializeResult{
+		Capabilities: serverCapabilities{
+			TextDocumentSync:           textDocumentSyncKindFull,
+			DocumentFormattingProvider: true,
+			CompletionProvider: &completionOptions{
+				TriggerCharacters: []string{":", ".", "@"},
+			},
+			InlayHintProvider:      true,
+			DefinitionProvider:     true,
+			HoverProvider:          true,
+			DocumentSymbolProvider: true,
+			ReferencesProvider:     true,
+			SignatureHelpProvider: &signatureOptions{
+				TriggerCharacters: []string{"(", ","},
+			},
+			SemanticTokensProvider: &semanticTokensOptions{
+				Legend: semanticTokenLegend(),
+				Full:   true,
+			},
+			WorkspaceSymbolProvider:   true,
+			DocumentHighlightProvider: true,
+			RenameProvider:            &renameOptions{PrepareProvider: true},
+			FoldingRangeProvider:      true,
+			SelectionRangeProvider:    true,
+			TypeDefinitionProvider:    true,
+			ImplementationProvider:    true,
+			CallHierarchyProvider:     true,
+			CodeLensProvider:          &codeLensOptions{ResolveProvider: false},
+			CodeActionProvider: &codeActionOptions{
+				CodeActionKinds: []string{codeActionOrganizeImports},
+			},
+		},
+		ServerInfo: serverInfo{Name: "kizu-lsp"},
+	})
 }
 
 // handleFormattingRequest returns whole-document edits for a tracked document.
@@ -157,6 +185,51 @@ func (s *Server) handleDefinitionRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.definition(params.TextDocument.URI, params.Position))
+}
+
+// handleTypeDefinitionRequest returns the declaration of the cursor symbol's type.
+func (s *Server) handleTypeDefinitionRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.typeDefinition(params.TextDocument.URI, params.Position))
+}
+
+// handlePrepareCallHierarchyRequest seeds the call hierarchy from the cursor.
+func (s *Server) handlePrepareCallHierarchyRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.prepareCallHierarchy(params.TextDocument.URI, params.Position))
+}
+
+// handleIncomingCallsRequest returns the callers of a call hierarchy item.
+func (s *Server) handleIncomingCallsRequest(msg incomingMessage) error {
+	var params callHierarchyItemParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.incomingCalls(params.Item))
+}
+
+// handleOutgoingCallsRequest returns the callees of a call hierarchy item.
+func (s *Server) handleOutgoingCallsRequest(msg incomingMessage) error {
+	var params callHierarchyItemParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.outgoingCalls(params.Item))
+}
+
+// handleImplementationRequest returns concrete implementations of the cursor contract.
+func (s *Server) handleImplementationRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.implementation(params.TextDocument.URI, params.Position))
 }
 
 // handleHoverRequest returns concise information for the symbol under the cursor.
@@ -210,6 +283,69 @@ func (s *Server) handleSemanticTokensRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.semanticTokens(params.TextDocument.URI))
+}
+
+// handleDocumentHighlightRequest returns highlight ranges for the cursor symbol.
+func (s *Server) handleDocumentHighlightRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.documentHighlights(params.TextDocument.URI, params.Position))
+}
+
+// handlePrepareRenameRequest returns the editable range for the cursor symbol.
+func (s *Server) handlePrepareRenameRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.prepareRename(params.TextDocument.URI, params.Position))
+}
+
+// handleRenameRequest returns a workspace edit renaming the cursor symbol.
+func (s *Server) handleRenameRequest(msg incomingMessage) error {
+	var params renameParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.rename(params.TextDocument.URI, params.Position, params.NewName))
+}
+
+// handleFoldingRangeRequest returns collapsible regions for a tracked document.
+func (s *Server) handleFoldingRangeRequest(msg incomingMessage) error {
+	var params foldingRangeParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.foldingRanges(params.TextDocument.URI))
+}
+
+// handleSelectionRangeRequest returns smart-selection hierarchies per position.
+func (s *Server) handleSelectionRangeRequest(msg incomingMessage) error {
+	var params selectionRangeParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.selectionRanges(params.TextDocument.URI, params.Positions))
+}
+
+// handleCodeActionRequest returns refactors available for a tracked document.
+func (s *Server) handleCodeActionRequest(msg incomingMessage) error {
+	var params codeActionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.codeActions(params.TextDocument.URI))
+}
+
+// handleCodeLensRequest returns reference-count lenses for a tracked document.
+func (s *Server) handleCodeLensRequest(msg incomingMessage) error {
+	var params codeLensParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.codeLenses(params.TextDocument.URI))
 }
 
 // handleWorkspaceSymbolRequest returns package symbols matching a query.

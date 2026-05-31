@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	diag "github.com/kizu-lang/kizu/internal/diagnostic"
@@ -22,7 +23,7 @@ const diagnosticSource = "kizu"
 func Analyze(source string) []Diagnostic {
 	program, parseErrors := parseSource(source)
 	if len(parseErrors) > 0 {
-		return []Diagnostic{diagnosticFromParseError(parseErrors[0])}
+		return parseErrorDiagnostics(parseErrors)
 	}
 	if diagnostics := appendStdDecls(program, []string{source}); len(diagnostics) > 0 {
 		return diagnostics
@@ -68,15 +69,47 @@ func (s *Server) analyzeDocument(uri string) []Diagnostic {
 	return checkProgramDiagnostics(program)
 }
 
-// checkProgramDiagnostics runs semantic checks for a parsed program.
+// checkProgramDiagnostics runs semantic checks for a parsed program, reporting
+// every independent type error at once. Ownership checks only run once the
+// program type-checks cleanly, since they assume a well-typed program.
 func checkProgramDiagnostics(program *ast.Program) []Diagnostic {
-	if err := types.New().Check(program); err != nil {
-		return []Diagnostic{diagnosticFromError(err)}
+	if typeErrors := types.New().CheckAll(program); len(typeErrors) > 0 {
+		return diagnosticsFromErrors(typeErrors)
 	}
-	if err := ownership.New().Check(program); err != nil {
-		return []Diagnostic{diagnosticFromError(err)}
+	if moveErrors := ownership.New().CheckAll(program); len(moveErrors) > 0 {
+		return diagnosticsFromErrors(moveErrors)
 	}
 	return []Diagnostic{}
+}
+
+// diagnosticsFromErrors converts checker errors into ordered LSP diagnostics.
+func diagnosticsFromErrors(errs []error) []Diagnostic {
+	diagnostics := make([]Diagnostic, 0, len(errs))
+	for _, err := range errs {
+		diagnostics = append(diagnostics, diagnosticFromError(err))
+	}
+	return sortedDiagnostics(diagnostics)
+}
+
+// parseErrorDiagnostics converts every parse error into an LSP diagnostic.
+func parseErrorDiagnostics(parseErrors []parser.Diagnostic) []Diagnostic {
+	diagnostics := make([]Diagnostic, 0, len(parseErrors))
+	for _, parseError := range parseErrors {
+		diagnostics = append(diagnostics, diagnosticFromParseError(parseError))
+	}
+	return sortedDiagnostics(diagnostics)
+}
+
+// sortedDiagnostics orders diagnostics by start position for stable display.
+func sortedDiagnostics(diagnostics []Diagnostic) []Diagnostic {
+	sort.SliceStable(diagnostics, func(i, j int) bool {
+		left, right := diagnostics[i].Range.Start, diagnostics[j].Range.Start
+		if left.Line != right.Line {
+			return left.Line < right.Line
+		}
+		return left.Character < right.Character
+	})
+	return diagnostics
 }
 
 // loadPackageGraph parses the package manifest and resolves its module graph.

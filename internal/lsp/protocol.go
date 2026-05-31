@@ -35,6 +35,8 @@ const (
 	symbolKindVariable   = 13
 	symbolKindEnumMember = 22
 	symbolKindStruct     = 23
+
+	documentHighlightKindText = 1
 )
 
 type incomingMessage struct {
@@ -79,6 +81,83 @@ type serverCapabilities struct {
 	SignatureHelpProvider      *signatureOptions      `json:"signatureHelpProvider,omitempty"`
 	SemanticTokensProvider     *semanticTokensOptions `json:"semanticTokensProvider,omitempty"`
 	WorkspaceSymbolProvider    bool                   `json:"workspaceSymbolProvider,omitempty"`
+	DocumentHighlightProvider  bool                   `json:"documentHighlightProvider,omitempty"`
+	RenameProvider             *renameOptions         `json:"renameProvider,omitempty"`
+	FoldingRangeProvider       bool                   `json:"foldingRangeProvider,omitempty"`
+	SelectionRangeProvider     bool                   `json:"selectionRangeProvider,omitempty"`
+	TypeDefinitionProvider     bool                   `json:"typeDefinitionProvider,omitempty"`
+	ImplementationProvider     bool                   `json:"implementationProvider,omitempty"`
+	CallHierarchyProvider      bool                   `json:"callHierarchyProvider,omitempty"`
+	CodeLensProvider           *codeLensOptions       `json:"codeLensProvider,omitempty"`
+	CodeActionProvider         *codeActionOptions     `json:"codeActionProvider,omitempty"`
+}
+
+type codeActionOptions struct {
+	CodeActionKinds []string `json:"codeActionKinds"`
+}
+
+type codeActionParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Range        Range                  `json:"range"`
+}
+
+// codeAction is a refactor or fix the editor can apply, carrying its workspace edit.
+type codeAction struct {
+	Title string         `json:"title"`
+	Kind  string         `json:"kind,omitempty"`
+	Edit  *workspaceEdit `json:"edit,omitempty"`
+}
+
+type codeLensOptions struct {
+	ResolveProvider bool `json:"resolveProvider"`
+}
+
+type codeLensParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
+// codeLens is an annotation rendered above a declaration; its command carries
+// the human-readable reference count.
+type codeLens struct {
+	Range   Range    `json:"range"`
+	Command *command `json:"command,omitempty"`
+}
+
+// command is an editor command bound to a code lens.
+type command struct {
+	Title     string `json:"title"`
+	Command   string `json:"command"`
+	Arguments []any  `json:"arguments,omitempty"`
+}
+
+// callHierarchyItem identifies one function node in the call hierarchy.
+type callHierarchyItem struct {
+	Name           string `json:"name"`
+	Kind           int    `json:"kind"`
+	URI            string `json:"uri"`
+	Range          Range  `json:"range"`
+	SelectionRange Range  `json:"selectionRange"`
+	Detail         string `json:"detail,omitempty"`
+}
+
+type callHierarchyItemParams struct {
+	Item callHierarchyItem `json:"item"`
+}
+
+// callHierarchyIncomingCall is one caller plus the ranges where it calls.
+type callHierarchyIncomingCall struct {
+	From       callHierarchyItem `json:"from"`
+	FromRanges []Range           `json:"fromRanges"`
+}
+
+// callHierarchyOutgoingCall is one callee plus the call sites within the caller.
+type callHierarchyOutgoingCall struct {
+	To         callHierarchyItem `json:"to"`
+	FromRanges []Range           `json:"fromRanges"`
+}
+
+type renameOptions struct {
+	PrepareProvider bool `json:"prepareProvider"`
 }
 
 type completionOptions struct {
@@ -208,9 +287,48 @@ type location struct {
 	Range Range  `json:"range"`
 }
 
+type documentHighlight struct {
+	Range Range `json:"range"`
+	Kind  int   `json:"kind,omitempty"`
+}
+
+type renameParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+	NewName      string                 `json:"newName"`
+}
+
+type workspaceEdit struct {
+	Changes map[string][]textEdit `json:"changes"`
+}
+
+type foldingRangeParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
+// foldingRange describes one collapsible line span. Character offsets are
+// omitted so editors fold whole lines, matching how gopls reports regions.
+type foldingRange struct {
+	StartLine int    `json:"startLine"`
+	EndLine   int    `json:"endLine"`
+	Kind      string `json:"kind,omitempty"`
+}
+
 type hover struct {
 	Contents markupContent `json:"contents"`
 	Range    *Range        `json:"range,omitempty"`
+}
+
+type selectionRangeParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Positions    []Position             `json:"positions"`
+}
+
+// selectionRange is one node of the smart-selection hierarchy: a range plus an
+// optional parent that fully encloses it, letting editors expand outward.
+type selectionRange struct {
+	Range  Range           `json:"range"`
+	Parent *selectionRange `json:"parent,omitempty"`
 }
 
 type markupContent struct {

@@ -131,6 +131,41 @@ func (c *Checker) Check(program *ast.Program) error {
 	return nil
 }
 
+// CheckAll validates ownership like Check but accumulates one error per
+// top-level declaration instead of stopping at the first, so editors can show
+// every independent move error at once. Setup phases still fail fast.
+func (c *Checker) CheckAll(program *ast.Program) []error {
+	if err := c.checkStructs(program); err != nil {
+		return []error{err}
+	}
+	c.collectEnums(program)
+	c.collectUnions(program)
+	if err := c.collectFunctions(program); err != nil {
+		return []error{err}
+	}
+	var errs []error
+	for _, decl := range program.Decls {
+		switch d := decl.(type) {
+		case *ast.FunctionDecl:
+			if len(d.TypeParams) > 0 {
+				continue
+			}
+			if err := c.checkFunction(c.functions[d.Name]); err != nil {
+				errs = append(errs, err)
+			}
+		case *ast.TestDecl:
+			if err := c.checkTestDecl(d); err != nil {
+				errs = append(errs, err)
+			}
+		case *ast.ImplDecl:
+			if err := c.checkImpl(d); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errs
+}
+
 // collectEnums records tag enum declarations for enum value reads.
 func (c *Checker) collectEnums(program *ast.Program) {
 	for _, decl := range program.Decls {

@@ -42,8 +42,8 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	}
 	params := messages[1]["params"].(map[string]any)
 	diagnostics := params["diagnostics"].([]any)
-	if len(diagnostics) != 1 {
-		t.Fatalf("got %d diagnostics, want 1", len(diagnostics))
+	if len(diagnostics) == 0 {
+		t.Fatalf("got %d diagnostics, want at least 1", len(diagnostics))
 	}
 }
 
@@ -53,10 +53,19 @@ func requireInitializeCapabilities(t *testing.T, capabilities map[string]any) {
 	requireCapability(t, capabilities, "documentFormattingProvider")
 	requireCapability(t, capabilities, "inlayHintProvider")
 	requireCapability(t, capabilities, "definitionProvider")
+	requireCapability(t, capabilities, "typeDefinitionProvider")
+	requireCapability(t, capabilities, "implementationProvider")
+	requireCapability(t, capabilities, "callHierarchyProvider")
+	requireCapabilityObject(t, capabilities, "codeLensProvider")
+	requireCapabilityObject(t, capabilities, "codeActionProvider")
 	requireCapability(t, capabilities, "hoverProvider")
 	requireCapability(t, capabilities, "documentSymbolProvider")
 	requireCapability(t, capabilities, "referencesProvider")
 	requireCapability(t, capabilities, "workspaceSymbolProvider")
+	requireCapability(t, capabilities, "documentHighlightProvider")
+	requireCapability(t, capabilities, "foldingRangeProvider")
+	requireCapability(t, capabilities, "selectionRangeProvider")
+	requireCapabilityObject(t, capabilities, "renameProvider")
 	requireCapabilityObject(t, capabilities, "completionProvider")
 	requireCompletionTrigger(t, capabilities, "@")
 	requireCapabilityObject(t, capabilities, "signatureHelpProvider")
@@ -403,6 +412,167 @@ func TestServerShutdownReturnsNullResult(t *testing.T) {
 	}
 	if messages[0]["result"] != nil {
 		t.Fatalf("shutdown result = %#v, want nil", messages[0]["result"])
+	}
+}
+
+// TestServerStructuralRequests exercises the folding, selection, type
+// definition, implementation, and rename methods over the full JSON-RPC loop.
+func TestServerStructuralRequests(t *testing.T) {
+	source := "import std::io;\n" +
+		"import std::mem;\n" +
+		"\n" +
+		"struct File {\n" +
+		"    name: []u8,\n" +
+		"}\n" +
+		"\n" +
+		"contract Writer {\n" +
+		"    fn write(self: &Self) -> !i64;\n" +
+		"}\n" +
+		"\n" +
+		"impl Writer for File {\n" +
+		"    fn write(self: &Self) -> !i64 {\n" +
+		"        return 2;\n" +
+		"    }\n" +
+		"}\n" +
+		"\n" +
+		"fn main() -> !void {\n" +
+		"    let file = File { name: \"out\" };\n" +
+		"    print(file.name);\n" +
+		"    return;\n" +
+		"}\n"
+	uri := "file:///main.kizu"
+	input := strings.Join([]string{
+		didOpenFrame(t, uri, source),
+		frame(`{"jsonrpc":"2.0","id":2,"method":"textDocument/foldingRange",` +
+			`"params":{"textDocument":{"uri":"` + uri + `"}}}`),
+		frame(`{"jsonrpc":"2.0","id":3,"method":"textDocument/selectionRange",` +
+			`"params":{"textDocument":{"uri":"` + uri + `"},` +
+			`"positions":[{"line":18,"character":8}]}}`),
+		frame(`{"jsonrpc":"2.0","id":4,"method":"textDocument/typeDefinition",` +
+			`"params":{"textDocument":{"uri":"` + uri + `"},` +
+			`"position":{"line":18,"character":8}}}`),
+		frame(`{"jsonrpc":"2.0","id":5,"method":"textDocument/implementation",` +
+			`"params":{"textDocument":{"uri":"` + uri + `"},` +
+			`"position":{"line":7,"character":9}}}`),
+		frame(`{"jsonrpc":"2.0","id":6,"method":"textDocument/rename",` +
+			`"params":{"textDocument":{"uri":"` + uri + `"},` +
+			`"position":{"line":18,"character":8},"newName":"handle"}}`),
+		frame(`{"jsonrpc":"2.0","method":"exit"}`),
+	}, "")
+	var output bytes.Buffer
+
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	messages := readFrames(t, output.String())
+	if len(messages) != 6 {
+		t.Fatalf("got %d messages, want diagnostics and 5 responses", len(messages))
+	}
+	assertStructuralResponses(t, messages, uri)
+}
+
+// assertStructuralResponses checks the folding, selection, type definition,
+// implementation, and rename responses produced by TestServerStructuralRequests.
+func assertStructuralResponses(t *testing.T, messages []map[string]any, uri string) {
+	t.Helper()
+	folds := messages[1]["result"].([]any)
+	if len(folds) < 2 {
+		t.Fatalf("foldingRange result = %#v, want at least 2 regions", folds)
+	}
+
+	selections := messages[2]["result"].([]any)
+	if len(selections) != 1 {
+		t.Fatalf("selectionRange result = %#v, want one hierarchy", selections)
+	}
+	if _, ok := selections[0].(map[string]any)["parent"]; !ok {
+		t.Fatalf("selectionRange[0] = %#v, want a parent node", selections[0])
+	}
+
+	typeDefs := messages[3]["result"].([]any)
+	if len(typeDefs) != 1 {
+		t.Fatalf("typeDefinition result = %#v, want one location", typeDefs)
+	}
+	if line := typeDefRangeLine(t, typeDefs[0]); line != 3 {
+		t.Fatalf("typeDefinition line = %d, want struct File on line 3", line)
+	}
+
+	impls := messages[4]["result"].([]any)
+	if len(impls) != 1 {
+		t.Fatalf("implementation result = %#v, want one location", impls)
+	}
+	if line := typeDefRangeLine(t, impls[0]); line != 11 {
+		t.Fatalf("implementation line = %d, want impl on line 11", line)
+	}
+
+	renameResult := messages[5]["result"].(map[string]any)
+	changes := renameResult["changes"].(map[string]any)
+	edits := changes[uri].([]any)
+	if len(edits) != 2 {
+		t.Fatalf("rename edits = %#v, want declaration and use", edits)
+	}
+}
+
+// typeDefRangeLine extracts the start line of a location's range.
+func typeDefRangeLine(t *testing.T, loc any) int {
+	t.Helper()
+	rng := loc.(map[string]any)["range"].(map[string]any)
+	start := rng["start"].(map[string]any)
+	return int(start["line"].(float64))
+}
+
+// TestServerCallHierarchyRequests exercises prepare, incoming, and outgoing
+// call hierarchy methods over the full JSON-RPC loop.
+func TestServerCallHierarchyRequests(t *testing.T) {
+	source := callHierarchyFixture()
+	uri := "file:///main.kizu"
+	helperItem := `{"name":"helper","kind":12,"uri":"` + uri + `",` +
+		`"range":{"start":{"line":4,"character":0},"end":{"line":6,"character":1}},` +
+		`"selectionRange":{"start":{"line":4,"character":3},"end":{"line":4,"character":9}}}`
+	input := strings.Join([]string{
+		didOpenFrame(t, uri, source),
+		frame(`{"jsonrpc":"2.0","id":2,"method":"textDocument/prepareCallHierarchy",` +
+			`"params":{"textDocument":{"uri":"` + uri + `"},` +
+			`"position":{"line":4,"character":3}}}`),
+		frame(`{"jsonrpc":"2.0","id":3,"method":"callHierarchy/incomingCalls",` +
+			`"params":{"item":` + helperItem + `}}`),
+		frame(`{"jsonrpc":"2.0","id":4,"method":"callHierarchy/outgoingCalls",` +
+			`"params":{"item":` + helperItem + `}}`),
+		frame(`{"jsonrpc":"2.0","method":"exit"}`),
+	}, "")
+	var output bytes.Buffer
+
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	messages := readFrames(t, output.String())
+	if len(messages) != 4 {
+		t.Fatalf("got %d messages, want diagnostics and 3 responses", len(messages))
+	}
+
+	prepared := messages[1]["result"].([]any)
+	if len(prepared) != 1 {
+		t.Fatalf("prepareCallHierarchy result = %#v, want one item", prepared)
+	}
+	if name := prepared[0].(map[string]any)["name"]; name != "helper" {
+		t.Fatalf("prepared item name = %v, want helper", name)
+	}
+
+	incoming := messages[2]["result"].([]any)
+	if len(incoming) != 1 {
+		t.Fatalf("incomingCalls result = %#v, want one caller", incoming)
+	}
+	from := incoming[0].(map[string]any)["from"].(map[string]any)
+	if from["name"] != "main" {
+		t.Fatalf("incoming caller = %v, want main", from["name"])
+	}
+
+	outgoing := messages[3]["result"].([]any)
+	if len(outgoing) != 1 {
+		t.Fatalf("outgoingCalls result = %#v, want one callee", outgoing)
+	}
+	to := outgoing[0].(map[string]any)["to"].(map[string]any)
+	if to["name"] != "leaf" {
+		t.Fatalf("outgoing callee = %v, want leaf", to["name"])
 	}
 }
 
