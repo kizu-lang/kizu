@@ -97,6 +97,7 @@ func (s *Server) requestHandlers() map[string]func(incomingMessage) error {
 		"textDocument/prepareRename":        s.handlePrepareRenameRequest,
 		"textDocument/rename":               s.handleRenameRequest,
 		"textDocument/foldingRange":         s.handleFoldingRangeRequest,
+		"textDocument/codeLens":             s.handleCodeLensRequest,
 		"textDocument/selectionRange":       s.handleSelectionRangeRequest,
 		"workspace/symbol":                  s.handleWorkspaceSymbolRequest,
 	}
@@ -136,6 +137,7 @@ func (s *Server) handleInitializeRequest(msg incomingMessage) error {
 			TypeDefinitionProvider:    true,
 			ImplementationProvider:    true,
 			CallHierarchyProvider:     true,
+			CodeLensProvider:          &codeLensOptions{ResolveProvider: false},
 		},
 		ServerInfo: serverInfo{Name: "kizu-lsp"},
 	})
@@ -322,6 +324,15 @@ func (s *Server) handleSelectionRangeRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.selectionRanges(params.TextDocument.URI, params.Positions))
+}
+
+// handleCodeLensRequest returns reference-count lenses for a tracked document.
+func (s *Server) handleCodeLensRequest(msg incomingMessage) error {
+	var params codeLensParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.codeLenses(params.TextDocument.URI))
 }
 
 // handleWorkspaceSymbolRequest returns package symbols matching a query.

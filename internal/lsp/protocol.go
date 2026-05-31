@@ -88,6 +88,29 @@ type serverCapabilities struct {
 	TypeDefinitionProvider     bool                   `json:"typeDefinitionProvider,omitempty"`
 	ImplementationProvider     bool                   `json:"implementationProvider,omitempty"`
 	CallHierarchyProvider      bool                   `json:"callHierarchyProvider,omitempty"`
+	CodeLensProvider           *codeLensOptions       `json:"codeLensProvider,omitempty"`
+}
+
+type codeLensOptions struct {
+	ResolveProvider bool `json:"resolveProvider"`
+}
+
+type codeLensParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
+// codeLens is an annotation rendered above a declaration; its command carries
+// the human-readable reference count.
+type codeLens struct {
+	Range   Range    `json:"range"`
+	Command *command `json:"command,omitempty"`
+}
+
+// command is an editor command bound to a code lens.
+type command struct {
+	Title     string `json:"title"`
+	Command   string `json:"command"`
+	Arguments []any  `json:"arguments,omitempty"`
 }
 
 // callHierarchyItem identifies one function node in the call hierarchy.
