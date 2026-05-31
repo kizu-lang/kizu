@@ -54,8 +54,9 @@ fn append_ll_line(out: &var std::string::String, text: []u8) -> !void {
 // borrowed view and wraps it as the error-union success value (field 1); the failure
 // path forwards the runtime message as the error-union failure value (field 2), never
 // 'unreachable'. The index operand is the i64 index parameter (%<index_param_name>)
-// when index_is_param, otherwise the lowered index temp (%t<index_temp_id>). The body
-// uses function-scoped fixed names, so a function carries at most one array get.
+// when index_is_param, otherwise the lowered index value. A lowered Var index can
+// reference the source SSA name directly; other indexes use %t<index_temp_id>. The
+// body uses function-scoped fixed names, so a function carries at most one array get.
 fn append_array_get_body(
     out: &var std::string::String,
     error_union: []u8,
@@ -65,6 +66,7 @@ fn append_array_get_body(
     element_type: []u8,
     index_is_param: bool,
     index_param_name: []u8,
+    index_value_name: []u8,
     index_temp_id: i64
 ) -> !void {
     // Read the Array<T> handle off the struct value receiver.
@@ -82,8 +84,7 @@ fn append_array_get_body(
         try out.append_bytes("%");
         try out.append_bytes(index_param_name);
     } else {
-        try out.append_bytes("%t");
-        try std::fmt::append_i64(out, index_temp_id);
+        try append_ssa_or_temp_ref(out, index_value_name, index_temp_id);
     }
     try append_ll_line(out, ")");
     try append_ll_line(out, "  %view_ok = extractvalue %kizu.error.slice.u8 %view, 0");
@@ -149,6 +150,7 @@ fn append_array_get_block(
         inst.element_type,
         true,
         inst.index_name,
+        "",
         0
     );
     try append_ll_line(out, "}");
@@ -3635,21 +3637,23 @@ fn append_multi_return_error(
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.expr_insts);
     try append_error_union_failure_value(
-        out, function.return_type.llvm_name, stmt.message_result_id
+        out, function.return_type.llvm_name, &stmt.expr_insts, stmt.message_result_id
     );
     return;
 }
 // append_multi_return_array_get renders a multi-statement
 // 'return self.<field>.get(<expr>);' (Array<T>.get -> !T, tracker 961). It first
-// lowers the index expression (e.g. range.start + index) into %t<index_result_id>,
-// then emits the shared checked array-get body keyed off that index temp. The error
-// branch is a real error-union failure return, never 'unreachable'.
+// lowers the index expression (e.g. range.start + index), then emits the shared
+// checked array-get body keyed off that index value. Var indexes reference the
+// original local SSA name directly. The error branch is a real error-union failure
+// return, never 'unreachable'.
 fn append_multi_return_array_get(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirReturnArrayGetStmt
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.expr_insts);
+    let index_value_name = try expr_inst_var_name_by_id(&stmt.expr_insts, stmt.index_result_id);
     try append_array_get_body(
         out,
         function.return_type.llvm_name,
@@ -3659,6 +3663,7 @@ fn append_multi_return_array_get(
         stmt.element_type,
         false,
         "",
+        index_value_name,
         stmt.index_result_id
     );
     return;
@@ -3666,12 +3671,14 @@ fn append_multi_return_array_get(
 // append_error_union_failure_value renders a return error("...") failure value
 // for the %kizu.error.<success> ABI: field 0 is the i1 false ok flag, field 1 the
 // success value (left as zeroinitializer), and the error message %kizu.slice.u8 at
-// the failure index 2. The message must already be materialized in %t<message_id>
-// as a %kizu.slice.u8 by the caller (tracker 961). The %errfail<id> temps are keyed
-// off the unique message temp id so multiple return errors never collide.
+// the failure index 2. The message must already be materialized by the caller
+// and can reference either a source SSA value or a %t<message_id> temp (tracker
+// 961). The %errfail<id> temps are keyed off the unique message temp id so
+// multiple return errors never collide.
 fn append_error_union_failure_value(
     out: &var std::string::String,
     return_type: []u8,
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
     message_result_id: i64
 ) -> !void {
     try out.append_bytes("  %errfail");
@@ -3686,8 +3693,8 @@ fn append_error_union_failure_value(
     try out.append_bytes(return_type);
     try out.append_bytes(" %errfail");
     try std::fmt::append_i64(out, message_result_id);
-    try out.append_bytes("_flag, %kizu.slice.u8 %t");
-    try std::fmt::append_i64(out, message_result_id);
+    try out.append_bytes("_flag, %kizu.slice.u8 ");
+    try append_expr_value_ref(out, insts, message_result_id);
     try out.append_bytes(", 2");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ret ");
@@ -3711,12 +3718,12 @@ fn append_multi_let_expr(
     try out.append_bytes(stmt.name);
     try out.append_bytes(" = select i1 true, ");
     try out.append_bytes(result_type);
-    try out.append_bytes(" %t");
-    try std::fmt::append_i64(out, stmt.expr_result_id);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, &stmt.expr_insts, stmt.expr_result_id);
     try out.append_bytes(", ");
     try out.append_bytes(result_type);
-    try out.append_bytes(" %t");
-    try std::fmt::append_i64(out, stmt.expr_result_id);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, &stmt.expr_insts, stmt.expr_result_id);
     try out.append_byte(cast<u8>(10));
     return;
 }
@@ -3826,8 +3833,8 @@ fn append_expr_return_value(
     if !needs_wrap {
         try out.append_bytes("  ret ");
         try out.append_bytes(return_type);
-        try out.append_bytes(" %t");
-        try std::fmt::append_i64(out, result_id);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, insts, result_id);
         try out.append_byte(cast<u8>(10));
         return;
     }
@@ -3839,8 +3846,8 @@ fn append_expr_return_value(
     try out.append_bytes(return_type);
     try out.append_bytes(" %retwrap_ok, ");
     try out.append_bytes(value_type);
-    try out.append_bytes(" %t");
-    try std::fmt::append_i64(out, result_id);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, result_id);
     try out.append_bytes(", 1");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ret ");
@@ -3848,6 +3855,49 @@ fn append_expr_return_value(
     try out.append_bytes(" %retwrap_val");
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+fn append_expr_value_ref(
+    out: &var std::string::String,
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> !void {
+    let var_name = try expr_inst_var_name_by_id(insts, result_id);
+    try append_ssa_or_temp_ref(out, var_name, result_id);
+    return;
+}
+
+fn append_ssa_or_temp_ref(
+    out: &var std::string::String,
+    value_name: []u8,
+    temp_id: i64
+) -> !void {
+    if std::mem::len(value_name) > 0 {
+        try out.append_bytes("%");
+        try out.append_bytes(value_name);
+        return;
+    }
+    try out.append_bytes("%t");
+    try std::fmt::append_i64(out, temp_id);
+    return;
+}
+
+fn expr_inst_var_name_by_id(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> ![]u8 {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            return match inst {
+                Var(payload) => payload.value,
+                _ => "",
+            };
+        }
+        index = index + 1;
+    }
+    return "";
 }
 
 fn expr_inst_type_by_id(
@@ -4021,8 +4071,8 @@ fn append_multi_if(
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.cond_insts);
     if stmt.cond_short_circuit == 0 {
-        try out.append_bytes("  br i1 %t");
-        try std::fmt::append_i64(out, stmt.cond_result_id);
+        try out.append_bytes("  br i1 ");
+        try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
         try out.append_bytes(", label %if");
         try std::fmt::append_i64(out, stmt.if_index);
         try out.append_bytes("_then, label %if");
@@ -4059,8 +4109,8 @@ fn append_multi_if(
                 try append_expr_insts(out, function.name, &stmt.then_expr_insts);
                 try out.append_bytes("  ret ");
                 try out.append_bytes(function.return_type.llvm_name);
-                try out.append_bytes(" %t");
-                try std::fmt::append_i64(out, stmt.then_expr_result_id);
+                try out.append_bytes(" ");
+                try append_expr_value_ref(out, &stmt.then_expr_insts, stmt.then_expr_result_id);
                 try out.append_byte(cast<u8>(10));
             } else {
                 if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnStruct {
@@ -4069,7 +4119,10 @@ fn append_multi_if(
                     if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnError {
                         try append_expr_insts(out, function.name, &stmt.then_expr_insts);
                         try append_error_union_failure_value(
-                            out, function.return_type.llvm_name, stmt.then_expr_result_id
+                            out,
+                            function.return_type.llvm_name,
+                            &stmt.then_expr_insts,
+                            stmt.then_expr_result_id
                         );
                     } else {
                         return error("compiled mir llvm: unsupported if then kind");
@@ -4138,8 +4191,8 @@ fn append_multi_while(
     try out.append_bytes("_latch ]");
     try out.append_byte(cast<u8>(10));
     try append_expr_insts(out, function.name, &stmt.cond_insts);
-    try out.append_bytes("  br i1 %t");
-    try std::fmt::append_i64(out, stmt.cond_result_id);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
     try out.append_bytes(", label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_body, label %loop");
@@ -4192,8 +4245,8 @@ fn append_short_circuit_branches(
     llvm_symbol: []u8,
     stmt: &compiled_mir::MirIfStmt
 ) -> !void {
-    try out.append_bytes("  br i1 %t");
-    try std::fmt::append_i64(out, stmt.cond_result_id);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
     if stmt.cond_short_circuit == 1 {
         try out.append_bytes(", label %if");
         try std::fmt::append_i64(out, stmt.if_index);
@@ -4213,8 +4266,8 @@ fn append_short_circuit_branches(
     try out.append_bytes("_rhs:");
     try out.append_byte(cast<u8>(10));
     try append_expr_insts(out, llvm_symbol, &stmt.cond_rhs_insts);
-    try out.append_bytes("  br i1 %t");
-    try std::fmt::append_i64(out, stmt.cond_rhs_result_id);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_rhs_insts, stmt.cond_rhs_result_id);
     try out.append_bytes(", label %if");
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_then, label %if");
@@ -4293,8 +4346,8 @@ fn append_expr_return(
     try append_expr_insts(out, function.name, &function.expr_insts);
     try out.append_bytes("  ret ");
     try out.append_bytes(function.return_type.llvm_name);
-    try out.append_bytes(" %t");
-    try std::fmt::append_i64(out, function.entry.terminator.value.id);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, &function.expr_insts, function.entry.terminator.value.id);
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("}");
     try out.append_byte(cast<u8>(10));
@@ -4326,10 +4379,10 @@ fn append_expr_inst(
         ConstBool(payload) => try append_const_bool_expr(out, payload);,
         ConstInt(payload) => try append_const_int_expr(out, payload.id, payload.llvm_type, payload.int_value);,
         ConstEnumTag(payload) => try append_const_int_expr(out, payload.id, payload.llvm_type, payload.int_value);,
-        PrefixNot(payload) => try append_prefix_not_expr(out, payload);,
+        PrefixNot(payload) => try append_prefix_not_expr(out, payload, insts);,
         Binary(payload) => try append_binary_expr_inst(out, payload, insts);,
-        FieldAccess(payload) => try append_field_access_expr(out, payload);,
-        IndexLoad(payload) => try append_index_load_expr(out, payload);,
+        FieldAccess(payload) => try append_field_access_expr(out, payload, insts);,
+        IndexLoad(payload) => try append_index_load_expr(out, payload, insts);,
         Call(payload) => try append_call_expr(out, llvm_symbol, payload);,
     }
     return;
@@ -4343,7 +4396,8 @@ fn append_expr_inst(
 // or argN_M temps.
 fn append_index_load_expr(
     out: &var std::string::String,
-    inst: &compiled_mir::MirIndexLoadExpr
+    inst: &compiled_mir::MirIndexLoadExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
     try out.append_bytes("  %t");
     try std::fmt::append_i64(out, inst.id);
@@ -4353,14 +4407,14 @@ fn append_index_load_expr(
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  %t");
     try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes("_neg = icmp slt i64 %t");
-    try std::fmt::append_i64(out, inst.index);
+    try out.append_bytes("_neg = icmp slt i64 ");
+    try append_expr_value_ref(out, insts, inst.index);
     try out.append_bytes(", 0");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  %t");
     try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes("_high = icmp sge i64 %t");
-    try std::fmt::append_i64(out, inst.index);
+    try out.append_bytes("_high = icmp sge i64 ");
+    try append_expr_value_ref(out, insts, inst.index);
     try out.append_bytes(", %t");
     try std::fmt::append_i64(out, inst.id);
     try out.append_bytes("_len");
@@ -4400,8 +4454,8 @@ fn append_index_load_expr(
     try std::fmt::append_i64(out, inst.id);
     try out.append_bytes("_gep = getelementptr i8, ptr %t");
     try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes("_ptr, i64 %t");
-    try std::fmt::append_i64(out, inst.index);
+    try out.append_bytes("_ptr, i64 ");
+    try append_expr_value_ref(out, insts, inst.index);
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  %t");
     try std::fmt::append_i64(out, inst.id);
@@ -4415,17 +4469,7 @@ fn append_var_expr(
     out: &var std::string::String,
     inst: &compiled_mir::MirVarExpr
 ) -> !void {
-    try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes(" = select i1 true, ");
-    try out.append_bytes(inst.llvm_type);
-    try out.append_bytes(" %");
-    try out.append_bytes(inst.value);
-    try out.append_bytes(", ");
-    try out.append_bytes(inst.llvm_type);
-    try out.append_bytes(" %");
-    try out.append_bytes(inst.value);
-    try out.append_byte(cast<u8>(10));
+    // Var is a copy-propagated alias; consumers print %<value> directly.
     return;
 }
 fn append_const_string_expr(
@@ -4495,27 +4539,29 @@ fn append_const_int_expr(
 }
 fn append_prefix_not_expr(
     out: &var std::string::String,
-    inst: &compiled_mir::MirPrefixNotExpr
+    inst: &compiled_mir::MirPrefixNotExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
     try out.append_bytes("  %t");
     try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes(" = xor i1 %t");
-    try std::fmt::append_i64(out, inst.operand);
+    try out.append_bytes(" = xor i1 ");
+    try append_expr_value_ref(out, insts, inst.operand);
     try out.append_bytes(", true");
     try out.append_byte(cast<u8>(10));
     return;
 }
 fn append_field_access_expr(
     out: &var std::string::String,
-    inst: &compiled_mir::MirFieldAccessExpr
+    inst: &compiled_mir::MirFieldAccessExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
     try out.append_bytes("  %t");
     try std::fmt::append_i64(out, inst.id);
     try out.append_bytes(" = extractvalue ");
     try out.append_bytes(inst.source_type);
     if inst.left >= 0 {
-        try out.append_bytes(" %t");
-        try std::fmt::append_i64(out, inst.left);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, insts, inst.left);
     } else {
         try out.append_bytes(" %");
         try out.append_bytes(inst.value);
@@ -4613,10 +4659,10 @@ fn append_binary_expr_inst(
     if std::mem::equal_bytes(inst.op, "and") or std::mem::equal_bytes(inst.op, "or") {
         try out.append_bytes(" = ");
         try out.append_bytes(inst.op);
-        try out.append_bytes(" i1 %t");
-        try std::fmt::append_i64(out, inst.left);
-        try out.append_bytes(", %t");
-        try std::fmt::append_i64(out, inst.right);
+        try out.append_bytes(" i1 ");
+        try append_expr_value_ref(out, insts, inst.left);
+        try out.append_bytes(", ");
+        try append_expr_value_ref(out, insts, inst.right);
         try out.append_byte(cast<u8>(10));
         return;
     }
@@ -4631,10 +4677,10 @@ fn append_binary_expr_inst(
         }
         try out.append_byte(cast<u8>(32));
         try out.append_bytes(arith_type);
-        try out.append_bytes(" %t");
-        try std::fmt::append_i64(out, inst.left);
-        try out.append_bytes(", %t");
-        try std::fmt::append_i64(out, inst.right);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, insts, inst.left);
+        try out.append_bytes(", ");
+        try append_expr_value_ref(out, insts, inst.right);
         try out.append_byte(cast<u8>(10));
         return;
     }
@@ -4667,10 +4713,10 @@ fn append_binary_expr_inst(
     let operand_type = try binary_operand_type(insts, inst.left);
     try out.append_byte(cast<u8>(32));
     try out.append_bytes(operand_type);
-    try out.append_bytes(" %t");
-    try std::fmt::append_i64(out, inst.left);
-    try out.append_bytes(", %t");
-    try std::fmt::append_i64(out, inst.right);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.left);
+    try out.append_bytes(", ");
+    try append_expr_value_ref(out, insts, inst.right);
     try out.append_byte(cast<u8>(10));
     return;
 }
