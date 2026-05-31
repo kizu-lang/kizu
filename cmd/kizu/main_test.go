@@ -196,6 +196,51 @@ func TestFmtCommandHasNoGoWriteFallback(t *testing.T) {
 	}
 }
 
+// TestFmtWriteUsesAtomicRenameCapability keeps --write on temp-write plus rename.
+func TestFmtWriteUsesAtomicRenameCapability(t *testing.T) {
+	selfhostMain, err := os.ReadFile("../../selfhost/src/main.kizu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainSource := string(selfhostMain)
+	requiredMain := []string{
+		"var temp_path = try fmt_write_temp_path(allocator, path);",
+		"try std::fs::write_file(io, temp_bytes, formatted_bytes);",
+		"try std::fs::rename(io, temp_bytes, path);",
+	}
+	for _, fragment := range requiredMain {
+		if !strings.Contains(mainSource, fragment) {
+			t.Fatalf("selfhost fmt --write path missing %q", fragment)
+		}
+	}
+	if strings.Contains(mainSource, "std::fs::write_file(io, path, formatted_bytes)") {
+		t.Fatalf("selfhost fmt --write still writes directly to the target path")
+	}
+
+	hostedLLVM, err := os.ReadFile("../../selfhost/src/backend/cli_parse_llvm.kizu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostedSource := string(hostedLLVM)
+	hostedTempWrite := "@kizu_rt_fs_write_file(%kizu.owned %io, " +
+		"%kizu.slice.u8 %temp_path, %kizu.slice.u8 %formatted_bytes)"
+	hostedDirectWrite := "@kizu_rt_fs_write_file(%kizu.owned %io, " +
+		"%kizu.slice.u8 %path, %kizu.slice.u8 %formatted_bytes)"
+	requiredHosted := []string{
+		"@kizu_selfhost__parse_temp_path(%kizu.slice.u8 %path)",
+		hostedTempWrite,
+		"@kizu_rt_fs_rename(%kizu.owned %io, %kizu.slice.u8 %temp_path, %kizu.slice.u8 %path)",
+	}
+	for _, fragment := range requiredHosted {
+		if !strings.Contains(hostedSource, fragment) {
+			t.Fatalf("hosted fmt --write path missing %q", fragment)
+		}
+	}
+	if strings.Contains(hostedSource, hostedDirectWrite) {
+		t.Fatalf("hosted fmt --write still writes directly to the target path")
+	}
+}
+
 // TestInitCommandCreatesRunnablePackage checks init scaffolds a minimal package.
 func TestInitCommandCreatesRunnablePackage(t *testing.T) {
 	root := t.TempDir()
@@ -989,6 +1034,23 @@ func TestFmtCommandPreservesBlockLineComments(t *testing.T) {
 	}
 }
 
+// TestFmtCommandPreservesInlineLineComments keeps inline comments as canonical trivia.
+func TestFmtCommandPreservesInlineLineComments(t *testing.T) {
+	path := writeTempKizuSource(t, "inline-comment.kizu",
+		"fn main() { // keep this comment\n    print(\"hello, kizu\");\n}\n")
+	got, stderr, runErr := runDispatchCaptureOutput(t, "fmt", []string{path})
+	if runErr != nil {
+		t.Fatalf("fmt failed: %v\n%s", runErr, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
+	}
+	want := "fn main() {\n    // keep this comment\n    print(\"hello, kizu\");\n}\n"
+	if got != want {
+		t.Fatalf("fmt inline comments:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFmtCommandRejectsInvalidSyntax checks fmt reports parser failures through selfhost.
 func TestFmtCommandRejectsInvalidSyntax(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.kizu")
@@ -1030,28 +1092,27 @@ func TestFmtWritePreservesLeadingLineComments(t *testing.T) {
 	}
 }
 
-// TestFmtWriteRejectsInlineLineComments checks unsupported comments are not dropped.
-func TestFmtWriteRejectsInlineLineComments(t *testing.T) {
+// TestFmtWritePreservesInlineLineComments checks --write keeps inline comment trivia.
+func TestFmtWritePreservesInlineLineComments(t *testing.T) {
 	src := "fn main() { // keep this comment\n    print(\"hello, kizu\");\n}\n"
 	path := filepath.Join(t.TempDir(), "inline-comment.kizu")
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, runErr := runDispatchCaptureStderr(t, "fmt", []string{"--write", path})
-	var status exitStatus
-	if !errors.As(runErr, &status) || status.code != 1 {
-		t.Fatalf("got error %v, want exit status 1", runErr)
+	if runErr != nil {
+		t.Fatalf("command failed: %v\n%s", runErr, out)
 	}
-	wantErr := "error: fmt does not support non-leading line comments yet\n"
-	if out != wantErr {
-		t.Fatalf("got %q, want %q", out, wantErr)
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
 	}
 	got, readErr := os.ReadFile(path)
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if string(got) != src {
-		t.Fatalf("file changed:\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	want := "fn main() {\n    // keep this comment\n    print(\"hello, kizu\");\n}"
+	if string(got) != want {
+		t.Fatalf("file changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 

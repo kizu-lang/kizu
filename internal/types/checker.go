@@ -3486,6 +3486,8 @@ func (c *Checker) checkFsBuiltin(
 		return c.checkFsReadDir(args, env, unsafe)
 	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
 		return c.checkFsPathOnly(name, args, env, unsafe, "!void")
+	case "std.builtin.fs_rename":
+		return c.checkFsRename(args, env, unsafe)
 	default:
 		return "", false, nil
 	}
@@ -3563,6 +3565,31 @@ func (c *Checker) checkFsWriteFile(
 		if !sameType(got, typeByteString) {
 			return "", true, errorf(
 				"type error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
+		}
+	}
+	return "!void", true, nil
+}
+
+// checkFsRename validates std::fs::rename.
+func (c *Checker) checkFsRename(
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, bool, error) {
+	if len(args) != 3 {
+		return "", true, errorf("type error: `std::fs::rename` expects io, from, and to")
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, "std::fs::rename"); err != nil {
+		return "", true, err
+	}
+	for idx, label := range []string{"from", "to"} {
+		got, err := c.checkExpr(args[idx+1], env, unsafe)
+		if err != nil {
+			return "", true, err
+		}
+		if !sameType(got, typeByteString) {
+			return "", true, errorf(
+				"type error: `std::fs::rename` expects []u8 %s, got %s", label, got)
 		}
 	}
 	return "!void", true, nil

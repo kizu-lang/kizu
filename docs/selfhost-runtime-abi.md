@@ -32,6 +32,7 @@ external std::fs::metadata
 external std::fs::read_dir
 external std::fs::read_file
 external std::fs::write_file
+external std::fs::rename
 external std::fs::create_dir
 external std::io::blocking
 external std::io::write_stdout
@@ -68,8 +69,8 @@ Kizu module and function symbols lower to deterministic LLVM symbol names:
 | std primitive `std::fs::read_dir` | `@kizu_rt_fs_read_dir` |
 | std primitive `std::fs::read_file` | `@kizu_rt_fs_read_file` |
 | std primitive `std::fs::write_file` | `@kizu_rt_fs_write_file` |
+| std primitive `std::fs::rename` | `@kizu_rt_fs_rename` |
 | std primitive `std::fs::create_dir` | `@kizu_rt_fs_create_dir` |
-| artifact publish rename boundary | `@kizu_rt_fs_rename` |
 | std primitive `std::io::blocking` | `@kizu_rt_io_blocking` |
 | std primitive `std::io::write_stdout` | `@kizu_rt_io_write_stdout` |
 | std primitive `std::io::write_stderr` | `@kizu_rt_io_write_stderr` |
@@ -463,6 +464,7 @@ concrete reachable call site.
 | `std::fs::read_dir` | `@kizu_rt_fs_read_dir` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.owned` |
 | `std::fs::read_file` | `@kizu_rt_fs_read_file` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.slice.u8` |
 | `std::fs::write_file` | `@kizu_rt_fs_write_file` | `(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8) -> %kizu.error.void` |
+| `std::fs::rename` | `@kizu_rt_fs_rename` | `(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8) -> %kizu.error.void` |
 | `std::fs::create_dir` | `@kizu_rt_fs_create_dir` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
 | `std::io::write_stdout` | `@kizu_rt_io_write_stdout` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
 | `std::io::write_stderr` | `@kizu_rt_io_write_stderr` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
@@ -483,7 +485,7 @@ Go-owned compiler helpers further:
 | Capability | Status | Boundary |
 | --- | --- | --- |
 | file loading | available | `std::fs::{exists, metadata, read_dir, read_file}` through explicit `Io` |
-| artifact writing | available | `std::fs::write_file`, `std::fs::create_dir`, and publish/rename runtime boundary |
+| artifact writing | available | `std::fs::write_file`, `std::fs::rename`, `std::fs::create_dir`, and publish/rename runtime boundary |
 | path handling | available | Kizu `std::path` and `std::path_bits`; no host path fallback |
 | arrays | available | `std::array::Array<T>` over opaque runtime storage |
 | strings | available | `std::string::String` over opaque runtime storage |
@@ -516,9 +518,9 @@ stdout, stderr, and exit boundaries.
 The current bootstrap comparison is artifact-only before external linking, so
 process spawn/wait is deferred to #459 unless that issue chooses a hosted linker
 execution path. `@kizu_rt_fs_rename` is included as the deterministic artifact
-publish boundary without adding a public `std::fs::rename` wrapper yet;
-additional filesystem calls require a concrete selfhost call site and a linked
-roadmap issue.
+publish boundary and is exposed through `std::fs::rename` for #1073 atomic
+formatter writes. Additional filesystem calls require a concrete selfhost call
+site and a linked roadmap issue.
 
 For #458, `selfhost.ll` also exposes `@kizu_selfhost__cli_main` as the minimum
 hosted compiler CLI entry. A host launcher initializes process arguments with
@@ -633,10 +635,11 @@ deferrals are recorded in `docs/selfhost-cli-parity.md`.
 For #1073, hosted `fmt <file>` is routed through the selfhost formatter writer
 and has its own dispatch instead of the parse command's `fn main` source-shape
 guard. Hosted `fmt --write <file>` reuses the same formatted byte buffer and
-writes it through the existing `fs_write_file` ABI. The dedicated
+publishes it with `fs_write_file` to a sibling temporary path followed by
+`fs_rename`. The dedicated
 `selfhost/tests/cli/fmt-parity.tsv` gate records source-preserving comment,
-doc-comment, import sorting, and deterministic no-write rows. Inline-comment
-preservation and syntax surfaces outside that manifest remain deferred.
+doc-comment, inline-comment, import sorting, and deterministic no-write rows.
+Syntax surfaces outside that manifest remain deferred.
 
 For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
 emit/link/execute instead of a selfhost interpreter. The first runnable fixture

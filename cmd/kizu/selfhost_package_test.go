@@ -1901,7 +1901,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_parse_comment_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_functions(",
-		"fn append_parse_has_unsupported_line_comment_function(",
+		"fn append_parse_leading_comment_prefix_end_function(",
 	},
 	"../../selfhost/src/backend/cli_parse_diag_llvm.kizu": {
 		"pub fn append_globals(",

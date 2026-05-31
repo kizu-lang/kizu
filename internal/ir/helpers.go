@@ -155,6 +155,7 @@ func runtimeBuiltinReturnType(name string) (string, bool) {
 		return "![]u8", true
 	case "std.builtin.fs_write_file",
 		"std.builtin.fs_create_dir",
+		"std.builtin.fs_rename",
 		"std.builtin.fs_remove_dir",
 		"std.builtin.fs_remove_file":
 		return "!void", true

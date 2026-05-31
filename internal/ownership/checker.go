@@ -2021,6 +2021,8 @@ func (c *Checker) checkFsBuiltin(
 			"!std::array::Array<std::fs::DirEntry>")
 	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
 		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "!void")
+	case "std.builtin.fs_rename":
+		return c.checkFsRename(args, env)
 	default:
 		return "", false, nil
 	}
@@ -2128,6 +2130,27 @@ func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, b
 		if !sameOwnershipType(got, "[]u8") {
 			return "", true, errorf(
 				"move error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
+		}
+	}
+	return "!void", true, nil
+}
+
+// checkFsRename validates ownership effects for std::fs::rename.
+func (c *Checker) checkFsRename(args []ast.Expression, env *scope) (string, bool, error) {
+	if len(args) != 3 {
+		return "", true, errorf("move error: `std::fs::rename` expects io, from, and to")
+	}
+	if err := c.checkIoArg(args[0], env, "std::fs::rename"); err != nil {
+		return "", true, err
+	}
+	for idx, label := range []string{"from", "to"} {
+		got, err := c.readExpr(args[idx+1], env)
+		if err != nil {
+			return "", true, err
+		}
+		if !sameOwnershipType(got, "[]u8") {
+			return "", true, errorf(
+				"move error: `std::fs::rename` expects []u8 %s, got %s", label, got)
 		}
 	}
 	return "!void", true, nil

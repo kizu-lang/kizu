@@ -183,9 +183,6 @@ fn fmt_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     if !(try validate_file_cli_parse(allocator, io, path, file_text)) {
         return std::process::exit_code(1);
     }
-    if format::has_unsupported_line_comment(file_text) {
-        return try write_fmt_unsupported_line_comment(allocator, io);
-    }
     return try write_parse_success(allocator, io, file_text);
 }
 
@@ -194,23 +191,23 @@ fn fmt_write_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     if !(try validate_file_cli_parse(allocator, io, path, file_text)) {
         return std::process::exit_code(1);
     }
-    if format::has_unsupported_line_comment(file_text) {
-        return try write_fmt_unsupported_line_comment(allocator, io);
-    }
     var formatted = try format::format_source(allocator, file_text);
+    defer formatted.deinit();
     let formatted_bytes = formatted.as_bytes();
-    try std::fs::write_file(io, path, formatted_bytes);
-    formatted.deinit();
+    var temp_path = try fmt_write_temp_path(allocator, path);
+    defer temp_path.deinit();
+    let temp_bytes = temp_path.as_bytes();
+    try std::fs::write_file(io, temp_bytes, formatted_bytes);
+    try std::fs::rename(io, temp_bytes, path);
     return std::process::exit_code(0);
 }
 
-fn write_fmt_unsupported_line_comment(allocator: Allocator, io: Io) -> !i64 {
-    try output::error_line(
-        allocator,
-        io,
-        "error: fmt does not support non-leading line comments yet"
-    );
-    return std::process::exit_code(1);
+fn fmt_write_temp_path(allocator: Allocator, path: []u8) -> !std::string::String {
+    var temp_path = std::string::String(allocator);
+    try temp_path.reserve(std::mem::len(path) + 13);
+    try temp_path.append_bytes(path);
+    try temp_path.append_bytes(".kizu-fmt.tmp");
+    return temp_path;
 }
 
 fn validate_file_cli_parse(

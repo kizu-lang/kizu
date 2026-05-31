@@ -695,19 +695,26 @@ func TestRuntimeRejectsInvalidArenaHandle(t *testing.T) {
 
 // TestRunFsWriteAndRead checks the minimal std::fs API against a temp file.
 func TestRunFsWriteAndRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "note.txt")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.txt")
+	renamed := filepath.Join(dir, "renamed.txt")
 	source := strings.ReplaceAll(`fn main() -> !void {
     let io = std::builtin::io_blocking();
     try std::builtin::fs_write_file(io, "__PATH__", "hello fs");
-    let text = try std::builtin::fs_read_file(io, "__PATH__");
+    try std::builtin::fs_rename(io, "__PATH__", "__RENAMED__");
+    let text = try std::builtin::fs_read_file(io, "__RENAMED__");
     print(text);
     return;
 }`, "__PATH__", path)
+	source = strings.ReplaceAll(source, "__RENAMED__", renamed)
 	got := runSource(t, source)
 	if got != "hello fs\n" {
 		t.Fatalf("got %q", got)
 	}
-	written, err := os.ReadFile(path)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("source path still exists or stat failed unexpectedly: %v", err)
+	}
+	written, err := os.ReadFile(renamed)
 	if err != nil {
 		t.Fatal(err)
 	}
