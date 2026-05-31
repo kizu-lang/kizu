@@ -60,6 +60,7 @@ pub struct Program {
     pub i64_call_callee: []u8,
     pub i64_call_arg0: i64,
     pub i64_call_arg1: i64,
+    pub loop_start_value: i64,
     pub loop_bound: i64,
     pub loop_continue_value: i64,
     pub loop_break_value: i64,
@@ -103,6 +104,7 @@ pub struct RunAst {
     pub i64_call_callee: []u8,
     pub i64_call_arg0: i64,
     pub i64_call_arg1: i64,
+    pub loop_start_value: i64,
     pub loop_bound: i64,
     pub loop_continue_value: i64,
     pub loop_break_value: i64,
@@ -153,6 +155,7 @@ fn build_main_print_program(payload: []u8, from_codegen_lowering: bool) -> Progr
         i64_call_callee: payload[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -183,6 +186,7 @@ pub fn unsupported_program(empty: []u8) -> Program {
         i64_call_callee: empty[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -375,16 +379,23 @@ pub fn loop_i64_program_supported(program: &Program) -> bool {
     if program.third_kind != InstructionKind::ReturnVoid {
         return false;
     }
-    if program.loop_bound <= 0 {
+    if program.loop_start_value < 0 {
         return false;
     }
-    if program.loop_continue_value <= 0 or program.loop_break_value <= 0 {
+    if program.loop_bound <= program.loop_start_value {
+        return false;
+    }
+    if program.loop_continue_value < program.loop_start_value or
+        program.loop_break_value < program.loop_start_value {
+        return false;
+    }
+    if program.loop_continue_value >= program.loop_bound or program.loop_break_value >= program.loop_bound {
         return false;
     }
     if program.loop_continue_value == program.loop_break_value {
         return false;
     }
-    return program.loop_break_value < program.loop_bound;
+    return true;
 }
 
 pub fn metadata_for_program(program: &Program) -> []u8 {
@@ -679,6 +690,24 @@ fn lower_loop_i64_block(
     function_name: []u8,
     statements: std::kizu::ast::ChildRange
 ) -> !RunAst {
+    if statements.len == 1 {
+        let for_statement = try ast.child_at(statements, 0);
+        let for_node = ast.get(for_statement);
+        match for_node.data {
+            For(loop_node) => return try lower_loop_i64_for(
+                text,
+                ast,
+                function_name,
+                statements.len,
+                loop_node.label,
+                loop_node.name,
+                loop_node.start,
+                loop_node.end,
+                loop_node.body
+            );,
+            _ => return unsupported_run_ast(text[0..0]);,
+        }
+    }
     if statements.len != 2 {
         return unsupported_run_ast(text[0..0]);
     }
@@ -695,6 +724,48 @@ fn lower_loop_i64_block(
             let_node.name,
             let_node.value,
             loop_statement
+        );,
+        _ => return unsupported_run_ast(text[0..0]);,
+    }
+}
+
+fn lower_loop_i64_for(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
+    label: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !RunAst {
+    if !is_empty_node(ast, label) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let local_name = ast_node_text(text, ast, name);
+    if std::mem::len(local_name) == 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let start_value = try call_arg_i64_literal(text, ast, start);
+    if start_value < 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let bound = try call_arg_i64_literal(text, ast, end);
+    if bound <= start_value {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let body_node = ast.get(body);
+    match body_node.data {
+        Block(block) => return try lower_loop_i64_for_body(
+            text,
+            ast,
+            function_name,
+            statement_count,
+            local_name,
+            start_value,
+            bound,
+            block.statements
         );,
         _ => return unsupported_run_ast(text[0..0]);,
     }
@@ -754,6 +825,8 @@ fn lower_loop_i64_while(
     if bound <= 0 {
         return unsupported_run_ast(text[0..0]);
     }
+    let loop_start = 1;
+    let loop_bound = bound + 1;
     let body_node = ast.get(body);
     match body_node.data {
         Block(block) => return try lower_loop_i64_body(
@@ -762,7 +835,8 @@ fn lower_loop_i64_while(
             function_name,
             statement_count,
             local_name,
-            bound,
+            loop_start,
+            loop_bound,
             block.statements
         );,
         _ => return unsupported_run_ast(text[0..0]);,
@@ -775,6 +849,7 @@ fn lower_loop_i64_body(
     function_name: []u8,
     statement_count: i64,
     local_name: []u8,
+    start_value: i64,
     bound: i64,
     body_statements: std::kizu::ast::ChildRange
 ) -> !RunAst {
@@ -800,7 +875,53 @@ fn lower_loop_i64_body(
     if !(try loop_print_statement_ok(text, ast, print_statement, local_name)) {
         return unsupported_run_ast(text[0..0]);
     }
-    return loop_i64_run_ast(function_name, statement_count, "print", bound, continue_value, break_value);
+    return loop_i64_run_ast(
+        function_name,
+        statement_count,
+        "print",
+        start_value,
+        bound,
+        continue_value,
+        break_value
+    );
+}
+
+fn lower_loop_i64_for_body(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
+    local_name: []u8,
+    start_value: i64,
+    bound: i64,
+    body_statements: std::kizu::ast::ChildRange
+) -> !RunAst {
+    if body_statements.len != 3 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let continue_statement = try ast.child_at(body_statements, 0);
+    let continue_value = try loop_if_terminal_value(text, ast, continue_statement, local_name, true);
+    if continue_value < start_value {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let break_statement = try ast.child_at(body_statements, 1);
+    let break_value = try loop_if_terminal_value(text, ast, break_statement, local_name, false);
+    if break_value < start_value {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let print_statement = try ast.child_at(body_statements, 2);
+    if !(try loop_print_statement_ok(text, ast, print_statement, local_name)) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    return loop_i64_run_ast(
+        function_name,
+        statement_count,
+        "print",
+        start_value,
+        bound,
+        continue_value,
+        break_value
+    );
 }
 
 fn loop_increment_step(
@@ -1700,7 +1821,7 @@ fn loop_i64_run_ast_supported(run_ast: &RunAst) -> bool {
     if run_ast.function_count != 1 {
         return false;
     }
-    if run_ast.statement_count != 2 {
+    if run_ast.statement_count != 1 and run_ast.statement_count != 2 {
         return false;
     }
     if run_ast.final_statement_kind != RunStatementKind::LoopI64Print {
@@ -1712,16 +1833,23 @@ fn loop_i64_run_ast_supported(run_ast: &RunAst) -> bool {
     if run_ast.final_argument_kind != RunArgumentKind::None {
         return false;
     }
-    if run_ast.loop_bound <= 0 {
+    if run_ast.loop_start_value < 0 {
         return false;
     }
-    if run_ast.loop_continue_value <= 0 or run_ast.loop_break_value <= 0 {
+    if run_ast.loop_bound <= run_ast.loop_start_value {
+        return false;
+    }
+    if run_ast.loop_continue_value < run_ast.loop_start_value or
+        run_ast.loop_break_value < run_ast.loop_start_value {
+        return false;
+    }
+    if run_ast.loop_continue_value >= run_ast.loop_bound or run_ast.loop_break_value >= run_ast.loop_bound {
         return false;
     }
     if run_ast.loop_continue_value == run_ast.loop_break_value {
         return false;
     }
-    return run_ast.loop_break_value < run_ast.loop_bound;
+    return true;
 }
 
 fn run_ast_i64_call_supported(run_ast: &RunAst) -> bool {
@@ -1786,6 +1914,7 @@ fn print_run_ast(
         i64_call_callee: payload[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -1817,6 +1946,7 @@ fn i64_call_run_ast(
         i64_call_callee: callee,
         i64_call_arg0: arg0,
         i64_call_arg1: arg1,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -1827,6 +1957,7 @@ fn loop_i64_run_ast(
     function_name: []u8,
     statement_count: i64,
     print_callee: []u8,
+    start_value: i64,
     bound: i64,
     continue_value: i64,
     break_value: i64
@@ -1847,6 +1978,7 @@ fn loop_i64_run_ast(
         i64_call_callee: function_name[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0,
+        loop_start_value: start_value,
         loop_bound: bound,
         loop_continue_value: continue_value,
         loop_break_value: break_value
@@ -1870,6 +2002,7 @@ fn return_void_run_ast(text: []u8, function_name: []u8, statement_count: i64) ->
         i64_call_callee: text[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -1900,6 +2033,7 @@ fn try_void_run_ast(
         i64_call_callee: try_callee,
         i64_call_arg0: helper_exit_code,
         i64_call_arg1: 0,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -1923,6 +2057,7 @@ fn unsupported_run_ast(empty: []u8) -> RunAst {
         i64_call_callee: empty[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -1953,6 +2088,7 @@ fn lowered_return_void_program(run_ast: &RunAst) -> Program {
         i64_call_callee: run_ast.function_name[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -1983,6 +2119,7 @@ fn lowered_try_void_program(run_ast: &RunAst) -> Program {
         i64_call_callee: run_ast.i64_call_callee,
         i64_call_arg0: run_ast.i64_call_arg0,
         i64_call_arg1: 0,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -2013,6 +2150,7 @@ fn lowered_i64_call_program(run_ast: &RunAst) -> Program {
         i64_call_callee: run_ast.i64_call_callee,
         i64_call_arg0: run_ast.i64_call_arg0,
         i64_call_arg1: run_ast.i64_call_arg1,
+        loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
         loop_break_value: 0
@@ -2043,6 +2181,7 @@ fn lowered_loop_i64_program(run_ast: &RunAst) -> Program {
         i64_call_callee: run_ast.function_name[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0,
+        loop_start_value: run_ast.loop_start_value,
         loop_bound: run_ast.loop_bound,
         loop_continue_value: run_ast.loop_continue_value,
         loop_break_value: run_ast.loop_break_value

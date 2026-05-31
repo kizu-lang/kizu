@@ -351,6 +351,8 @@ func nativeSourceRunCases() []runParityCase {
 		nativeSourceRunStem("run_functions_nested"),
 		nativeSourceRunExampleBreakContinue(),
 		nativeSourceRunStem("run_break_continue_alt"),
+		nativeSourceRunExampleForRange(),
+		nativeSourceRunStem("run_for_range_alt"),
 	}
 }
 
@@ -366,6 +368,21 @@ func nativeSourceRunExampleBreakContinue() runParityCase {
 		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
 		artifactMode: "hosted-artifact",
 		artifactStem: "break_continue",
+	}
+}
+
+// nativeSourceRunExampleForRange checks for-range lowering through a source-built
+// runner.
+func nativeSourceRunExampleForRange() runParityCase {
+	return runParityCase{
+		name:         "run_example_for_range",
+		command:      "run",
+		fixture:      "examples/for.kizu",
+		exitCode:     0,
+		stdoutGolden: "selfhost/tests/cli/golden/run_for_range.stdout",
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		artifactMode: "hosted-artifact",
+		artifactStem: "for",
 	}
 }
 
