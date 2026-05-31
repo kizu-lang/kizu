@@ -27,8 +27,8 @@ The current hosted stage2 artifact supports these command slices:
 | `parse <moved-value declarations source file>` | #600 positive declaration, record-literal, field-access, and call source-shape slice | `just selfhost-parse-parity-gate` |
 | `parse <missing-expression source file>` | #586 negative source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `parse <missing-assign source file>` | #646 negative binding source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
-| `fmt <source file>` | #648/#650 stdout formatter slice routed through the hosted selfhost formatter path | `just selfhost-backend-artifact-gate` |
-| `fmt --write <source file>` | #629 bounded formatter mutation slice using the same hosted formatter bytes and `fs_write_file` | `just selfhost-backend-artifact-gate` |
+| `fmt <source file>` | #1073 source-preserving formatter stdout rows for selected fixtures | `just selfhost-fmt-parity-gate` |
+| `fmt --write <source file>` | #1073 formatter mutation/no-mutation rows using the same selfhost formatted bytes and `fs_write_file` | `just selfhost-fmt-parity-gate` |
 | `run <top-level main print-string source file>` | #588/#752 positive source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-run-parity-gate` |
 | `run <top-level main return-only source file>` | #752 positive no-output executable slice lowered to the same bounded executable model before canonical artifact emission | `just selfhost-run-parity-gate` |
 | `run <missing-expression source file>` | #588 negative source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
@@ -64,6 +64,19 @@ path. The fast
 `just selfhost-check-parity-gate` recipe reuses an existing passing
 `target/selfhost/stage2/selfhost` artifact and records `go.cmd-kizu-fallback
 none`; it does not bootstrap from scratch by default.
+
+`selfhost/tests/cli/fmt-parity.tsv` is the #1073 formatter parity manifest. It
+records command args, fixture paths, expected exit codes, checked-in
+stdout/stderr golden paths, and the expected write mutation behavior for the
+bounded `fmt <file>` and `fmt --write <file>` slices. The supported rows cover
+simple formatting, leading line comments, doc comments, block full-line
+comments, and stable leading import sorting. Every successful stdout row also
+runs a copied `fmt --write` mirror check and asserts that file content matches
+the same formatted bytes as stdout minus the CLI newline. The explicit write
+failure rows assert that parse failures or unsupported inline comments preserve
+the original file. The gate runs through `target/selfhost/stage2/selfhost`,
+records `go.cmd-kizu-fallback none`, and does not use BackendArtifactGate as the
+formatter ownership gate.
 
 `selfhost/tests/cli/run-parity.tsv` is the #569/#588/#752 run parity manifest. It
 records command args, fixture paths, expected exit codes, checked-in
@@ -104,10 +117,10 @@ the Kizu-owned checked-AST lowering path and requires the metadata marker
 
 Unsupported commands, wrong arity, and arguments beginning with `-` remain
 deterministic usage/unsupported paths with exit code `64`.
-The hosted `fmt` slice accepts only the two-argument `fmt <file>` form and uses
-its own formatter dispatch instead of the `parse` command's `fn main` guard.
-In-place rewrite flags remain owned by the Go CLI until a separate issue
-defines hosted mutation behavior.
+The hosted `fmt` slices accept `fmt <file>` and `fmt --write <file>` through
+their own formatter dispatch instead of the `parse` command's `fn main` guard.
+Inline/non-leading line comments remain explicit unsupported formatter input
+until a child issue preserves that trivia.
 
 ## Hosted Run And Test Strategy
 
@@ -215,7 +228,7 @@ release scope:
 | --- | --- | --- | --- |
 | broader `check <file>` frontend | Partially deferred | #592, #602, and #604 move the first positive, return-statement, qualified-call, and negative check shapes off single hardcoded paths, but broader parsing, type checking, move checking, and borrow checking are not claimed. | Add one check source shape at a time, keeping checked-in goldens and no Go fallback. |
 | broader `parse <file>` diagnostics | Partially deferred | #579, #586, #594, #598, and #600 move the first positive, call-statement, qualified-call, declaration/record/field/call, and negative parse shapes off single hardcoded paths, but broader parsing and diagnostic recovery are not claimed. | Add one parse diagnostic/source shape at a time, keeping checked-in goldens and no Go fallback. |
-| broader `fmt <file>` and `fmt --write` | Partially deferred | #648/#650 and #629 cover the first stdout and in-place write formatter slice over the existing hosted formatter path; broader source-preserving comments, import ordering, and formatter coverage are not claimed. | Extend formatter slices under #629 with explicit stdout/stderr, mutation, and comment-trivia contracts. |
+| broader `fmt <file>` and `fmt --write` | Partially deferred | #1073 covers selected source-preserving stdout/write rows for comments, imports, and deterministic no-write failures; inline comments and syntax surfaces outside the manifest are not claimed. | Extend `fmt-parity.tsv` one source-preservation shape at a time, keeping unsupported trivia explicit until implemented. |
 | broader `run <file>` | Partially deferred | #588 moves the first positive and negative run shapes off single hardcoded paths, but broader frontend, lowering, and artifact naming are not claimed. | Extend `run-parity.tsv` one source shape at a time, using hosted-artifact validation and no Go fallback. |
 | broader `kizu test <file>` | Partially deferred | #590 moves the first expect-ok and expect-failure shapes off single hardcoded paths, but broader frontend, lowering, artifact naming, and discovery are not claimed. | Extend `test-parity.tsv` one source shape at a time, using hosted-artifact validation and no discovery. |
 | cache/status, cache/prune, why-rebuild, cache artifact commands | Deferred | Hosted artifact cache ownership, persistence, pruning, and no-op rebuild semantics are not designed. | Split into cache command issues with explicit cache directory, artifact paths, mutation rules, stdout/stderr, and cache-size acceptance checks. |

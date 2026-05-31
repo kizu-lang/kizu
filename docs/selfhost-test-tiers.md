@@ -321,8 +321,9 @@ just selfhost-production-from-scratch
 That command runs `just selfhost-bootstrap` followed by `just selfhost-fast-gate`.
 `just selfhost-fast-gate` reuses the existing stage2 artifact and runs
 `selfhost-production-gate`, `selfhost-corpus-gate`, `selfhost-parse-parity-gate`,
-`selfhost-check-parity-gate`, `selfhost-run-parity-gate`, and
-`selfhost-test-parity-gate` without rebuilding. Go is present only as the
+`selfhost-check-parity-gate`, `selfhost-fmt-parity-gate`,
+`selfhost-run-parity-gate`, and `selfhost-test-parity-gate` without rebuilding.
+Go is present only as the
 explicit stage0 native bootstrap compiler in the first step and as the test
 runner for the gate; the production commands are direct executions of the
 hosted artifact.

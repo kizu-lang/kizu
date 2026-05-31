@@ -216,6 +216,7 @@ just selfhost-production-gate
 just selfhost-corpus-gate
 just selfhost-parse-parity-gate
 just selfhost-check-parity-gate
+just selfhost-fmt-parity-gate
 just selfhost-run-parity-gate
 just selfhost-test-parity-gate
 ```
@@ -249,6 +250,13 @@ inside the corpus test. Clean jobs can use
 through the hosted stage2 artifact and compares checked-in stdout/stderr
 goldens plus exit codes. It reuses the stage2 artifact and passing bootstrap
 report; it does not rebuild bootstrap artifacts inside the parity test.
+
+`just selfhost-fmt-parity-gate` is the #1073 fast parity gate for the bounded
+`fmt <file>` and `fmt --write <file>` slices. It runs only entries from
+[`selfhost/tests/cli/fmt-parity.tsv`](../selfhost/tests/cli/fmt-parity.tsv)
+through the hosted stage2 artifact, compares checked-in stdout/stderr goldens,
+mirrors successful stdout rows through `fmt --write`, and checks that write
+failures preserve the copied input file.
 
 Heavy cache/perf measurements remain explicit jobs unless a switch issue changes
 the CI policy with recorded timing and cache-size evidence.

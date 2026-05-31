@@ -81,6 +81,7 @@ selfhost-fast-gate:
     just selfhost-corpus-gate
     just selfhost-parse-parity-gate
     just selfhost-check-parity-gate
+    just selfhost-fmt-parity-gate
     just selfhost-run-parity-gate
     just selfhost-test-parity-gate
 
@@ -110,6 +111,15 @@ selfhost-check-parity-gate:
 selfhost-check-parity-gate-from-scratch:
     just selfhost-bootstrap
     just selfhost-check-parity-gate
+
+# Run #1073 fmt <file> parity through the hosted selfhost artifact.
+selfhost-fmt-parity-gate:
+    KIZU_RUN_SELFHOST_FMT_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostFmtParityGate$' -count=1 -v
+
+# Build the hosted artifact once, then run fmt <file> parity.
+selfhost-fmt-parity-gate-from-scratch:
+    just selfhost-bootstrap
+    just selfhost-fmt-parity-gate
 
 # Run #569 run <file> parity through the hosted selfhost artifact.
 selfhost-run-parity-gate:
