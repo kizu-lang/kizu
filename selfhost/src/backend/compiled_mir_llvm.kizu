@@ -406,6 +406,7 @@ fn append_multi_stmt(
         StringToken(payload) => try append_multi_string_token(out, payload);,
         SkipLineComment(payload) => try append_multi_skip_line_comment(out, payload);,
         IsDocCommentStart(payload) => try append_multi_is_doc_comment_start(out, payload);,
+        WordToken(payload) => try append_multi_word_token(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
@@ -934,6 +935,196 @@ fn append_multi_is_doc_comment_start(
     try append_ll_line(out, "  ret i1 true");
     try append_ll_line(out, "dc_false:");
     try append_ll_line(out, "  ret i1 false");
+    return;
+}
+
+// append_word_token_globals emits one private string constant per keyword spelling (plain ASCII,
+// no escaping needed), named @.kizu.compiled.<symbol>.kw<i> (tracker 961, scope 4 prerequisite).
+fn append_word_token_globals(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWordTokenStmt
+) -> !void {
+    let kws = &stmt.keywords;
+    var index = 0;
+    while index < kws.len() {
+        let kw = try kws.at(index);
+        try out.append_bytes("@.kizu.compiled.");
+        try out.append_bytes(stmt.symbol);
+        try out.append_bytes(".kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes(" = private unnamed_addr constant [");
+        try std::fmt::append_i64(out, std::mem::len(kw.text));
+        try out.append_bytes(" x i8] c");
+        try out.append_byte(cast<u8>(34));
+        try out.append_bytes(kw.text);
+        try out.append_byte(cast<u8>(34));
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    return;
+}
+
+// append_multi_word_token renders word_token(source, start, current): it scans an identifier run
+// (is_word) into an i64 end phi, returns a single-byte Ident when the run is empty, otherwise
+// builds the run slice and compares it against each keyword constant via equal_bytes, returning the
+// matching keyword Token or a multi-byte Ident fallback (tracker 961, scope 4 prerequisite). The
+// keyword globals are emitted by append_word_token_globals; len(source) is the slice length field.
+fn append_multi_word_token(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWordTokenStmt
+) -> !void {
+    try out.append_bytes("  %wt_length = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %wt_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  br label %wt_head");
+    try append_ll_line(out, "wt_head:");
+    try out.append_bytes("  %wt_end = phi i64 [ %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", %entry ], [ %wt_next, %wt_body ]");
+    try append_ll_line(out, "  %wt_inb = icmp slt i64 %wt_end, %wt_length");
+    try append_ll_line(out, "  br i1 %wt_inb, label %wt_check, label %wt_scan_done");
+    try append_ll_line(out, "wt_check:");
+    try append_ll_line(out, "  %wt_bptr = getelementptr i8, ptr %wt_source_ptr, i64 %wt_end");
+    try append_ll_line(out, "  %wt_byte = load i8, ptr %wt_bptr");
+    try out.append_bytes("  %wt_isw = call i1 @");
+    try out.append_bytes(stmt.is_word_symbol);
+    try append_ll_line(out, "(i8 %wt_byte)");
+    try append_ll_line(out, "  br i1 %wt_isw, label %wt_body, label %wt_scan_done");
+    try append_ll_line(out, "wt_body:");
+    try append_ll_line(out, "  %wt_next = add i64 %wt_end, 1");
+    try append_ll_line(out, "  br label %wt_head");
+    try append_ll_line(out, "wt_scan_done:");
+    try out.append_bytes("  %wt_empty = icmp eq i64 %wt_end, %");
+    try append_ll_line(out, stmt.start_name);
+    try append_ll_line(out,
+        "  br i1 %wt_empty, label %wt_ident_single, label %wt_text_build");
+    // Empty run: single-byte Ident at start.
+    try append_ll_line(out, "wt_ident_single:");
+    try out.append_bytes("  %wt_single_end = add i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %wt_single_tok = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.token_symbol);
+    try out.append_bytes("(i64 ");
+    try std::fmt::append_i64(out, stmt.ident_tag);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.start_name);
+    try out.append_bytes(", i64 %wt_single_end, ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.current_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %wt_single_tok");
+    // Build the run slice source[start..end] for the keyword comparisons.
+    try append_ll_line(out, "wt_text_build:");
+    try out.append_bytes("  %wt_text_ptr = getelementptr i8, ptr %wt_source_ptr, i64 %");
+    try append_ll_line(out, stmt.start_name);
+    try out.append_bytes("  %wt_text_len = sub i64 %wt_end, %");
+    try append_ll_line(out, stmt.start_name);
+    try append_ll_line(out,
+        "  %wt_text_base = insertvalue %kizu.slice.u8 poison, ptr %wt_text_ptr, 0");
+    try append_ll_line(out,
+        "  %wt_text = insertvalue %kizu.slice.u8 %wt_text_base, i64 %wt_text_len, 1");
+    try append_ll_line(out, "  br label %wt_kw0_check");
+    // One comparison block per keyword; the last one's miss target is the multi-byte Ident.
+    let kws = &stmt.keywords;
+    var index = 0;
+    while index < kws.len() {
+        let kw = try kws.at(index);
+        try out.append_bytes("wt_kw");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, "_check:");
+        try out.append_bytes("  %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_ptr = getelementptr [");
+        try std::fmt::append_i64(out, std::mem::len(kw.text));
+        try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+        try out.append_bytes(stmt.symbol);
+        try out.append_bytes(".kw");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, ", i64 0, i64 0");
+        try out.append_bytes("  %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, "_ptr, 0");
+        try out.append_bytes("  %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_slice = insertvalue %kizu.slice.u8 %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_base, i64 ");
+        try std::fmt::append_i64(out, std::mem::len(kw.text));
+        try append_ll_line(out, ", 1");
+        try out.append_bytes("  %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_eq = call i1 @");
+        try out.append_bytes(stmt.equal_bytes_symbol);
+        try out.append_bytes("(%kizu.slice.u8 %wt_text, %kizu.slice.u8 %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, "_slice)");
+        try out.append_bytes("  br i1 %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_eq, label %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_ret, label %");
+        if index + 1 < kws.len() {
+            try out.append_bytes("wt_kw");
+            try std::fmt::append_i64(out, index + 1);
+            try append_ll_line(out, "_check");
+        } else {
+            try append_ll_line(out, "wt_ident_multi");
+        }
+        // Per-keyword return block: token(<tag>, start, end, current).
+        try out.append_bytes("wt_kw");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, "_ret:");
+        try out.append_bytes("  %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_tok = call ");
+        try out.append_bytes(stmt.token_type);
+        try out.append_bytes(" @");
+        try out.append_bytes(stmt.token_symbol);
+        try out.append_bytes("(i64 ");
+        try std::fmt::append_i64(out, kw.tag);
+        try out.append_bytes(", i64 %");
+        try out.append_bytes(stmt.start_name);
+        try out.append_bytes(", i64 %wt_end, ");
+        try out.append_bytes(stmt.position_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(stmt.current_name);
+        try append_ll_line(out, ")");
+        try out.append_bytes("  ret ");
+        try out.append_bytes(stmt.token_type);
+        try out.append_bytes(" %wt_kw");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, "_tok");
+        index = index + 1;
+    }
+    // Multi-byte Ident fallback.
+    try append_ll_line(out, "wt_ident_multi:");
+    try out.append_bytes("  %wt_ident_tok = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.token_symbol);
+    try out.append_bytes("(i64 ");
+    try std::fmt::append_i64(out, stmt.ident_tag);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.start_name);
+    try out.append_bytes(", i64 %wt_end, ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.current_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %wt_ident_tok");
     return;
 }
 
@@ -2310,6 +2501,7 @@ fn append_stmt_globals(
         StringToken(payload) => try append_string_token_globals(payload);,
         SkipLineComment(payload) => try append_skip_line_comment_globals(payload);,
         IsDocCommentStart(payload) => try append_is_doc_comment_start_globals(payload);,
+        WordToken(payload) => try append_word_token_globals(out, payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,
