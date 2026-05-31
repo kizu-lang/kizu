@@ -502,6 +502,34 @@ pub struct MirSkipLineCommentStmt {
     pub eof_tag: i64,
 }
 
+// MirKeyword is one (spelling, TokenKind tag) entry of word_token's keyword table (tracker 961,
+// scope 4 prerequisite). The renderer emits the spelling as a private string constant and compares
+// the scanned identifier slice against it via equal_bytes, returning the keyword Token on a match.
+// It owns nothing (text is a borrowed literal slice), so its deinit is empty.
+pub struct MirKeyword {
+    pub text: []u8,
+    pub tag: i64,
+}
+
+// MirWordTokenStmt backs word_token(source, start, current): it scans an identifier run (is_word),
+// returns a single-byte Ident when the run is empty, otherwise compares the run against the keyword
+// table and returns the matching keyword Token, falling back to a multi-byte Ident (tracker 961,
+// scope 4 prerequisite). is_word_symbol / token_symbol / equal_bytes_symbol are the already-
+// compiled callees; ident_tag is the Ident discriminant; keywords owns the keyword table Array.
+pub struct MirWordTokenStmt {
+    pub symbol: []u8,
+    pub source_name: []u8,
+    pub start_name: []u8,
+    pub current_name: []u8,
+    pub position_type: []u8,
+    pub token_type: []u8,
+    pub is_word_symbol: []u8,
+    pub token_symbol: []u8,
+    pub equal_bytes_symbol: []u8,
+    pub ident_tag: i64,
+    pub keywords: std::array::Array<MirKeyword>,
+}
+
 // MirIsDocCommentStartStmt backs is_doc_comment_start(source, start): 'let length = len(source);
 // if start + 2 >= length { return false; } if source[start] != 47 or source[start + 1] != 47 or
 // source[start + 2] != 47 { return false; } return start + 3 >= length or source[start + 3] != 47;'
@@ -707,6 +735,7 @@ pub union MirStmt {
     StringToken(MirStringTokenStmt),
     SkipLineComment(MirSkipLineCommentStmt),
     IsDocCommentStart(MirIsDocCommentStartStmt),
+    WordToken(MirWordTokenStmt),
     AstNodeText(MirAstNodeTextStmt),
     StringLiteralSpan(MirStringLiteralSpanStmt),
     PrintPayload(MirPrintPayloadStmt),
@@ -982,6 +1011,19 @@ impl MirIsDocCommentStartStmt {
     }
 }
 
+impl MirKeyword {
+    fn deinit(self: MirKeyword) -> void {
+        return;
+    }
+}
+
+impl MirWordTokenStmt {
+    fn deinit(self: MirWordTokenStmt) -> void {
+        self.keywords.deinit();
+        return;
+    }
+}
+
 impl MirAstNodeTextStmt {
     fn deinit(self: MirAstNodeTextStmt) -> void {
         return;
@@ -1103,6 +1145,7 @@ impl MirStmt {
             StringToken(payload) => payload.deinit(),
             SkipLineComment(payload) => payload.deinit(),
             IsDocCommentStart(payload) => payload.deinit(),
+            WordToken(payload) => payload.deinit(),
             AstNodeText(payload) => payload.deinit(),
             StringLiteralSpan(payload) => payload.deinit(),
             PrintPayload(payload) => payload.deinit(),
@@ -2076,6 +2119,41 @@ pub fn is_doc_comment_start_stmt(
     return MirStmt::IsDocCommentStart(MirIsDocCommentStartStmt {
         source_name: source_name,
         start_name: start_name
+    });
+}
+
+pub fn keyword(text: []u8, tag: i64) -> MirKeyword {
+    return MirKeyword {
+        text: text,
+        tag: tag
+    };
+}
+
+pub fn word_token_stmt(
+    symbol: []u8,
+    source_name: []u8,
+    start_name: []u8,
+    current_name: []u8,
+    position_type: []u8,
+    token_type: []u8,
+    is_word_symbol: []u8,
+    token_symbol: []u8,
+    equal_bytes_symbol: []u8,
+    ident_tag: i64,
+    keywords: std::array::Array<MirKeyword>
+) -> MirStmt {
+    return MirStmt::WordToken(MirWordTokenStmt {
+        symbol: symbol,
+        source_name: source_name,
+        start_name: start_name,
+        current_name: current_name,
+        position_type: position_type,
+        token_type: token_type,
+        is_word_symbol: is_word_symbol,
+        token_symbol: token_symbol,
+        equal_bytes_symbol: equal_bytes_symbol,
+        ident_tag: ident_tag,
+        keywords: keywords
     });
 }
 

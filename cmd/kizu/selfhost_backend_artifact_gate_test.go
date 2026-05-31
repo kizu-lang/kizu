@@ -1177,6 +1177,15 @@ func requiredLLVMLexerTokenFragments() []string {
 		"define i1 @kizu_kizu__lexer_is_doc_comment_start(",
 		"%dc_is0 = icmp eq i8 %dc_b0, 47",
 		"%dc_ne = icmp ne i8 %dc_b3v, 47",
+		// word_token: an is_word scan loop, an empty-run single-byte Ident, a keyword table
+		// compared via equal_bytes against private string constants, and a multi-byte Ident.
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_word_token(",
+		"%wt_isw = call i1 @kizu_kizu__lexer_is_word(i8 %wt_byte)",
+		"@.kizu.compiled.kizu_kizu__lexer_word_token.kw0 = " +
+			"private unnamed_addr constant [2 x i8] c\"fn\"",
+		"%wt_kw0_eq = call i1 @kizu_selfhost__slice_equal(" +
+			"%kizu.slice.u8 %wt_text, %kizu.slice.u8 %wt_kw0_slice)",
+		"br i1 %wt_kw0_eq, label %wt_kw0_ret, label %wt_kw1_check",
 	}
 }
 
