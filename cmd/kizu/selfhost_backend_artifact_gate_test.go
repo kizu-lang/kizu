@@ -1195,6 +1195,13 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%rt_isd = call i1 @kizu_kizu__lexer_is_digit(i8 %rt_byte)",
 		"%rt_wt = call %kizu.kizu.lexer.token @kizu_kizu__lexer_word_token(" +
 			"%kizu.slice.u8 %source, i64 %start, %kizu.kizu.lexer.position %current)",
+		// token_at: an outer loop (start / current / has_doc / doc_start / doc_end phis) with an
+		// inner whitespace loop, comment skipping, and the final attach_doc(raw_token_at(...)).
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_token_at(",
+		"%ta_has_doc = phi i1 [ false, %entry ], [ %ta_doc_comment, %ta_comment ]",
+		"%ta_ws_isspace = call i1 @kizu_kizu__lexer_is_space(i8 %ta_ws_byte)",
+		"%ta_skipped = call %kizu.kizu.lexer.token @kizu_kizu__lexer_skip_line_comment(",
+		"%ta_tok = call %kizu.kizu.lexer.token @kizu_kizu__lexer_attach_doc(",
 	}
 }
 
