@@ -252,6 +252,49 @@ func TestSelfhostFunctionSignaturesUseParsedAST(t *testing.T) {
 	}
 }
 
+// TestSelfhostComponentFunctionCatalogAPI keeps component functions discoverable from AST.
+func TestSelfhostComponentFunctionCatalogAPI(t *testing.T) {
+	catalog := readSelfhostFile(t, "../../selfhost/src/ir/component_function_catalog.kizu")
+	required := []string{
+		"pub struct ComponentFunctionCatalog",
+		"pub struct ComponentFunctionEntry",
+		"pub struct ComponentFunctionSignature",
+		"pub fn collect_from_ast(",
+		"pub fn local_function_name(",
+		"pub fn append_qualified_function_name(",
+		"pub fn qualified_function_name(",
+		"pub fn function_node_id(",
+		"pub fn function_signature(",
+		"pub fn find_local_function_index(",
+		"pub fn find_qualified_function_index(",
+		"pub fn qualified_function_name_matches(",
+		"Program(program) => return collect_range(",
+		"FnDecl(fn_decl) => return append_function_from_decl(",
+		"pub params: std::kizu::ast::ChildRange",
+		"pub return_type: std::kizu::ast::NodeId",
+		"pub node_id: std::kizu::ast::NodeId",
+		"component_prefix: []u8",
+		"function_node_ids: std::array::Array<std::kizu::ast::NodeId>",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(catalog, fragment) {
+			t.Fatalf("component function catalog missing %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"lexer::tokenize(",
+		"append_selected_helper_body(",
+		"append_compiled_function_auto(",
+		"llvm_symbol",
+		"params_spec",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(catalog, fragment) {
+			t.Fatalf("component function catalog includes out-of-scope fragment %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST keeps the AST check entry parsed.
 func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
 	typeRefs := readSelfhostFile(t, "../../selfhost/src/types/type_ref_ast.kizu")

@@ -1,0 +1,259 @@
+pub struct ComponentFunctionSignature {
+    pub params: std::kizu::ast::ChildRange,
+    pub return_type: std::kizu::ast::NodeId,
+}
+
+pub struct ComponentFunctionEntry {
+    pub node_id: std::kizu::ast::NodeId,
+    pub signature: ComponentFunctionSignature,
+    pub local_start: i64,
+    pub local_end: i64,
+}
+
+pub struct ComponentFunctionCatalog {
+    source_text: []u8,
+    component_prefix: []u8,
+    // Keep entry fields in copy-friendly arrays until selfhost Array borrowing
+    // supports reading non-copy aggregate entries from catalog fields.
+    function_node_ids: std::array::Array<std::kizu::ast::NodeId>,
+    local_starts: std::array::Array<i64>,
+    local_ends: std::array::Array<i64>,
+    param_starts: std::array::Array<i64>,
+    param_lens: std::array::Array<i64>,
+    return_type_node_ids: std::array::Array<std::kizu::ast::NodeId>,
+}
+
+pub fn collect_from_ast(
+    allocator: Allocator,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    component_prefix: []u8
+) -> !ComponentFunctionCatalog {
+    var catalog = ComponentFunctionCatalog {
+        source_text: text,
+        component_prefix: component_prefix,
+        function_node_ids: std::array::Array<std::kizu::ast::NodeId>(allocator),
+        local_starts: std::array::Array<i64>(allocator),
+        local_ends: std::array::Array<i64>(allocator),
+        param_starts: std::array::Array<i64>(allocator),
+        param_lens: std::array::Array<i64>(allocator),
+        return_type_node_ids: std::array::Array<std::kizu::ast::NodeId>(allocator)
+    };
+    try collect_node(&var catalog, text, ast, root);
+    return catalog;
+}
+
+pub fn len(catalog: &ComponentFunctionCatalog) -> i64 {
+    return catalog.function_node_ids.len();
+}
+
+pub fn entry(
+    catalog: &ComponentFunctionCatalog,
+    index: i64
+) -> !ComponentFunctionEntry {
+    return ComponentFunctionEntry {
+        node_id: try function_node_id(catalog, index),
+        signature: try function_signature(catalog, index),
+        local_start: try catalog.local_starts.get(index),
+        local_end: try catalog.local_ends.get(index)
+    };
+}
+
+pub fn local_function_name(
+    catalog: &ComponentFunctionCatalog,
+    index: i64
+) -> ![]u8 borrows catalog {
+    let start = try catalog.local_starts.get(index);
+    let end = try catalog.local_ends.get(index);
+    return catalog.source_text[start..end];
+}
+
+pub fn append_qualified_function_name(
+    out: &var std::string::String,
+    catalog: &ComponentFunctionCatalog,
+    index: i64
+) -> !void {
+    let local_name = try local_function_name(catalog, index);
+    if std::mem::len(catalog.component_prefix) > 0 {
+        try out.append_bytes(catalog.component_prefix);
+        try out.append_bytes("::");
+    }
+    try out.append_bytes(local_name);
+    return;
+}
+
+pub fn qualified_function_name(
+    allocator: Allocator,
+    catalog: &ComponentFunctionCatalog,
+    index: i64
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_qualified_function_name(&var out, catalog, index);
+    return out;
+}
+
+pub fn function_node_id(
+    catalog: &ComponentFunctionCatalog,
+    index: i64
+) -> !std::kizu::ast::NodeId {
+    return try catalog.function_node_ids.get(index);
+}
+
+pub fn function_signature(
+    catalog: &ComponentFunctionCatalog,
+    index: i64
+) -> !ComponentFunctionSignature {
+    let param_start = try catalog.param_starts.get(index);
+    let param_len = try catalog.param_lens.get(index);
+    return ComponentFunctionSignature {
+        params: std::kizu::ast::ChildRange {
+            start: param_start,
+            len: param_len
+        },
+        return_type: try catalog.return_type_node_ids.get(index)
+    };
+}
+
+pub fn find_local_function_index(
+    catalog: &ComponentFunctionCatalog,
+    local_name: []u8
+) -> !i64 {
+    var index = 0;
+    while index < catalog.function_node_ids.len() {
+        let name = try local_function_name(catalog, index);
+        if std::mem::equal_bytes(name, local_name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return error("component function not found");
+}
+
+pub fn find_qualified_function_index(
+    catalog: &ComponentFunctionCatalog,
+    qualified_name: []u8
+) -> !i64 {
+    var index = 0;
+    while index < catalog.function_node_ids.len() {
+        if try qualified_function_name_matches(catalog, index, qualified_name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return error("component function not found");
+}
+
+pub fn qualified_function_name_matches(
+    catalog: &ComponentFunctionCatalog,
+    index: i64,
+    qualified_name: []u8
+) -> !bool {
+    let local_name = try local_function_name(catalog, index);
+    let prefix_len = std::mem::len(catalog.component_prefix);
+    let local_len = std::mem::len(local_name);
+    if prefix_len == 0 {
+        return std::mem::equal_bytes(qualified_name, local_name);
+    }
+    if std::mem::len(qualified_name) != prefix_len + 2 + local_len {
+        return false;
+    }
+    if !std::mem::equal_bytes(qualified_name[0..prefix_len], catalog.component_prefix) {
+        return false;
+    }
+    if qualified_name[prefix_len] != cast<u8>(58) or
+        qualified_name[prefix_len + 1] != cast<u8>(58) {
+        return false;
+    }
+    return std::mem::equal_bytes(
+        qualified_name[prefix_len + 2..std::mem::len(qualified_name)],
+        local_name
+    );
+}
+
+fn collect_node(
+    catalog: &var ComponentFunctionCatalog,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_range(catalog, text, ast, program.declarations);,
+        FnDecl(fn_decl) => return append_function_from_decl(
+            catalog,
+            text,
+            ast,
+            node_id,
+            fn_decl.name,
+            fn_decl.params,
+            fn_decl.return_type
+        );,
+        _ => return;,
+    }
+    return;
+}
+
+fn collect_range(
+    catalog: &var ComponentFunctionCatalog,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_node(catalog, text, ast, child);
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_function_from_decl(
+    catalog: &var ComponentFunctionCatalog,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_node: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId
+) -> !void {
+    let name_span = ast.get(name).span;
+    let local_name = std::mem::trim_ascii(text[name_span.start..name_span.end]);
+    if contains_local_function(catalog, local_name) {
+        return error("duplicate component function");
+    }
+    try catalog.function_node_ids.append(function_node);
+    try catalog.local_starts.append(name_span.start);
+    try catalog.local_ends.append(name_span.end);
+    try catalog.param_starts.append(params.start);
+    try catalog.param_lens.append(params.len);
+    try catalog.return_type_node_ids.append(return_type);
+    return;
+}
+
+fn contains_local_function(catalog: &ComponentFunctionCatalog, local_name: []u8) -> bool {
+    var index = 0;
+    while index < catalog.function_node_ids.len() {
+        let start = catalog.local_starts.get_or_panic(index);
+        let end = catalog.local_ends.get_or_panic(index);
+        let name = catalog.source_text[start..end];
+        if std::mem::equal_bytes(name, local_name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+impl ComponentFunctionCatalog {
+    fn deinit(self: ComponentFunctionCatalog) -> void {
+        self.function_node_ids.deinit();
+        self.local_starts.deinit();
+        self.local_ends.deinit();
+        self.param_starts.deinit();
+        self.param_lens.deinit();
+        self.return_type_node_ids.deinit();
+        return;
+    }
+}
