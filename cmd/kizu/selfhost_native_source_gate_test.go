@@ -353,6 +353,10 @@ func nativeSourceRunCases() []runParityCase {
 		nativeSourceRunStem("run_break_continue_alt"),
 		nativeSourceRunExampleForRange(),
 		nativeSourceRunStem("run_for_range_alt"),
+		nativeSourceRunExampleFsRead(),
+		nativeSourceRunOK("run_fs_read_alt", "run_fs_read_alt.kizu",
+			"run_fs_read_alt.stdout", "run_fs_read_alt"),
+		nativeSourceRunExampleFsReadMissing(),
 	}
 }
 
@@ -383,6 +387,36 @@ func nativeSourceRunExampleForRange() runParityCase {
 		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
 		artifactMode: "hosted-artifact",
 		artifactStem: "for",
+	}
+}
+
+// nativeSourceRunExampleFsRead checks std::fs::read_file lowering through a
+// source-built runner.
+func nativeSourceRunExampleFsRead() runParityCase {
+	return runParityCase{
+		name:         "run_example_fs_read",
+		command:      "run",
+		fixture:      "examples/fs_read.kizu",
+		exitCode:     0,
+		stdoutGolden: "selfhost/tests/cli/golden/run_fs_read.stdout",
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		artifactMode: "hosted-artifact",
+		artifactStem: "fs_read",
+	}
+}
+
+// nativeSourceRunExampleFsReadMissing checks the runtime error path for a
+// missing file through the emitted hosted artifact.
+func nativeSourceRunExampleFsReadMissing() runParityCase {
+	return runParityCase{
+		name:         "run_fs_read_missing",
+		command:      "run",
+		fixture:      "examples/negative/fs_read_missing.kizu",
+		exitCode:     1,
+		stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		artifactMode: "hosted-artifact",
+		artifactStem: "fs_read_missing",
 	}
 }
 
