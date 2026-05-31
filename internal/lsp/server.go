@@ -67,59 +67,66 @@ func (s *Server) handleMessage(body []byte) (bool, error) {
 
 // handleRequest responds to LSP requests that expect a JSON-RPC response.
 func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
-	switch msg.Method {
-	case "initialize":
-		return false, s.respond(msg.ID, initializeResult{
-			Capabilities: serverCapabilities{
-				TextDocumentSync:           textDocumentSyncKindFull,
-				DocumentFormattingProvider: true,
-				CompletionProvider: &completionOptions{
-					TriggerCharacters: []string{":", ".", "@"},
-				},
-				InlayHintProvider:      true,
-				DefinitionProvider:     true,
-				HoverProvider:          true,
-				DocumentSymbolProvider: true,
-				ReferencesProvider:     true,
-				SignatureHelpProvider: &signatureOptions{
-					TriggerCharacters: []string{"(", ","},
-				},
-				SemanticTokensProvider: &semanticTokensOptions{
-					Legend: semanticTokenLegend(),
-					Full:   true,
-				},
-				WorkspaceSymbolProvider:   true,
-				DocumentHighlightProvider: true,
-			},
-			ServerInfo: serverInfo{Name: "kizu-lsp"},
-		})
-	case "shutdown":
-		return false, s.respond(msg.ID, nil)
-	case "textDocument/formatting":
-		return false, s.handleFormattingRequest(msg)
-	case "textDocument/completion":
-		return false, s.handleCompletionRequest(msg)
-	case "textDocument/inlayHint":
-		return false, s.handleInlayHintRequest(msg)
-	case "textDocument/definition":
-		return false, s.handleDefinitionRequest(msg)
-	case "textDocument/hover":
-		return false, s.handleHoverRequest(msg)
-	case "textDocument/documentSymbol":
-		return false, s.handleDocumentSymbolRequest(msg)
-	case "textDocument/references":
-		return false, s.handleReferencesRequest(msg)
-	case "textDocument/signatureHelp":
-		return false, s.handleSignatureHelpRequest(msg)
-	case "textDocument/semanticTokens/full":
-		return false, s.handleSemanticTokensRequest(msg)
-	case "textDocument/documentHighlight":
-		return false, s.handleDocumentHighlightRequest(msg)
-	case "workspace/symbol":
-		return false, s.handleWorkspaceSymbolRequest(msg)
-	default:
-		return false, s.respondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
+	if handler, ok := s.requestHandlers()[msg.Method]; ok {
+		return false, handler(msg)
 	}
+	return false, s.respondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
+}
+
+// requestHandlers maps each supported request method to its handler. Splitting
+// the dispatch into a table keeps handleRequest flat instead of a large switch.
+func (s *Server) requestHandlers() map[string]func(incomingMessage) error {
+	return map[string]func(incomingMessage) error{
+		"initialize":                       s.handleInitializeRequest,
+		"shutdown":                         s.handleShutdownRequest,
+		"textDocument/formatting":          s.handleFormattingRequest,
+		"textDocument/completion":          s.handleCompletionRequest,
+		"textDocument/inlayHint":           s.handleInlayHintRequest,
+		"textDocument/definition":          s.handleDefinitionRequest,
+		"textDocument/hover":               s.handleHoverRequest,
+		"textDocument/documentSymbol":      s.handleDocumentSymbolRequest,
+		"textDocument/references":          s.handleReferencesRequest,
+		"textDocument/signatureHelp":       s.handleSignatureHelpRequest,
+		"textDocument/semanticTokens/full": s.handleSemanticTokensRequest,
+		"textDocument/documentHighlight":   s.handleDocumentHighlightRequest,
+		"textDocument/prepareRename":       s.handlePrepareRenameRequest,
+		"textDocument/rename":              s.handleRenameRequest,
+		"workspace/symbol":                 s.handleWorkspaceSymbolRequest,
+	}
+}
+
+// handleShutdownRequest acknowledges a shutdown request with a null result.
+func (s *Server) handleShutdownRequest(msg incomingMessage) error {
+	return s.respond(msg.ID, nil)
+}
+
+// handleInitializeRequest advertises the server's capabilities to the client.
+func (s *Server) handleInitializeRequest(msg incomingMessage) error {
+	return s.respond(msg.ID, initializeResult{
+		Capabilities: serverCapabilities{
+			TextDocumentSync:           textDocumentSyncKindFull,
+			DocumentFormattingProvider: true,
+			CompletionProvider: &completionOptions{
+				TriggerCharacters: []string{":", ".", "@"},
+			},
+			InlayHintProvider:      true,
+			DefinitionProvider:     true,
+			HoverProvider:          true,
+			DocumentSymbolProvider: true,
+			ReferencesProvider:     true,
+			SignatureHelpProvider: &signatureOptions{
+				TriggerCharacters: []string{"(", ","},
+			},
+			SemanticTokensProvider: &semanticTokensOptions{
+				Legend: semanticTokenLegend(),
+				Full:   true,
+			},
+			WorkspaceSymbolProvider:   true,
+			DocumentHighlightProvider: true,
+			RenameProvider:            &renameOptions{PrepareProvider: true},
+		},
+		ServerInfo: serverInfo{Name: "kizu-lsp"},
+	})
 }
 
 // handleFormattingRequest returns whole-document edits for a tracked document.
@@ -222,6 +229,24 @@ func (s *Server) handleDocumentHighlightRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.documentHighlights(params.TextDocument.URI, params.Position))
+}
+
+// handlePrepareRenameRequest returns the editable range for the cursor symbol.
+func (s *Server) handlePrepareRenameRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.prepareRename(params.TextDocument.URI, params.Position))
+}
+
+// handleRenameRequest returns a workspace edit renaming the cursor symbol.
+func (s *Server) handleRenameRequest(msg incomingMessage) error {
+	var params renameParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.rename(params.TextDocument.URI, params.Position, params.NewName))
 }
 
 // handleWorkspaceSymbolRequest returns package symbols matching a query.

@@ -82,6 +82,11 @@ type serverCapabilities struct {
 	SemanticTokensProvider     *semanticTokensOptions `json:"semanticTokensProvider,omitempty"`
 	WorkspaceSymbolProvider    bool                   `json:"workspaceSymbolProvider,omitempty"`
 	DocumentHighlightProvider  bool                   `json:"documentHighlightProvider,omitempty"`
+	RenameProvider             *renameOptions         `json:"renameProvider,omitempty"`
+}
+
+type renameOptions struct {
+	PrepareProvider bool `json:"prepareProvider"`
 }
 
 type completionOptions struct {
@@ -214,6 +219,16 @@ type location struct {
 type documentHighlight struct {
 	Range Range `json:"range"`
 	Kind  int   `json:"kind,omitempty"`
+}
+
+type renameParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+	NewName      string                 `json:"newName"`
+}
+
+type workspaceEdit struct {
+	Changes map[string][]textEdit `json:"changes"`
 }
 
 type hover struct {

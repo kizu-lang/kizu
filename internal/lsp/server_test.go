@@ -58,6 +58,7 @@ func requireInitializeCapabilities(t *testing.T, capabilities map[string]any) {
 	requireCapability(t, capabilities, "referencesProvider")
 	requireCapability(t, capabilities, "workspaceSymbolProvider")
 	requireCapability(t, capabilities, "documentHighlightProvider")
+	requireCapabilityObject(t, capabilities, "renameProvider")
 	requireCapabilityObject(t, capabilities, "completionProvider")
 	requireCompletionTrigger(t, capabilities, "@")
 	requireCapabilityObject(t, capabilities, "signatureHelpProvider")
