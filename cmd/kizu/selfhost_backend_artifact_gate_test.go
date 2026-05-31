@@ -1172,6 +1172,11 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%slc_notnl = icmp ne i8 %slc_byte, 10",
 		"%slc_advanced = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_byte(" +
 			"i8 %slc_byte, %kizu.kizu.lexer.position %slc_current)",
+		// is_doc_comment_start: a bounded branch chain testing three slash bytes (47) plus a
+		// fourth-slash demotion, returning i1.
+		"define i1 @kizu_kizu__lexer_is_doc_comment_start(",
+		"%dc_is0 = icmp eq i8 %dc_b0, 47",
+		"%dc_ne = icmp ne i8 %dc_b3v, 47",
 	}
 }
 
