@@ -409,6 +409,8 @@ fn append_multi_stmt(
         WordToken(payload) => try append_multi_word_token(out, payload);,
         RawToken(payload) => try append_multi_raw_token(out, payload);,
         TokenAt(payload) => try append_multi_token_at(out, payload);,
+        FirstToken(payload) => try append_multi_first_token(out, payload);,
+        NextToken(payload) => try append_multi_next_token(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
@@ -1598,6 +1600,101 @@ fn append_multi_token_at(
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.token_type);
     try append_ll_line(out, " %ta_tok");
+    return;
+}
+
+// append_first_token_globals: first_token forwards only value arguments, so it emits no
+// string-constant globals (tracker 961).
+fn append_first_token_globals(stmt: &compiled_mir::MirFirstTokenStmt) -> !void {
+    return;
+}
+
+// append_multi_first_token renders first_token(source): build the (1, 1) start Position then return
+// token_at(source, 0, position) (tracker 961, scope 4 prerequisite).
+fn append_multi_first_token(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirFirstTokenStmt
+) -> !void {
+    try out.append_bytes("  %ft_pos = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.position_symbol);
+    try append_ll_line(out, "(i64 1, i64 1)");
+    try out.append_bytes("  %ft_tok = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.token_at_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try out.append_bytes(", i64 0, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %ft_pos)");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %ft_tok");
+    return;
+}
+
+// append_next_token_globals: next_token forwards only value arguments, so it emits no
+// string-constant globals (tracker 961).
+fn append_next_token_globals(stmt: &compiled_mir::MirNextTokenStmt) -> !void {
+    return;
+}
+
+// append_multi_next_token renders next_token(source, previous): read previous.start / end / line /
+// column, advance the Position across the previous token span via advance_position, then return
+// token_at(source, previous.end, next) (tracker 961, scope 4 prerequisite). Token fields: start=1,
+// end=2, line=3, column=4.
+fn append_multi_next_token(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirNextTokenStmt
+) -> !void {
+    try out.append_bytes("  %nt_pstart = extractvalue ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.previous_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %nt_pend = extractvalue ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.previous_name);
+    try append_ll_line(out, ", 2");
+    try out.append_bytes("  %nt_pline = extractvalue ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.previous_name);
+    try append_ll_line(out, ", 3");
+    try out.append_bytes("  %nt_pcol = extractvalue ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.previous_name);
+    try append_ll_line(out, ", 4");
+    try out.append_bytes("  %nt_pos = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.position_symbol);
+    try append_ll_line(out, "(i64 %nt_pline, i64 %nt_pcol)");
+    try out.append_bytes("  %nt_next = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.advance_position_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try out.append_bytes(", i64 %nt_pstart, i64 %nt_pend, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %nt_pos)");
+    try out.append_bytes("  %nt_tok = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.token_at_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try out.append_bytes(", i64 %nt_pend, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %nt_next)");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %nt_tok");
     return;
 }
 
@@ -2977,6 +3074,8 @@ fn append_stmt_globals(
         WordToken(payload) => try append_word_token_globals(out, payload);,
         RawToken(payload) => try append_raw_token_globals(payload);,
         TokenAt(payload) => try append_token_at_globals(payload);,
+        FirstToken(payload) => try append_first_token_globals(payload);,
+        NextToken(payload) => try append_next_token_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,

@@ -1202,6 +1202,11 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%ta_ws_isspace = call i1 @kizu_kizu__lexer_is_space(i8 %ta_ws_byte)",
 		"%ta_skipped = call %kizu.kizu.lexer.token @kizu_kizu__lexer_skip_line_comment(",
 		"%ta_tok = call %kizu.kizu.lexer.token @kizu_kizu__lexer_attach_doc(",
+		// first_token / next_token: tokenizer entry points wrapping token_at / advance_position.
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_first_token(",
+		"%ft_pos = call %kizu.kizu.lexer.position @kizu_kizu__lexer_position(i64 1, i64 1)",
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_next_token(",
+		"%nt_next = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_position(",
 	}
 }
 
