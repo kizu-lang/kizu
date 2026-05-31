@@ -1,3 +1,156 @@
+import selfhost::parser;
+
+pub fn gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let source = "fn add(left: i64, right: i64) -> i64 { return left; }
+fn zero() -> i64 { return 0; }";
+    var result = try parser::parse_checked_file(
+        allocator,
+        "component_function_catalog_gate.kizu",
+        source
+    );
+    defer result.deinit();
+    var catalog = try collect_from_ast(allocator, source, result.ast, result.root, "demo");
+    defer catalog.deinit();
+
+    std::testing::expect_equal<i64>(2, len(&catalog));
+    try expect_local_name(&catalog, 0, "add");
+    try expect_local_name(&catalog, 1, "zero");
+    try expect_appended_qualified_name(allocator, &catalog, 0, "demo::add");
+    std::testing::expect(try qualified_function_name_matches(&catalog, 0, "demo::add"));
+    std::testing::expect(!(try qualified_function_name_matches(&catalog, 0, "demo::zero")));
+
+    let add_index = try find_local_function_index(&catalog, "add");
+    let zero_index = try find_qualified_function_index(&catalog, "demo::zero");
+    std::testing::expect_equal<i64>(0, add_index);
+    std::testing::expect_equal<i64>(1, zero_index);
+    let add_signature = try function_signature(&catalog, add_index);
+    let zero_signature = try function_signature(&catalog, zero_index);
+    try expect_add_signature(
+        source,
+        result.ast,
+        add_signature.params,
+        add_signature.return_type
+    );
+    try expect_zero_signature(
+        source,
+        result.ast,
+        zero_signature.params,
+        zero_signature.return_type
+    );
+
+    print("component-catalog-functions");
+    print(len(&catalog));
+    print("component-catalog-add-index");
+    print(add_index);
+    print("component-catalog-zero-index");
+    print(zero_index);
+    return;
+}
+
+fn expect_local_name(
+    catalog: &ComponentFunctionCatalog,
+    index: i64,
+    expected: []u8
+) -> !void {
+    let name = try local_function_name(catalog, index);
+    std::testing::expect_equal<[]u8>(expected, name);
+    return;
+}
+
+fn expect_appended_qualified_name(
+    allocator: Allocator,
+    catalog: &ComponentFunctionCatalog,
+    index: i64,
+    expected: []u8
+) -> !void {
+    var qualified = std::string::String(allocator);
+    defer qualified.deinit();
+    try append_qualified_function_name(&var qualified, catalog, index);
+    let qualified_bytes = qualified.as_bytes();
+    std::testing::expect_equal<[]u8>(expected, qualified_bytes);
+    return;
+}
+
+fn expect_add_signature(
+    source: []u8,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId
+) -> !void {
+    std::testing::expect_equal<i64>(2, params.len);
+    try expect_param(source, ast, params, 0, "left", "i64");
+    try expect_param(source, ast, params, 1, "right", "i64");
+    expect_type_text(source, ast, return_type, "i64");
+    return;
+}
+
+fn expect_zero_signature(
+    source: []u8,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId
+) -> !void {
+    std::testing::expect_equal<i64>(0, params.len);
+    expect_type_text(source, ast, return_type, "i64");
+    return;
+}
+
+fn expect_param(
+    source: []u8,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    index: i64,
+    expected_name: []u8,
+    expected_type: []u8
+) -> !void {
+    let param_id = try ast.child_at(params, index);
+    let node = ast.get(param_id);
+    match node.data {
+        Param(param) => return expect_param_nodes(
+            source,
+            ast,
+            param.name,
+            param.type_node,
+            expected_name,
+            expected_type
+        );,
+        _ => return std::testing::fail("expected component function param");,
+    }
+}
+
+fn expect_param_nodes(
+    source: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    expected_name: []u8,
+    expected_type: []u8
+) -> !void {
+    std::testing::expect_equal<[]u8>(expected_name, ast_node_text(source, ast, name));
+    expect_type_text(source, ast, type_node, expected_type);
+    return;
+}
+
+fn expect_type_text(
+    source: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    expected: []u8
+) -> void {
+    std::testing::expect_equal<[]u8>(expected, ast_node_text(source, ast, node_id));
+    return;
+}
+
+fn ast_node_text(
+    source: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 borrows source {
+    let span = ast.get(node_id).span;
+    return std::mem::trim_ascii(source[span.start..span.end]);
+}
+
 pub struct ComponentFunctionSignature {
     pub params: std::kizu::ast::ChildRange,
     pub return_type: std::kizu::ast::NodeId,
