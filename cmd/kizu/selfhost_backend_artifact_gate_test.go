@@ -1164,6 +1164,14 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%st_end = phi i64 [ %st_init, %entry ], [ %st_next, %st_body ]",
 		"%st_notq = icmp ne i8 %st_byte, 34",
 		"%st_endp1 = add i64 %st_end, 1",
+		// skip_line_comment threads a two-phi loop (i64 end + Position current) past a comment line,
+		// folding advance_byte until newline (byte 10), then building the Eof Token.
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_skip_line_comment(",
+		"%slc_current = phi %kizu.kizu.lexer.position [ %initial, %entry ], " +
+			"[ %slc_advanced, %slc_body ]",
+		"%slc_notnl = icmp ne i8 %slc_byte, 10",
+		"%slc_advanced = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_byte(" +
+			"i8 %slc_byte, %kizu.kizu.lexer.position %slc_current)",
 	}
 }
 

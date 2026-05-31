@@ -404,6 +404,7 @@ fn append_multi_stmt(
         AdvancePosition(payload) => try append_multi_advance_position(out, payload);,
         NumberToken(payload) => try append_multi_number_token(out, payload);,
         StringToken(payload) => try append_multi_string_token(out, payload);,
+        SkipLineComment(payload) => try append_multi_skip_line_comment(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
@@ -804,6 +805,70 @@ fn append_string_token_return(
     try out.append_bytes(stmt.token_type);
     try out.append_bytes(" %");
     try append_ll_line(out, result_name);
+    return;
+}
+
+// append_skip_line_comment_globals: skip_line_comment forwards only value arguments, so it emits
+// no string-constant globals (tracker 961).
+fn append_skip_line_comment_globals(stmt: &compiled_mir::MirSkipLineCommentStmt) -> !void {
+    return;
+}
+
+// append_multi_skip_line_comment renders skip_line_comment(source, start, initial): a two-phi loop
+// threading the i64 end and the Position struct current past a comment line, folding advance_byte
+// over each byte while end is in bounds and source[end] is not a newline (byte 10), then building
+// the Eof Token at end (tracker 961, scope 4 prerequisite). len(source) is the slice length field
+// read inline as extractvalue field 1.
+fn append_multi_skip_line_comment(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirSkipLineCommentStmt
+) -> !void {
+    try out.append_bytes("  %slc_length = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %slc_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  br label %slc_head");
+    try append_ll_line(out, "slc_head:");
+    try out.append_bytes("  %slc_end = phi i64 [ %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", %entry ], [ %slc_next, %slc_body ]");
+    try out.append_bytes("  %slc_current = phi ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(stmt.initial_name);
+    try append_ll_line(out, ", %entry ], [ %slc_advanced, %slc_body ]");
+    try append_ll_line(out, "  %slc_inb = icmp slt i64 %slc_end, %slc_length");
+    try append_ll_line(out, "  br i1 %slc_inb, label %slc_check, label %slc_exit");
+    try append_ll_line(out, "slc_check:");
+    try append_ll_line(out, "  %slc_bptr = getelementptr i8, ptr %slc_source_ptr, i64 %slc_end");
+    try append_ll_line(out, "  %slc_byte = load i8, ptr %slc_bptr");
+    try append_ll_line(out, "  %slc_notnl = icmp ne i8 %slc_byte, 10");
+    try append_ll_line(out, "  br i1 %slc_notnl, label %slc_body, label %slc_exit");
+    try append_ll_line(out, "slc_body:");
+    try out.append_bytes("  %slc_advanced = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.advance_byte_symbol);
+    try out.append_bytes("(i8 %slc_byte, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %slc_current)");
+    try append_ll_line(out, "  %slc_next = add i64 %slc_end, 1");
+    try append_ll_line(out, "  br label %slc_head");
+    try append_ll_line(out, "slc_exit:");
+    try out.append_bytes("  %slc_tok = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.token_symbol);
+    try out.append_bytes("(i64 ");
+    try std::fmt::append_i64(out, stmt.eof_tag);
+    try out.append_bytes(", i64 %slc_end, i64 %slc_end, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %slc_current)");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %slc_tok");
     return;
 }
 
@@ -2178,6 +2243,7 @@ fn append_stmt_globals(
         AdvancePosition(payload) => try append_advance_position_globals(payload);,
         NumberToken(payload) => try append_number_token_globals(payload);,
         StringToken(payload) => try append_string_token_globals(payload);,
+        SkipLineComment(payload) => try append_skip_line_comment_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,
