@@ -293,6 +293,43 @@ func (c *Checker) Check(program *ast.Program) error {
 	return nil
 }
 
+// CheckAll validates the program like Check but accumulates one error per
+// top-level declaration instead of stopping at the first, so editors can show
+// every independent type error at once. Setup phases that the body checks
+// depend on still fail fast, since later errors would be noise without them.
+func (c *Checker) CheckAll(program *ast.Program) []error {
+	if err := c.collectFunctions(program); err != nil {
+		return []error{err}
+	}
+	if err := c.checkPublicAPI(program); err != nil {
+		return []error{err}
+	}
+	if err := c.checkOwnerUnionContracts(program); err != nil {
+		return []error{err}
+	}
+	var errs []error
+	for _, decl := range program.Decls {
+		switch d := decl.(type) {
+		case *ast.FunctionDecl:
+			if len(d.TypeParams) > 0 {
+				continue
+			}
+			if err := c.checkFunction(c.functions[d.Name]); err != nil {
+				errs = append(errs, err)
+			}
+		case *ast.TestDecl:
+			if err := c.checkTestDecl(d); err != nil {
+				errs = append(errs, err)
+			}
+		case *ast.ImplDecl:
+			if err := c.checkImpl(d); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errs
+}
+
 // collectFunctions registers top-level function signatures before body checks.
 func (c *Checker) collectFunctions(program *ast.Program) error {
 	if err := c.collectTypesAndMethods(program); err != nil {

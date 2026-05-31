@@ -2000,6 +2000,38 @@ fn main() {
 	}
 }
 
+// TestCheckAllCollectsPerFunctionErrors checks CheckAll reports each function's
+// error instead of stopping at the first, while Check still returns just one.
+func TestCheckAllCollectsPerFunctionErrors(t *testing.T) {
+	source := "fn first() -> i64 { return missing_one; }\n" +
+		"fn second() -> i64 { return missing_two; }\n"
+	p := parser.New(lexer.New(source))
+	program := p.ParseProgram()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("unexpected parse errors: %v", p.Errors())
+	}
+
+	if errs := New().CheckAll(program); len(errs) != 2 {
+		t.Fatalf("CheckAll returned %d errors, want 2", len(errs))
+	}
+	if err := New().Check(program); err == nil {
+		t.Fatal("Check returned nil, want the first error")
+	}
+}
+
+// TestCheckAllReturnsEmptyForValidProgram checks a sound program yields no errors.
+func TestCheckAllReturnsEmptyForValidProgram(t *testing.T) {
+	source := "fn main() { print(\"ok\"); }\n"
+	p := parser.New(lexer.New(source))
+	program := p.ParseProgram()
+	if len(p.Errors()) > 0 {
+		t.Fatalf("unexpected parse errors: %v", p.Errors())
+	}
+	if errs := New().CheckAll(program); len(errs) != 0 {
+		t.Fatalf("CheckAll returned %#v, want no errors", errs)
+	}
+}
+
 // checkSource parses and type-checks a source snippet.
 func checkSource(source string) error {
 	p := parser.New(lexer.New(source))

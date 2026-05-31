@@ -11,8 +11,8 @@ import (
 // TestAnalyzeReportsParsePosition checks parser diagnostics keep token positions.
 func TestAnalyzeReportsParsePosition(t *testing.T) {
 	diagnostics := Analyze("let x = 1;\n")
-	if len(diagnostics) != 1 {
-		t.Fatalf("got %d diagnostics, want 1", len(diagnostics))
+	if len(diagnostics) == 0 {
+		t.Fatalf("got %d diagnostics, want at least 1", len(diagnostics))
 	}
 	got := diagnostics[0]
 	if got.Range.Start.Line != 0 || got.Range.Start.Character != 0 {
@@ -44,6 +44,23 @@ func TestAnalyzeReportsCheckDiagnostic(t *testing.T) {
 	}
 	if diagnostics[0].Message == "" {
 		t.Fatal("diagnostic message is empty")
+	}
+}
+
+// TestAnalyzeReportsMultipleTypeErrors checks each function's error is reported,
+// ordered by position, rather than only the first.
+func TestAnalyzeReportsMultipleTypeErrors(t *testing.T) {
+	source := "fn first() -> i64 { return missing_one; }\n" +
+		"fn second() -> i64 { return missing_two; }\n"
+	diagnostics := Analyze(source)
+	if len(diagnostics) != 2 {
+		t.Fatalf("got %d diagnostics, want 2 (one per function)", len(diagnostics))
+	}
+	joined := diagnostics[0].Message + "\n" + diagnostics[1].Message
+	for _, want := range []string{"missing_one", "missing_two"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("diagnostics %q missing reference to %q", joined, want)
+		}
 	}
 }
 

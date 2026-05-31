@@ -42,8 +42,8 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	}
 	params := messages[1]["params"].(map[string]any)
 	diagnostics := params["diagnostics"].([]any)
-	if len(diagnostics) != 1 {
-		t.Fatalf("got %d diagnostics, want 1", len(diagnostics))
+	if len(diagnostics) == 0 {
+		t.Fatalf("got %d diagnostics, want at least 1", len(diagnostics))
 	}
 }
 
