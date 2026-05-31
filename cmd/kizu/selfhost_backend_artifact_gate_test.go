@@ -442,6 +442,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMParserPredicateFragments()...)
 	fragments = append(fragments, requiredLLVMSourcePredicateFragments()...)
 	fragments = append(fragments, requiredLLVMSourceModulePathFragments()...)
+	fragments = append(fragments, requiredLLVMSourcePackagePrefixFragments()...)
 	fragments = append(fragments, requiredLLVMSourceLoaderFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
@@ -494,6 +495,33 @@ func requiredLLVMSourceModulePathFragments() []string {
 		"%t7_gep = getelementptr i8, ptr %t7_baseptr, i64 %t5",
 		"%t7_len = sub i64 %t6, %t5",
 		"ret %kizu.slice.u8 %t7",
+	}
+}
+
+// requiredLLVMSourcePackagePrefixFragments locks source::starts_with_package_prefix
+// compiled through mini MIR field lets, stdlib slice calls, checked slice call
+// arguments, checked byte indexes, and the final boolean conjunction.
+func requiredLLVMSourcePackagePrefixFragments() []string {
+	return []string{
+		"define i1 @kizu_selfhost__source_starts_with_package_prefix",
+		"%t0 = extractvalue %kizu.selfhost.source.source_file %file, 2",
+		"%package_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %package_name)",
+		"%t3 = icmp slt i64 %package_len, 1",
+		"%name_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %name)",
+		"%t6 = icmp slt i64 %name_len, %package_len",
+		"%arg1000007_0_send = add i64 %package_len, 0",
+		"%t7 = call i1 @kizu_selfhost__slice_equal(" +
+			"%kizu.slice.u8 %arg1000007_0_slice, %kizu.slice.u8 %package_name)",
+		"%t8 = xor i1 %t7, true",
+		"%t11 = icmp eq i64 %name_len, %package_len",
+		"%t16 = icmp sle i64 %name_len, %t15",
+		"%t18_gep = getelementptr i8, ptr %t18_ptr, i64 %package_len",
+		"%t20 = icmp eq i8 %t18, 58",
+		"%t23 = add i64 %package_len, 1",
+		"%t24_gep = getelementptr i8, ptr %t24_ptr, i64 %t23",
+		"%t26 = icmp eq i8 %t24, 58",
+		"%t27 = and i1 %t20, %t26",
+		"ret i1 %t27",
 	}
 }
 
