@@ -349,6 +349,23 @@ func nativeSourceRunCases() []runParityCase {
 		nativeSourceRunStem("run_if_minor"),
 		nativeSourceRunStem("run_functions"),
 		nativeSourceRunStem("run_functions_nested"),
+		nativeSourceRunExampleBreakContinue(),
+		nativeSourceRunStem("run_break_continue_alt"),
+	}
+}
+
+// nativeSourceRunExampleBreakContinue checks loop break/continue lowering through
+// a source-built runner.
+func nativeSourceRunExampleBreakContinue() runParityCase {
+	return runParityCase{
+		name:         "run_example_break_continue",
+		command:      "run",
+		fixture:      "examples/break_continue.kizu",
+		exitCode:     0,
+		stdoutGolden: "selfhost/tests/cli/golden/run_break_continue.stdout",
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		artifactMode: "hosted-artifact",
+		artifactStem: "break_continue",
 	}
 }
 

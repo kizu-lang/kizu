@@ -1000,8 +1000,8 @@ func requiredLLVMLowerLetBindingFragments() []string {
 
 // requiredLLVMLowerRunAstBlockFragments returns the tracker-961 scope-4 prerequisite
 // lower_run_ast_block AST traversal lowering compiled into stage2: the stateful run-block
-// traversal. It first probes the try-void block shape, then threads a mutable LocalTable + index
-// through a bounded loop (two head phis), lowering non-terminal Let bindings
+// traversal. It first probes the try-void and loop-i64 block shapes, then threads a mutable
+// LocalTable + index through a bounded loop (two head phis), lowering non-terminal Let bindings
 // (lower_let_binding + insert_local) and the terminal ExprStmt (lower_print_statement),
 // propagating the checked Ast.child_at failure and returning the wrapped unsupported_run_ast() on
 // rejection. These fragments lock the lowered body shape.
@@ -1010,11 +1010,13 @@ func requiredLLVMLowerRunAstBlockFragments() []string {
 		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_block(",
 		"%lrb_try_result = call %kizu.error.run_ast " +
 			"@kizu_selfhost__ir_codegen_lower_try_void_block(",
+		"%lrb_loop_result = call %kizu.error.run_ast " +
+			"@kizu_selfhost__ir_codegen_lower_loop_i64_block(",
 		"%lrb_locals0 = call %kizu.selfhost.codegen.local_table " +
 			"@kizu_selfhost__ir_codegen_empty_local_table(%kizu.slice.u8 %text)",
 		"%lrb_locals = phi %kizu.selfhost.codegen.local_table " +
-			"[ %lrb_locals0, %lrb_try_continue ], [ %lrb_locals_next, %lrb_insert ]",
-		"%lrb_index = phi i64 [ 0, %lrb_try_continue ], [ %lrb_index_next, %lrb_insert ]",
+			"[ %lrb_locals0, %lrb_loop_continue ], [ %lrb_locals_next, %lrb_insert ]",
+		"%lrb_index = phi i64 [ 0, %lrb_loop_continue ], [ %lrb_index_next, %lrb_insert ]",
 		"%lrb_child = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(",
 		"%lrb_terminal = icmp eq i64 %lrb_index1, %lrb_stmts_len",
 		"%lrb_is_let = icmp eq i64 %lrb_tag, 21",
