@@ -1307,6 +1307,35 @@ pub fn lower_raw_token_function(
     );
 }
 
+// lower_tokenize_function lowers std::kizu::lexer::tokenize into a single Tokenize statement: it
+// builds a dynamic Array<Token> and fills it from first_token / next_token until Eof, returning the
+// array as the !Array success (tracker 961, scope 4 prerequisite). Its dynamic array construction,
+// try-append loop, and error-union-owned return the generic path does not model, so it is
+// dispatched by name. Token is seven i64 fields (56 bytes); the Eof tag comes from the enum facts.
+pub fn lower_tokenize_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let allocator_name = try nth_param_field(params_spec, 0, true);
+    let source_name = try nth_param_field(params_spec, 1, true);
+    let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", "Eof"
+    );
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::tokenize_stmt(
+        allocator_name, source_name, "%kizu.kizu.lexer.token", "%kizu.owned",
+        llvm_return_type, "%kizu.error.void", "kizu_rt_array_new", "kizu_rt_array_append",
+        "kizu_kizu__lexer_first_token", "kizu_kizu__lexer_next_token", eof_tag, 56
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // lower_first_token_function lowers std::kizu::lexer::first_token into a single FirstToken
 // statement: 'return token_at(source, 0, position(1, 1));' (tracker 961, scope 4 prerequisite).
 // Its nested call argument the generic path does not model, so it is dispatched by name.
