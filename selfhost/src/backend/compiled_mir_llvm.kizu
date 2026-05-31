@@ -405,6 +405,7 @@ fn append_multi_stmt(
         NumberToken(payload) => try append_multi_number_token(out, payload);,
         StringToken(payload) => try append_multi_string_token(out, payload);,
         SkipLineComment(payload) => try append_multi_skip_line_comment(out, payload);,
+        IsDocCommentStart(payload) => try append_multi_is_doc_comment_start(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
@@ -869,6 +870,70 @@ fn append_multi_skip_line_comment(
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.token_type);
     try append_ll_line(out, " %slc_tok");
+    return;
+}
+
+// append_is_doc_comment_start_globals: is_doc_comment_start forwards only value arguments, so it
+// emits no string-constant globals (tracker 961).
+fn append_is_doc_comment_start_globals(stmt: &compiled_mir::MirIsDocCommentStartStmt) -> !void {
+    return;
+}
+
+// append_multi_is_doc_comment_start renders is_doc_comment_start(source, start): a bounded branch
+// chain returning i1. It bails to false when start + 2 is out of bounds, requires source[start],
+// source[start + 1] and source[start + 2] to each be a slash (byte 47), and returns true unless a
+// fourth in-bounds slash (start + 3) demotes the run to a non-doc comment (tracker 961, scope 4
+// prerequisite). All byte offsets and the slash sentinel are fixed; len(source) is the slice
+// length field read inline as extractvalue field 1.
+fn append_multi_is_doc_comment_start(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIsDocCommentStartStmt
+) -> !void {
+    try out.append_bytes("  %dc_length = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %dc_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  %dc_start2 = add i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", 2");
+    try append_ll_line(out, "  %dc_oob = icmp sge i64 %dc_start2, %dc_length");
+    try append_ll_line(out, "  br i1 %dc_oob, label %dc_false, label %dc_s0");
+    try append_ll_line(out, "dc_s0:");
+    try out.append_bytes("  %dc_p0 = getelementptr i8, ptr %dc_source_ptr, i64 %");
+    try append_ll_line(out, stmt.start_name);
+    try append_ll_line(out, "  %dc_b0 = load i8, ptr %dc_p0");
+    try append_ll_line(out, "  %dc_is0 = icmp eq i8 %dc_b0, 47");
+    try append_ll_line(out, "  br i1 %dc_is0, label %dc_s1, label %dc_false");
+    try append_ll_line(out, "dc_s1:");
+    try out.append_bytes("  %dc_start1 = add i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", 1");
+    try append_ll_line(out, "  %dc_p1 = getelementptr i8, ptr %dc_source_ptr, i64 %dc_start1");
+    try append_ll_line(out, "  %dc_b1 = load i8, ptr %dc_p1");
+    try append_ll_line(out, "  %dc_is1 = icmp eq i8 %dc_b1, 47");
+    try append_ll_line(out, "  br i1 %dc_is1, label %dc_s2, label %dc_false");
+    try append_ll_line(out, "dc_s2:");
+    try append_ll_line(out, "  %dc_p2 = getelementptr i8, ptr %dc_source_ptr, i64 %dc_start2");
+    try append_ll_line(out, "  %dc_b2 = load i8, ptr %dc_p2");
+    try append_ll_line(out, "  %dc_is2 = icmp eq i8 %dc_b2, 47");
+    try append_ll_line(out, "  br i1 %dc_is2, label %dc_fourth, label %dc_false");
+    try append_ll_line(out, "dc_fourth:");
+    try out.append_bytes("  %dc_start3 = add i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", 3");
+    try append_ll_line(out, "  %dc_oob3 = icmp sge i64 %dc_start3, %dc_length");
+    try append_ll_line(out, "  br i1 %dc_oob3, label %dc_true, label %dc_b3");
+    try append_ll_line(out, "dc_b3:");
+    try append_ll_line(out, "  %dc_p3 = getelementptr i8, ptr %dc_source_ptr, i64 %dc_start3");
+    try append_ll_line(out, "  %dc_b3v = load i8, ptr %dc_p3");
+    try append_ll_line(out, "  %dc_ne = icmp ne i8 %dc_b3v, 47");
+    try append_ll_line(out, "  br i1 %dc_ne, label %dc_true, label %dc_false");
+    try append_ll_line(out, "dc_true:");
+    try append_ll_line(out, "  ret i1 true");
+    try append_ll_line(out, "dc_false:");
+    try append_ll_line(out, "  ret i1 false");
     return;
 }
 
@@ -2244,6 +2309,7 @@ fn append_stmt_globals(
         NumberToken(payload) => try append_number_token_globals(payload);,
         StringToken(payload) => try append_string_token_globals(payload);,
         SkipLineComment(payload) => try append_skip_line_comment_globals(payload);,
+        IsDocCommentStart(payload) => try append_is_doc_comment_start_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,

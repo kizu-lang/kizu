@@ -502,6 +502,18 @@ pub struct MirSkipLineCommentStmt {
     pub eof_tag: i64,
 }
 
+// MirIsDocCommentStartStmt backs is_doc_comment_start(source, start): 'let length = len(source);
+// if start + 2 >= length { return false; } if source[start] != 47 or source[start + 1] != 47 or
+// source[start + 2] != 47 { return false; } return start + 3 >= length or source[start + 3] != 47;'
+// (tracker 961, scope 4 prerequisite). The renderer emits a bounded branch chain returning i1:
+// three slash bytes (47) make a comment, and a fourth slash (start + 3 in bounds) demotes it from
+// a doc comment. All byte offsets / sentinels are fixed, so the renderer needs only the slice and
+// start names.
+pub struct MirIsDocCommentStartStmt {
+    pub source_name: []u8,
+    pub start_name: []u8,
+}
+
 // MirStringLiteralSpanStmt backs string_literal_span(text, ast, node_id): it binds the AstNode
 // via Ast.get, reads the Span (AstNode field 0) start/end, rejects spans shorter than the two
 // surrounding quote bytes, checks the leading/trailing double-quote (byte 34), forwards the
@@ -694,6 +706,7 @@ pub union MirStmt {
     NumberToken(MirNumberTokenStmt),
     StringToken(MirStringTokenStmt),
     SkipLineComment(MirSkipLineCommentStmt),
+    IsDocCommentStart(MirIsDocCommentStartStmt),
     AstNodeText(MirAstNodeTextStmt),
     StringLiteralSpan(MirStringLiteralSpanStmt),
     PrintPayload(MirPrintPayloadStmt),
@@ -963,6 +976,12 @@ impl MirSkipLineCommentStmt {
     }
 }
 
+impl MirIsDocCommentStartStmt {
+    fn deinit(self: MirIsDocCommentStartStmt) -> void {
+        return;
+    }
+}
+
 impl MirAstNodeTextStmt {
     fn deinit(self: MirAstNodeTextStmt) -> void {
         return;
@@ -1083,6 +1102,7 @@ impl MirStmt {
             NumberToken(payload) => payload.deinit(),
             StringToken(payload) => payload.deinit(),
             SkipLineComment(payload) => payload.deinit(),
+            IsDocCommentStart(payload) => payload.deinit(),
             AstNodeText(payload) => payload.deinit(),
             StringLiteralSpan(payload) => payload.deinit(),
             PrintPayload(payload) => payload.deinit(),
@@ -2046,6 +2066,16 @@ pub fn skip_line_comment_stmt(
         advance_byte_symbol: advance_byte_symbol,
         token_symbol: token_symbol,
         eof_tag: eof_tag
+    });
+}
+
+pub fn is_doc_comment_start_stmt(
+    source_name: []u8,
+    start_name: []u8
+) -> MirStmt {
+    return MirStmt::IsDocCommentStart(MirIsDocCommentStartStmt {
+        source_name: source_name,
+        start_name: start_name
     });
 }
 
