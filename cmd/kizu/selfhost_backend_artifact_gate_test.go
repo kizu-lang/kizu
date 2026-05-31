@@ -268,6 +268,7 @@ func requiredLLVMFragments() []string {
 	fragments := requiredLLVMRuntimeFragments()
 	fragments = append(fragments, requiredLLVMCLIFragments()...)
 	fragments = append(fragments, requiredLLVMExecutableFragments()...)
+	fragments = append(fragments, requiredLLVMMemStartsWithFragments()...)
 	return fragments
 }
 
@@ -968,6 +969,26 @@ func requiredLLVMTextAccessorFragments() []string {
 		"%ant_slice_len = sub i64 %ant_end, %ant_start",
 		"%ant_trimmed = call %kizu.slice.u8 @kizu_std__mem_trim_ascii(%kizu.slice.u8 %ant_s1)",
 		"  ret %kizu.slice.u8 %ant_trimmed",
+	}
+}
+
+// requiredLLVMMemStartsWithFragments locks std::mem::starts_with compiled into stage2 as a
+// selfhost-owned checked-index slice-prefix predicate for stdlib-symbol callers.
+func requiredLLVMMemStartsWithFragments() []string {
+	return []string{
+		"define i1 @kizu_std__mem_starts_with(",
+		"%prefix_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %prefix)",
+		"%t1 = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %bytes)",
+		"%t2 = icmp sgt i64 %prefix_len, %t1",
+		"%index = phi i64 [ 0, %loop3_preheader ], [ %index_next, %loop3_latch ]",
+		"%t5 = icmp slt i64 %index, %prefix_len",
+		"%t7_bad = or i1 %t7_neg, %t7_high",
+		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
+		"%t9_bad = or i1 %t9_neg, %t9_high",
+		"br i1 %t9_bad, label %t9_idx_oob, label %t9_idx_ok",
+		"%t10 = icmp ne i8 %t7, %t9",
+		"%index_next = add i64 %index, 1",
+		"loop3_exit:\n  ret i1 true",
 	}
 }
 
