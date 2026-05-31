@@ -457,10 +457,10 @@ func requiredLLVMExecutableFragments() []string {
 	}...)
 }
 
-// requiredLLVMSourceLoaderFragments locks the first source-loader helper compiled
-// through mini MIR LetExpr/IndexExpr support. Var reads are copy-propagated so the
-// path/module-root length comparison and start offset subtraction use their source
-// SSA names directly, and literal operands are consumed without throwaway const temps.
+// requiredLLVMSourceLoaderFragments locks source-loader helpers compiled through
+// mini MIR LetExpr/IndexExpr support. Var reads are copy-propagated so comparisons,
+// checked index operands, and offset arithmetic use their source SSA names directly;
+// literal operands are consumed without throwaway const temps.
 func requiredLLVMSourceLoaderFragments() []string {
 	return []string{
 		"define i1 @kizu_selfhost__source_loader_is_manifest_root_source",
@@ -471,6 +471,12 @@ func requiredLLVMSourceLoaderFragments() []string {
 		"%t14 = icmp ne i8 %t12, 47",
 		"%arg5_0_sstart = add i64 %start, 0",
 		"%arg5_0_send = add i64 %path_len, 0",
+		"define i64 @kizu_selfhost__source_loader_package_module_start",
+		"%t2 = icmp slt i64 %source_root_len, 0",
+		"%t6 = icmp sle i64 %t4, %source_root_len",
+		"%t9_gep = getelementptr i8, ptr %t9_ptr, i64 %source_root_len",
+		"%t11 = icmp ne i8 %t9, 47",
+		"%t15 = add i64 %source_root_len, 1",
 	}
 }
 
