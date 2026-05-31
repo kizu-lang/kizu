@@ -85,6 +85,7 @@ type serverCapabilities struct {
 	RenameProvider             *renameOptions         `json:"renameProvider,omitempty"`
 	FoldingRangeProvider       bool                   `json:"foldingRangeProvider,omitempty"`
 	SelectionRangeProvider     bool                   `json:"selectionRangeProvider,omitempty"`
+	TypeDefinitionProvider     bool                   `json:"typeDefinitionProvider,omitempty"`
 }
 
 type renameOptions struct {

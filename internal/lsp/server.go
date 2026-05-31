@@ -83,6 +83,7 @@ func (s *Server) requestHandlers() map[string]func(incomingMessage) error {
 		"textDocument/completion":          s.handleCompletionRequest,
 		"textDocument/inlayHint":           s.handleInlayHintRequest,
 		"textDocument/definition":          s.handleDefinitionRequest,
+		"textDocument/typeDefinition":      s.handleTypeDefinitionRequest,
 		"textDocument/hover":               s.handleHoverRequest,
 		"textDocument/documentSymbol":      s.handleDocumentSymbolRequest,
 		"textDocument/references":          s.handleReferencesRequest,
@@ -128,6 +129,7 @@ func (s *Server) handleInitializeRequest(msg incomingMessage) error {
 			RenameProvider:            &renameOptions{PrepareProvider: true},
 			FoldingRangeProvider:      true,
 			SelectionRangeProvider:    true,
+			TypeDefinitionProvider:    true,
 		},
 		ServerInfo: serverInfo{Name: "kizu-lsp"},
 	})
@@ -171,6 +173,15 @@ func (s *Server) handleDefinitionRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.definition(params.TextDocument.URI, params.Position))
+}
+
+// handleTypeDefinitionRequest returns the declaration of the cursor symbol's type.
+func (s *Server) handleTypeDefinitionRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.typeDefinition(params.TextDocument.URI, params.Position))
 }
 
 // handleHoverRequest returns concise information for the symbol under the cursor.
