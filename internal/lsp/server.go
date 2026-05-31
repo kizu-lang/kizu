@@ -91,6 +91,7 @@ func (s *Server) requestHandlers() map[string]func(incomingMessage) error {
 		"textDocument/documentHighlight":   s.handleDocumentHighlightRequest,
 		"textDocument/prepareRename":       s.handlePrepareRenameRequest,
 		"textDocument/rename":              s.handleRenameRequest,
+		"textDocument/foldingRange":        s.handleFoldingRangeRequest,
 		"workspace/symbol":                 s.handleWorkspaceSymbolRequest,
 	}
 }
@@ -124,6 +125,7 @@ func (s *Server) handleInitializeRequest(msg incomingMessage) error {
 			WorkspaceSymbolProvider:   true,
 			DocumentHighlightProvider: true,
 			RenameProvider:            &renameOptions{PrepareProvider: true},
+			FoldingRangeProvider:      true,
 		},
 		ServerInfo: serverInfo{Name: "kizu-lsp"},
 	})
@@ -247,6 +249,15 @@ func (s *Server) handleRenameRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.rename(params.TextDocument.URI, params.Position, params.NewName))
+}
+
+// handleFoldingRangeRequest returns collapsible regions for a tracked document.
+func (s *Server) handleFoldingRangeRequest(msg incomingMessage) error {
+	var params foldingRangeParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.foldingRanges(params.TextDocument.URI))
 }
 
 // handleWorkspaceSymbolRequest returns package symbols matching a query.

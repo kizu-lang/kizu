@@ -83,6 +83,7 @@ type serverCapabilities struct {
 	WorkspaceSymbolProvider    bool                   `json:"workspaceSymbolProvider,omitempty"`
 	DocumentHighlightProvider  bool                   `json:"documentHighlightProvider,omitempty"`
 	RenameProvider             *renameOptions         `json:"renameProvider,omitempty"`
+	FoldingRangeProvider       bool                   `json:"foldingRangeProvider,omitempty"`
 }
 
 type renameOptions struct {
@@ -229,6 +230,18 @@ type renameParams struct {
 
 type workspaceEdit struct {
 	Changes map[string][]textEdit `json:"changes"`
+}
+
+type foldingRangeParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
+// foldingRange describes one collapsible line span. Character offsets are
+// omitted so editors fold whole lines, matching how gopls reports regions.
+type foldingRange struct {
+	StartLine int    `json:"startLine"`
+	EndLine   int    `json:"endLine"`
+	Kind      string `json:"kind,omitempty"`
 }
 
 type hover struct {
