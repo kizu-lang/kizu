@@ -345,9 +345,14 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"dispatch_fmt_write_arg:",
 		"dispatch_fmt_write:",
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
+		"%run_parsed = call %kizu.kizu.ast.parse_result " +
+			"@kizu_selfhost__cli_parse_validated_ast",
+		"%run_ast_result = call %kizu.error.run_ast " +
+			"@kizu_selfhost__ir_codegen_lower_run_parse_result",
+		"%test_parsed = call %kizu.kizu.ast.parse_result " +
+			"@kizu_selfhost__cli_parse_validated_ast",
 		"%test_executable = call %kizu.selfhost.executable " +
-			"@kizu_selfhost__cli_test_executable",
-		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value",
+			"@kizu_selfhost__cli_lower_test_parse_result",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
@@ -384,8 +389,6 @@ func requiredLLVMCLICheckFragments() []string {
 func requiredLLVMExecutableFragments() []string {
 	fragments := []string{
 		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
-		"%kizu.selfhost.codegen.binding = type { i1, %kizu.slice.u8, %kizu.slice.u8, i64 }",
-		"%kizu.selfhost.codegen.payload = type { i1, %kizu.slice.u8, i64 }",
 		"%kizu.selfhost.codegen.run_ast = type { i1, i64, %kizu.slice.u8",
 		// !RunAst error union backs the run-codegen AST traversal lowering cluster compiled
 		// into stage2 (tracker 961, scope 4 prerequisite): { ok, RunAst value, diagnostic }.
@@ -395,7 +398,7 @@ func requiredLLVMExecutableFragments() []string {
 		"%kizu.selfhost.codegen.block = type { %kizu.slice.u8, i64 }",
 		"%kizu.selfhost.codegen.function = type { %kizu.slice.u8, i64 }",
 		"%kizu.selfhost.codegen.program = type { i64, %kizu.slice.u8",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_executable",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_parse_result",
 		"define %kizu.selfhost.codegen.value @kizu_selfhost__ir_codegen_const_string_value",
 		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__ir_codegen_const_string_instruction",
 		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__ir_codegen_call_instruction",
@@ -403,10 +406,11 @@ func requiredLLVMExecutableFragments() []string {
 		"@.kizu.cli.codegen_metadata_line = private unnamed_addr constant",
 		"define %kizu.slice.u8 @kizu_selfhost__ir_codegen_metadata_line()",
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_main_print_program",
-		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
+		"%tokens_result = call %kizu.error.owned @kizu_kizu__lexer_tokenize",
+		"@kizu_kizu__ast_ast_add_node",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_lower_program",
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_ast",
-		"define %kizu.selfhost.codegen.binding @kizu_selfhost__cli_frontend_parse_let_binding",
-		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_frontend_parse_print_statement",
 		"define i1 @kizu_selfhost__ir_codegen_program_supported",
 	}
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
@@ -428,6 +432,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLowerRunAstBlockFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstFunctionFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstDeclarationsFragments()...)
+	fragments = append(fragments, requiredLLVMLowerRunParseResultFragments()...)
 	fragments = append(fragments, requiredLLVMLowerRunAstFragments()...)
 	fragments = append(fragments, requiredLLVMLexerClassifierFragments()...)
 	fragments = append(fragments, requiredLLVMLexerAdvanceFragments()...)
@@ -644,6 +649,10 @@ func requiredLLVMUnionAbiFragments() []string {
 			"%kizu.slice.u8 %raw_slice)",
 		"%raw = extractvalue %kizu.handle %raw_handle, 1",
 		"  ret %kizu.kizu.ast.node_id %v2_0",
+		"define %kizu.kizu.ast.parse_result @kizu_kizu__ast_parse_result",
+		"%v0_0 = insertvalue %kizu.kizu.ast.parse_result poison, %kizu.kizu.ast.ast %ast, 0",
+		"%v0_1 = insertvalue %kizu.kizu.ast.parse_result %v0_0, %kizu.kizu.ast.node_id %root, 1",
+		"  ret %kizu.kizu.ast.parse_result %v0_1",
 		"define %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %value)",
 	}
 }
@@ -1067,6 +1076,22 @@ func requiredLLVMLowerRunAstDeclarationsFragments() []string {
 	}
 }
 
+// requiredLLVMLowerRunParseResultFragments returns the tracker-961 parser boundary bridge compiled
+// into stage2: ParseResult is consumed as a parsed AST value, then ast/root are forwarded into the
+// lower_run_ast traversal.
+func requiredLLVMLowerRunParseResultFragments() []string {
+	return []string{
+		"%kizu.kizu.ast.parse_result = type { %kizu.kizu.ast.ast, %kizu.kizu.ast.node_id }",
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_parse_result(",
+		"%lrpr_ast = extractvalue %kizu.kizu.ast.parse_result %parsed, 0",
+		"%lrpr_root = extractvalue %kizu.kizu.ast.parse_result %parsed, 1",
+		"%lrpr_result = call %kizu.error.run_ast " +
+			"@kizu_selfhost__ir_codegen_lower_run_ast(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %lrpr_ast, %kizu.kizu.ast.node_id %lrpr_root)",
+		"  ret %kizu.error.run_ast %lrpr_result",
+	}
+}
+
 // requiredLLVMLowerRunAstFragments returns the tracker-961 scope-4 prerequisite lower_run_ast AST
 // traversal root compiled into stage2: it binds the root AstNode via Ast.get and on the Program
 // variant (tag 0) loads the ProgramNode declarations (field 0) and forwards
@@ -1228,17 +1253,49 @@ func requiredLLVMTokenizerFragments() []string {
 	}
 }
 
-// requiredLLVMParserPredicateFragments pins the first std::kizu::parser leaves: single-variant
-// token predicates that extract the TokenKind field off the Token param and compare it to the
-// matched variant discriminant, returning i1 (tracker 961, scope 4 prerequisite).
+// requiredLLVMParserPredicateFragments pins std::kizu::parser TokenKind leaves: predicates that
+// extract the TokenKind field off the Token param and compare it to one or more matched variant
+// discriminants, returning i1 (tracker 961, scope 4 prerequisite).
 func requiredLLVMParserPredicateFragments() []string {
 	return []string{
+		"define i1 @kizu_kizu__parser_is_double_colon(",
+		"define i1 @kizu_kizu__parser_is_eof_token(",
 		"define i1 @kizu_kizu__parser_is_left_brace_token(",
 		"define i1 @kizu_kizu__parser_is_right_brace_token(",
+		"define i1 @kizu_kizu__parser_is_block_close_token(",
 		"define i1 @kizu_kizu__parser_is_ident_kind(",
+		"define i1 @kizu_kizu__parser_is_postfix_start(",
+		"define i1 @kizu_kizu__parser_is_call_close_token(",
+		"define i1 @kizu_kizu__parser_is_pub_token(",
+		"define i1 @kizu_kizu__parser_is_comptime_token(",
+		"define i1 @kizu_kizu__parser_is_decl_item_separator(",
+		"define i1 @kizu_kizu__parser_is_lt_token(",
+		"define i1 @kizu_kizu__parser_is_gt_token(",
+		"define i1 @kizu_kizu__parser_is_comma_token(",
+		"define i1 @kizu_kizu__parser_is_arrow_token(",
+		"define i1 @kizu_kizu__parser_is_left_paren_token(",
+		"define i1 @kizu_kizu__parser_is_right_paren_token(",
 		"%tkp_kind = extractvalue %kizu.kizu.lexer.token %token, 0",
 		"%tkp_is = icmp eq i64 %tkp_kind, ",
+		"%tkp_is_1 = or i1 %tkp_is_0, %tkp_cmp_1",
 		"ret i1 %tkp_is",
+		"define i1 @kizu_kizu__parser_is_single_token_byte(",
+		"define i1 @kizu_kizu__parser_is_double_token_byte(",
+		"define i1 @kizu_kizu__parser_is_double_colon_at(",
+		"define i1 @kizu_kizu__parser_is_name_byte(",
+		"define i1 @kizu_kizu__parser_is_upper_byte(",
+		"define i1 @kizu_kizu__parser_is_namespace_path_span(",
+		"define i1 @kizu_kizu__parser_is_struct_literal_type_span(",
+		"define i1 @kizu_kizu__parser_is_type_apply_start(",
+		"define i1 @kizu_kizu__parser_is_struct_literal_start(",
+		"%nps_saw = phi i1",
+		"%slt_count = phi i64",
+		"%pps_next = extractvalue %kizu.kizu.parser.parse_node %left,",
+		"%pps_guard = call i1 @kizu_kizu__parser_is_lt_token",
+		"%pps_ast_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(",
+		"%pps_result = call i1 @kizu_kizu__parser_is_namespace_path_span(",
+		"%pps_result = call i1 @kizu_kizu__parser_is_struct_literal_type_span(",
+		"_idx_oob:",
 	}
 }
 
@@ -1279,6 +1336,11 @@ func forbiddenLLVMFragments() []string {
 		"@kizu_selfhost__cli_codegen_parse_let_binding",
 		"@kizu_selfhost__cli_codegen_parse_print_statement",
 		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_codegen_parse_print_payload",
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"@kizu_selfhost__cli_frontend_parse_let_binding",
+		"@kizu_selfhost__cli_frontend_parse_print_statement",
+		"@kizu_selfhost__cli_parse_test_expect_value",
+		"@kizu_selfhost__cli_test_executable",
 		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
@@ -1387,6 +1449,10 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"lower_run_ast !RunAst\n",
 		"backend-input function-signature-param selfhost::ir::codegen::" +
 			"lower_run_ast 1 ast:runtime:std::kizu::ast::Ast\n",
+		"backend-input function-signature-return selfhost::ir::codegen::" +
+			"lower_run_parse_result !RunAst\n",
+		"backend-input function-signature-param selfhost::ir::codegen::" +
+			"lower_run_parse_result 1 parsed:runtime:std::kizu::ast::ParseResult\n",
 		"backend-input function-signature-return selfhost::ir::codegen::" +
 			"lower_run_ast_to_program Program\n",
 		"backend-input function-signature-return selfhost::ir::codegen::" +

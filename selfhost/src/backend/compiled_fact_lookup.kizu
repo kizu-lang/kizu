@@ -299,11 +299,11 @@ pub fn lookup_stdlib_return(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
 }
 
 // lookup_stdlib_arg_type resolves the LLVM argument type of a stdlib callee from the optional
-// fourth token of its 'stdlib-symbol <name> <symbol> <return> <arg-llvm-type>' fact (tracker 961,
-// scope 4 prerequisite). Stdlib callees take uniform argument types, so the single arg type
-// applies to every argument. When the fourth token is absent the callee takes byte slices, so the
-// default is the canonical %kizu.slice.u8 (preserving equal_bytes / len lowering).
-pub fn lookup_stdlib_arg_type(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
+// trailing tokens of its 'stdlib-symbol <name> <symbol> <return> <arg-llvm-type>...' fact
+// (tracker 961). A single arg-type token remains the legacy uniform type for every argument;
+// multiple arg-type tokens are matched by argument index. When no arg type is present, the
+// canonical byte-slice default preserves equal_bytes / len lowering.
+pub fn lookup_stdlib_arg_type(ir_bytes: []u8, callee_name: []u8, arg_index: i64) -> ![]u8 {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "stdlib-symbol ";
     let prefix_len = std::mem::len(prefix);
@@ -336,11 +336,38 @@ pub fn lookup_stdlib_arg_type(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
                 if pos >= line_end {
                     return "%kizu.slice.u8";
                 }
-                let arg_start = pos;
-                while pos < line_end and ir_bytes[pos] != cast<u8>(32) {
-                    pos = pos + 1;
+                let args_start = pos;
+                var scan = args_start;
+                var arg_count = 0;
+                while scan < line_end {
+                    while scan < line_end and ir_bytes[scan] == cast<u8>(32) {
+                        scan = scan + 1;
+                    }
+                    if scan < line_end {
+                        arg_count = arg_count + 1;
+                        while scan < line_end and ir_bytes[scan] != cast<u8>(32) {
+                            scan = scan + 1;
+                        }
+                    }
                 }
-                return ir_bytes[arg_start..pos];
+                scan = args_start;
+                var current = 0;
+                while scan < line_end {
+                    while scan < line_end and ir_bytes[scan] == cast<u8>(32) {
+                        scan = scan + 1;
+                    }
+                    if scan < line_end {
+                        let arg_start = scan;
+                        while scan < line_end and ir_bytes[scan] != cast<u8>(32) {
+                            scan = scan + 1;
+                        }
+                        if arg_count == 1 or current == arg_index {
+                            return ir_bytes[arg_start..scan];
+                        }
+                        current = current + 1;
+                    }
+                }
+                return error("compiled function: stdlib arg type not found");
             }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;

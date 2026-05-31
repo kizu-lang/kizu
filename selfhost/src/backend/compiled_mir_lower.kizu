@@ -1307,12 +1307,88 @@ pub fn lower_raw_token_function(
     );
 }
 
-// lower_token_kind_predicate_function lowers a parser single-variant token predicate of the form
-// 'return match token.kind { <Variant> => true, _ => false };' (e.g. is_left_brace_token) into a
-// single TokenKindPredicate statement (tracker 961, scope 4 prerequisite). It reads the scrutinee
-// field off the Token param and the matched TokenKind variant from the first arm's pattern; the
-// enum-over-bool match the generic path does not model, so it is dispatched from the single-return
-// shape. The field index comes from the Token facts, the variant tag from the TokenKind facts.
+// token_kind_predicate_match_node unwraps the two parser predicate spellings: compact
+// 'return match token.kind { ... };' and exhaustive statement 'match token.kind { X => return ...; }'
+// (tracker 961, scope 4 prerequisite).
+fn token_kind_predicate_match_node(
+    ir_bytes: []u8,
+    function_name: []u8,
+    bs: i64
+) -> !i64 {
+    let statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let statement_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, statement, bs
+    );
+    if std::mem::equal_bytes(statement_kind, "Return") {
+        let value = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, statement, "value", 0, bs
+        );
+        let value_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, value, bs
+        );
+        if !std::mem::equal_bytes(value_kind, "Match") {
+            return error("compiled mir: token-kind predicate return value must be a match");
+        }
+        return value;
+    }
+    if std::mem::equal_bytes(statement_kind, "Match") {
+        return statement;
+    }
+    if std::mem::equal_bytes(statement_kind, "ExprStmt") {
+        let expr = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, statement, "expr", 0, bs
+        );
+        let expr_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, expr, bs
+        );
+        if std::mem::equal_bytes(expr_kind, "Match") {
+            return expr;
+        }
+    }
+    return error("compiled mir: token-kind predicate body must be a match");
+}
+
+fn token_kind_predicate_arm_value(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arm_body: i64,
+    bs: i64
+) -> !i64 {
+    let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arm_body, bs);
+    if std::mem::equal_bytes(body_kind, "Return") {
+        return try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arm_body, "value", 0, bs
+        );
+    }
+    if std::mem::equal_bytes(body_kind, "ExprStmt") {
+        return try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arm_body, "expr", 0, bs
+        );
+    }
+    return arm_body;
+}
+
+fn token_kind_predicate_arm_bool(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arm_body: i64,
+    bs: i64
+) -> !bool {
+    let value = try token_kind_predicate_arm_value(ir_bytes, function_name, arm_body, bs);
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if !std::mem::equal_bytes(value_kind, "Bool") {
+        return error("compiled mir: token-kind predicate arms must return bool");
+    }
+    let token = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, value, bs);
+    return std::mem::equal_bytes(token, "true");
+}
+
+// lower_token_kind_predicate_function lowers parser TokenKind predicates into a single
+// TokenKindPredicate statement (tracker 961, scope 4 prerequisite). It reads the Token.kind
+// scrutinee and records every arm whose body returns true; the renderer emits an i1 compare/OR
+// chain. The field index comes from the Token facts and variant tags from TokenKind facts.
 pub fn lower_token_kind_predicate_function(
     ir_bytes: []u8,
     function_name: []u8,
@@ -1321,12 +1397,7 @@ pub fn lower_token_kind_predicate_function(
     params_spec: []u8,
     bs: i64
 ) -> !compiled_mir::MirFunction {
-    let return_stmt = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, 0, "statement", 0, bs
-    );
-    let match_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, return_stmt, "value", 0, bs
-    );
+    let match_node = try token_kind_predicate_match_node(ir_bytes, function_name, bs);
     let scrutinee = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, match_node, "value", 0, bs
     );
@@ -1344,21 +1415,154 @@ pub fn lower_token_kind_predicate_function(
     let kind_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
         ir_bytes, "std::kizu::lexer::", "Token", field_name
     );
-    let variant_arm = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, match_node, "arm", 0, bs
+    var variant_tags = std::array::Array<i64>(std::mem::page_allocator());
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, match_node, "arm", bs
     );
-    let variant_pattern = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, variant_arm, "pattern", 0, bs
-    );
-    let variant_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, variant_pattern, bs
-    );
-    let variant_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
-        ir_bytes, "std::kizu::lexer::", "TokenKind", variant_name
-    );
+    var arm_index = 0;
+    while arm_index < arm_count {
+        let arm = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, match_node, "arm", arm_index, bs
+        );
+        let arm_body = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arm, "body", 0, bs
+        );
+        if try token_kind_predicate_arm_bool(ir_bytes, function_name, arm_body, bs) {
+            let pattern = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, arm, "pattern", 0, bs
+            );
+            let variant_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, pattern, bs
+            );
+            if std::mem::equal_bytes(variant_name, "_") {
+                return error("compiled mir: token-kind predicate wildcard true arm unsupported");
+            }
+            let variant_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+                ir_bytes, "std::kizu::lexer::", "TokenKind", variant_name
+            );
+            try variant_tags.append(variant_tag);
+        }
+        arm_index = arm_index + 1;
+    }
+    if variant_tags.len() == 0 {
+        return error("compiled mir: token-kind predicate must have a true arm");
+    }
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::token_kind_predicate_stmt(
-        token_name, "%kizu.kizu.lexer.token", kind_field_index, variant_tag
+        token_name, "%kizu.kizu.lexer.token", kind_field_index, variant_tags
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
+// lower_parser_span_predicate_function lowers the parser's source-span classifiers that drive
+// namespace/type disambiguation. Their loop-carried booleans and segment cursors are deliberately
+// outside the generic restricted while lowering, so they lower as a dedicated statement while still
+// resolving helper calls through stdlib-symbol facts (tracker 961).
+pub fn lower_parser_span_predicate_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    var mode = 0;
+    if std::mem::equal_bytes(function_name, "std::kizu::parser::is_struct_literal_type_span") {
+        mode = 1;
+    }
+    let source_name = try nth_param_field(params_spec, 0, true);
+    let span_type = try nth_param_field(params_spec, 1, false);
+    let span_name = try nth_param_field(params_spec, 1, true);
+    let is_name_symbol = try compiled_fact_lookup::lookup_stdlib_symbol(
+        ir_bytes, "std::kizu::parser::is_name_byte"
+    );
+    let is_double_colon_symbol = try compiled_fact_lookup::lookup_stdlib_symbol(
+        ir_bytes, "std::kizu::parser::is_double_colon_at"
+    );
+    let is_upper_symbol = try compiled_fact_lookup::lookup_stdlib_symbol(
+        ir_bytes, "std::kizu::parser::is_upper_byte"
+    );
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::parser_span_predicate_stmt(
+        mode,
+        source_name,
+        span_name,
+        span_type,
+        is_name_symbol,
+        is_double_colon_symbol,
+        is_upper_symbol
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
+// lower_parser_postfix_start_function lowers the parser's AST-aware postfix guards. The body
+// shapes are intentionally narrow: guard on left.next, bind ast.get(left.node), then classify the
+// bound node span through one of the compiled span predicates (tracker 961).
+pub fn lower_parser_postfix_start_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    var mode = 0;
+    var guard_lookup = "std::kizu::parser::is_lt_token";
+    var span_lookup = "std::kizu::parser::is_namespace_path_span";
+    if std::mem::equal_bytes(function_name, "std::kizu::parser::is_struct_literal_start") {
+        mode = 1;
+        guard_lookup = "std::kizu::parser::is_single_token_byte";
+        span_lookup = "std::kizu::parser::is_struct_literal_type_span";
+    } else {
+        if !std::mem::equal_bytes(function_name, "std::kizu::parser::is_type_apply_start") {
+            return error("compiled mir: unknown parser postfix start predicate");
+        }
+    }
+    let ast_type = try nth_param_field(params_spec, 0, false);
+    let ast_name = try nth_param_field(params_spec, 0, true);
+    let text_name = try nth_param_field(params_spec, 1, true);
+    let left_type = try nth_param_field(params_spec, 2, false);
+    let left_name = try nth_param_field(params_spec, 2, true);
+    let node_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, "std::kizu::parser::", "ParseNode", "node"
+    );
+    let next_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, "std::kizu::parser::", "ParseNode", "next"
+    );
+    let ast_node_span_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, "std::kizu::ast::", "AstNode", "span"
+    );
+    let token_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "Token"
+    );
+    let ast_node_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
+        ir_bytes, "std::kizu::ast::", "AstNode"
+    );
+    let span_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
+        ir_bytes, "std::kizu::ast::", "Span"
+    );
+    let guard_symbol = try compiled_fact_lookup::lookup_stdlib_symbol(ir_bytes, guard_lookup);
+    let span_symbol = try compiled_fact_lookup::lookup_stdlib_symbol(ir_bytes, span_lookup);
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::parser_postfix_start_stmt(
+        mode,
+        ast_name,
+        ast_type,
+        text_name,
+        left_name,
+        left_type,
+        token_type,
+        ast_node_type,
+        span_type,
+        node_field_index,
+        next_field_index,
+        ast_node_span_field_index,
+        guard_symbol,
+        span_symbol
     ));
     return compiled_mir_function::multi_statement_function(
         llvm_symbol, llvm_return_type, params_spec, stmts
@@ -1761,6 +1965,34 @@ pub fn lower_print_statement_function(
     try stmts.append(compiled_mir::lower_print_statement_stmt(
         text_name, ast_name, ast_type, function_name_name, statement_count_name,
         locals_name, locals_type, expr_name, expr_type, call_variant.tag
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
+// lower_run_parse_result_function lowers selfhost::ir::codegen::lower_run_parse_result into a
+// single boundary bridge from std::kizu::ast::ParseResult to lower_run_ast(text, ast, root).
+pub fn lower_run_parse_result_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let text_name = try nth_param_field(params_spec, 0, true);
+    let parsed_type = try nth_param_field(params_spec, 1, false);
+    let parsed_name = try nth_param_field(params_spec, 1, true);
+    let ast_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, "std::kizu::ast::", "ParseResult", "ast"
+    );
+    let root_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, "std::kizu::ast::", "ParseResult", "root"
+    );
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::lower_run_parse_result_stmt(
+        text_name, parsed_name, parsed_type, ast_field_index, root_field_index
     ));
     return compiled_mir_function::multi_statement_function(
         llvm_symbol, llvm_return_type, params_spec, stmts
