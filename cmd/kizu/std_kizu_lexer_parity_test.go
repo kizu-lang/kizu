@@ -400,6 +400,9 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 				"comptime if 1 <= 2 { return; } }",
 		},
 		{name: "seed/operator_tokens", source: "a = b - c / d % e != f <= g > h >= i.x .. j | k => l"},
+		{name: "seed/multiline_string", source: "\\\\hello world"},
+		{name: "seed/multiline_string_join", source: "\\\\foo\n\\\\bar"},
+		{name: "seed/multiline_string_indent", source: "\\\\foo\n  \\\\bar"},
 		{
 			name: "seed/declaration_tokens",
 			source: "import app::lexer; pub struct User { pub name: []u8, } " +
@@ -430,7 +433,14 @@ func summarizeGoLexerSubset(source string) (string, string) {
 			return "", "token outside std lexer subset: " + string(tok.Type)
 		}
 		literal := lexerParityTokenLiteral(tok)
-		start, end := lexerParityTokenByteSpan(source, offset, literal, tok.Type)
+		var start, end int
+		if tok.Type == token.String {
+			start = lexerParitySkipTrivia(source, offset)
+			end = lexerParityStringTokenEnd(source, start)
+			literal = source[start:end]
+		} else {
+			start, end = lexerParityTokenByteSpan(source, offset, literal, tok.Type)
+		}
 		offset = end
 		lines = append(
 			lines,
@@ -482,6 +492,58 @@ func lexerParityTokenByteSpan(
 	}
 	start += index
 	return start, start + len(literal)
+}
+
+// lexerParityStringTokenEnd returns the byte offset just past a string literal,
+// handling both double-quoted strings and `\\` multiline strings.
+func lexerParityStringTokenEnd(source string, start int) int {
+	if start >= len(source) {
+		return start
+	}
+	if source[start] == '"' {
+		index := start + 1
+		for index < len(source) && source[index] != '"' {
+			index++
+		}
+		if index < len(source) {
+			return index + 1
+		}
+		return index
+	}
+	index := start
+	for {
+		index += 2
+		for index < len(source) && source[index] != '\n' {
+			index++
+		}
+		next := lexerParityMultilineContinuation(source, index)
+		if next < len(source) {
+			index = next
+			continue
+		}
+		return index
+	}
+}
+
+// lexerParityMultilineContinuation returns the offset of the next `\\` segment
+// when the line continues a multiline string, or len(source) otherwise.
+func lexerParityMultilineContinuation(source string, offset int) int {
+	if offset >= len(source) || source[offset] != '\n' {
+		return len(source)
+	}
+	probe := offset + 1
+	for probe < len(source) {
+		c := source[probe]
+		if c == ' ' || c == '\t' || c == '\r' {
+			probe++
+			continue
+		}
+		if c == '\\' && probe+1 < len(source) && source[probe+1] == '\\' {
+			return probe
+		}
+		return len(source)
+	}
+	return len(source)
 }
 
 // lexerParitySkipTrivia skips spaces and line comments like the Go lexer.
