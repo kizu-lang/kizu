@@ -2463,9 +2463,9 @@ func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	failures := countHostedCompilerCLIUnsupportedRunSourceFailures(
 		t,
 		exePath,
-		"hosted_run_return.kizu",
-		"hosted_run_return",
-		"fn main(){return;}\n",
+		"hosted_run_if_unsupported.kizu",
+		"hosted_run_if_unsupported",
+		"fn main(){if true {print(\"ok\");}else{print(\"no\");}}\n",
 	)
 	return failures
 }
@@ -2498,7 +2498,7 @@ func countHostedCompilerCLIUnsupportedRunSourceFailures(
 		t.Errorf("hosted compiler run stdout mismatch: %q", stdout)
 		return 1
 	}
-	if !strings.Contains(stderr, "usage: selfhost") {
+	if !strings.Contains(stderr, "unsupported run codegen program") {
 		t.Errorf("hosted compiler run stderr mismatch: %q", stderr)
 		return 1
 	}

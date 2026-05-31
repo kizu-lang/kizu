@@ -369,7 +369,7 @@ func runParityGuardCases() []runParityGuardCase {
 			name:     "unsupported_target",
 			args:     []string{"run", "selfhost/tests/cli/test_expect_ok.kizu"},
 			exitCode: 64,
-			stderr:   selfhostUsageStderr(),
+			stderr:   "unsupported run codegen program\n",
 		},
 		{
 			name:     "unsupported_command",
