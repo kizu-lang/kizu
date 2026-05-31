@@ -460,13 +460,15 @@ func requiredLLVMExecutableFragments() []string {
 // requiredLLVMSourceLoaderFragments locks the first source-loader helper compiled
 // through mini MIR LetExpr/IndexExpr support. Var reads are copy-propagated so the
 // path/module-root length comparison and start offset subtraction use their source
-// SSA names directly.
+// SSA names directly, and literal operands are consumed without throwaway const temps.
 func requiredLLVMSourceLoaderFragments() []string {
 	return []string{
 		"define i1 @kizu_selfhost__source_loader_is_manifest_root_source",
 		"%t2 = icmp slt i64 %path_len, %module_root_len",
 		"%t5 = sub i64 %path_len, %module_root_len",
-		"%t8 = icmp sgt i64 %start, %t7",
+		"%t8 = icmp sgt i64 %start, 0",
+		"%t11 = sub i64 %start, 1",
+		"%t14 = icmp ne i8 %t12, 47",
 		"%arg5_0_sstart = add i64 %start, 0",
 		"%arg5_0_send = add i64 %path_len, 0",
 	}
@@ -624,6 +626,7 @@ func requiredLLVMChildAtFragments() []string {
 		"%kizu.error.node_id = type { i1, %kizu.kizu.ast.node_id, %kizu.slice.u8 }",
 		"define %kizu.error.node_id @kizu_kizu__ast_ast_child_at",
 		"%kizu.kizu.ast.child_range %range",
+		"%t2 = icmp slt i64 %index, 0",
 		"br i1 %t2, label %if0_then, label %if0_rhs",
 		"%t5 = icmp sge i64 %index, %t4",
 		"%t4 = extractvalue %kizu.kizu.ast.child_range %range, 1",
@@ -1138,7 +1141,7 @@ func requiredLLVMLowerRunAstFragments() []string {
 
 // requiredLLVMLexerClassifierFragments returns the tracker-961 scope-4 prerequisite
 // std::kizu::lexer leaf byte classifiers compiled into stage2: is_alpha / is_digit / is_space
-// (range/or-chain byte predicates over a single i8) and is_word (which or-combines is_alpha /
+// (range/or-chain byte predicates over literal i8 bounds) and is_word (which or-combines is_alpha /
 // is_digit). They are the bottom of the lexer compile chain the eventual scanner removal needs
 // (source -> Ast requires the compiled tokenizer). is_word's i8 call arguments are resolved via the
 // stdlib-symbol arg-type facts rather than the default slice type. These fragments lock the shapes.
@@ -1148,7 +1151,9 @@ func requiredLLVMLexerClassifierFragments() []string {
 		"define i1 @kizu_kizu__lexer_is_digit(",
 		"define i1 @kizu_kizu__lexer_is_space(",
 		"define i1 @kizu_kizu__lexer_is_word(",
-		"%t2 = icmp sge i8 %byte, %t1",
+		"%t2 = icmp sge i8 %byte, 65",
+		"%t5 = icmp sle i8 %byte, 90",
+		"%t17 = icmp eq i8 %byte, 95",
 		"%t0 = call i1 @kizu_kizu__lexer_is_alpha(i8 %byte)",
 		"%t1 = call i1 @kizu_kizu__lexer_is_digit(i8 %byte)",
 		// position(line, column) builds the (line, column) Position cursor struct; its type is
