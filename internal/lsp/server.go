@@ -88,7 +88,8 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 					Legend: semanticTokenLegend(),
 					Full:   true,
 				},
-				WorkspaceSymbolProvider: true,
+				WorkspaceSymbolProvider:   true,
+				DocumentHighlightProvider: true,
 			},
 			ServerInfo: serverInfo{Name: "kizu-lsp"},
 		})
@@ -112,6 +113,8 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 		return false, s.handleSignatureHelpRequest(msg)
 	case "textDocument/semanticTokens/full":
 		return false, s.handleSemanticTokensRequest(msg)
+	case "textDocument/documentHighlight":
+		return false, s.handleDocumentHighlightRequest(msg)
 	case "workspace/symbol":
 		return false, s.handleWorkspaceSymbolRequest(msg)
 	default:
@@ -210,6 +213,15 @@ func (s *Server) handleSemanticTokensRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.semanticTokens(params.TextDocument.URI))
+}
+
+// handleDocumentHighlightRequest returns highlight ranges for the cursor symbol.
+func (s *Server) handleDocumentHighlightRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.documentHighlights(params.TextDocument.URI, params.Position))
 }
 
 // handleWorkspaceSymbolRequest returns package symbols matching a query.

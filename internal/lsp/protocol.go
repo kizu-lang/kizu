@@ -35,6 +35,8 @@ const (
 	symbolKindVariable   = 13
 	symbolKindEnumMember = 22
 	symbolKindStruct     = 23
+
+	documentHighlightKindText = 1
 )
 
 type incomingMessage struct {
@@ -79,6 +81,7 @@ type serverCapabilities struct {
 	SignatureHelpProvider      *signatureOptions      `json:"signatureHelpProvider,omitempty"`
 	SemanticTokensProvider     *semanticTokensOptions `json:"semanticTokensProvider,omitempty"`
 	WorkspaceSymbolProvider    bool                   `json:"workspaceSymbolProvider,omitempty"`
+	DocumentHighlightProvider  bool                   `json:"documentHighlightProvider,omitempty"`
 }
 
 type completionOptions struct {
@@ -206,6 +209,11 @@ type inlayHint struct {
 type location struct {
 	URI   string `json:"uri"`
 	Range Range  `json:"range"`
+}
+
+type documentHighlight struct {
+	Range Range `json:"range"`
+	Kind  int   `json:"kind,omitempty"`
 }
 
 type hover struct {
