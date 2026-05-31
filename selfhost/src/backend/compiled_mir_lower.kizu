@@ -2504,6 +2504,215 @@ pub fn lower_expr_return_function(
         insts
     );
 }
+
+pub fn return_value_is_short_circuit_or(
+    ir_bytes: []u8,
+    function_name: []u8,
+    value_node: i64,
+    bs: i64
+) -> !bool {
+    return (try short_circuit_kind(ir_bytes, function_name, value_node, bs)) == 2;
+}
+
+pub fn lower_short_circuit_or_return_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    value_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    let prefix_result = try lower_short_circuit_or_prefix(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        params_spec,
+        value_node,
+        0,
+        0,
+        0,
+        &var stmts,
+        bs
+    );
+    var final_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let final_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        params_spec,
+        prefix_result.final_node,
+        prefix_result.string_counter,
+        prefix_result.temp_counter,
+        &var final_insts,
+        bs
+    );
+    try stmts.append(compiled_mir::return_expr_stmt(
+        prefix_result.string_counter,
+        final_result,
+        final_insts
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        stmts
+    );
+}
+
+pub struct ShortCircuitOrLowerResult {
+    pub final_node: i64,
+    pub string_counter: i64,
+    pub temp_counter: i64,
+    pub if_index: i64,
+}
+
+fn lower_short_circuit_or_prefix(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    if_index: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !ShortCircuitOrLowerResult {
+    if (try short_circuit_kind(ir_bytes, function_name, node, bs)) != 2 {
+        return ShortCircuitOrLowerResult {
+            final_node: node,
+            string_counter: string_counter,
+            temp_counter: temp_counter,
+            if_index: if_index
+        };
+    }
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node, "left", 0, bs
+    );
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node, "right", 0, bs
+    );
+    let left_result = try append_short_circuit_or_operand_ifs(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        params_spec,
+        left_node,
+        string_counter,
+        temp_counter,
+        if_index,
+        stmts,
+        bs
+    );
+    return try lower_short_circuit_or_prefix(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        params_spec,
+        right_node,
+        left_result.string_counter,
+        left_result.temp_counter,
+        left_result.if_index,
+        stmts,
+        bs
+    );
+}
+
+fn append_short_circuit_or_operand_ifs(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    if_index: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !ShortCircuitOrLowerResult {
+    if (try short_circuit_kind(ir_bytes, function_name, node, bs)) == 2 {
+        let left_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "left", 0, bs
+        );
+        let right_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "right", 0, bs
+        );
+        let left_result = try append_short_circuit_or_operand_ifs(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            params_spec,
+            left_node,
+            string_counter,
+            temp_counter,
+            if_index,
+            stmts,
+            bs
+        );
+        return try append_short_circuit_or_operand_ifs(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            params_spec,
+            right_node,
+            left_result.string_counter,
+            left_result.temp_counter,
+            left_result.if_index,
+            stmts,
+            bs
+        );
+    }
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        params_spec,
+        node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        bs
+    );
+    let cond_strings = try count_strings_in_insts(&cond_insts);
+    let cond_len = cond_insts.len();
+    try stmts.append(compiled_mir::if_stmt(
+        if_index,
+        string_counter,
+        cond_result,
+        cond_insts,
+        0,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        compiled_mir::MirIfThenKind::ReturnBool,
+        true,
+        llvm_return_type,
+        "",
+        "",
+        std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator()),
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
+        string_counter + cond_strings
+    ));
+    return ShortCircuitOrLowerResult {
+        final_node: node,
+        string_counter: string_counter + cond_strings,
+        temp_counter: temp_counter + cond_len,
+        if_index: if_index + 1
+    };
+}
+
 pub fn lower_multi_statement_function(
     ir_bytes: []u8,
     function_name: []u8,
@@ -3530,8 +3739,14 @@ fn lower_multi_while_statement(
 fn count_strings_in_insts(
     insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !i64 {
+    return try count_strings_in_insts_from(insts, 0);
+}
+fn count_strings_in_insts_from(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    start: i64
+) -> !i64 {
     var count = 0;
-    var index = 0;
+    var index = start;
     while index < insts.len() {
         let inst = try insts.at(index);
         count = count + try count_strings_in_inst(inst);
@@ -3664,13 +3879,15 @@ fn lower_expr_into(
         let right_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, expr_node, "right", 0, bs
         );
+        let before_left = insts.len();
         let left = try lower_expr_into(
             ir_bytes, function_name, module_prefix, params_spec, left_node,
             string_index, id_base, insts, bs
         );
+        let right_string_index = string_index + try count_strings_in_insts_from(insts, before_left);
         let right = try lower_expr_into(
             ir_bytes, function_name, module_prefix, params_spec, right_node,
-            string_index, id_base, insts, bs
+            right_string_index, id_base, insts, bs
         );
         let result_id = id_base + insts.len();
         try insts.append(compiled_mir::binary_expr_inst(result_id, op, left, right));

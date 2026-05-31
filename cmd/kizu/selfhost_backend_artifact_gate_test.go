@@ -269,6 +269,7 @@ func requiredLLVMFragments() []string {
 	fragments = append(fragments, requiredLLVMCLIFragments()...)
 	fragments = append(fragments, requiredLLVMExecutableFragments()...)
 	fragments = append(fragments, requiredLLVMMemStartsWithFragments()...)
+	fragments = append(fragments, requiredLLVMSourceAbsoluteNameFragments()...)
 	return fragments
 }
 
@@ -471,9 +472,10 @@ func requiredLLVMSourcePredicateFragments() []string {
 		"ret i1 %t2",
 		"define i1 @kizu_selfhost__source_is_frontend_source",
 		"%t2 = icmp eq i64 %kind, 1",
+		"br i1 %t2, label %if0_then, label %if0_cont",
+		"if0_then:\n  ret i1 true",
 		"%t5 = icmp eq i64 %kind, 3",
-		"%t6 = or i1 %t2, %t5",
-		"ret i1 %t6",
+		"ret i1 %t5",
 	}
 }
 
@@ -496,6 +498,35 @@ func requiredLLVMSourceModulePathFragments() []string {
 		"%t7_gep = getelementptr i8, ptr %t7_baseptr, i64 %t5",
 		"%t7_len = sub i64 %t6, %t5",
 		"ret %kizu.slice.u8 %t7",
+	}
+}
+
+// requiredLLVMSourceAbsoluteNameFragments locks source::is_absolute_name_for_file compiled through
+// short-circuit OR return lowering. The two string literal call arguments must receive distinct
+// globals so the std:: and selfhost:: prefix checks do not collide before the package-prefix helper
+// call.
+func requiredLLVMSourceAbsoluteNameFragments() []string {
+	return []string{
+		"@.kizu.compiled.kizu_selfhost__source_is_absolute_name_for_file.s0 = " +
+			"private unnamed_addr constant [5 x i8] c\"std::\"",
+		"@.kizu.compiled.kizu_selfhost__source_is_absolute_name_for_file.s1 = " +
+			"private unnamed_addr constant [10 x i8] c\"selfhost::\"",
+		"define i1 @kizu_selfhost__source_is_absolute_name_for_file",
+		"%arg1000000_1_ptr = getelementptr [5 x i8], ptr " +
+			"@.kizu.compiled.kizu_selfhost__source_is_absolute_name_for_file.s0",
+		"%t0 = call i1 @kizu_std__mem_starts_with(" +
+			"%kizu.slice.u8 %name, %kizu.slice.u8 %arg1000000_1_slice)",
+		"br i1 %t0, label %if0_then, label %if0_cont",
+		"if0_then:\n  ret i1 true",
+		"%arg1000001_1_ptr = getelementptr [10 x i8], ptr " +
+			"@.kizu.compiled.kizu_selfhost__source_is_absolute_name_for_file.s1",
+		"%t1 = call i1 @kizu_std__mem_starts_with(" +
+			"%kizu.slice.u8 %name, %kizu.slice.u8 %arg1000001_1_slice)",
+		"br i1 %t1, label %if1_then, label %if1_cont",
+		"if1_then:\n  ret i1 true",
+		"%t2 = call i1 @kizu_selfhost__source_starts_with_package_prefix(" +
+			"%kizu.selfhost.source.source_file %file, %kizu.slice.u8 %name)",
+		"ret i1 %t2",
 	}
 }
 
