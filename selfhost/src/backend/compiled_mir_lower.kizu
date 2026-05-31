@@ -1207,6 +1207,106 @@ pub fn lower_string_token_function(
     );
 }
 
+// append_single_op resolves a single-char operator's TokenKind tag and appends a no-look-ahead
+// entry to raw_token_at's dispatch table (tracker 961, scope 4 prerequisite).
+fn append_single_op(
+    ir_bytes: []u8,
+    ops: &var std::array::Array<compiled_mir::MirOperator>,
+    byte: i64,
+    variant: []u8
+) -> !void {
+    let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", variant
+    );
+    try ops.append(compiled_mir::operator(byte, tag, 0 - 1, 0 - 1, 0 - 1, 0 - 1));
+    return;
+}
+
+// append_two_op resolves a two-char-or-single operator's tags and appends a single look-ahead
+// entry (tracker 961, scope 4 prerequisite).
+fn append_two_op(
+    ir_bytes: []u8,
+    ops: &var std::array::Array<compiled_mir::MirOperator>,
+    byte: i64,
+    single_variant: []u8,
+    second_byte: i64,
+    two_variant: []u8
+) -> !void {
+    let single_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", single_variant
+    );
+    let two_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", two_variant
+    );
+    try ops.append(compiled_mir::operator(byte, single_tag, second_byte, two_tag, 0 - 1, 0 - 1));
+    return;
+}
+
+// lower_raw_token_function lowers std::kizu::lexer::raw_token_at into a single RawToken statement:
+// an Eof guard, an operator dispatch table over the byte at start, then the quote / digit / word
+// fallbacks to string_token / number_token / word_token (tracker 961, scope 4 prerequisite). Its
+// many-arm byte dispatch with two- and three-char look-aheads the generic path does not model, so
+// it is dispatched by name. All TokenKind tags come from the enum-variant facts.
+pub fn lower_raw_token_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let source_name = try nth_param_field(params_spec, 0, true);
+    let start_name = try nth_param_field(params_spec, 1, true);
+    let current_name = try nth_param_field(params_spec, 2, true);
+    let position_type = try nth_param_field(params_spec, 2, false);
+    let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", "Eof"
+    );
+    var ops = std::array::Array<compiled_mir::MirOperator>(std::mem::page_allocator());
+    try append_single_op(ir_bytes, &var ops, 123, "LBrace");
+    try append_single_op(ir_bytes, &var ops, 125, "RBrace");
+    try append_single_op(ir_bytes, &var ops, 40, "LParen");
+    try append_single_op(ir_bytes, &var ops, 41, "RParen");
+    try append_single_op(ir_bytes, &var ops, 59, "Semicolon");
+    try append_single_op(ir_bytes, &var ops, 44, "Comma");
+    try append_two_op(ir_bytes, &var ops, 33, "Bang", 61, "NotEq");
+    try append_single_op(ir_bytes, &var ops, 38, "Amp");
+    try append_two_op(ir_bytes, &var ops, 60, "LT", 61, "LTE");
+    try append_two_op(ir_bytes, &var ops, 62, "GT", 61, "GTE");
+    try append_single_op(ir_bytes, &var ops, 63, "Question");
+    try append_single_op(ir_bytes, &var ops, 91, "LBracket");
+    try append_single_op(ir_bytes, &var ops, 93, "RBracket");
+    try append_two_op(ir_bytes, &var ops, 58, "Colon", 58, "DoubleColon");
+    try append_two_op(ir_bytes, &var ops, 45, "Minus", 62, "Arrow");
+    // '=' is the only three-way operator: '==' -> Eq, '=>' -> FatArrow, else Assign.
+    let assign_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", "Assign"
+    );
+    let eq_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", "Eq"
+    );
+    let fat_arrow_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, "std::kizu::lexer::", "TokenKind", "FatArrow"
+    );
+    try ops.append(compiled_mir::operator(61, assign_tag, 61, eq_tag, 62, fat_arrow_tag));
+    try append_single_op(ir_bytes, &var ops, 43, "Plus");
+    try append_single_op(ir_bytes, &var ops, 42, "Asterisk");
+    try append_single_op(ir_bytes, &var ops, 47, "Slash");
+    try append_single_op(ir_bytes, &var ops, 37, "Percent");
+    try append_two_op(ir_bytes, &var ops, 46, "Dot", 46, "Range");
+    try append_single_op(ir_bytes, &var ops, 124, "Pipe");
+    try append_single_op(ir_bytes, &var ops, 64, "At");
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::raw_token_stmt(
+        source_name, start_name, current_name, position_type, llvm_return_type,
+        "kizu_kizu__lexer_token", "kizu_kizu__lexer_is_digit", "kizu_kizu__lexer_string_token",
+        "kizu_kizu__lexer_number_token", "kizu_kizu__lexer_word_token", eof_tag, ops
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // lower_skip_line_comment_function lowers std::kizu::lexer::skip_line_comment into a single
 // SkipLineComment statement: a two-phi loop threading the i64 end and the Position struct current
 // past a comment line, folding advance_byte until newline, then building the Eof Token (tracker

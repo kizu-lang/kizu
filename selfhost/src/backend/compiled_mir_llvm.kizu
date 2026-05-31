@@ -407,6 +407,7 @@ fn append_multi_stmt(
         SkipLineComment(payload) => try append_multi_skip_line_comment(out, payload);,
         IsDocCommentStart(payload) => try append_multi_is_doc_comment_start(out, payload);,
         WordToken(payload) => try append_multi_word_token(out, payload);,
+        RawToken(payload) => try append_multi_raw_token(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
@@ -1125,6 +1126,297 @@ fn append_multi_word_token(
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.token_type);
     try append_ll_line(out, " %wt_ident_tok");
+    return;
+}
+
+// append_raw_token_globals: raw_token_at forwards only value arguments and inline byte constants,
+// so it emits no string-constant globals (tracker 961).
+fn append_raw_token_globals(stmt: &compiled_mir::MirRawTokenStmt) -> !void {
+    return;
+}
+
+// append_raw_op_token emits one operator arm's token(<tag>, start, %op<index>_<end_suffix>,
+// current) call + ret, naming the result %op<index>_tok<result_suffix> (tracker 961, scope 4
+// prerequisite).
+fn append_raw_op_token(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirRawTokenStmt,
+    index: i64,
+    result_suffix: []u8,
+    tag: i64,
+    end_suffix: []u8
+) -> !void {
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_tok");
+    try out.append_bytes(result_suffix);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.token_symbol);
+    try out.append_bytes("(i64 ");
+    try std::fmt::append_i64(out, tag);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.start_name);
+    try out.append_bytes(", i64 %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_");
+    try out.append_bytes(end_suffix);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.current_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_tok");
+    try append_ll_line(out, result_suffix);
+    return;
+}
+
+// append_raw_operator emits one operator dispatch arm: an icmp on the leading byte, then either a
+// single-char Token return or a look-ahead chain (two-char / optional third / single fallback).
+// The match-miss edge targets the next operator, or rt_dispatch_string for the last one (tracker
+// 961, scope 4 prerequisite).
+fn append_raw_operator(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirRawTokenStmt,
+    index: i64,
+    op: &compiled_mir::MirOperator,
+    is_last: bool
+) -> !void {
+    try out.append_bytes("op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, ":");
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_is = icmp eq i8 %rt_byte, ");
+    try std::fmt::append_i64(out, op.byte);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br i1 %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_is, label %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_m, label %");
+    if is_last {
+        try append_ll_line(out, "rt_dispatch_string");
+    } else {
+        try out.append_bytes("op");
+        try std::fmt::append_i64(out, index + 1);
+        try out.append_byte(cast<u8>(10));
+    }
+    try out.append_bytes("op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, "_m:");
+    if op.second_byte < 0 {
+        try out.append_bytes("  %op");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_e1 = add i64 %");
+        try out.append_bytes(stmt.start_name);
+        try append_ll_line(out, ", 1");
+        try append_raw_op_token(out, stmt, index, "s", op.single_tag, "e1");
+        return;
+    }
+    // Two-char-or-single: bounds-check start + 1 before the look-ahead load.
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_n = add i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_inb = icmp slt i64 %op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, "_n, %rt_length");
+    try out.append_bytes("  br i1 %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_inb, label %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_look, label %op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, "_single");
+    try out.append_bytes("op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, "_look:");
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_p2 = getelementptr i8, ptr %rt_source_ptr, i64 %op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, "_n");
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_b2 = load i8, ptr %op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, "_p2");
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_is2 = icmp eq i8 %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_b2, ");
+    try std::fmt::append_i64(out, op.second_byte);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br i1 %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_is2, label %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_two, label %op");
+    try std::fmt::append_i64(out, index);
+    if op.third_byte >= 0 {
+        try append_ll_line(out, "_third");
+    } else {
+        try append_ll_line(out, "_single");
+    }
+    try out.append_bytes("op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, "_two:");
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_e2 = add i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", 2");
+    try append_raw_op_token(out, stmt, index, "2", op.two_tag, "e2");
+    if op.third_byte >= 0 {
+        try out.append_bytes("op");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, "_third:");
+        try out.append_bytes("  %op");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_is3 = icmp eq i8 %op");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_b2, ");
+        try std::fmt::append_i64(out, op.third_byte);
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  br i1 %op");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_is3, label %op");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_three, label %op");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, "_single");
+        try out.append_bytes("op");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, "_three:");
+        try out.append_bytes("  %op");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes("_e3 = add i64 %");
+        try out.append_bytes(stmt.start_name);
+        try append_ll_line(out, ", 2");
+        try append_raw_op_token(out, stmt, index, "3", op.third_tag, "e3");
+    }
+    try out.append_bytes("op");
+    try std::fmt::append_i64(out, index);
+    try append_ll_line(out, "_single:");
+    try out.append_bytes("  %op");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_e1 = add i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", 1");
+    try append_raw_op_token(out, stmt, index, "s", op.single_tag, "e1");
+    return;
+}
+
+// append_raw_dispatch_call emits a 'return <callee>(source, start, current);' tail call + ret for
+// the string / number / word fallbacks (tracker 961, scope 4 prerequisite).
+fn append_raw_dispatch_call(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirRawTokenStmt,
+    result: []u8,
+    symbol: []u8
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(result);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.start_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.current_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" %");
+    try append_ll_line(out, result);
+    return;
+}
+
+// append_multi_raw_token renders raw_token_at(source, start, current): an Eof guard, the operator
+// dispatch table over the byte at start, then the quote / digit / word fallbacks dispatching to
+// string_token / number_token / word_token (tracker 961, scope 4 prerequisite). len(source) is the
+// slice length field read inline as extractvalue field 1.
+fn append_multi_raw_token(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirRawTokenStmt
+) -> !void {
+    try out.append_bytes("  %rt_length = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %rt_eof = icmp sge i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", %rt_length");
+    try append_ll_line(out, "  br i1 %rt_eof, label %rt_eof_ret, label %rt_load");
+    try append_ll_line(out, "rt_eof_ret:");
+    try out.append_bytes("  %rt_eof_tok = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.token_symbol);
+    try out.append_bytes("(i64 ");
+    try std::fmt::append_i64(out, stmt.eof_tag);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.start_name);
+    try out.append_bytes(", i64 %");
+    try out.append_bytes(stmt.start_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.current_name);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %rt_eof_tok");
+    try append_ll_line(out, "rt_load:");
+    try out.append_bytes("  %rt_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  %rt_bptr = getelementptr i8, ptr %rt_source_ptr, i64 %");
+    try out.append_bytes(stmt.start_name);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  %rt_byte = load i8, ptr %rt_bptr");
+    try append_ll_line(out, "  br label %op0");
+    let ops = &stmt.operators;
+    var index = 0;
+    while index < ops.len() {
+        let op = try ops.at(index);
+        var is_last = false;
+        if index + 1 == ops.len() {
+            is_last = true;
+        }
+        try append_raw_operator(out, stmt, index, &op, is_last);
+        index = index + 1;
+    }
+    // Fallback dispatch: a double-quote byte (34) goes to string_token, a digit to number_token,
+    // and anything else to word_token.
+    try append_ll_line(out, "rt_dispatch_string:");
+    try append_ll_line(out, "  %rt_isq = icmp eq i8 %rt_byte, 34");
+    try append_ll_line(out, "  br i1 %rt_isq, label %rt_string, label %rt_dispatch_number");
+    try append_ll_line(out, "rt_string:");
+    try append_raw_dispatch_call(out, stmt, "rt_st", stmt.string_token_symbol);
+    try append_ll_line(out, "rt_dispatch_number:");
+    try out.append_bytes("  %rt_isd = call i1 @");
+    try out.append_bytes(stmt.is_digit_symbol);
+    try append_ll_line(out, "(i8 %rt_byte)");
+    try append_ll_line(out, "  br i1 %rt_isd, label %rt_number, label %rt_word");
+    try append_ll_line(out, "rt_number:");
+    try append_raw_dispatch_call(out, stmt, "rt_nt", stmt.number_token_symbol);
+    try append_ll_line(out, "rt_word:");
+    try append_raw_dispatch_call(out, stmt, "rt_wt", stmt.word_token_symbol);
     return;
 }
 
@@ -2502,6 +2794,7 @@ fn append_stmt_globals(
         SkipLineComment(payload) => try append_skip_line_comment_globals(payload);,
         IsDocCommentStart(payload) => try append_is_doc_comment_start_globals(payload);,
         WordToken(payload) => try append_word_token_globals(out, payload);,
+        RawToken(payload) => try append_raw_token_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,

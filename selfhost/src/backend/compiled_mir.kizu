@@ -502,6 +502,41 @@ pub struct MirSkipLineCommentStmt {
     pub eof_tag: i64,
 }
 
+// MirOperator is one entry of raw_token_at's operator dispatch table (tracker 961, scope 4
+// prerequisite). When byte matches the first byte, the renderer returns the single-char Token
+// (single_tag, start..start+1). second_byte >= 0 adds a look-ahead: if source[start+1] equals it,
+// the two-char Token (two_tag, start..start+2) is returned instead; third_byte >= 0 adds one more
+// alternative (third_tag, used only by '=' -> Eq / FatArrow / Assign). -1 marks an absent
+// alternative.
+pub struct MirOperator {
+    pub byte: i64,
+    pub single_tag: i64,
+    pub second_byte: i64,
+    pub two_tag: i64,
+    pub third_byte: i64,
+    pub third_tag: i64,
+}
+
+// MirRawTokenStmt backs raw_token_at(source, start, current): an Eof guard, an operator dispatch
+// table over the byte at start, then the quote / digit / word fallbacks dispatching to
+// string_token / number_token / word_token (tracker 961, scope 4 prerequisite). eof_tag is the
+// TokenKind::Eof discriminant; the *_symbol fields are the already-compiled callees; operators owns
+// the dispatch table Array.
+pub struct MirRawTokenStmt {
+    pub source_name: []u8,
+    pub start_name: []u8,
+    pub current_name: []u8,
+    pub position_type: []u8,
+    pub token_type: []u8,
+    pub token_symbol: []u8,
+    pub is_digit_symbol: []u8,
+    pub string_token_symbol: []u8,
+    pub number_token_symbol: []u8,
+    pub word_token_symbol: []u8,
+    pub eof_tag: i64,
+    pub operators: std::array::Array<MirOperator>,
+}
+
 // MirKeyword is one (spelling, TokenKind tag) entry of word_token's keyword table (tracker 961,
 // scope 4 prerequisite). The renderer emits the spelling as a private string constant and compares
 // the scanned identifier slice against it via equal_bytes, returning the keyword Token on a match.
@@ -736,6 +771,7 @@ pub union MirStmt {
     SkipLineComment(MirSkipLineCommentStmt),
     IsDocCommentStart(MirIsDocCommentStartStmt),
     WordToken(MirWordTokenStmt),
+    RawToken(MirRawTokenStmt),
     AstNodeText(MirAstNodeTextStmt),
     StringLiteralSpan(MirStringLiteralSpanStmt),
     PrintPayload(MirPrintPayloadStmt),
@@ -1024,6 +1060,19 @@ impl MirWordTokenStmt {
     }
 }
 
+impl MirOperator {
+    fn deinit(self: MirOperator) -> void {
+        return;
+    }
+}
+
+impl MirRawTokenStmt {
+    fn deinit(self: MirRawTokenStmt) -> void {
+        self.operators.deinit();
+        return;
+    }
+}
+
 impl MirAstNodeTextStmt {
     fn deinit(self: MirAstNodeTextStmt) -> void {
         return;
@@ -1146,6 +1195,7 @@ impl MirStmt {
             SkipLineComment(payload) => payload.deinit(),
             IsDocCommentStart(payload) => payload.deinit(),
             WordToken(payload) => payload.deinit(),
+            RawToken(payload) => payload.deinit(),
             AstNodeText(payload) => payload.deinit(),
             StringLiteralSpan(payload) => payload.deinit(),
             PrintPayload(payload) => payload.deinit(),
@@ -2127,6 +2177,54 @@ pub fn keyword(text: []u8, tag: i64) -> MirKeyword {
         text: text,
         tag: tag
     };
+}
+
+pub fn operator(
+    byte: i64,
+    single_tag: i64,
+    second_byte: i64,
+    two_tag: i64,
+    third_byte: i64,
+    third_tag: i64
+) -> MirOperator {
+    return MirOperator {
+        byte: byte,
+        single_tag: single_tag,
+        second_byte: second_byte,
+        two_tag: two_tag,
+        third_byte: third_byte,
+        third_tag: third_tag
+    };
+}
+
+pub fn raw_token_stmt(
+    source_name: []u8,
+    start_name: []u8,
+    current_name: []u8,
+    position_type: []u8,
+    token_type: []u8,
+    token_symbol: []u8,
+    is_digit_symbol: []u8,
+    string_token_symbol: []u8,
+    number_token_symbol: []u8,
+    word_token_symbol: []u8,
+    eof_tag: i64,
+    operators: std::array::Array<MirOperator>
+) -> MirStmt {
+    return MirStmt::RawToken(MirRawTokenStmt {
+        source_name: source_name,
+        start_name: start_name,
+        current_name: current_name,
+        position_type: position_type,
+        token_type: token_type,
+        token_symbol: token_symbol,
+        is_digit_symbol: is_digit_symbol,
+        string_token_symbol: string_token_symbol,
+        number_token_symbol: number_token_symbol,
+        word_token_symbol: word_token_symbol,
+        eof_tag: eof_tag,
+        operators: operators
+    });
 }
 
 pub fn word_token_stmt(
