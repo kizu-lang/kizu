@@ -85,6 +85,17 @@ pub fn append_compiled_function_params(
             ir_bytes, function_name, 0, "statement", 0, bs
         );
         let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        // Parser TokenKind predicates can be written as a statement match with return-bool arms
+        // (the common exhaustive helper form) or as a compact return-match expression. Both lower
+        // through the same semantic predicate MIR instead of a source-shape scanner.
+        if std::mem::equal_bytes(kind, "Match") or std::mem::equal_bytes(kind, "ExprStmt") {
+            let predicate_mir = try compiled_mir_lower::lower_token_kind_predicate_function(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            defer predicate_mir.deinit();
+            try compiled_mir_llvm::append_function(out, &predicate_mir);
+            return;
+        }
         if !std::mem::equal_bytes(kind, "Return") {
             return error("compiled function: single statement must be return");
         }
@@ -209,6 +220,16 @@ pub fn append_compiled_function_params(
         );
         defer stmt_mir.deinit();
         try compiled_mir_llvm::append_function(out, &stmt_mir);
+        return;
+    }
+    // lower_run_parse_result consumes the parser/check AST boundary value and forwards ast/root
+    // into the existing run-codegen AST traversal.
+    if std::mem::equal_bytes(function_name, "selfhost::ir::codegen::lower_run_parse_result") {
+        let parse_result_mir = try compiled_mir_lower::lower_run_parse_result_function(
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+        defer parse_result_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &parse_result_mir);
         return;
     }
     // lower_run_ast is the run-codegen AST traversal root: a 'let node = ast.get(root); return
@@ -364,6 +385,30 @@ pub fn append_compiled_function_params(
         );
         defer token_at_mir.deinit();
         try compiled_mir_llvm::append_function(out, &token_at_mir);
+        return;
+    }
+    // Parser source-span predicates scan an AST span for namespace paths / struct-literal type
+    // names. They carry multiple loop variables and early returns, so they are intercepted by name
+    // instead of broadening the generic restricted while lowering (tracker 961).
+    if std::mem::equal_bytes(function_name, "std::kizu::parser::is_namespace_path_span") or
+        std::mem::equal_bytes(function_name, "std::kizu::parser::is_struct_literal_type_span") {
+        let span_mir = try compiled_mir_lower::lower_parser_span_predicate_function(
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+        defer span_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &span_mir);
+        return;
+    }
+    // Parser postfix guards are the first helpers in this cluster that cross from tokens into the
+    // parsed AST: they inspect ParseNode.next, fetch Ast.get(ParseNode.node), then classify the
+    // node span through the compiled parser span predicates (tracker 961).
+    if std::mem::equal_bytes(function_name, "std::kizu::parser::is_type_apply_start") or
+        std::mem::equal_bytes(function_name, "std::kizu::parser::is_struct_literal_start") {
+        let postfix_mir = try compiled_mir_lower::lower_parser_postfix_start_function(
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+        defer postfix_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &postfix_mir);
         return;
     }
     // 'let node = self.get(index); return match node.data { ... };' is the first

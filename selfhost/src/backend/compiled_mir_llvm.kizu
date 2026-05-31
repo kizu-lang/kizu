@@ -413,11 +413,14 @@ fn append_multi_stmt(
         NextToken(payload) => try append_multi_next_token(out, payload);,
         Tokenize(payload) => try append_multi_tokenize(out, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
+        ParserSpanPredicate(payload) => try append_multi_parser_span_predicate(out, payload);,
+        ParserPostfixStart(payload) => try append_multi_parser_postfix_start(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
         LowerPrintCall(payload) => try append_multi_lower_print_call(out, payload);,
         LowerPrintStatement(payload) => try append_multi_lower_print_statement(out, payload);,
+        LowerRunParseResult(payload) => try append_multi_lower_run_parse_result(out, payload);,
         LowerRunAstBlock(payload) => try append_multi_lower_run_ast_block(out, payload);,
         LowerRunAstFunction(payload) => try append_multi_lower_run_ast_function(out, payload);,
         LowerRunAstDeclarations(payload) => try append_multi_lower_run_ast_declarations(out, payload);,
@@ -1874,9 +1877,9 @@ fn append_token_kind_predicate_globals(stmt: &compiled_mir::MirTokenKindPredicat
     return;
 }
 
-// append_multi_token_kind_predicate renders 'return match token.kind { <Variant> => true, _ =>
-// false };': extract the TokenKind field off the Token param and compare it to the variant
-// discriminant, returning the i1 result (tracker 961, scope 4 prerequisite).
+// append_multi_token_kind_predicate renders parser TokenKind predicates by extracting the
+// Token.kind field and comparing it to every variant whose match arm returns true. Single-variant
+// predicates keep the historical %tkp_is name; multi-variant predicates emit an OR-chain.
 fn append_multi_token_kind_predicate(
     out: &var std::string::String,
     stmt: &compiled_mir::MirTokenKindPredicateStmt
@@ -1888,10 +1891,268 @@ fn append_multi_token_kind_predicate(
     try out.append_bytes(", ");
     try std::fmt::append_i64(out, stmt.kind_field_index);
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %tkp_is = icmp eq i64 %tkp_kind, ");
-    try std::fmt::append_i64(out, stmt.variant_tag);
+    let tags = &stmt.variant_tags;
+    if tags.len() == 1 {
+        let tag = try tags.get(0);
+        try out.append_bytes("  %tkp_is = icmp eq i64 %tkp_kind, ");
+        try std::fmt::append_i64(out, tag);
+        try out.append_byte(cast<u8>(10));
+        try append_ll_line(out, "  ret i1 %tkp_is");
+        return;
+    }
+    let first_tag = try tags.get(0);
+    try out.append_bytes("  %tkp_is_0 = icmp eq i64 %tkp_kind, ");
+    try std::fmt::append_i64(out, first_tag);
     try out.append_byte(cast<u8>(10));
-    try append_ll_line(out, "  ret i1 %tkp_is");
+    var index = 1;
+    while index < tags.len() {
+        let tag = try tags.get(index);
+        try out.append_bytes("  %tkp_cmp_");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes(" = icmp eq i64 %tkp_kind, ");
+        try std::fmt::append_i64(out, tag);
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  %tkp_is_");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes(" = or i1 %tkp_is_");
+        try std::fmt::append_i64(out, index - 1);
+        try out.append_bytes(", %tkp_cmp_");
+        try std::fmt::append_i64(out, index);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    try out.append_bytes("  ret i1 %tkp_is_");
+    try std::fmt::append_i64(out, tags.len() - 1);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_parser_span_predicate_globals: parser span predicates forward only source/span values.
+fn append_parser_span_predicate_globals(stmt: &compiled_mir::MirParserSpanPredicateStmt) -> !void {
+    return;
+}
+
+fn append_parser_postfix_start_globals(stmt: &compiled_mir::MirParserPostfixStartStmt) -> !void {
+    return;
+}
+
+fn append_multi_parser_span_predicate(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirParserSpanPredicateStmt
+) -> !void {
+    if stmt.mode == 0 {
+        try append_namespace_path_span(out, stmt);
+        return;
+    }
+    try append_struct_literal_type_span(out, stmt);
+    return;
+}
+
+// append_namespace_path_span renders is_namespace_path_span(source, span): it scans the span,
+// accepts name bytes separated by a double-colon, rejects empty segments, and returns true only when at
+// least one namespace separator was seen.
+fn append_namespace_path_span(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirParserSpanPredicateStmt
+) -> !void {
+    try out.append_bytes("  %nps_start = extractvalue ");
+    try out.append_bytes(stmt.span_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.span_name);
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  %nps_end = extractvalue ");
+    try out.append_bytes(stmt.span_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.span_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %nps_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  br label %nps_loop");
+    try append_ll_line(out, "nps_loop:");
+    try append_ll_line(out,
+        "  %nps_index = phi i64 [ %nps_start, %entry ], [ %nps_name_next, %nps_name ], [ %nps_dc_next, %nps_dc_advance ]");
+    try append_ll_line(out,
+        "  %nps_need = phi i1 [ true, %entry ], [ false, %nps_name ], [ true, %nps_dc_advance ]");
+    try append_ll_line(out,
+        "  %nps_saw = phi i1 [ false, %entry ], [ %nps_saw, %nps_name ], [ true, %nps_dc_advance ]");
+    try append_ll_line(out, "  %nps_in_span = icmp slt i64 %nps_index, %nps_end");
+    try append_ll_line(out, "  br i1 %nps_in_span, label %nps_body, label %nps_exit");
+    try append_ll_line(out, "nps_body:");
+    try append_ll_line(out, "  %nps_bptr = getelementptr i8, ptr %nps_source_ptr, i64 %nps_index");
+    try append_ll_line(out, "  %nps_byte = load i8, ptr %nps_bptr");
+    try out.append_bytes("  %nps_name_byte = call i1 @");
+    try out.append_bytes(stmt.is_name_symbol);
+    try append_ll_line(out, "(i8 %nps_byte)");
+    try append_ll_line(out, "  br i1 %nps_name_byte, label %nps_name, label %nps_other");
+    try append_ll_line(out, "nps_name:");
+    try append_ll_line(out, "  %nps_name_next = add i64 %nps_index, 1");
+    try append_ll_line(out, "  br label %nps_loop");
+    try append_ll_line(out, "nps_other:");
+    try out.append_bytes("  %nps_double_colon = call i1 @");
+    try out.append_bytes(stmt.is_double_colon_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", i64 %nps_end, i64 %nps_index)");
+    try append_ll_line(out, "  br i1 %nps_double_colon, label %nps_colon, label %nps_false");
+    try append_ll_line(out, "nps_colon:");
+    try append_ll_line(out, "  br i1 %nps_need, label %nps_false, label %nps_dc_advance");
+    try append_ll_line(out, "nps_dc_advance:");
+    try append_ll_line(out, "  %nps_dc_next = add i64 %nps_index, 2");
+    try append_ll_line(out, "  br label %nps_loop");
+    try append_ll_line(out, "nps_exit:");
+    try append_ll_line(out, "  br i1 %nps_need, label %nps_false, label %nps_return");
+    try append_ll_line(out, "nps_return:");
+    try append_ll_line(out, "  ret i1 %nps_saw");
+    try append_ll_line(out, "nps_false:");
+    try append_ll_line(out, "  ret i1 false");
+    return;
+}
+
+// append_struct_literal_type_span renders is_struct_literal_type_span(source, span): it scans a
+// namespace-style path and applies the parser's capitalization rule for struct literal types.
+fn append_struct_literal_type_span(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirParserSpanPredicateStmt
+) -> !void {
+    try out.append_bytes("  %slt_start = extractvalue ");
+    try out.append_bytes(stmt.span_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.span_name);
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  %slt_end = extractvalue ");
+    try out.append_bytes(stmt.span_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.span_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %slt_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  br label %slt_loop");
+    try append_ll_line(out, "slt_loop:");
+    try append_ll_line(out,
+        "  %slt_index = phi i64 [ %slt_start, %entry ], [ %slt_name_next_new, %slt_name_new ], [ %slt_name_next_keep, %slt_name_keep ], [ %slt_dc_next, %slt_dc_advance ]");
+    try append_ll_line(out,
+        "  %slt_segment = phi i64 [ %slt_start, %entry ], [ %slt_index, %slt_name_new ], [ %slt_segment, %slt_name_keep ], [ %slt_segment, %slt_dc_advance ]");
+    try append_ll_line(out,
+        "  %slt_previous = phi i64 [ %slt_start, %entry ], [ %slt_segment, %slt_name_new ], [ %slt_previous, %slt_name_keep ], [ %slt_previous, %slt_dc_advance ]");
+    try append_ll_line(out,
+        "  %slt_count = phi i64 [ 0, %entry ], [ %slt_count_next, %slt_name_new ], [ %slt_count, %slt_name_keep ], [ %slt_count, %slt_dc_advance ]");
+    try append_ll_line(out,
+        "  %slt_need = phi i1 [ true, %entry ], [ false, %slt_name_new ], [ false, %slt_name_keep ], [ true, %slt_dc_advance ]");
+    try append_ll_line(out, "  %slt_in_span = icmp slt i64 %slt_index, %slt_end");
+    try append_ll_line(out, "  br i1 %slt_in_span, label %slt_body, label %slt_exit");
+    try append_ll_line(out, "slt_body:");
+    try append_ll_line(out, "  %slt_bptr = getelementptr i8, ptr %slt_source_ptr, i64 %slt_index");
+    try append_ll_line(out, "  %slt_byte = load i8, ptr %slt_bptr");
+    try out.append_bytes("  %slt_name_byte = call i1 @");
+    try out.append_bytes(stmt.is_name_symbol);
+    try append_ll_line(out, "(i8 %slt_byte)");
+    try append_ll_line(out, "  br i1 %slt_name_byte, label %slt_name, label %slt_other");
+    try append_ll_line(out, "slt_name:");
+    try append_ll_line(out, "  br i1 %slt_need, label %slt_name_new, label %slt_name_keep");
+    try append_ll_line(out, "slt_name_new:");
+    try append_ll_line(out, "  %slt_count_next = add i64 %slt_count, 1");
+    try append_ll_line(out, "  %slt_name_next_new = add i64 %slt_index, 1");
+    try append_ll_line(out, "  br label %slt_loop");
+    try append_ll_line(out, "slt_name_keep:");
+    try append_ll_line(out, "  %slt_name_next_keep = add i64 %slt_index, 1");
+    try append_ll_line(out, "  br label %slt_loop");
+    try append_ll_line(out, "slt_other:");
+    try out.append_bytes("  %slt_double_colon = call i1 @");
+    try out.append_bytes(stmt.is_double_colon_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", i64 %slt_end, i64 %slt_index)");
+    try append_ll_line(out, "  br i1 %slt_double_colon, label %slt_colon, label %slt_false");
+    try append_ll_line(out, "slt_colon:");
+    try append_ll_line(out, "  br i1 %slt_need, label %slt_false, label %slt_dc_advance");
+    try append_ll_line(out, "slt_dc_advance:");
+    try append_ll_line(out, "  %slt_dc_next = add i64 %slt_index, 2");
+    try append_ll_line(out, "  br label %slt_loop");
+    try append_ll_line(out, "slt_exit:");
+    try append_ll_line(out, "  br i1 %slt_need, label %slt_false, label %slt_check_last");
+    try append_ll_line(out, "slt_check_last:");
+    try append_ll_line(out, "  %slt_last_ptr = getelementptr i8, ptr %slt_source_ptr, i64 %slt_segment");
+    try append_ll_line(out, "  %slt_last_byte = load i8, ptr %slt_last_ptr");
+    try out.append_bytes("  %slt_last_upper = call i1 @");
+    try out.append_bytes(stmt.is_upper_symbol);
+    try append_ll_line(out, "(i8 %slt_last_byte)");
+    try append_ll_line(out, "  br i1 %slt_last_upper, label %slt_check_previous, label %slt_false");
+    try append_ll_line(out, "slt_check_previous:");
+    try append_ll_line(out, "  %slt_multiple = icmp sgt i64 %slt_count, 1");
+    try append_ll_line(out, "  br i1 %slt_multiple, label %slt_prev, label %slt_true");
+    try append_ll_line(out, "slt_prev:");
+    try append_ll_line(out, "  %slt_prev_ptr = getelementptr i8, ptr %slt_source_ptr, i64 %slt_previous");
+    try append_ll_line(out, "  %slt_prev_byte = load i8, ptr %slt_prev_ptr");
+    try out.append_bytes("  %slt_prev_upper = call i1 @");
+    try out.append_bytes(stmt.is_upper_symbol);
+    try append_ll_line(out, "(i8 %slt_prev_byte)");
+    try append_ll_line(out, "  br i1 %slt_prev_upper, label %slt_false, label %slt_true");
+    try append_ll_line(out, "slt_true:");
+    try append_ll_line(out, "  ret i1 true");
+    try append_ll_line(out, "slt_false:");
+    try append_ll_line(out, "  ret i1 false");
+    return;
+}
+
+// append_multi_parser_postfix_start renders is_type_apply_start / is_struct_literal_start by
+// guarding on left.next, then asking Ast.get(left.node) for the source span to classify.
+fn append_multi_parser_postfix_start(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirParserPostfixStartStmt
+) -> !void {
+    try out.append_bytes("  %pps_next = extractvalue ");
+    try out.append_bytes(stmt.left_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.left_name);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, stmt.next_field_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %pps_guard = call i1 @");
+    try out.append_bytes(stmt.guard_symbol);
+    if stmt.mode == 0 {
+        try out.append_bytes("(");
+        try out.append_bytes(stmt.token_type);
+        try append_ll_line(out, " %pps_next)");
+    } else {
+        try out.append_bytes("(%kizu.slice.u8 %");
+        try out.append_bytes(stmt.text_name);
+        try out.append_bytes(", ");
+        try out.append_bytes(stmt.token_type);
+        try append_ll_line(out, " %pps_next, i8 123)");
+    }
+    try append_ll_line(out, "  br i1 %pps_guard, label %pps_node, label %pps_false");
+    try append_ll_line(out, "pps_node:");
+    try out.append_bytes("  %pps_node_id = extractvalue ");
+    try out.append_bytes(stmt.left_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.left_name);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, stmt.node_field_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %pps_ast_node = call ");
+    try out.append_bytes(stmt.ast_node_type);
+    try out.append_bytes(" @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.node_id %pps_node_id)");
+    try out.append_bytes("  %pps_span = extractvalue ");
+    try out.append_bytes(stmt.ast_node_type);
+    try out.append_bytes(" %pps_ast_node, ");
+    try std::fmt::append_i64(out, stmt.ast_node_span_field_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %pps_result = call i1 @");
+    try out.append_bytes(stmt.span_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.span_type);
+    try append_ll_line(out, " %pps_span)");
+    try append_ll_line(out, "  ret i1 %pps_result");
+    try append_ll_line(out, "pps_false:");
+    try append_ll_line(out, "  ret i1 false");
     return;
 }
 
@@ -2357,6 +2618,39 @@ fn append_multi_lower_print_statement(
     try append_ll_line(out,
         "  %lps_uw2 = insertvalue %kizu.error.run_ast %lps_uw1, %kizu.slice.u8 zeroinitializer, 2");
     try append_ll_line(out, "  ret %kizu.error.run_ast %lps_uw2");
+    return;
+}
+
+// append_lower_run_parse_result_globals: the ParseResult bridge forwards only value arguments and
+// emits no string-constant globals.
+fn append_lower_run_parse_result_globals(stmt: &compiled_mir::MirLowerRunParseResultStmt) -> !void {
+    return;
+}
+
+// append_multi_lower_run_parse_result renders lower_run_parse_result(text, parsed): it extracts
+// ParseResult.ast/root from the parser boundary value and forwards directly to lower_run_ast.
+fn append_multi_lower_run_parse_result(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirLowerRunParseResultStmt
+) -> !void {
+    try out.append_bytes("  %lrpr_ast = extractvalue ");
+    try out.append_bytes(stmt.parsed_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.parsed_name);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, stmt.ast_field_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %lrpr_root = extractvalue ");
+    try out.append_bytes(stmt.parsed_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.parsed_name);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, stmt.root_field_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %lrpr_result = call %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.ast %lrpr_ast, %kizu.kizu.ast.node_id %lrpr_root)");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrpr_result");
     return;
 }
 
@@ -3275,11 +3569,14 @@ fn append_stmt_globals(
         NextToken(payload) => try append_next_token_globals(payload);,
         Tokenize(payload) => try append_tokenize_globals(payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,
+        ParserSpanPredicate(payload) => try append_parser_span_predicate_globals(payload);,
+        ParserPostfixStart(payload) => try append_parser_postfix_start_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,
         LowerPrintCall(payload) => try append_lower_print_call_string_globals(out, payload);,
         LowerPrintStatement(payload) => try append_lower_print_statement_globals(payload);,
+        LowerRunParseResult(payload) => try append_lower_run_parse_result_globals(payload);,
         LowerRunAstBlock(payload) => try append_lower_run_ast_block_globals(payload);,
         LowerRunAstFunction(payload) => try append_lower_run_ast_function_string_globals(out, payload);,
         LowerRunAstDeclarations(payload) => try append_lower_run_ast_declarations_globals(payload);,

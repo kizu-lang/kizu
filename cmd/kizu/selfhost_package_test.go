@@ -977,7 +977,7 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	execute := readSelfhostFile(t, "../../selfhost/src/cli/execute.kizu")
 	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
 	cliRun := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
-	cliFrontend := readSelfhostFile(t, "../../selfhost/src/backend/cli_frontend_llvm.kizu")
+	cliAstBoundary := readSelfhostFile(t, "../../selfhost/src/backend/cli_ast_boundary_llvm.kizu")
 	cliCodegen := readSelfhostFile(t, "../../selfhost/src/backend/cli_codegen_llvm.kizu")
 	cliHostedRenderer := readSelfhostFile(
 		t,
@@ -987,63 +987,48 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	assertHostedOmitsRunCodegenArtifact(t, hosted)
 	assertCodegenIRShape(t, codegen)
 	assertCodegenIRForbiddenBridges(t, hosted, codegen)
-	assertHostedRunLLVMResponsibilities(t, cliRun, cliFrontend, cliCodegen, cliHostedRenderer)
+	assertHostedRunLLVMResponsibilities(t, cliRun, cliAstBoundary, cliCodegen, cliHostedRenderer)
 }
 
-// TestSelfhostRunFrontendScannerFrozen freezes the stage2 run-frontend token
-// scanner so it cannot grow new source-shape routes (tracker 961).
-//
-// stage2 has no compiled parser/AST yet, so the run frontend in
-// cli_frontend_llvm.kizu still recognizes the supported run shape by scanning
-// source tokens. That scanner is a temporary stopgap until stage2 compiles the
-// parser/AST and the real lower_run_ast traversal. Until then the scanner is
-// frozen: new run features must be added by AST node lowering, not by adding
-// more source-token scanners. This gate fails if any new cli_frontend function
-// or parse_<feature> scanner is introduced, or if the temporary-scanner
-// documentation (with its deletion path) is dropped.
-func TestSelfhostRunFrontendScannerFrozen(t *testing.T) {
-	cliFrontend := readSelfhostFile(t, "../../selfhost/src/backend/cli_frontend_llvm.kizu")
+// TestSelfhostRunFrontendScannerRemoved keeps run/test dispatch on the
+// parse-result AST boundary instead of the removed source-token scanners.
+func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	cliRun := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
+	cliTest := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu")
+	astBoundary := readSelfhostFile(t, "../../selfhost/src/backend/cli_ast_boundary_llvm.kizu")
+	testAst := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_ast_llvm.kizu")
+	combined := cli + cliRun + cliTest + astBoundary + testAst
 
-	// The run frontend is a frozen allowlist of functions. Any new
-	// @kizu_selfhost__cli_frontend_* function (define or call) fails the gate.
-	allowed := map[string]bool{
-		"cli_frontend_lower_checked_run_ast": true,
-		"cli_frontend_parse_let_binding":     true,
-		"cli_frontend_parse_print_statement": true,
-		"cli_frontend_string_payload":        true,
-		"cli_frontend_token_slice":           true,
-	}
-	frontendFnRe := regexp.MustCompile(`kizu_selfhost__(cli_frontend_[a-z0-9_]+)`)
-	for _, match := range frontendFnRe.FindAllStringSubmatch(cliFrontend, -1) {
-		if !allowed[match[1]] {
-			t.Fatalf(
-				"run frontend introduces non-allowlisted scanner function %q; add run "+
-					"features by AST node lowering, not new source-token scanners (tracker 961)",
-				match[1],
-			)
-		}
-	}
-
-	// Exactly the two legacy parse_<feature> scanners are permitted. A third
-	// parse_<feature> define means the scanner is growing a new shape route.
-	parseDefineRe := regexp.MustCompile(`define [^"]*@kizu_selfhost__cli_frontend_parse_[a-z_]+\(`)
-	if got := len(parseDefineRe.FindAllString(cliFrontend, -1)); got != 2 {
-		t.Fatalf(
-			"run frontend defines %d parse_<feature> scanners, want exactly the 2 frozen "+
-				"legacy scanners (tracker 961)",
-			got,
-		)
-	}
-
-	// The temporary-scanner isolation must stay documented with a deletion path
-	// so the stopgap cannot quietly become permanent.
-	for _, marker := range []string{
-		"TEMPORARY LEGACY SCANNER (tracker 961)",
-		"DELETION CONDITION",
+	for _, fragment := range []string{
+		"cli_frontend_llvm",
+		"cli_test_executable_llvm",
+		"cli_executable_body_parsing_llvm",
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"@kizu_selfhost__cli_frontend_parse_let_binding",
+		"@kizu_selfhost__cli_frontend_parse_print_statement",
+		"@kizu_selfhost__cli_parse_test_expect_value",
+		"@kizu_selfhost__cli_test_executable",
 	} {
-		if !strings.Contains(cliFrontend, marker) {
-			t.Fatalf("run frontend dropped temporary-scanner documentation marker %q", marker)
+		if strings.Contains(combined, fragment) {
+			t.Fatalf("stage2 run/test path keeps removed source scanner fragment %q", fragment)
 		}
+	}
+
+	for _, fragment := range []string{
+		"@kizu_selfhost__cli_parse_validated_ast",
+		"@kizu_kizu__lexer_tokenize",
+		"@kizu_selfhost__ir_codegen_lower_run_parse_result",
+		"@kizu_selfhost__cli_lower_test_parse_result",
+	} {
+		if !strings.Contains(combined, fragment) {
+			t.Fatalf("stage2 run/test path missing parse-result AST boundary %q", fragment)
+		}
+	}
+
+	scannerRoute := regexp.MustCompile(`cli_(frontend|test_executable|executable_body).*parse_`)
+	if match := scannerRoute.FindString(combined); match != "" {
+		t.Fatalf("stage2 run/test path has feature-specific scanner route %q", match)
 	}
 }
 
@@ -1098,6 +1083,7 @@ func assertCodegenIRShape(t *testing.T, codegen string) {
 		"pub struct Program",
 		"pub struct RunAst",
 		"pub from_codegen_lowering: bool",
+		"pub fn lower_run_parse_result(",
 		"pub fn lower_run_ast(",
 		"fn lower_run_ast_to_program(",
 		"fn run_ast_supported(",
@@ -1151,18 +1137,19 @@ func assertCodegenIRForbiddenBridges(t *testing.T, hosted string, codegen string
 }
 
 // assertHostedRunLLVMResponsibilities keeps the stage2 hosted run path split:
-// run orchestrates, frontend lowers checked source to RunAst, codegen lowers
+// run orchestrates, the parse boundary builds ParseResult, codegen lowers
 // RunAst to Program, and hosted renderer owns the LLVM module rendering.
 func assertHostedRunLLVMResponsibilities(
 	t *testing.T,
 	cliRun string,
-	cliFrontend string,
+	cliAstBoundary string,
 	cliCodegen string,
 	cliHostedRenderer string,
 ) {
 	t.Helper()
 	requiredRun := []string{
-		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"@kizu_selfhost__cli_parse_validated_ast",
+		"@kizu_selfhost__ir_codegen_lower_run_parse_result",
 		"@kizu_selfhost__cli_codegen_lower_run_ast",
 		"@kizu_selfhost__cli_emit_run_codegen_artifact",
 		"@kizu_selfhost__cli_hosted_write_stdout_ll",
@@ -1173,44 +1160,19 @@ func assertHostedRunLLVMResponsibilities(
 			t.Fatalf("run LLVM path missing responsibility boundary %q", fragment)
 		}
 	}
-	requiredFrontend := []string{
-		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__cli_frontend_lower_checked_run_ast",
-		"define %kizu.selfhost.codegen.binding @kizu_selfhost__cli_frontend_parse_let_binding",
-		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_frontend_parse_print_statement",
+	requiredAstBoundary := []string{
+		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
+		"@kizu_kizu__lexer_tokenize",
+		"@kizu_kizu__ast_ast_add_node",
+		"@kizu_kizu__ast_parse_result",
 	}
-	for _, fragment := range requiredFrontend {
-		if !strings.Contains(cliFrontend, fragment) {
-			t.Fatalf("frontend LLVM path missing %q", fragment)
+	for _, fragment := range requiredAstBoundary {
+		if !strings.Contains(cliAstBoundary, fragment) {
+			t.Fatalf("AST boundary LLVM path missing %q", fragment)
 		}
 	}
-	for _, forbidden := range []string{
-		"run_module_prefix",
-		"run_module_len_middle",
-		"run_module_payload_middle",
-		"run_module_slice_middle",
-		"run_module_suffix",
-		"@kizu_selfhost__cli_codegen_parse_checked_run_ast",
-		"@kizu_selfhost__cli_codegen_parse_let_binding",
-		"@kizu_selfhost__cli_codegen_parse_print_statement",
-		"@kizu_selfhost__parse_next_semantic_token_index",
-		"cli_token_word_eq",
-		"cli_token_char_eq",
-	} {
-		if strings.Contains(cliRun, forbidden) {
-			t.Fatalf("run LLVM path owns forbidden frontend/static detail %q", forbidden)
-		}
-		if strings.Contains(cliCodegen, forbidden) {
-			t.Fatalf("codegen LLVM path owns forbidden frontend/static detail %q", forbidden)
-		}
-	}
-	for _, fragment := range []string{
-		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
-		"hosted::run_print_executable()",
-	} {
-		if !strings.Contains(cliHostedRenderer, fragment) {
-			t.Fatalf("hosted renderer missing %q", fragment)
-		}
-	}
+	assertHostedRunLLVMForbiddenDetails(t, cliRun, cliCodegen)
+	assertHostedRunLLVMHostedRenderer(t, cliHostedRenderer)
 	assertMetadataLineBodyDerivedCodegen(t, cliCodegen)
 	assertConstStringValueBodyDerivedCodegen(t, cliCodegen)
 	assertConstStringInstructionBodyDerivedCodegen(t, cliCodegen)
@@ -1223,6 +1185,47 @@ func assertHostedRunLLVMResponsibilities(
 	assertCompiledFunctionGeneric(t)
 	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
 		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
+	}
+}
+
+// assertHostedRunLLVMForbiddenDetails rejects obsolete scanner/frontend details
+// from the hosted run and codegen LLVM paths.
+func assertHostedRunLLVMForbiddenDetails(t *testing.T, cliRun string, cliCodegen string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"run_module_prefix",
+		"run_module_len_middle",
+		"run_module_payload_middle",
+		"run_module_slice_middle",
+		"run_module_suffix",
+		"@kizu_selfhost__cli_codegen_parse_checked_run_ast",
+		"@kizu_selfhost__cli_codegen_parse_let_binding",
+		"@kizu_selfhost__cli_codegen_parse_print_statement",
+		"@kizu_selfhost__parse_next_semantic_token_index",
+		"cli_token_word_eq",
+		"cli_token_char_eq",
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+	} {
+		if strings.Contains(cliRun, forbidden) {
+			t.Fatalf("run LLVM path owns forbidden frontend/static detail %q", forbidden)
+		}
+		if strings.Contains(cliCodegen, forbidden) {
+			t.Fatalf("codegen LLVM path owns forbidden frontend/static detail %q", forbidden)
+		}
+	}
+}
+
+// assertHostedRunLLVMHostedRenderer keeps hosted rendering responsibilities in
+// the hosted renderer LLVM module.
+func assertHostedRunLLVMHostedRenderer(t *testing.T, cliHostedRenderer string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
+		"hosted::run_print_executable()",
+	} {
+		if !strings.Contains(cliHostedRenderer, fragment) {
+			t.Fatalf("hosted renderer missing %q", fragment)
+		}
 	}
 }
 
@@ -1670,7 +1673,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"cli_artifact_dir_llvm::append_globals(",
 		"cli_artifact_dir_llvm::append_functions(",
-		"cli_frontend_llvm::append_functions(",
+		"cli_ast_boundary_llvm::append_functions(",
+		"cli_test_ast_llvm::append_functions(",
 		"cli_hosted_renderer_llvm::append_functions(",
 		"compiled_llvm::append_compiled_function_auto(",
 	},
@@ -1714,16 +1718,18 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_cli_run_blocks(",
 		"@kizu_selfhost__ir_codegen_stdout_payload",
 		"cli_check_gate_llvm::append_static_check_gate(",
-		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"@kizu_selfhost__cli_parse_validated_ast",
+		"@kizu_selfhost__ir_codegen_lower_run_parse_result",
 		"@kizu_selfhost__cli_codegen_lower_run_ast",
 	},
-	"../../selfhost/src/backend/cli_frontend_llvm.kizu": {
+	"../../selfhost/src/backend/cli_ast_boundary_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_functions(",
-		"fn append_frontend_lower_checked_run_ast_function(",
-		"fn append_frontend_parse_let_binding_function(",
-		"fn append_frontend_parse_print_statement_function(",
-		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"fn append_parse_validated_ast_function(",
+		"fn append_parse_decl_function(",
+		"fn append_parse_block_function(",
+		"@kizu_kizu__lexer_tokenize",
+		"@kizu_kizu__ast_ast_add_node",
 	},
 	"../../selfhost/src/backend/cli_codegen_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1741,33 +1747,25 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_globals(",
 		"pub fn append_functions(",
 		"pub fn append_cli_test_blocks(",
-		"cli_test_executable_llvm::append_functions(",
+		"@kizu_selfhost__cli_parse_validated_ast",
+		"@kizu_selfhost__cli_lower_test_parse_result",
 		"fn executable_kind_tag(",
 		"fn append_executable_kind_compare(",
 		"fn append_test_ok_emit_block(",
 		"@kizu_selfhost__ensure_artifact_dir",
 	},
-	"../../selfhost/src/backend/cli_test_executable_llvm.kizu": {
+	"../../selfhost/src/backend/cli_test_ast_llvm.kizu": {
+		"import selfhost::backend::executable;",
 		"pub fn append_functions(",
-		"cli_executable_body_parsing_llvm::append_functions(",
-		"fn append_cli_test_executable_function(",
+		"fn append_lower_test_parse_result_function(",
+		"fn append_lower_test_program_function(",
+		"fn append_lower_test_call_function(",
 		"executable::unsupported_executable_kind_tag(",
 		"executable::call_executable_kind_tag(",
 	},
 	"../../selfhost/src/backend/cli_match_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn append_cli_moved_value_name_function(",
-	},
-	"../../selfhost/src/backend/cli_executable_main_llvm.kizu": {
-		"pub fn append_functions(",
-		"fn append_cli_main_name_end_function(",
-		"fn append_cli_run_main_body_start_function(",
-		"fn append_cli_test_block_body_start_function(",
-		"fn append_cli_test_main_body_start_function(",
-	},
-	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
-		"pub fn append_functions(",
-		"fn append_cli_parse_test_expect_value_function(",
 	},
 	"../../selfhost/src/backend/compiled_llvm.kizu": {
 		"pub fn append_compiled_function(",
@@ -2095,23 +2093,17 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 		contract: readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu"),
 		selected: readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu") +
 			readSelfhostFile(t, "../../selfhost/src/ir/function_signature.kizu"),
-		body: readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu"),
-		llvm: readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu"),
-		cli:  readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu"),
-		parser: readSelfhostFile(
+		body:   readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu"),
+		llvm:   readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu"),
+		cli:    readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu"),
+		parser: readSelfhostFile(t, "../../selfhost/src/backend/cli_ast_boundary_llvm.kizu"),
+		ast:    readSelfhostFile(t, "../../selfhost/src/backend/cli_test_ast_llvm.kizu"),
+		lowerer: readSelfhostFile(
 			t,
-			"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu",
-		) + readSelfhostFile(
-			t,
-			"../../selfhost/src/backend/cli_executable_parser_token_llvm.kizu",
+			"../../selfhost/src/backend/cli_test_ast_llvm.kizu",
 		),
-		ast: readSelfhostFile(
-			t,
-			"../../selfhost/src/backend/cli_test_executable_llvm.kizu",
-		),
-		lowerer: "",
-		run:     readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu"),
-		test:    readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu"),
+		run:  readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu"),
+		test: readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu"),
 		metadata: readSelfhostFile(
 			t,
 			"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu",
@@ -2553,16 +2545,20 @@ func assertExecutableParserConsumers(
 func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"cli_executable_parser_token_llvm::append_named_token_char_eq_call(",
-		"cli_executable_parser_token_llvm::append_named_token_pair_eq_call(",
-		"executable::parser_source_token(",
+		"@kizu_kizu__lexer_tokenize",
+		"@kizu_selfhost__cli_parse_validated_ast",
+		"@kizu_kizu__ast_ast_add_node",
+		"@kizu_kizu__ast_parse_result",
 	} {
 		if !strings.Contains(parser, fragment) {
-			t.Fatalf("hosted executable parser does not consume fact tags with %q", fragment)
+			t.Fatalf("hosted executable parser does not consume tokenized AST boundary with %q", fragment)
 		}
 	}
 	for _, forbidden := range []string{
 		"executable-parser-token ",
+		"cli_executable_parser_token_llvm",
+		"cli_executable_body_parsing_llvm",
+		"@kizu_selfhost__cli_parse_test_expect_value",
 		"cli_executable_body_parser_contract::unsupported_ast_kind_name(",
 		"cli_executable_body_parser_contract::run_print_ast_kind_name(",
 		"cli_executable_body_parser_contract::run_return_ast_kind_name(",
@@ -2779,8 +2775,6 @@ func assertExecutableIRThreading(
 		name    string
 		content string
 	}{
-		{name: "parser", content: parser},
-		{name: "ast", content: ast},
 		{name: "run", content: run},
 		{name: "test", content: test},
 	} {
@@ -2790,9 +2784,9 @@ func assertExecutableIRThreading(
 	}
 	for _, fragment := range []string{
 		"try cli_llvm::append_functions(out, ir_bytes)",
+		"try cli_ast_boundary_llvm::append_functions(out)",
+		"try cli_test_ast_llvm::append_functions(out)",
 		"try cli_test_llvm::append_functions(out, ir_bytes)",
-		"try cli_test_executable_llvm::append_functions(out, ir_bytes)",
-		"try cli_executable_body_parsing_llvm::append_functions(out, ir_bytes)",
 		"try cli_test_llvm::append_cli_test_blocks(out, ir_bytes)",
 		"try cli_run_llvm::append_cli_run_blocks(out, ir_bytes)",
 	} {
@@ -2833,6 +2827,10 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 			"lower_run_ast !RunAst",
 		"function-signature-param selfhost::ir::codegen::" +
 			"lower_run_ast 1 ast:runtime:std::kizu::ast::Ast",
+		"function-signature-return selfhost::ir::codegen::" +
+			"lower_run_parse_result !RunAst",
+		"function-signature-param selfhost::ir::codegen::" +
+			"lower_run_parse_result 1 parsed:runtime:std::kizu::ast::ParseResult",
 		"function-signature-return selfhost::ir::codegen::" +
 			"lower_run_ast_to_program Program",
 		"function-signature-return selfhost::ir::codegen::" +
