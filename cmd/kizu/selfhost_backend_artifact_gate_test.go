@@ -433,6 +433,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLexerAdvanceFragments()...)
 	fragments = append(fragments, requiredLLVMLexerTokenFragments()...)
 	fragments = append(fragments, requiredLLVMTokenizerFragments()...)
+	fragments = append(fragments, requiredLLVMParserPredicateFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -1224,6 +1225,20 @@ func requiredLLVMTokenizerFragments() []string {
 			"[ %tk_next, %tk_after_append ]",
 		"%tk_a0_app = call %kizu.error.void @kizu_rt_array_append(",
 		"%tk_ok1 = insertvalue %kizu.error.owned %tk_ok0, %kizu.owned %tk_array, 1",
+	}
+}
+
+// requiredLLVMParserPredicateFragments pins the first std::kizu::parser leaves: single-variant
+// token predicates that extract the TokenKind field off the Token param and compare it to the
+// matched variant discriminant, returning i1 (tracker 961, scope 4 prerequisite).
+func requiredLLVMParserPredicateFragments() []string {
+	return []string{
+		"define i1 @kizu_kizu__parser_is_left_brace_token(",
+		"define i1 @kizu_kizu__parser_is_right_brace_token(",
+		"define i1 @kizu_kizu__parser_is_ident_kind(",
+		"%tkp_kind = extractvalue %kizu.kizu.lexer.token %token, 0",
+		"%tkp_is = icmp eq i64 %tkp_kind, ",
+		"ret i1 %tkp_is",
 	}
 }
 
