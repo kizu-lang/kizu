@@ -440,6 +440,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLexerTokenFragments()...)
 	fragments = append(fragments, requiredLLVMTokenizerFragments()...)
 	fragments = append(fragments, requiredLLVMParserPredicateFragments()...)
+	fragments = append(fragments, requiredLLVMSourceLoaderFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -454,6 +455,21 @@ func requiredLLVMExecutableFragments() []string {
 		"%run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
 		"%run_artifact_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
 	}...)
+}
+
+// requiredLLVMSourceLoaderFragments locks the first source-loader helper compiled
+// through mini MIR LetExpr/IndexExpr support. Var reads are copy-propagated so the
+// path/module-root length comparison and start offset subtraction use their source
+// SSA names directly.
+func requiredLLVMSourceLoaderFragments() []string {
+	return []string{
+		"define i1 @kizu_selfhost__source_loader_is_manifest_root_source",
+		"%t2 = icmp slt i64 %path_len, %module_root_len",
+		"%t5 = sub i64 %path_len, %module_root_len",
+		"%t8 = icmp sgt i64 %start, %t7",
+		"%arg5_0_sstart = add i64 %start, 0",
+		"%arg5_0_send = add i64 %path_len, 0",
+	}
 }
 
 // requiredLLVMRunCodegenLoweringFragments returns the tracker-961 run-codegen
@@ -497,14 +513,16 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 		// phi for the induction variable (%index), a comparison condition that branches to
 		// the loop body/exit, an index-plus-one latch increment, and an ADR-0053 checked
 		// payload index load (trap-guarded getelementptr) rather than an unchecked GEP.
-		// The three sequential early-return byte-range checks reject bytes outside
-		// 32..126 and the quote byte.
+		// Var reads are copy-propagated, so the condition and checked index load use the
+		// loop-carried %index directly instead of a trivial %tN alias. The three sequential
+		// early-return byte-range checks reject bytes outside 32..126 and the quote byte.
 		"define i1 @kizu_selfhost__ir_codegen_is_payload_supported",
 		"%index = phi i64 [ 0, %loop4_preheader ], [ %index_next, %loop4_latch ]",
+		"%t5 = icmp slt i64 %index, %t4",
 		", label %loop4_body, label %loop4_exit",
 		"%index_next = add i64 %index, 1",
 		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
-		"%t7_gep = getelementptr i8, ptr %t7_ptr, i64 %t6",
+		"%t7_gep = getelementptr i8, ptr %t7_ptr, i64 %index",
 		// tracker 961 foundation: empty_int_env is the first stage2 function that
 		// takes a real std::kizu::ast value type (ChildRange) as a parameter and
 		// forwards it whole into a struct field, without touching the AstNode/AstData
@@ -607,13 +625,13 @@ func requiredLLVMChildAtFragments() []string {
 		"define %kizu.error.node_id @kizu_kizu__ast_ast_child_at",
 		"%kizu.kizu.ast.child_range %range",
 		"br i1 %t2, label %if0_then, label %if0_rhs",
-		"%t5 = icmp sge i64 %t3, %t4",
+		"%t5 = icmp sge i64 %index, %t4",
 		"%t4 = extractvalue %kizu.kizu.ast.child_range %range, 1",
 		"br i1 %t5, label %if0_then, label %if0_cont",
 		"%errfail6 = insertvalue %kizu.error.node_id %errfail6_flag, %kizu.slice.u8 %t6, 2",
 		"  ret %kizu.error.node_id %errfail6",
 		"%t7 = extractvalue %kizu.kizu.ast.child_range %range, 0",
-		"%t9 = add i64 %t7, %t8",
+		"%t9 = add i64 %t7, %index",
 		"%array = extractvalue %kizu.kizu.ast.ast %self, 1",
 		"%view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %t9)",
 		"%elem = load %kizu.kizu.ast.node_id, ptr %elem_ptr",
@@ -1130,7 +1148,7 @@ func requiredLLVMLexerClassifierFragments() []string {
 		"define i1 @kizu_kizu__lexer_is_digit(",
 		"define i1 @kizu_kizu__lexer_is_space(",
 		"define i1 @kizu_kizu__lexer_is_word(",
-		"%t2 = icmp sge i8 %t0, %t1",
+		"%t2 = icmp sge i8 %byte, %t1",
 		"%t0 = call i1 @kizu_kizu__lexer_is_alpha(i8 %byte)",
 		"%t1 = call i1 @kizu_kizu__lexer_is_digit(i8 %byte)",
 		// position(line, column) builds the (line, column) Position cursor struct; its type is
