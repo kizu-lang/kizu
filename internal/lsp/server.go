@@ -92,6 +92,7 @@ func (s *Server) requestHandlers() map[string]func(incomingMessage) error {
 		"textDocument/prepareRename":       s.handlePrepareRenameRequest,
 		"textDocument/rename":              s.handleRenameRequest,
 		"textDocument/foldingRange":        s.handleFoldingRangeRequest,
+		"textDocument/selectionRange":      s.handleSelectionRangeRequest,
 		"workspace/symbol":                 s.handleWorkspaceSymbolRequest,
 	}
 }
@@ -126,6 +127,7 @@ func (s *Server) handleInitializeRequest(msg incomingMessage) error {
 			DocumentHighlightProvider: true,
 			RenameProvider:            &renameOptions{PrepareProvider: true},
 			FoldingRangeProvider:      true,
+			SelectionRangeProvider:    true,
 		},
 		ServerInfo: serverInfo{Name: "kizu-lsp"},
 	})
@@ -258,6 +260,15 @@ func (s *Server) handleFoldingRangeRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.foldingRanges(params.TextDocument.URI))
+}
+
+// handleSelectionRangeRequest returns smart-selection hierarchies per position.
+func (s *Server) handleSelectionRangeRequest(msg incomingMessage) error {
+	var params selectionRangeParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.selectionRanges(params.TextDocument.URI, params.Positions))
 }
 
 // handleWorkspaceSymbolRequest returns package symbols matching a query.

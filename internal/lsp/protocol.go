@@ -84,6 +84,7 @@ type serverCapabilities struct {
 	DocumentHighlightProvider  bool                   `json:"documentHighlightProvider,omitempty"`
 	RenameProvider             *renameOptions         `json:"renameProvider,omitempty"`
 	FoldingRangeProvider       bool                   `json:"foldingRangeProvider,omitempty"`
+	SelectionRangeProvider     bool                   `json:"selectionRangeProvider,omitempty"`
 }
 
 type renameOptions struct {
@@ -247,6 +248,18 @@ type foldingRange struct {
 type hover struct {
 	Contents markupContent `json:"contents"`
 	Range    *Range        `json:"range,omitempty"`
+}
+
+type selectionRangeParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Positions    []Position             `json:"positions"`
+}
+
+// selectionRange is one node of the smart-selection hierarchy: a range plus an
+// optional parent that fully encloses it, letting editors expand outward.
+type selectionRange struct {
+	Range  Range           `json:"range"`
+	Parent *selectionRange `json:"parent,omitempty"`
 }
 
 type markupContent struct {
