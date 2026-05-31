@@ -188,6 +188,9 @@ pub fn emit_run_codegen_artifact(
     let metadata_path_view = metadata_path.as_bytes();
     let metadata_hosted = try hosted_executable_metadata_from_codegen(run_print_executable(), &program);
     var module_len = 0;
+    if codegen::loop_i64_program_supported(&program) {
+        module_len = try write_loop_i64_module(allocator, io, source_path, ll_path_view, &program);
+    } else {
     if codegen::i64_call_program_supported(&program) {
         module_len = try write_i64_call_module(allocator, io, source_path, ll_path_view, &program);
     } else {
@@ -203,6 +206,7 @@ pub fn emit_run_codegen_artifact(
                 &hosted
             );
         }
+    }
     }
     let metadata_len = try write_run_metadata(
         allocator,
@@ -494,6 +498,25 @@ fn write_i64_call_module(
     return module_len;
 }
 
+fn write_loop_i64_module(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8,
+    ll_path: &[]u8,
+    program: &codegen::Program
+) -> !i64 {
+    var module = try render_loop_i64_llvm(allocator, source_path, program);
+    let module_view = module.as_bytes();
+    let module_len = try write_backend_bytes(
+        io,
+        ll_path,
+        module_view,
+        module.len()
+    );
+    module.deinit();
+    return module_len;
+}
+
 fn write_try_void_module(
     allocator: Allocator,
     io: Io,
@@ -539,6 +562,24 @@ fn render_i64_call_llvm(
     try append_i64_function(out, program.i64_return_op);
     try append_i64_decimal_function(out);
     try append_i64_run_main(out, program.i64_call_arg0, program.i64_call_arg1);
+    try append_host_main(out, "kizu_run_main");
+    return out;
+}
+
+fn render_loop_i64_llvm(
+    allocator: Allocator,
+    source_path: []u8,
+    program: &codegen::Program
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_i64_call_header(out, source_path);
+    try append_i64_decimal_function(out);
+    try append_loop_i64_run_main(
+        out,
+        program.loop_bound,
+        program.loop_continue_value,
+        program.loop_break_value
+    );
     try append_host_main(out, "kizu_run_main");
     return out;
 }
@@ -717,6 +758,50 @@ fn append_i64_run_main(out: &var std::string::String, arg0: i64, arg1: i64) -> !
     try append_line(out, "  %newline_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.newline, 0");
     try append_line(out, "  %newline = insertvalue %kizu.slice.u8 %newline_base, i64 1, 1");
     try append_line(out, "  %write_newline = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %newline)");
+    try append_line(out, "  %code = call i64 @kizu_rt_process_exit_code(i64 0)");
+    try append_line(out, "  ret i64 %code");
+    try append_line(out, "}");
+    return;
+}
+
+fn append_loop_i64_run_main(
+    out: &var std::string::String,
+    bound: i64,
+    continue_value: i64,
+    break_value: i64
+) -> !void {
+    try append_line(out, "define i64 @kizu_run_main() {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out, "  br label %loop_head");
+    try append_line(out, "loop_head:");
+    try append_line(out, "  %i = phi i64 [ 0, %entry ], [ %i_next, %loop_latch ]");
+    try out.append_bytes("  %loop_cond = icmp slt i64 %i, ");
+    try std::fmt::append_i64(out, bound);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %loop_cond, label %loop_body, label %loop_exit");
+    try append_line(out, "loop_body:");
+    try append_line(out, "  %i_next = add i64 %i, 1");
+    try out.append_bytes("  %is_continue = icmp eq i64 %i_next, ");
+    try std::fmt::append_i64(out, continue_value);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_continue, label %loop_latch, label %check_break");
+    try append_line(out, "check_break:");
+    try out.append_bytes("  %is_break = icmp eq i64 %i_next, ");
+    try std::fmt::append_i64(out, break_value);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_break, label %loop_exit, label %print_value");
+    try append_line(out, "print_value:");
+    try append_line(out, "  %decimal_result = call %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %i_next)");
+    try append_line(out, "  %decimal = extractvalue %kizu.error.slice.u8 %decimal_result, 1");
+    try append_line(out, "  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %decimal)");
+    try append_line(out, "  %newline_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.newline, 0");
+    try append_line(out, "  %newline = insertvalue %kizu.slice.u8 %newline_base, i64 1, 1");
+    try append_line(out, "  %write_newline = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %newline)");
+    try append_line(out, "  br label %loop_latch");
+    try append_line(out, "loop_latch:");
+    try append_line(out, "  br label %loop_head");
+    try append_line(out, "loop_exit:");
     try append_line(out, "  %code = call i64 @kizu_rt_process_exit_code(i64 0)");
     try append_line(out, "  ret i64 %code");
     try append_line(out, "}");

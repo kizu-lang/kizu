@@ -60,6 +60,9 @@ pub struct Program {
     pub i64_call_callee: []u8,
     pub i64_call_arg0: i64,
     pub i64_call_arg1: i64,
+    pub loop_bound: i64,
+    pub loop_continue_value: i64,
+    pub loop_break_value: i64,
 }
 
 pub enum RunStatementKind {
@@ -67,6 +70,7 @@ pub enum RunStatementKind {
     Print,
     ReturnVoid,
     TryVoidPrintReturn,
+    LoopI64Print,
 }
 
 pub enum RunArgumentKind {
@@ -99,6 +103,9 @@ pub struct RunAst {
     pub i64_call_callee: []u8,
     pub i64_call_arg0: i64,
     pub i64_call_arg1: i64,
+    pub loop_bound: i64,
+    pub loop_continue_value: i64,
+    pub loop_break_value: i64,
 }
 
 pub fn main_print_program(payload: []u8) -> Program {
@@ -145,7 +152,10 @@ fn build_main_print_program(payload: []u8, from_codegen_lowering: bool) -> Progr
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: payload[0..0],
         i64_call_arg0: 0,
-        i64_call_arg1: 0
+        i64_call_arg1: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
     };
 }
 
@@ -172,7 +182,10 @@ pub fn unsupported_program(empty: []u8) -> Program {
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: empty[0..0],
         i64_call_arg0: 0,
-        i64_call_arg1: 0
+        i64_call_arg1: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
     };
 }
 
@@ -184,6 +197,9 @@ pub fn program_supported(program: &Program) -> bool {
         return true;
     }
     if try_void_program_supported(program) {
+        return true;
+    }
+    if loop_i64_program_supported(program) {
         return true;
     }
     if program.function_count != 2 {
@@ -332,6 +348,43 @@ pub fn try_void_program_supported(program: &Program) -> bool {
         return false;
     }
     return program.i64_call_arg0 == 0 or program.i64_call_arg0 == 1;
+}
+
+pub fn loop_i64_program_supported(program: &Program) -> bool {
+    if program.function_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.function_name, "main") {
+        return false;
+    }
+    if program.block_count != 4 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.block_label, "entry") {
+        return false;
+    }
+    if program.instruction_count != 0 {
+        return false;
+    }
+    if program.first_kind != InstructionKind::None {
+        return false;
+    }
+    if program.second_kind != InstructionKind::None {
+        return false;
+    }
+    if program.third_kind != InstructionKind::ReturnVoid {
+        return false;
+    }
+    if program.loop_bound <= 0 {
+        return false;
+    }
+    if program.loop_continue_value <= 0 or program.loop_break_value <= 0 {
+        return false;
+    }
+    if program.loop_continue_value == program.loop_break_value {
+        return false;
+    }
+    return program.loop_break_value < program.loop_bound;
 }
 
 pub fn metadata_for_program(program: &Program) -> []u8 {
@@ -532,6 +585,10 @@ fn lower_run_ast_block(
     if try_void.ok {
         return try_void;
     }
+    let loop_i64 = try lower_loop_i64_block(text, ast, function_name, statements);
+    if loop_i64.ok {
+        return loop_i64;
+    }
 
     var locals = empty_local_table(text);
     var index = 0;
@@ -614,6 +671,323 @@ fn lower_try_void_block(
         try_callee,
         helper_exit_code
     );
+}
+
+fn lower_loop_i64_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statements: std::kizu::ast::ChildRange
+) -> !RunAst {
+    if statements.len != 2 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let init_statement = try ast.child_at(statements, 0);
+    let loop_statement = try ast.child_at(statements, 1);
+    let init_node = ast.get(init_statement);
+    match init_node.data {
+        Let(let_node) => return try lower_loop_i64_let_while(
+            text,
+            ast,
+            function_name,
+            statements.len,
+            let_node.mutable,
+            let_node.name,
+            let_node.value,
+            loop_statement
+        );,
+        _ => return unsupported_run_ast(text[0..0]);,
+    }
+}
+
+fn lower_loop_i64_let_while(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
+    mutable: bool,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    loop_statement: std::kizu::ast::NodeId
+) -> !RunAst {
+    if !mutable {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let local_name = ast_node_text(text, ast, name);
+    if std::mem::len(local_name) == 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let init_value = try call_arg_i64_literal(text, ast, value);
+    if init_value != 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let loop_node = ast.get(loop_statement);
+    match loop_node.data {
+        While(while_node) => return try lower_loop_i64_while(
+            text,
+            ast,
+            function_name,
+            statement_count,
+            local_name,
+            while_node.label,
+            while_node.condition,
+            while_node.body
+        );,
+        _ => return unsupported_run_ast(text[0..0]);,
+    }
+}
+
+fn lower_loop_i64_while(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
+    local_name: []u8,
+    label: std::kizu::ast::NodeId,
+    condition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !RunAst {
+    if !is_empty_node(ast, label) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let bound = try loop_var_int_binary(text, ast, condition, local_name, std::kizu::ast::binary_lt());
+    if bound <= 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let body_node = ast.get(body);
+    match body_node.data {
+        Block(block) => return try lower_loop_i64_body(
+            text,
+            ast,
+            function_name,
+            statement_count,
+            local_name,
+            bound,
+            block.statements
+        );,
+        _ => return unsupported_run_ast(text[0..0]);,
+    }
+}
+
+fn lower_loop_i64_body(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
+    local_name: []u8,
+    bound: i64,
+    body_statements: std::kizu::ast::ChildRange
+) -> !RunAst {
+    if body_statements.len != 4 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let increment_statement = try ast.child_at(body_statements, 0);
+    let step = try loop_increment_step(text, ast, increment_statement, local_name);
+    if step != 1 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let continue_statement = try ast.child_at(body_statements, 1);
+    let continue_value = try loop_if_terminal_value(text, ast, continue_statement, local_name, true);
+    if continue_value <= 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let break_statement = try ast.child_at(body_statements, 2);
+    let break_value = try loop_if_terminal_value(text, ast, break_statement, local_name, false);
+    if break_value <= 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let print_statement = try ast.child_at(body_statements, 3);
+    if !(try loop_print_statement_ok(text, ast, print_statement, local_name)) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    return loop_i64_run_ast(function_name, statement_count, "print", bound, continue_value, break_value);
+}
+
+fn loop_increment_step(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId,
+    local_name: []u8
+) -> !i64 {
+    let node = ast.get(statement);
+    match node.data {
+        Assign(assign_node) => return try loop_assign_step(text, ast, assign_node.target, assign_node.value, local_name);,
+        _ => return -1;,
+    }
+}
+
+fn loop_assign_step(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_name: []u8
+) -> !i64 {
+    if !node_text_is_var(text, ast, target, local_name) {
+        return -1;
+    }
+    return try loop_var_int_binary(
+        text,
+        ast,
+        value,
+        local_name,
+        std::kizu::ast::binary_add()
+    );
+}
+
+fn loop_if_terminal_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId,
+    local_name: []u8,
+    want_continue: bool
+) -> !i64 {
+    let node = ast.get(statement);
+    match node.data {
+        If(if_node) => return try loop_if_value(
+            text,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            local_name,
+            want_continue
+        );,
+        _ => return -1;,
+    }
+}
+
+fn loop_if_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    local_name: []u8,
+    want_continue: bool
+) -> !i64 {
+    if !is_empty_node(ast, else_block) {
+        return -1;
+    }
+    if !(try loop_then_terminal_ok(ast, then_block, want_continue)) {
+        return -1;
+    }
+    return try loop_var_int_binary(
+        text,
+        ast,
+        condition,
+        local_name,
+        std::kizu::ast::binary_eq()
+    );
+}
+
+fn loop_then_terminal_ok(
+    ast: std::kizu::ast::Ast,
+    then_block: std::kizu::ast::NodeId,
+    want_continue: bool
+) -> !bool {
+    let node = ast.get(then_block);
+    match node.data {
+        Block(block) => return try loop_then_block_ok(ast, block.statements, want_continue);,
+        _ => return false;,
+    }
+}
+
+fn loop_then_block_ok(
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    want_continue: bool
+) -> !bool {
+    if statements.len != 1 {
+        return false;
+    }
+    let child = try ast.child_at(statements, 0);
+    return loop_terminal_statement_ok(ast, child, want_continue);
+}
+
+fn loop_terminal_statement_ok(
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId,
+    want_continue: bool
+) -> bool {
+    let node = ast.get(statement);
+    match node.data {
+        Continue(continue_node) => return want_continue and is_empty_node(ast, continue_node.label);,
+        Break(break_node) => return !want_continue and is_empty_node(ast, break_node.label);,
+        _ => return false;,
+    }
+}
+
+fn loop_print_statement_ok(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId,
+    local_name: []u8
+) -> !bool {
+    let node = ast.get(statement);
+    match node.data {
+        ExprStmt(expr_stmt) => return try loop_print_expr_ok(text, ast, expr_stmt.expr, local_name);,
+        _ => return false;,
+    }
+}
+
+fn loop_print_expr_ok(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId,
+    local_name: []u8
+) -> !bool {
+    let node = ast.get(expr);
+    match node.data {
+        Call(call_node) => return try loop_print_call_ok(text, ast, call_node.callee, call_node.args, local_name);,
+        _ => return false;,
+    }
+}
+
+fn loop_print_call_ok(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    local_name: []u8
+) -> !bool {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
+        return false;
+    }
+    let arg = try ast.child_at(args, 0);
+    return node_text_is_var(text, ast, arg, local_name);
+}
+
+fn loop_var_int_binary(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_name: []u8,
+    op: std::kizu::ast::BinaryOp
+) -> !i64 {
+    let node = ast.get(node_id);
+    match node.data {
+        Binary(binary) => return try loop_binary_value(text, ast, binary.op, binary.left, binary.right, local_name, op);,
+        _ => return -1;,
+    }
+}
+
+fn loop_binary_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    actual_op: std::kizu::ast::BinaryOp,
+    left: std::kizu::ast::NodeId,
+    right: std::kizu::ast::NodeId,
+    local_name: []u8,
+    expected_op: std::kizu::ast::BinaryOp
+) -> !i64 {
+    if actual_op != expected_op {
+        return -1;
+    }
+    if !node_text_is_var(text, ast, left, local_name) {
+        return -1;
+    }
+    return try call_arg_i64_literal(text, ast, right);
 }
 
 fn try_void_statement_callee(
@@ -1227,6 +1601,9 @@ fn lower_run_ast_to_program(text: []u8, run_ast: &RunAst) -> Program {
     if run_ast_i64_call_supported(run_ast) {
         return lowered_i64_call_program(run_ast);
     }
+    if loop_i64_run_ast_supported(run_ast) {
+        return lowered_loop_i64_program(run_ast);
+    }
     if run_ast.final_statement_kind == RunStatementKind::TryVoidPrintReturn {
         return lowered_try_void_program(run_ast);
     }
@@ -1254,6 +1631,9 @@ fn run_ast_supported(run_ast: &RunAst) -> bool {
     }
     if run_ast.final_statement_kind == RunStatementKind::TryVoidPrintReturn {
         return try_void_run_ast_supported(run_ast);
+    }
+    if run_ast.final_statement_kind == RunStatementKind::LoopI64Print {
+        return loop_i64_run_ast_supported(run_ast);
     }
     if run_ast.final_statement_kind != RunStatementKind::Print {
         return false;
@@ -1314,6 +1694,34 @@ fn try_void_run_ast_supported(run_ast: &RunAst) -> bool {
         return true;
     }
     return run_ast.i64_call_arg0 == 1;
+}
+
+fn loop_i64_run_ast_supported(run_ast: &RunAst) -> bool {
+    if run_ast.function_count != 1 {
+        return false;
+    }
+    if run_ast.statement_count != 2 {
+        return false;
+    }
+    if run_ast.final_statement_kind != RunStatementKind::LoopI64Print {
+        return false;
+    }
+    if !std::mem::equal_bytes(run_ast.final_callee, "print") {
+        return false;
+    }
+    if run_ast.final_argument_kind != RunArgumentKind::None {
+        return false;
+    }
+    if run_ast.loop_bound <= 0 {
+        return false;
+    }
+    if run_ast.loop_continue_value <= 0 or run_ast.loop_break_value <= 0 {
+        return false;
+    }
+    if run_ast.loop_continue_value == run_ast.loop_break_value {
+        return false;
+    }
+    return run_ast.loop_break_value < run_ast.loop_bound;
 }
 
 fn run_ast_i64_call_supported(run_ast: &RunAst) -> bool {
@@ -1377,7 +1785,10 @@ fn print_run_ast(
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: payload[0..0],
         i64_call_arg0: 0,
-        i64_call_arg1: 0
+        i64_call_arg1: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
     };
 }
 
@@ -1405,7 +1816,40 @@ fn i64_call_run_ast(
         i64_return_op: op,
         i64_call_callee: callee,
         i64_call_arg0: arg0,
-        i64_call_arg1: arg1
+        i64_call_arg1: arg1,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
+    };
+}
+
+fn loop_i64_run_ast(
+    function_name: []u8,
+    statement_count: i64,
+    print_callee: []u8,
+    bound: i64,
+    continue_value: i64,
+    break_value: i64
+) -> RunAst {
+    return RunAst {
+        ok: true,
+        function_count: 1,
+        function_name: function_name,
+        block_count: 1,
+        statement_count: statement_count,
+        final_statement_kind: RunStatementKind::LoopI64Print,
+        final_callee: print_callee,
+        final_argument_kind: RunArgumentKind::None,
+        final_argument_payload: function_name[0..0],
+        i64_function_name: function_name[0..0],
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: function_name[0..0],
+        i64_call_arg0: 0,
+        i64_call_arg1: 0,
+        loop_bound: bound,
+        loop_continue_value: continue_value,
+        loop_break_value: break_value
     };
 }
 
@@ -1425,7 +1869,10 @@ fn return_void_run_ast(text: []u8, function_name: []u8, statement_count: i64) ->
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: text[0..0],
         i64_call_arg0: 0,
-        i64_call_arg1: 0
+        i64_call_arg1: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
     };
 }
 
@@ -1452,7 +1899,10 @@ fn try_void_run_ast(
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: try_callee,
         i64_call_arg0: helper_exit_code,
-        i64_call_arg1: 0
+        i64_call_arg1: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
     };
 }
 
@@ -1472,7 +1922,10 @@ fn unsupported_run_ast(empty: []u8) -> RunAst {
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: empty[0..0],
         i64_call_arg0: 0,
-        i64_call_arg1: 0
+        i64_call_arg1: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
     };
 }
 
@@ -1499,7 +1952,10 @@ fn lowered_return_void_program(run_ast: &RunAst) -> Program {
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: run_ast.function_name[0..0],
         i64_call_arg0: 0,
-        i64_call_arg1: 0
+        i64_call_arg1: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
     };
 }
 
@@ -1526,7 +1982,10 @@ fn lowered_try_void_program(run_ast: &RunAst) -> Program {
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: run_ast.i64_call_callee,
         i64_call_arg0: run_ast.i64_call_arg0,
-        i64_call_arg1: 0
+        i64_call_arg1: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
     };
 }
 
@@ -1553,7 +2012,40 @@ fn lowered_i64_call_program(run_ast: &RunAst) -> Program {
         i64_return_op: run_ast.i64_return_op,
         i64_call_callee: run_ast.i64_call_callee,
         i64_call_arg0: run_ast.i64_call_arg0,
-        i64_call_arg1: run_ast.i64_call_arg1
+        i64_call_arg1: run_ast.i64_call_arg1,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
+    };
+}
+
+fn lowered_loop_i64_program(run_ast: &RunAst) -> Program {
+    return Program {
+        function_count: 1,
+        function_name: run_ast.function_name,
+        block_count: 4,
+        block_label: "entry",
+        instruction_count: 0,
+        first_kind: InstructionKind::None,
+        first_result_kind: ValueKind::None,
+        first_result_name: run_ast.function_name[0..0],
+        first_result_payload: run_ast.function_name[0..0],
+        second_kind: InstructionKind::None,
+        second_callee: run_ast.function_name[0..0],
+        second_argument_kind: ValueKind::None,
+        second_argument_name: run_ast.function_name[0..0],
+        second_argument_payload: run_ast.function_name[0..0],
+        third_kind: InstructionKind::ReturnVoid,
+        from_codegen_lowering: true,
+        i64_function_name: run_ast.function_name[0..0],
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: run_ast.function_name[0..0],
+        i64_call_arg0: 0,
+        i64_call_arg1: 0,
+        loop_bound: run_ast.loop_bound,
+        loop_continue_value: run_ast.loop_continue_value,
+        loop_break_value: run_ast.loop_break_value
     };
 }
 
