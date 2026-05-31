@@ -3932,36 +3932,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "%kizu.slice.u8 output_payload;i1 append_newline"
     );
     try append_source_reachable_compiled_functions(out, ir_bytes);
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::source::loader::module_end_for",
-        "kizu_selfhost__source_loader_module_end_for",
-        "%kizu.slice.u8 path"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::source::loader::package_module_end",
-        "kizu_selfhost__source_loader_package_module_end",
-        "%kizu.slice.u8 path;i64 start"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::source::loader::is_manifest_root_source",
-        "kizu_selfhost__source_loader_is_manifest_root_source",
-        "%kizu.slice.u8 module_root;%kizu.slice.u8 path"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::source::loader::package_module_start",
-        "kizu_selfhost__source_loader_package_module_start",
-        "i64 source_root_len;%kizu.slice.u8 path"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::source::loader::source_file",
-        "kizu_selfhost__source_loader_source_file",
-        "i64 id;i64 kind;%kizu.slice.u8 package_name;i64 module_start;i64 module_end;%kizu.slice.u8 path;%kizu.slice.u8 text"
-    );
+    try append_loader_reachable_compiled_functions(out, ir_bytes);
     try append_cli_main_function(out, ir_bytes);
     return;
 }
@@ -3979,7 +3950,7 @@ fn append_source_reachable_compiled_functions(
     var index = 0;
     while index < pending.len() {
         let local_name = try pending.get(index);
-        if !(try source_compiled_name_seen(&emitted, local_name)) {
+        if !(try compiled_closure_name_seen(&emitted, local_name)) {
             try append_source_compiled_function(out, ir_bytes, local_name);
             try collect_source_compiled_callees(ir_bytes, local_name, &var pending);
             try emitted.append(local_name);
@@ -3991,7 +3962,7 @@ fn append_source_reachable_compiled_functions(
     return;
 }
 
-fn source_compiled_name_seen(
+fn compiled_closure_name_seen(
     names: &std::array::Array<[]u8>,
     name: []u8
 ) -> !bool {
@@ -4126,6 +4097,160 @@ fn source_compiled_params_spec(local_name: []u8) -> ![]u8 {
         return "%kizu.selfhost.source.source_file file;%kizu.slice.u8 name";
     }
     return error("source compiled closure: unsupported local helper");
+}
+
+fn append_loader_reachable_compiled_functions(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("package_module_end");
+    try pending.append("is_manifest_root_source");
+    try pending.append("package_module_start");
+    try pending.append("source_file");
+    var index = 0;
+    while index < pending.len() {
+        let local_name = try pending.get(index);
+        if !(try compiled_closure_name_seen(&emitted, local_name)) {
+            try append_loader_compiled_function(out, ir_bytes, local_name);
+            try collect_loader_compiled_callees(ir_bytes, local_name, &var pending);
+            try emitted.append(local_name);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_loader_compiled_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    local_name: []u8
+) -> !void {
+    try compiled_llvm::append_compiled_function_auto(
+        out,
+        ir_bytes,
+        try loader_compiled_qualified_name(local_name),
+        try loader_compiled_llvm_symbol(local_name),
+        try loader_compiled_params_spec(local_name)
+    );
+    return;
+}
+
+fn collect_loader_compiled_callees(
+    ir_bytes: []u8,
+    local_name: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let function_name = try loader_compiled_qualified_name(local_name);
+    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var sequence = 0;
+    while sequence < count {
+        let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+        if std::mem::equal_bytes(kind, "Call") {
+            let callee = try ir_contract::body_call_callee_or_empty(
+                ir_bytes,
+                function_name,
+                sequence
+            );
+            try collect_loader_compiled_callee(callee, pending);
+        }
+        sequence = sequence + 1;
+    }
+    return;
+}
+
+fn collect_loader_compiled_callee(
+    callee: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    if std::mem::starts_with(callee, "std::mem::") {
+        return;
+    }
+    if std::mem::starts_with(callee, "selfhost::source::loader::") {
+        let prefix = "selfhost::source::loader::";
+        let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
+        if !loader_compiled_supported_local(local) {
+            return error("loader compiled closure: unsupported local helper");
+        }
+        try pending.append(local);
+        return;
+    }
+    if std::mem::starts_with(callee, "selfhost::source::") {
+        return error("loader compiled closure: unsupported source callee");
+    }
+    if loader_compiled_supported_local(callee) {
+        try pending.append(callee);
+        return;
+    }
+    return error("loader compiled closure: unsupported callee");
+}
+
+fn loader_compiled_supported_local(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "module_end_for") or
+        std::mem::equal_bytes(name, "package_module_end") or
+        std::mem::equal_bytes(name, "is_manifest_root_source") or
+        std::mem::equal_bytes(name, "package_module_start") or
+        std::mem::equal_bytes(name, "source_file");
+}
+
+fn loader_compiled_qualified_name(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "module_end_for") {
+        return "selfhost::source::loader::module_end_for";
+    }
+    if std::mem::equal_bytes(local_name, "package_module_end") {
+        return "selfhost::source::loader::package_module_end";
+    }
+    if std::mem::equal_bytes(local_name, "is_manifest_root_source") {
+        return "selfhost::source::loader::is_manifest_root_source";
+    }
+    if std::mem::equal_bytes(local_name, "package_module_start") {
+        return "selfhost::source::loader::package_module_start";
+    }
+    if std::mem::equal_bytes(local_name, "source_file") {
+        return "selfhost::source::loader::source_file";
+    }
+    return error("loader compiled closure: unsupported local helper");
+}
+
+fn loader_compiled_llvm_symbol(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "module_end_for") {
+        return "kizu_selfhost__source_loader_module_end_for";
+    }
+    if std::mem::equal_bytes(local_name, "package_module_end") {
+        return "kizu_selfhost__source_loader_package_module_end";
+    }
+    if std::mem::equal_bytes(local_name, "is_manifest_root_source") {
+        return "kizu_selfhost__source_loader_is_manifest_root_source";
+    }
+    if std::mem::equal_bytes(local_name, "package_module_start") {
+        return "kizu_selfhost__source_loader_package_module_start";
+    }
+    if std::mem::equal_bytes(local_name, "source_file") {
+        return "kizu_selfhost__source_loader_source_file";
+    }
+    return error("loader compiled closure: unsupported local helper");
+}
+
+fn loader_compiled_params_spec(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "module_end_for") {
+        return "%kizu.slice.u8 path";
+    }
+    if std::mem::equal_bytes(local_name, "package_module_end") {
+        return "%kizu.slice.u8 path;i64 start";
+    }
+    if std::mem::equal_bytes(local_name, "is_manifest_root_source") {
+        return "%kizu.slice.u8 module_root;%kizu.slice.u8 path";
+    }
+    if std::mem::equal_bytes(local_name, "package_module_start") {
+        return "i64 source_root_len;%kizu.slice.u8 path";
+    }
+    if std::mem::equal_bytes(local_name, "source_file") {
+        return "i64 id;i64 kind;%kizu.slice.u8 package_name;i64 module_start;i64 module_end;%kizu.slice.u8 path;%kizu.slice.u8 text";
+    }
+    return error("loader compiled closure: unsupported local helper");
 }
 
 fn append_slice_equal_function(out: &var std::string::String) -> !void {
