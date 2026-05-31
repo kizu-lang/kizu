@@ -651,6 +651,37 @@ void std_builtin_fs_write_file(
     *out = kizu_std_builtin_fs_write_file_result(io, *path, *bytes);
 }
 
+static KizuErrorVoid kizu_std_builtin_fs_rename_result(
+    void *io,
+    KizuSliceU8 from,
+    KizuSliceU8 to
+) {
+    (void)io;
+    char *cfrom = kizu_slice_to_cstr(from);
+    char *cto = kizu_slice_to_cstr(to);
+    if (!cfrom || !cto) {
+        free(cfrom);
+        free(cto);
+        return kizu_err_void("invalid path");
+    }
+    int result = rename(cfrom, cto);
+    free(cfrom);
+    free(cto);
+    if (result != 0) {
+        return kizu_err_void("rename failed");
+    }
+    return kizu_ok_void();
+}
+
+void std_builtin_fs_rename(
+    KizuErrorVoid *out,
+    void *io,
+    const KizuSliceU8 *from,
+    const KizuSliceU8 *to
+) {
+    *out = kizu_std_builtin_fs_rename_result(io, *from, *to);
+}
+
 static KizuErrorBool kizu_std_builtin_fs_exists_result(void *io, KizuSliceU8 path) {
     (void)io;
     char *cpath = kizu_slice_to_cstr(path);

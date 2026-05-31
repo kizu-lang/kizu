@@ -1720,6 +1720,9 @@ func (i *Interpreter) evalFsBuiltin(
 	case "std.builtin.fs_create_dir":
 		value, err := i.evalFsCreateDir(args, env)
 		return value, true, err
+	case "std.builtin.fs_rename":
+		value, err := i.evalFsRename(args, env)
+		return value, true, err
 	case "std.builtin.fs_remove_dir":
 		value, err := i.evalFsRemoveDir(args, env)
 		return value, true, err
@@ -1863,6 +1866,32 @@ func (i *Interpreter) evalFsWriteFile(args []ast.Expression, env *Env) (Value, e
 		return failure, nil
 	}
 	if err := os.WriteFile(path, []byte(bytes.s), 0o644); err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	return voidValue(), nil
+}
+
+// evalFsRename renames a file using an explicit Io capability.
+func (i *Interpreter) evalFsRename(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 3 {
+		return errorUnionValue("std::fs::rename expected io, from, and to"), nil
+	}
+	ioValue, from, err := i.evalFsIoPath(args, env, "std::fs::rename")
+	if err != nil {
+		return voidValue(), err
+	}
+	toValue, err := i.evalExpr(args[2], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	toValue = unwrapRefValue(toValue)
+	if toValue.kind != kindString {
+		return errorUnionValue("std::fs::rename expected []u8 to"), nil
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	if err := os.Rename(from, toValue.s); err != nil {
 		return errorUnionValue(err.Error()), nil
 	}
 	return voidValue(), nil

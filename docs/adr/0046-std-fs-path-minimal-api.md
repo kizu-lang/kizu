@@ -30,6 +30,7 @@ caller-provided allocator. Callers pass `result.as_bytes()` to APIs that need
 ```text
 std::fs::read_file(io: Io, path: &[]u8) -> ![]u8
 std::fs::write_file(io: Io, path: &[]u8, bytes: &[]u8) -> !void
+std::fs::rename(io: Io, from: &[]u8, to: &[]u8) -> !void
 std::fs::exists(io: Io, path: &[]u8) -> !bool
 std::fs::metadata(io: Io, path: &[]u8) -> !std::fs::Metadata
 std::fs::read_dir(io: Io, path: &[]u8) -> !std::array::Array<std::fs::DirEntry>
