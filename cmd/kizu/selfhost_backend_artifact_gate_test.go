@@ -563,6 +563,11 @@ func requiredLLVMSourcePackagePrefixFragments() []string {
 // literal operands are consumed without throwaway const temps.
 func requiredLLVMSourceLoaderFragments() []string {
 	return []string{
+		"define i64 @kizu_selfhost__source_loader_package_module_end",
+		"%end = call i64 @kizu_selfhost__source_loader_module_end_for(%kizu.slice.u8 %path)",
+		"define i64 @kizu_selfhost__source_loader_module_end_for",
+		"@.kizu.compiled.kizu_selfhost__source_loader_module_end_for.s0 = " +
+			"private unnamed_addr constant [5 x i8] c\".kizu\"",
 		"define i1 @kizu_selfhost__source_loader_is_manifest_root_source",
 		"%t2 = icmp slt i64 %path_len, %module_root_len",
 		"%t5 = sub i64 %path_len, %module_root_len",
