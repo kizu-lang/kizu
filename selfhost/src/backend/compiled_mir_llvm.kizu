@@ -55,8 +55,9 @@ fn append_ll_line(out: &var std::string::String, text: []u8) -> !void {
 // path forwards the runtime message as the error-union failure value (field 2), never
 // 'unreachable'. The index operand is the i64 index parameter (%<index_param_name>)
 // when index_is_param, otherwise the lowered index value. A lowered Var index can
-// reference the source SSA name directly; other indexes use %t<index_temp_id>. The
-// body uses function-scoped fixed names, so a function carries at most one array get.
+// reference the source SSA name directly, and a lowered ConstInt index can use the
+// literal value directly; other indexes use %t<index_temp_id>. The body uses
+// function-scoped fixed names, so a function carries at most one array get.
 fn append_array_get_body(
     out: &var std::string::String,
     error_union: []u8,
@@ -67,6 +68,8 @@ fn append_array_get_body(
     index_is_param: bool,
     index_param_name: []u8,
     index_value_name: []u8,
+    index_is_int_literal: bool,
+    index_int_value: i64,
     index_temp_id: i64
 ) -> !void {
     // Read the Array<T> handle off the struct value receiver.
@@ -84,7 +87,9 @@ fn append_array_get_body(
         try out.append_bytes("%");
         try out.append_bytes(index_param_name);
     } else {
-        try append_ssa_or_temp_ref(out, index_value_name, index_temp_id);
+        try append_ssa_or_int_or_temp_ref(
+            out, index_value_name, index_is_int_literal, index_int_value, index_temp_id
+        );
     }
     try append_ll_line(out, ")");
     try append_ll_line(out, "  %view_ok = extractvalue %kizu.error.slice.u8 %view, 0");
@@ -151,6 +156,8 @@ fn append_array_get_block(
         true,
         inst.index_name,
         "",
+        false,
+        0,
         0
     );
     try append_ll_line(out, "}");
@@ -3654,6 +3661,10 @@ fn append_multi_return_array_get(
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.expr_insts);
     let index_value_name = try expr_inst_var_name_by_id(&stmt.expr_insts, stmt.index_result_id);
+    let index_is_int_literal = try expr_inst_is_int_literal_by_id(
+        &stmt.expr_insts, stmt.index_result_id
+    );
+    let index_int_value = try expr_inst_int_value_by_id(&stmt.expr_insts, stmt.index_result_id);
     try append_array_get_body(
         out,
         function.return_type.llvm_name,
@@ -3664,6 +3675,8 @@ fn append_multi_return_array_get(
         false,
         "",
         index_value_name,
+        index_is_int_literal,
+        index_int_value,
         stmt.index_result_id
     );
     return;
@@ -3863,20 +3876,64 @@ fn append_expr_value_ref(
     result_id: i64
 ) -> !void {
     let var_name = try expr_inst_var_name_by_id(insts, result_id);
-    try append_ssa_or_temp_ref(out, var_name, result_id);
+    if std::mem::len(var_name) > 0 {
+        try append_named_ref(out, var_name);
+        return;
+    }
+    let is_bool_literal = try expr_inst_is_bool_literal_by_id(insts, result_id);
+    if is_bool_literal {
+        let bool_value = try expr_inst_bool_value_by_id(insts, result_id);
+        try append_bool_literal(out, bool_value);
+        return;
+    }
+    let is_int_literal = try expr_inst_is_int_literal_by_id(insts, result_id);
+    if is_int_literal {
+        let int_value = try expr_inst_int_value_by_id(insts, result_id);
+        try std::fmt::append_i64(out, int_value);
+        return;
+    }
+    try append_temp_ref(out, result_id);
     return;
 }
 
-fn append_ssa_or_temp_ref(
+fn append_named_ref(out: &var std::string::String, name: []u8) -> !void {
+    try out.append_bytes("%");
+    try out.append_bytes(name);
+    return;
+}
+
+fn append_bool_literal(out: &var std::string::String, value: bool) -> !void {
+    if value {
+        try out.append_bytes("true");
+    } else {
+        try out.append_bytes("false");
+    }
+    return;
+}
+
+fn append_ssa_or_int_or_temp_ref(
     out: &var std::string::String,
     value_name: []u8,
+    is_int_literal: bool,
+    int_value: i64,
     temp_id: i64
 ) -> !void {
     if std::mem::len(value_name) > 0 {
-        try out.append_bytes("%");
-        try out.append_bytes(value_name);
+        try append_named_ref(out, value_name);
         return;
     }
+    if is_int_literal {
+        try std::fmt::append_i64(out, int_value);
+        return;
+    }
+    try append_temp_ref(out, temp_id);
+    return;
+}
+
+fn append_temp_ref(
+    out: &var std::string::String,
+    temp_id: i64
+) -> !void {
     try out.append_bytes("%t");
     try std::fmt::append_i64(out, temp_id);
     return;
@@ -3898,6 +3955,80 @@ fn expr_inst_var_name_by_id(
         index = index + 1;
     }
     return "";
+}
+
+fn expr_inst_is_int_literal_by_id(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> !bool {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            return match inst {
+                ConstInt(payload) => true,
+                ConstEnumTag(payload) => true,
+                _ => false,
+            };
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn expr_inst_is_bool_literal_by_id(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> !bool {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            return match inst {
+                ConstBool(payload) => true,
+                _ => false,
+            };
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn expr_inst_int_value_by_id(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> !i64 {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            return match inst {
+                ConstInt(payload) => payload.int_value,
+                ConstEnumTag(payload) => payload.int_value,
+                _ => 0,
+            };
+        }
+        index = index + 1;
+    }
+    return 0;
+}
+
+fn expr_inst_bool_value_by_id(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> !bool {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            return match inst {
+                ConstBool(payload) => payload.bool_value,
+                _ => false,
+            };
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 fn expr_inst_type_by_id(
@@ -4511,15 +4642,7 @@ fn append_const_bool_expr(
     out: &var std::string::String,
     inst: &compiled_mir::MirConstBoolExpr
 ) -> !void {
-    try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes(" = select i1 true, i1 ");
-    if inst.bool_value {
-        try out.append_bytes("true, i1 true");
-    } else {
-        try out.append_bytes("false, i1 false");
-    }
-    try out.append_byte(cast<u8>(10));
+    // ConstBool is literal-propagated; consumers print true/false directly.
     return;
 }
 fn append_const_int_expr(
@@ -4528,13 +4651,7 @@ fn append_const_int_expr(
     llvm_type: []u8,
     int_value: i64
 ) -> !void {
-    try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, id);
-    try out.append_bytes(" = add ");
-    try out.append_bytes(llvm_type);
-    try out.append_bytes(" 0, ");
-    try std::fmt::append_i64(out, int_value);
-    try out.append_byte(cast<u8>(10));
+    // ConstInt/ConstEnumTag are literal-propagated; consumers print the integer directly.
     return;
 }
 fn append_prefix_not_expr(
