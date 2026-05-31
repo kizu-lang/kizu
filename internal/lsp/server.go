@@ -84,6 +84,7 @@ func (s *Server) requestHandlers() map[string]func(incomingMessage) error {
 		"textDocument/inlayHint":           s.handleInlayHintRequest,
 		"textDocument/definition":          s.handleDefinitionRequest,
 		"textDocument/typeDefinition":      s.handleTypeDefinitionRequest,
+		"textDocument/implementation":      s.handleImplementationRequest,
 		"textDocument/hover":               s.handleHoverRequest,
 		"textDocument/documentSymbol":      s.handleDocumentSymbolRequest,
 		"textDocument/references":          s.handleReferencesRequest,
@@ -130,6 +131,7 @@ func (s *Server) handleInitializeRequest(msg incomingMessage) error {
 			FoldingRangeProvider:      true,
 			SelectionRangeProvider:    true,
 			TypeDefinitionProvider:    true,
+			ImplementationProvider:    true,
 		},
 		ServerInfo: serverInfo{Name: "kizu-lsp"},
 	})
@@ -182,6 +184,15 @@ func (s *Server) handleTypeDefinitionRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.typeDefinition(params.TextDocument.URI, params.Position))
+}
+
+// handleImplementationRequest returns concrete implementations of the cursor contract.
+func (s *Server) handleImplementationRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.implementation(params.TextDocument.URI, params.Position))
 }
 
 // handleHoverRequest returns concise information for the symbol under the cursor.

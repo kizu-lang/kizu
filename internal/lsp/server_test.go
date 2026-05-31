@@ -54,6 +54,7 @@ func requireInitializeCapabilities(t *testing.T, capabilities map[string]any) {
 	requireCapability(t, capabilities, "inlayHintProvider")
 	requireCapability(t, capabilities, "definitionProvider")
 	requireCapability(t, capabilities, "typeDefinitionProvider")
+	requireCapability(t, capabilities, "implementationProvider")
 	requireCapability(t, capabilities, "hoverProvider")
 	requireCapability(t, capabilities, "documentSymbolProvider")
 	requireCapability(t, capabilities, "referencesProvider")
