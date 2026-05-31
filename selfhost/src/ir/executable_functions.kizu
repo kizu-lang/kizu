@@ -1306,6 +1306,17 @@ fn collect_loader_direct_callees(
     return;
 }
 
+fn collect_lexer_direct_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    try collect_frontend_direct_callees(text, ast, root, node_id, pending, "lexer");
+    return;
+}
+
 fn collect_frontend_direct_callees(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -1510,6 +1521,9 @@ fn frontend_closure_supported_local(component: []u8, name: []u8) -> bool {
     if std::mem::equal_bytes(component, "source-loader") {
         return loader_closure_supported_local(name);
     }
+    if std::mem::equal_bytes(component, "lexer") {
+        return lexer_closure_supported_local(name);
+    }
     return false;
 }
 
@@ -1519,6 +1533,9 @@ fn frontend_closure_qualified_prefix(component: []u8) -> ![]u8 {
     }
     if std::mem::equal_bytes(component, "source-loader") {
         return "selfhost::source::loader::";
+    }
+    if std::mem::equal_bytes(component, "lexer") {
+        return "selfhost::lexer::";
     }
     return error("frontend closure: unsupported component");
 }
@@ -1624,52 +1641,88 @@ fn append_lexer_function_facts(
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
-    try append_selected_helper_body(
+    try append_lexer_reachable_helper_bodies(
         out,
         file.text,
         parsed.ast,
-        parsed.root,
-        "is_digit",
-        "selfhost::lexer::is_digit",
-        "lexer-byte-class"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "is_alpha",
-        "selfhost::lexer::is_alpha",
-        "lexer-byte-class"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "is_identifier_start",
-        "selfhost::lexer::is_identifier_start",
-        "lexer-byte-class"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "is_identifier_continue",
-        "selfhost::lexer::is_identifier_continue",
-        "lexer-byte-class"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "invalid_token_display",
-        "selfhost::lexer::invalid_token_display",
-        "lexer-byte-class"
+        parsed.root
     );
     return;
+}
+
+fn append_lexer_reachable_helper_bodies(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("is_identifier_continue");
+    try pending.append("invalid_token_display");
+    var index = 0;
+    while index < pending.len() {
+        let local_name = try pending.get(index);
+        if !(try closure_name_seen(&emitted, local_name)) {
+            try append_lexer_closure_helper_body(
+                out,
+                text,
+                ast,
+                root,
+                local_name,
+                &var pending
+            );
+            try emitted.append(local_name);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_lexer_closure_helper_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    local_name: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let qualified_name = try lexer_closure_qualified_name(local_name);
+    let function_node_id = try function_node(text, ast, root, local_name);
+    try function_signature::append(out, text, ast, function_node_id, qualified_name);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_helper_body_ir(out, text, ast, qualified_name, "lexer-byte-class", body);
+    try collect_lexer_direct_callees(text, ast, root, body, pending);
+    return;
+}
+
+fn lexer_closure_supported_local(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "is_digit") or
+        std::mem::equal_bytes(name, "is_alpha") or
+        std::mem::equal_bytes(name, "is_identifier_start") or
+        std::mem::equal_bytes(name, "is_identifier_continue") or
+        std::mem::equal_bytes(name, "invalid_token_display");
+}
+
+fn lexer_closure_qualified_name(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "is_digit") {
+        return "selfhost::lexer::is_digit";
+    }
+    if std::mem::equal_bytes(local_name, "is_alpha") {
+        return "selfhost::lexer::is_alpha";
+    }
+    if std::mem::equal_bytes(local_name, "is_identifier_start") {
+        return "selfhost::lexer::is_identifier_start";
+    }
+    if std::mem::equal_bytes(local_name, "is_identifier_continue") {
+        return "selfhost::lexer::is_identifier_continue";
+    }
+    if std::mem::equal_bytes(local_name, "invalid_token_display") {
+        return "selfhost::lexer::invalid_token_display";
+    }
+    return error("lexer closure: unsupported local helper");
 }
 
 fn append_codegen_function_facts(

@@ -1284,7 +1284,7 @@ func requiredLLVMLowerRunAstFragments() []string {
 // (source -> Ast requires the compiled tokenizer). is_word's i8 call arguments are resolved via the
 // stdlib-symbol arg-type facts rather than the default slice type. These fragments lock the shapes.
 func requiredLLVMLexerClassifierFragments() []string {
-	return []string{
+	fragments := []string{
 		"define i1 @kizu_kizu__lexer_is_alpha(",
 		"define i1 @kizu_kizu__lexer_is_digit(",
 		"define i1 @kizu_kizu__lexer_is_space(",
@@ -1302,6 +1302,25 @@ func requiredLLVMLexerClassifierFragments() []string {
 		// Token is the tokenizer's output record; its type definition is the base the
 		// first_token / next_token / token_at cluster will consume (tracker 961).
 		"%kizu.kizu.lexer.token = type { i64, i64, i64, i64, i64, i64, i64 }",
+	}
+	return append(fragments, requiredLLVMSelfhostLexerFragments()...)
+}
+
+// requiredLLVMSelfhostLexerFragments locks the selfhost lexer byte-class helper chain compiled
+// through seed closure. is_identifier_continue reaches is_identifier_start and is_digit; the
+// start helper then reaches is_alpha.
+func requiredLLVMSelfhostLexerFragments() []string {
+	return []string{
+		"define i1 @kizu_selfhost__lexer_is_identifier_continue(",
+		"%t0 = call i1 @kizu_selfhost__lexer_is_identifier_start(i8 %byte)",
+		"%t1 = call i1 @kizu_selfhost__lexer_is_digit(i8 %byte)",
+		"define i1 @kizu_selfhost__lexer_is_identifier_start(",
+		"%t0 = call i1 @kizu_selfhost__lexer_is_alpha(i8 %byte)",
+		"define i1 @kizu_selfhost__lexer_is_digit(",
+		"define i1 @kizu_selfhost__lexer_is_alpha(",
+		"define %kizu.slice.u8 @kizu_selfhost__lexer_invalid_token_display()",
+		"@.kizu.compiled.kizu_selfhost__lexer_invalid_token_display = " +
+			"private unnamed_addr constant [7 x i8] c\"ILLEGAL\"",
 	}
 }
 

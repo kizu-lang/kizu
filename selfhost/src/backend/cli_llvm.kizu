@@ -3895,36 +3895,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "kizu_selfhost__ir_codegen_metadata_for_program",
         "%kizu.selfhost.codegen.program program"
     );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::lexer::is_digit",
-        "kizu_selfhost__lexer_is_digit",
-        "i8 byte"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::lexer::is_alpha",
-        "kizu_selfhost__lexer_is_alpha",
-        "i8 byte"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::lexer::is_identifier_start",
-        "kizu_selfhost__lexer_is_identifier_start",
-        "i8 byte"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::lexer::is_identifier_continue",
-        "kizu_selfhost__lexer_is_identifier_continue",
-        "i8 byte"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::lexer::invalid_token_display",
-        "kizu_selfhost__lexer_invalid_token_display",
-        ""
-    );
+    try append_lexer_reachable_compiled_functions(out, ir_bytes);
     try compiled_llvm::append_compiled_function_auto(
         out, ir_bytes,
         "selfhost::backend::hosted::hosted_output_len",
@@ -4097,6 +4068,152 @@ fn source_compiled_params_spec(local_name: []u8) -> ![]u8 {
         return "%kizu.selfhost.source.source_file file;%kizu.slice.u8 name";
     }
     return error("source compiled closure: unsupported local helper");
+}
+
+fn append_lexer_reachable_compiled_functions(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("is_identifier_continue");
+    try pending.append("invalid_token_display");
+    var index = 0;
+    while index < pending.len() {
+        let local_name = try pending.get(index);
+        if !(try compiled_closure_name_seen(&emitted, local_name)) {
+            try append_lexer_compiled_function(out, ir_bytes, local_name);
+            try collect_lexer_compiled_callees(ir_bytes, local_name, &var pending);
+            try emitted.append(local_name);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_lexer_compiled_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    local_name: []u8
+) -> !void {
+    try compiled_llvm::append_compiled_function_auto(
+        out,
+        ir_bytes,
+        try lexer_compiled_qualified_name(local_name),
+        try lexer_compiled_llvm_symbol(local_name),
+        try lexer_compiled_params_spec(local_name)
+    );
+    return;
+}
+
+fn collect_lexer_compiled_callees(
+    ir_bytes: []u8,
+    local_name: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let function_name = try lexer_compiled_qualified_name(local_name);
+    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var sequence = 0;
+    while sequence < count {
+        let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+        if std::mem::equal_bytes(kind, "Call") {
+            let callee = try ir_contract::body_call_callee_or_empty(
+                ir_bytes,
+                function_name,
+                sequence
+            );
+            try collect_lexer_compiled_callee(callee, pending);
+        }
+        sequence = sequence + 1;
+    }
+    return;
+}
+
+fn collect_lexer_compiled_callee(
+    callee: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    if std::mem::starts_with(callee, "std::mem::") {
+        return;
+    }
+    if std::mem::starts_with(callee, "selfhost::lexer::") {
+        let prefix = "selfhost::lexer::";
+        let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
+        if !lexer_compiled_supported_local(local) {
+            return error("lexer compiled closure: unsupported local helper");
+        }
+        try pending.append(local);
+        return;
+    }
+    if std::mem::starts_with(callee, "selfhost::") {
+        return error("lexer compiled closure: unsupported selfhost callee");
+    }
+    if lexer_compiled_supported_local(callee) {
+        try pending.append(callee);
+        return;
+    }
+    return error("lexer compiled closure: unsupported callee");
+}
+
+fn lexer_compiled_supported_local(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "is_digit") or
+        std::mem::equal_bytes(name, "is_alpha") or
+        std::mem::equal_bytes(name, "is_identifier_start") or
+        std::mem::equal_bytes(name, "is_identifier_continue") or
+        std::mem::equal_bytes(name, "invalid_token_display");
+}
+
+fn lexer_compiled_qualified_name(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "is_digit") {
+        return "selfhost::lexer::is_digit";
+    }
+    if std::mem::equal_bytes(local_name, "is_alpha") {
+        return "selfhost::lexer::is_alpha";
+    }
+    if std::mem::equal_bytes(local_name, "is_identifier_start") {
+        return "selfhost::lexer::is_identifier_start";
+    }
+    if std::mem::equal_bytes(local_name, "is_identifier_continue") {
+        return "selfhost::lexer::is_identifier_continue";
+    }
+    if std::mem::equal_bytes(local_name, "invalid_token_display") {
+        return "selfhost::lexer::invalid_token_display";
+    }
+    return error("lexer compiled closure: unsupported local helper");
+}
+
+fn lexer_compiled_llvm_symbol(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "is_digit") {
+        return "kizu_selfhost__lexer_is_digit";
+    }
+    if std::mem::equal_bytes(local_name, "is_alpha") {
+        return "kizu_selfhost__lexer_is_alpha";
+    }
+    if std::mem::equal_bytes(local_name, "is_identifier_start") {
+        return "kizu_selfhost__lexer_is_identifier_start";
+    }
+    if std::mem::equal_bytes(local_name, "is_identifier_continue") {
+        return "kizu_selfhost__lexer_is_identifier_continue";
+    }
+    if std::mem::equal_bytes(local_name, "invalid_token_display") {
+        return "kizu_selfhost__lexer_invalid_token_display";
+    }
+    return error("lexer compiled closure: unsupported local helper");
+}
+
+fn lexer_compiled_params_spec(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "is_digit") or
+        std::mem::equal_bytes(local_name, "is_alpha") or
+        std::mem::equal_bytes(local_name, "is_identifier_start") or
+        std::mem::equal_bytes(local_name, "is_identifier_continue") {
+        return "i8 byte";
+    }
+    if std::mem::equal_bytes(local_name, "invalid_token_display") {
+        return "";
+    }
+    return error("lexer compiled closure: unsupported local helper");
 }
 
 fn append_loader_reachable_compiled_functions(
