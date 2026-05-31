@@ -408,6 +408,7 @@ fn append_multi_stmt(
         IsDocCommentStart(payload) => try append_multi_is_doc_comment_start(out, payload);,
         WordToken(payload) => try append_multi_word_token(out, payload);,
         RawToken(payload) => try append_multi_raw_token(out, payload);,
+        TokenAt(payload) => try append_multi_token_at(out, payload);,
         AstNodeText(payload) => try append_multi_ast_node_text(out, payload);,
         StringLiteralSpan(payload) => try append_multi_string_literal_span(out, payload);,
         PrintPayload(payload) => try append_multi_print_payload(out, payload);,
@@ -1417,6 +1418,186 @@ fn append_multi_raw_token(
     try append_raw_dispatch_call(out, stmt, "rt_nt", stmt.number_token_symbol);
     try append_ll_line(out, "rt_word:");
     try append_raw_dispatch_call(out, stmt, "rt_wt", stmt.word_token_symbol);
+    return;
+}
+
+// append_token_at_globals: token_at forwards only value arguments, so it emits no string-constant
+// globals (tracker 961).
+fn append_token_at_globals(stmt: &compiled_mir::MirTokenAtStmt) -> !void {
+    return;
+}
+
+// append_multi_token_at renders token_at(source, offset, initial): an outer loop (start / current /
+// has_doc / doc_start / doc_end phis) that skips leading whitespace (inner start / current /
+// newlines loop), resets the doc span on a blank line, and consumes line comments while tracking
+// the pending doc span; on a non-comment byte it breaks and returns attach_doc(raw_token_at(...),
+// doc_start, doc_end). Conditional doc-span updates use select to keep the merge structure flat
+// (tracker 961, scope 4 prerequisite). len(source) is the slice length field.
+fn append_multi_token_at(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirTokenAtStmt
+) -> !void {
+    try out.append_bytes("  %ta_length = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %ta_source_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", 0");
+    try append_ll_line(out, "  br label %ta_outer");
+    // Outer loop carries start / current / has_doc / doc_start / doc_end; the only back-edge is
+    // ta_comment (a consumed line comment), the only entry edge is the function entry.
+    try append_ll_line(out, "ta_outer:");
+    try out.append_bytes("  %ta_start = phi i64 [ %");
+    try out.append_bytes(stmt.offset_name);
+    try append_ll_line(out, ", %entry ], [ %ta_skipped_start, %ta_comment ]");
+    try out.append_bytes("  %ta_current = phi ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(stmt.initial_name);
+    try append_ll_line(out, ", %entry ], [ %ta_cmt_current, %ta_comment ]");
+    try out.append_bytes("  %ta_has_doc = phi i1 [ false, %entry ], [ %ta_doc_comment, %ta_comment ]");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %ta_doc_start = phi i64 [ %");
+    try out.append_bytes(stmt.offset_name);
+    try append_ll_line(out, ", %entry ], [ %ta_cmt_doc_start, %ta_comment ]");
+    try out.append_bytes("  %ta_doc_end = phi i64 [ %");
+    try out.append_bytes(stmt.offset_name);
+    try append_ll_line(out, ", %entry ], [ %ta_skipped_start, %ta_comment ]");
+    try append_ll_line(out, "  br label %ta_ws_head");
+    // Inner whitespace loop: advance start / current while source[start] is space, counting blank
+    // lines (newlines).
+    try append_ll_line(out, "ta_ws_head:");
+    try append_ll_line(out,
+        "  %ta_ws_start = phi i64 [ %ta_start, %ta_outer ], [ %ta_ws_next, %ta_ws_body ]");
+    try out.append_bytes("  %ta_ws_current = phi ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " [ %ta_current, %ta_outer ], [ %ta_ws_advanced, %ta_ws_body ]");
+    try append_ll_line(out,
+        "  %ta_ws_newlines = phi i64 [ 0, %ta_outer ], [ %ta_ws_nl_next, %ta_ws_body ]");
+    try append_ll_line(out, "  %ta_ws_inb = icmp slt i64 %ta_ws_start, %ta_length");
+    try append_ll_line(out, "  br i1 %ta_ws_inb, label %ta_ws_check, label %ta_ws_done");
+    try append_ll_line(out, "ta_ws_check:");
+    try append_ll_line(out, "  %ta_ws_bptr = getelementptr i8, ptr %ta_source_ptr, i64 %ta_ws_start");
+    try append_ll_line(out, "  %ta_ws_byte = load i8, ptr %ta_ws_bptr");
+    try out.append_bytes("  %ta_ws_isspace = call i1 @");
+    try out.append_bytes(stmt.is_space_symbol);
+    try append_ll_line(out, "(i8 %ta_ws_byte)");
+    try append_ll_line(out, "  br i1 %ta_ws_isspace, label %ta_ws_body, label %ta_ws_done");
+    try append_ll_line(out, "ta_ws_body:");
+    try append_ll_line(out, "  %ta_ws_is_nl = icmp eq i8 %ta_ws_byte, 10");
+    try append_ll_line(out, "  %ta_ws_nl_inc = zext i1 %ta_ws_is_nl to i64");
+    try append_ll_line(out, "  %ta_ws_nl_next = add i64 %ta_ws_newlines, %ta_ws_nl_inc");
+    try out.append_bytes("  %ta_ws_advanced = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.advance_byte_symbol);
+    try out.append_bytes("(i8 %ta_ws_byte, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %ta_ws_current)");
+    try append_ll_line(out, "  %ta_ws_next = add i64 %ta_ws_start, 1");
+    try append_ll_line(out, "  br label %ta_ws_head");
+    // After whitespace: reset the doc span on a blank line (newlines > 1) via select, then test
+    // for a line comment '//'.
+    try append_ll_line(out, "ta_ws_done:");
+    try append_ll_line(out, "  %ta_nl_gt1 = icmp sgt i64 %ta_ws_newlines, 1");
+    try append_ll_line(out,
+        "  %ta_has_doc1 = select i1 %ta_nl_gt1, i1 false, i1 %ta_has_doc");
+    try append_ll_line(out,
+        "  %ta_doc_start1 = select i1 %ta_nl_gt1, i64 %ta_ws_start, i64 %ta_doc_start");
+    try append_ll_line(out,
+        "  %ta_doc_end1 = select i1 %ta_nl_gt1, i64 %ta_ws_start, i64 %ta_doc_end");
+    try append_ll_line(out, "  %ta_s1 = add i64 %ta_ws_start, 1");
+    try append_ll_line(out, "  %ta_s1_inb = icmp slt i64 %ta_s1, %ta_length");
+    try append_ll_line(out, "  br i1 %ta_s1_inb, label %ta_check_slashes, label %ta_break");
+    try append_ll_line(out, "ta_check_slashes:");
+    try append_ll_line(out, "  %ta_b0_ptr = getelementptr i8, ptr %ta_source_ptr, i64 %ta_ws_start");
+    try append_ll_line(out, "  %ta_b0 = load i8, ptr %ta_b0_ptr");
+    try append_ll_line(out, "  %ta_b0_is = icmp eq i8 %ta_b0, 47");
+    try append_ll_line(out, "  br i1 %ta_b0_is, label %ta_check_slash2, label %ta_break");
+    try append_ll_line(out, "ta_check_slash2:");
+    try append_ll_line(out, "  %ta_b1_ptr = getelementptr i8, ptr %ta_source_ptr, i64 %ta_s1");
+    try append_ll_line(out, "  %ta_b1 = load i8, ptr %ta_b1_ptr");
+    try append_ll_line(out, "  %ta_b1_is = icmp eq i8 %ta_b1, 47");
+    try append_ll_line(out, "  br i1 %ta_b1_is, label %ta_comment, label %ta_break");
+    // Consume the comment: detect a doc comment, advance past '//', skip to line end, update the
+    // doc span (doc_end is always skipped.start; doc_start/has_doc depend on doc_comment), then
+    // loop back to the outer head.
+    try append_ll_line(out, "ta_comment:");
+    try out.append_bytes("  %ta_doc_comment = call i1 @");
+    try out.append_bytes(stmt.is_doc_comment_start_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try append_ll_line(out, ", i64 %ta_ws_start)");
+    try append_ll_line(out, "  %ta_not_has = xor i1 %ta_has_doc1, true");
+    try append_ll_line(out, "  %ta_set_doc_start = and i1 %ta_doc_comment, %ta_not_has");
+    try append_ll_line(out,
+        "  %ta_doc_start2 = select i1 %ta_set_doc_start, i64 %ta_ws_start, i64 %ta_doc_start1");
+    try out.append_bytes("  %ta_adv1 = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.advance_byte_symbol);
+    try out.append_bytes("(i8 %ta_b0, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %ta_ws_current)");
+    try out.append_bytes("  %ta_adv2 = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.advance_byte_symbol);
+    try out.append_bytes("(i8 %ta_b1, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %ta_adv1)");
+    try append_ll_line(out, "  %ta_skip_start_arg = add i64 %ta_ws_start, 2");
+    try out.append_bytes("  %ta_skipped = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.skip_line_comment_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try out.append_bytes(", i64 %ta_skip_start_arg, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %ta_adv2)");
+    try out.append_bytes("  %ta_skipped_start = extractvalue ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %ta_skipped, 1");
+    try out.append_bytes("  %ta_skipped_line = extractvalue ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %ta_skipped, 3");
+    try out.append_bytes("  %ta_skipped_col = extractvalue ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %ta_skipped, 4");
+    try append_ll_line(out,
+        "  %ta_cmt_doc_start = select i1 %ta_doc_comment, i64 %ta_doc_start2, i64 %ta_skipped_start");
+    try out.append_bytes("  %ta_cmt_current = call ");
+    try out.append_bytes(stmt.position_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.position_symbol);
+    try append_ll_line(out, "(i64 %ta_skipped_line, i64 %ta_skipped_col)");
+    try append_ll_line(out, "  br label %ta_outer");
+    // Non-comment byte: finalize the doc span (empty when has_doc is false) and return the token.
+    try append_ll_line(out, "ta_break:");
+    try append_ll_line(out,
+        "  %ta_fin_doc_start = select i1 %ta_has_doc1, i64 %ta_doc_start1, i64 %ta_ws_start");
+    try append_ll_line(out,
+        "  %ta_fin_doc_end = select i1 %ta_has_doc1, i64 %ta_doc_end1, i64 %ta_ws_start");
+    try out.append_bytes("  %ta_raw = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.raw_token_at_symbol);
+    try out.append_bytes("(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.source_name);
+    try out.append_bytes(", i64 %ta_ws_start, ");
+    try out.append_bytes(stmt.position_type);
+    try append_ll_line(out, " %ta_ws_current)");
+    try out.append_bytes("  %ta_tok = call ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(stmt.attach_doc_symbol);
+    try out.append_bytes("(");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %ta_raw, i64 %ta_fin_doc_start, i64 %ta_fin_doc_end)");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.token_type);
+    try append_ll_line(out, " %ta_tok");
     return;
 }
 
@@ -2795,6 +2976,7 @@ fn append_stmt_globals(
         IsDocCommentStart(payload) => try append_is_doc_comment_start_globals(payload);,
         WordToken(payload) => try append_word_token_globals(out, payload);,
         RawToken(payload) => try append_raw_token_globals(payload);,
+        TokenAt(payload) => try append_token_at_globals(payload);,
         AstNodeText(payload) => try append_ast_node_text_globals(payload);,
         StringLiteralSpan(payload) => try append_string_literal_span_globals(payload);,
         PrintPayload(payload) => try append_print_payload_globals(payload);,
