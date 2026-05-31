@@ -77,25 +77,28 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 // the dispatch into a table keeps handleRequest flat instead of a large switch.
 func (s *Server) requestHandlers() map[string]func(incomingMessage) error {
 	return map[string]func(incomingMessage) error{
-		"initialize":                       s.handleInitializeRequest,
-		"shutdown":                         s.handleShutdownRequest,
-		"textDocument/formatting":          s.handleFormattingRequest,
-		"textDocument/completion":          s.handleCompletionRequest,
-		"textDocument/inlayHint":           s.handleInlayHintRequest,
-		"textDocument/definition":          s.handleDefinitionRequest,
-		"textDocument/typeDefinition":      s.handleTypeDefinitionRequest,
-		"textDocument/implementation":      s.handleImplementationRequest,
-		"textDocument/hover":               s.handleHoverRequest,
-		"textDocument/documentSymbol":      s.handleDocumentSymbolRequest,
-		"textDocument/references":          s.handleReferencesRequest,
-		"textDocument/signatureHelp":       s.handleSignatureHelpRequest,
-		"textDocument/semanticTokens/full": s.handleSemanticTokensRequest,
-		"textDocument/documentHighlight":   s.handleDocumentHighlightRequest,
-		"textDocument/prepareRename":       s.handlePrepareRenameRequest,
-		"textDocument/rename":              s.handleRenameRequest,
-		"textDocument/foldingRange":        s.handleFoldingRangeRequest,
-		"textDocument/selectionRange":      s.handleSelectionRangeRequest,
-		"workspace/symbol":                 s.handleWorkspaceSymbolRequest,
+		"initialize":                        s.handleInitializeRequest,
+		"shutdown":                          s.handleShutdownRequest,
+		"textDocument/formatting":           s.handleFormattingRequest,
+		"textDocument/completion":           s.handleCompletionRequest,
+		"textDocument/inlayHint":            s.handleInlayHintRequest,
+		"textDocument/definition":           s.handleDefinitionRequest,
+		"textDocument/typeDefinition":       s.handleTypeDefinitionRequest,
+		"textDocument/implementation":       s.handleImplementationRequest,
+		"textDocument/prepareCallHierarchy": s.handlePrepareCallHierarchyRequest,
+		"callHierarchy/incomingCalls":       s.handleIncomingCallsRequest,
+		"callHierarchy/outgoingCalls":       s.handleOutgoingCallsRequest,
+		"textDocument/hover":                s.handleHoverRequest,
+		"textDocument/documentSymbol":       s.handleDocumentSymbolRequest,
+		"textDocument/references":           s.handleReferencesRequest,
+		"textDocument/signatureHelp":        s.handleSignatureHelpRequest,
+		"textDocument/semanticTokens/full":  s.handleSemanticTokensRequest,
+		"textDocument/documentHighlight":    s.handleDocumentHighlightRequest,
+		"textDocument/prepareRename":        s.handlePrepareRenameRequest,
+		"textDocument/rename":               s.handleRenameRequest,
+		"textDocument/foldingRange":         s.handleFoldingRangeRequest,
+		"textDocument/selectionRange":       s.handleSelectionRangeRequest,
+		"workspace/symbol":                  s.handleWorkspaceSymbolRequest,
 	}
 }
 
@@ -132,6 +135,7 @@ func (s *Server) handleInitializeRequest(msg incomingMessage) error {
 			SelectionRangeProvider:    true,
 			TypeDefinitionProvider:    true,
 			ImplementationProvider:    true,
+			CallHierarchyProvider:     true,
 		},
 		ServerInfo: serverInfo{Name: "kizu-lsp"},
 	})
@@ -184,6 +188,33 @@ func (s *Server) handleTypeDefinitionRequest(msg incomingMessage) error {
 		return err
 	}
 	return s.respond(msg.ID, s.typeDefinition(params.TextDocument.URI, params.Position))
+}
+
+// handlePrepareCallHierarchyRequest seeds the call hierarchy from the cursor.
+func (s *Server) handlePrepareCallHierarchyRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.prepareCallHierarchy(params.TextDocument.URI, params.Position))
+}
+
+// handleIncomingCallsRequest returns the callers of a call hierarchy item.
+func (s *Server) handleIncomingCallsRequest(msg incomingMessage) error {
+	var params callHierarchyItemParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.incomingCalls(params.Item))
+}
+
+// handleOutgoingCallsRequest returns the callees of a call hierarchy item.
+func (s *Server) handleOutgoingCallsRequest(msg incomingMessage) error {
+	var params callHierarchyItemParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.outgoingCalls(params.Item))
 }
 
 // handleImplementationRequest returns concrete implementations of the cursor contract.

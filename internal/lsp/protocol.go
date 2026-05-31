@@ -87,6 +87,33 @@ type serverCapabilities struct {
 	SelectionRangeProvider     bool                   `json:"selectionRangeProvider,omitempty"`
 	TypeDefinitionProvider     bool                   `json:"typeDefinitionProvider,omitempty"`
 	ImplementationProvider     bool                   `json:"implementationProvider,omitempty"`
+	CallHierarchyProvider      bool                   `json:"callHierarchyProvider,omitempty"`
+}
+
+// callHierarchyItem identifies one function node in the call hierarchy.
+type callHierarchyItem struct {
+	Name           string `json:"name"`
+	Kind           int    `json:"kind"`
+	URI            string `json:"uri"`
+	Range          Range  `json:"range"`
+	SelectionRange Range  `json:"selectionRange"`
+	Detail         string `json:"detail,omitempty"`
+}
+
+type callHierarchyItemParams struct {
+	Item callHierarchyItem `json:"item"`
+}
+
+// callHierarchyIncomingCall is one caller plus the ranges where it calls.
+type callHierarchyIncomingCall struct {
+	From       callHierarchyItem `json:"from"`
+	FromRanges []Range           `json:"fromRanges"`
+}
+
+// callHierarchyOutgoingCall is one callee plus the call sites within the caller.
+type callHierarchyOutgoingCall struct {
+	To         callHierarchyItem `json:"to"`
+	FromRanges []Range           `json:"fromRanges"`
 }
 
 type renameOptions struct {

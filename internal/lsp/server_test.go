@@ -55,6 +55,7 @@ func requireInitializeCapabilities(t *testing.T, capabilities map[string]any) {
 	requireCapability(t, capabilities, "definitionProvider")
 	requireCapability(t, capabilities, "typeDefinitionProvider")
 	requireCapability(t, capabilities, "implementationProvider")
+	requireCapability(t, capabilities, "callHierarchyProvider")
 	requireCapability(t, capabilities, "hoverProvider")
 	requireCapability(t, capabilities, "documentSymbolProvider")
 	requireCapability(t, capabilities, "referencesProvider")
@@ -515,6 +516,62 @@ func typeDefRangeLine(t *testing.T, loc any) int {
 	rng := loc.(map[string]any)["range"].(map[string]any)
 	start := rng["start"].(map[string]any)
 	return int(start["line"].(float64))
+}
+
+// TestServerCallHierarchyRequests exercises prepare, incoming, and outgoing
+// call hierarchy methods over the full JSON-RPC loop.
+func TestServerCallHierarchyRequests(t *testing.T) {
+	source := callHierarchyFixture()
+	uri := "file:///main.kizu"
+	helperItem := `{"name":"helper","kind":12,"uri":"` + uri + `",` +
+		`"range":{"start":{"line":4,"character":0},"end":{"line":6,"character":1}},` +
+		`"selectionRange":{"start":{"line":4,"character":3},"end":{"line":4,"character":9}}}`
+	input := strings.Join([]string{
+		didOpenFrame(t, uri, source),
+		frame(`{"jsonrpc":"2.0","id":2,"method":"textDocument/prepareCallHierarchy",` +
+			`"params":{"textDocument":{"uri":"` + uri + `"},` +
+			`"position":{"line":4,"character":3}}}`),
+		frame(`{"jsonrpc":"2.0","id":3,"method":"callHierarchy/incomingCalls",` +
+			`"params":{"item":` + helperItem + `}}`),
+		frame(`{"jsonrpc":"2.0","id":4,"method":"callHierarchy/outgoingCalls",` +
+			`"params":{"item":` + helperItem + `}}`),
+		frame(`{"jsonrpc":"2.0","method":"exit"}`),
+	}, "")
+	var output bytes.Buffer
+
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	messages := readFrames(t, output.String())
+	if len(messages) != 4 {
+		t.Fatalf("got %d messages, want diagnostics and 3 responses", len(messages))
+	}
+
+	prepared := messages[1]["result"].([]any)
+	if len(prepared) != 1 {
+		t.Fatalf("prepareCallHierarchy result = %#v, want one item", prepared)
+	}
+	if name := prepared[0].(map[string]any)["name"]; name != "helper" {
+		t.Fatalf("prepared item name = %v, want helper", name)
+	}
+
+	incoming := messages[2]["result"].([]any)
+	if len(incoming) != 1 {
+		t.Fatalf("incomingCalls result = %#v, want one caller", incoming)
+	}
+	from := incoming[0].(map[string]any)["from"].(map[string]any)
+	if from["name"] != "main" {
+		t.Fatalf("incoming caller = %v, want main", from["name"])
+	}
+
+	outgoing := messages[3]["result"].([]any)
+	if len(outgoing) != 1 {
+		t.Fatalf("outgoingCalls result = %#v, want one callee", outgoing)
+	}
+	to := outgoing[0].(map[string]any)["to"].(map[string]any)
+	if to["name"] != "leaf" {
+		t.Fatalf("outgoing callee = %v, want leaf", to["name"])
+	}
 }
 
 // frame adds the LSP Content-Length envelope around a JSON body.
