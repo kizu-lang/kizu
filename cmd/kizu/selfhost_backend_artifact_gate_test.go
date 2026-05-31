@@ -477,6 +477,13 @@ func requiredLLVMSourceLoaderFragments() []string {
 		"%t9_gep = getelementptr i8, ptr %t9_ptr, i64 %source_root_len",
 		"%t11 = icmp ne i8 %t9, 47",
 		"%t15 = add i64 %source_root_len, 1",
+		"%kizu.selfhost.source.source_file = type { i64, i64, %kizu.slice.u8, " +
+			"i64, i64, %kizu.slice.u8, %kizu.slice.u8 }",
+		"define %kizu.selfhost.source.source_file @kizu_selfhost__source_loader_source_file",
+		"%v0_0 = insertvalue %kizu.selfhost.source.source_file poison, i64 %id, 0",
+		"%v0_1 = insertvalue %kizu.selfhost.source.source_file %v0_0, i64 %kind, 1",
+		"%v0_6 = insertvalue %kizu.selfhost.source.source_file %v0_5, %kizu.slice.u8 %text, 6",
+		"ret %kizu.selfhost.source.source_file %v0_6",
 	}
 }
 
