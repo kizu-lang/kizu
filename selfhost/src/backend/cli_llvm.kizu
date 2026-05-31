@@ -11,6 +11,7 @@ import selfhost::backend::cli_run_llvm;
 import selfhost::backend::cli_run_i64_codegen_llvm;
 import selfhost::backend::cli_test_ast_llvm;
 import selfhost::backend::cli_test_llvm;
+import selfhost::backend::compiled_abi_params;
 import selfhost::backend::compiled_fact_lookup;
 import selfhost::backend::compiled_llvm;
 import selfhost::backend::ir_contract;
@@ -3949,12 +3950,20 @@ fn append_kizu_lexer_compiled_function(
     ir_bytes: []u8,
     local_name: []u8
 ) -> !void {
+    let function_name = try kizu_lexer_compiled_qualified_name(local_name);
+    var params_spec = std::string::String(std::mem::page_allocator());
+    defer params_spec.deinit();
+    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name);
+    if params_spec.len() == 0 {
+        return error("std lexer compiled closure: missing signature params");
+    }
+    let params_spec_bytes = params_spec.as_bytes();
     try compiled_llvm::append_compiled_function_auto(
         out,
         ir_bytes,
-        try kizu_lexer_compiled_qualified_name(local_name),
+        function_name,
         try kizu_lexer_compiled_llvm_symbol(local_name),
-        try kizu_lexer_compiled_params_spec(local_name)
+        params_spec_bytes
     );
     return;
 }
@@ -4141,52 +4150,6 @@ fn kizu_lexer_compiled_llvm_symbol(local_name: []u8) -> ![]u8 {
     }
     if std::mem::equal_bytes(local_name, "next_token") {
         return "kizu_kizu__lexer_next_token";
-    }
-    return error("std lexer compiled closure: unsupported local helper");
-}
-
-fn kizu_lexer_compiled_params_spec(local_name: []u8) -> ![]u8 {
-    if std::mem::equal_bytes(local_name, "position") {
-        return "i64 line;i64 column";
-    }
-    if std::mem::equal_bytes(local_name, "is_alpha") or
-        std::mem::equal_bytes(local_name, "is_digit") or
-        std::mem::equal_bytes(local_name, "is_word") or
-        std::mem::equal_bytes(local_name, "is_space") {
-        return "i8 byte";
-    }
-    if std::mem::equal_bytes(local_name, "advance_byte") {
-        return "i8 byte;%kizu.kizu.lexer.position initial";
-    }
-    if std::mem::equal_bytes(local_name, "advance_position") {
-        return "%kizu.slice.u8 source;i64 start;i64 end;%kizu.kizu.lexer.position initial";
-    }
-    if std::mem::equal_bytes(local_name, "token") {
-        return "i64 kind;i64 start;i64 end;%kizu.kizu.lexer.position current";
-    }
-    if std::mem::equal_bytes(local_name, "attach_doc") {
-        return "%kizu.kizu.lexer.token raw;i64 doc_start;i64 doc_end";
-    }
-    if std::mem::equal_bytes(local_name, "number_token") or
-        std::mem::equal_bytes(local_name, "string_token") or
-        std::mem::equal_bytes(local_name, "word_token") or
-        std::mem::equal_bytes(local_name, "raw_token_at") {
-        return "%kizu.slice.u8 source;i64 start;%kizu.kizu.lexer.position current";
-    }
-    if std::mem::equal_bytes(local_name, "skip_line_comment") {
-        return "%kizu.slice.u8 source;i64 start;%kizu.kizu.lexer.position initial";
-    }
-    if std::mem::equal_bytes(local_name, "is_doc_comment_start") {
-        return "%kizu.slice.u8 source;i64 start";
-    }
-    if std::mem::equal_bytes(local_name, "token_at") {
-        return "%kizu.slice.u8 source;i64 offset;%kizu.kizu.lexer.position initial";
-    }
-    if std::mem::equal_bytes(local_name, "first_token") {
-        return "%kizu.slice.u8 source";
-    }
-    if std::mem::equal_bytes(local_name, "next_token") {
-        return "%kizu.slice.u8 source;%kizu.kizu.lexer.token previous";
     }
     return error("std lexer compiled closure: unsupported local helper");
 }

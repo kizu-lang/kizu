@@ -295,6 +295,69 @@ func TestSelfhostComponentFunctionCatalogAPI(t *testing.T) {
 	}
 }
 
+// TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
+// compiled closure params tied to function-signature-param facts.
+func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	abi := readSelfhostFile(t, "../../selfhost/src/backend/compiled_abi_params.kizu")
+	body := selfhostKizuFunctionBody(t, cli, "fn append_kizu_lexer_compiled_function(")
+	required := []string{
+		"import selfhost::backend::compiled_abi_params;",
+		"let function_name = try kizu_lexer_compiled_qualified_name(local_name);",
+		"var params_spec = std::string::String(std::mem::page_allocator());",
+		"defer params_spec.deinit();",
+		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name)",
+		"if params_spec.len() == 0 {",
+		"std lexer compiled closure: missing signature params",
+		"let params_spec_bytes = params_spec.as_bytes();",
+		"params_spec_bytes",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(cli+body, fragment) {
+			t.Fatalf("std lexer compiled params derivation missing %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"fn kizu_lexer_compiled_params_spec(",
+		"\"i64 line;i64 column\"",
+		"\"%kizu.slice.u8 source;i64 offset;%kizu.kizu.lexer.position initial\"",
+		"\"%kizu.slice.u8 source;%kizu.kizu.lexer.token previous\"",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("std lexer compiled params keeps hand-written fragment %q", fragment)
+		}
+	}
+	abiRequired := []string{
+		"pub fn append_params_spec(",
+		"function-signature-param ",
+		"std::mem::equal_bytes(kizu_type, \"TokenKind\")",
+		"std::mem::equal_bytes(kizu_type, \"Position\")",
+		"std::mem::equal_bytes(kizu_type, \"Token\")",
+	}
+	for _, fragment := range abiRequired {
+		if !strings.Contains(abi, fragment) {
+			t.Fatalf("compiled ABI params mapper missing %q", fragment)
+		}
+	}
+	supported := selfhostKizuFunctionBody(t, cli, "fn kizu_lexer_compiled_supported_local(")
+	if got := strings.Count(supported, "std::mem::equal_bytes(name, "); got != 18 {
+		t.Fatalf("std lexer compiled supported helper count changed: got %d, want 18", got)
+	}
+	reachable := selfhostKizuFunctionBody(t, cli, "fn append_kizu_lexer_reachable_compiled_functions(")
+	for _, seed := range []string{
+		"try pending.append(\"first_token\");",
+		"try pending.append(\"next_token\");",
+	} {
+		if !strings.Contains(reachable, seed) {
+			t.Fatalf("std lexer compiled closure seed changed, missing %q", seed)
+		}
+	}
+	if strings.Contains(reachable, "\"tokenize\"") {
+		t.Fatal("std lexer compiled closure expands to tokenize")
+	}
+}
+
 // TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST keeps the AST check entry parsed.
 func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
 	typeRefs := readSelfhostFile(t, "../../selfhost/src/types/type_ref_ast.kizu")
