@@ -1641,6 +1641,78 @@ fn render_llvm_module(
     try append_line(out, "  ret %kizu.error.slice.u8 %invalid_result");
     try append_line(out, "}");
     try append_line(out, "");
+    // array_new / array_append back the dynamic Array<T> builder backing
+    // std::kizu::lexer::tokenize (tracker 961, scope 4 prerequisite). array_new allocates the
+    // 40-byte %kizu.rt.array record (allocator, data, len, cap, element_size) off the allocator;
+    // array_append grows the heap buffer by one element and memcpy's the {ptr, element_size}
+    // element slice in, returning the ok error-union. They mirror the canonical storage-module
+    // definitions; the hosted compiler module carries its own self-contained copies (it never
+    // links the storage module), matching the embedded array_len / array_at / arena_add.
+    try append_line(out,
+        "define %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, i64 %element_size) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %allocator_ptr = extractvalue %kizu.owned %allocator, 0");
+    try append_line(out, "  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 40)");
+    try append_line(out,
+        "  %allocator_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 0");
+    try append_line(out, "  store ptr %allocator_ptr, ptr %allocator_field");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  store ptr null, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  store i64 0, ptr %len_field");
+    try append_line(out,
+        "  %cap_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 3");
+    try append_line(out, "  store i64 0, ptr %cap_field");
+    try append_line(out,
+        "  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4");
+    try append_line(out, "  store i64 %element_size, ptr %element_size_field");
+    try append_line(out, "  %handle = insertvalue %kizu.owned poison, ptr %raw, 0");
+    try append_line(out, "  ret %kizu.owned %handle");
+    try append_line(out, "}");
+    try append_line(out, "");
+    try append_line(out,
+        "define %kizu.error.void @kizu_rt_array_append(%kizu.owned %array, %kizu.slice.u8 %element) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %element_ptr = extractvalue %kizu.slice.u8 %element, 0");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
+    try append_line(out,
+        "  %allocator_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 0");
+    try append_line(out, "  %allocator_ptr = load ptr, ptr %allocator_field");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  %current_data = load ptr, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %current = load i64, ptr %len_field");
+    try append_line(out,
+        "  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4");
+    try append_line(out, "  %element_size = load i64, ptr %element_size_field");
+    try append_line(out, "  %next = add i64 %current, 1");
+    try append_line(out, "  %old_bytes = mul i64 %current, %element_size");
+    try append_line(out, "  %new_bytes = mul i64 %next, %element_size");
+    try append_line(out, "  %new_data = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %new_bytes)");
+    try append_line(out, "  %has_old = icmp sgt i64 %current, 0");
+    try append_line(out, "  br i1 %has_old, label %copy_old, label %copy_element");
+    try append_line(out, "copy_old:");
+    try append_line(out,
+        "  call void @llvm.memcpy.p0.p0.i64(ptr %new_data, ptr %current_data, i64 %old_bytes, i1 false)");
+    try append_line(out, "  call void @kizu_rt_free(ptr %allocator_ptr, ptr %current_data)");
+    try append_line(out, "  br label %copy_element");
+    try append_line(out, "copy_element:");
+    try append_line(out, "  %dest = getelementptr i8, ptr %new_data, i64 %old_bytes");
+    try append_line(out,
+        "  call void @llvm.memcpy.p0.p0.i64(ptr %dest, ptr %element_ptr, i64 %element_size, i1 false)");
+    try append_line(out, "  store ptr %new_data, ptr %data_field");
+    try append_line(out, "  store i64 %next, ptr %len_field");
+    try append_line(out,
+        "  %cap_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 3");
+    try append_line(out, "  store i64 %next, ptr %cap_field");
+    try append_line(out,
+        "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    try append_line(out, "}");
+    try append_line(out, "");
     // arena_add is the heap-backed Arena<T> append backing Ast.add_node (tracker 961).
     // It mirrors the array append runtime: the element is passed as a %kizu.slice.u8
     // (ptr + element_size), the arena's heap buffer grows by one element, the old bytes

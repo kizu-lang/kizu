@@ -432,6 +432,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMLexerClassifierFragments()...)
 	fragments = append(fragments, requiredLLVMLexerAdvanceFragments()...)
 	fragments = append(fragments, requiredLLVMLexerTokenFragments()...)
+	fragments = append(fragments, requiredLLVMTokenizerFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
@@ -1186,6 +1187,14 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%wt_kw0_eq = call i1 @kizu_selfhost__slice_equal(" +
 			"%kizu.slice.u8 %wt_text, %kizu.slice.u8 %wt_kw0_slice)",
 		"br i1 %wt_kw0_eq, label %wt_kw0_ret, label %wt_kw1_check",
+	}
+}
+
+// requiredLLVMTokenizerFragments pins the tokenizer driver functions: the byte classifier
+// raw_token_at, the integration loop token_at, the entry points first_token / next_token, and the
+// Array<Token> builder tokenize (tracker 961, scope 4 prerequisite).
+func requiredLLVMTokenizerFragments() []string {
+	return []string{
 		// raw_token_at: an Eof guard, an operator dispatch table over the byte at start, then the
 		// quote / digit / word fallbacks to string_token / number_token / word_token.
 		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_raw_token_at(",
@@ -1207,6 +1216,14 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%ft_pos = call %kizu.kizu.lexer.position @kizu_kizu__lexer_position(i64 1, i64 1)",
 		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_next_token(",
 		"%nt_next = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_position(",
+		// tokenize: build a dynamic Token array via the runtime helpers and fold first/next_token
+		// into it, returning the array as the error-union-owned success.
+		"define %kizu.error.owned @kizu_kizu__lexer_tokenize(",
+		"%tk_array = call %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, i64 56)",
+		"%tk_current = phi %kizu.kizu.lexer.token [ %tk_first, %entry ], " +
+			"[ %tk_next, %tk_after_append ]",
+		"%tk_a0_app = call %kizu.error.void @kizu_rt_array_append(",
+		"%tk_ok1 = insertvalue %kizu.error.owned %tk_ok0, %kizu.owned %tk_array, 1",
 	}
 }
 
