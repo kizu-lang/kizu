@@ -290,18 +290,18 @@ func nativeSourceRunStem(stem string) runParityCase {
 	return nativeSourceRunOK(stem, stem+".kizu", stem+".stdout", stem)
 }
 
-// nativeSourceRunReturn is the explicit-return case that the bounded run path
-// rejects with the usage error.
+// nativeSourceRunReturn is the explicit void-return case that emits a no-output
+// hosted artifact.
 func nativeSourceRunReturn() runParityCase {
 	return runParityCase{
 		name:         "run_return",
 		command:      "run",
 		fixture:      "selfhost/tests/cli/run_return.kizu",
-		exitCode:     64,
+		exitCode:     0,
 		stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-		stderrGolden: "selfhost/tests/cli/golden/usage.stderr",
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
 		artifactMode: "hosted-artifact",
-		artifactStem: "-",
+		artifactStem: "run_return",
 	}
 }
 

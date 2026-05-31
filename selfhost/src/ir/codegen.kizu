@@ -65,6 +65,7 @@ pub struct Program {
 pub enum RunStatementKind {
     None,
     Print,
+    ReturnVoid,
 }
 
 pub enum RunArgumentKind {
@@ -178,6 +179,9 @@ pub fn program_supported(program: &Program) -> bool {
     if main_print_payload(program).kind == ValueKind::ConstString {
         return true;
     }
+    if return_void_program_supported(program) {
+        return true;
+    }
     if program.function_count != 2 {
         return false;
     }
@@ -250,6 +254,31 @@ pub fn i64_call_program_supported(program: &Program) -> bool {
         program.i64_return_op == RunBinaryOp::Sub or
         program.i64_return_op == RunBinaryOp::Mul or
         program.i64_return_op == RunBinaryOp::Div;
+}
+
+pub fn return_void_program_supported(program: &Program) -> bool {
+    if program.function_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.function_name, "main") {
+        return false;
+    }
+    if program.block_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.block_label, "entry") {
+        return false;
+    }
+    if program.instruction_count != 1 {
+        return false;
+    }
+    if program.first_kind != InstructionKind::None {
+        return false;
+    }
+    if program.second_kind != InstructionKind::None {
+        return false;
+    }
+    return program.third_kind == InstructionKind::ReturnVoid;
 }
 
 pub fn metadata_for_program(program: &Program) -> []u8 {
@@ -473,6 +502,13 @@ fn lower_run_ast_block(
                     &locals,
                     expr_stmt.expr
                 ),
+                Return(return_node) => lower_return_void_statement(
+                    text,
+                    ast,
+                    function_name,
+                    statements.len,
+                    return_node.value
+                ),
                 _ => unsupported_run_ast(text[0..0]),
             };
         }
@@ -500,6 +536,19 @@ fn lower_let_binding(
         payload_start: payload.start,
         payload_end: payload.end
     };
+}
+
+fn lower_return_void_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
+    value: std::kizu::ast::NodeId
+) -> RunAst {
+    if !is_empty_node(ast, value) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    return return_void_run_ast(text, function_name, statement_count);
 }
 
 fn lower_print_statement(
@@ -787,6 +836,14 @@ fn node_text_is_var(
     };
 }
 
+fn is_empty_node(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Empty => true,
+        _ => false,
+    };
+}
+
 fn param_i64_name(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -849,6 +906,9 @@ fn lower_run_ast_to_program(text: []u8, run_ast: &RunAst) -> Program {
     if run_ast_i64_call_supported(run_ast) {
         return lowered_i64_call_program(run_ast);
     }
+    if run_ast.final_statement_kind == RunStatementKind::ReturnVoid {
+        return lowered_return_void_program(run_ast);
+    }
     return lowered_main_print_program(run_ast.final_argument_payload);
 }
 
@@ -864,6 +924,9 @@ fn run_ast_supported(run_ast: &RunAst) -> bool {
     }
     if run_ast.statement_count < 1 {
         return false;
+    }
+    if run_ast.final_statement_kind == RunStatementKind::ReturnVoid {
+        return run_ast.function_count == 1;
     }
     if run_ast.final_statement_kind != RunStatementKind::Print {
         return false;
@@ -991,6 +1054,26 @@ fn i64_call_run_ast(
     };
 }
 
+fn return_void_run_ast(text: []u8, function_name: []u8, statement_count: i64) -> RunAst {
+    return RunAst {
+        ok: true,
+        function_count: 1,
+        function_name: function_name,
+        block_count: 1,
+        statement_count: statement_count,
+        final_statement_kind: RunStatementKind::ReturnVoid,
+        final_callee: text[0..0],
+        final_argument_kind: RunArgumentKind::None,
+        final_argument_payload: text[0..0],
+        i64_function_name: text[0..0],
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: text[0..0],
+        i64_call_arg0: 0,
+        i64_call_arg1: 0
+    };
+}
+
 fn unsupported_run_ast(empty: []u8) -> RunAst {
     return RunAst {
         ok: false,
@@ -1006,6 +1089,33 @@ fn unsupported_run_ast(empty: []u8) -> RunAst {
         i64_param_count: 0,
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: empty[0..0],
+        i64_call_arg0: 0,
+        i64_call_arg1: 0
+    };
+}
+
+fn lowered_return_void_program(run_ast: &RunAst) -> Program {
+    return Program {
+        function_count: 1,
+        function_name: run_ast.function_name,
+        block_count: 1,
+        block_label: "entry",
+        instruction_count: 1,
+        first_kind: InstructionKind::None,
+        first_result_kind: ValueKind::None,
+        first_result_name: run_ast.function_name[0..0],
+        first_result_payload: run_ast.function_name[0..0],
+        second_kind: InstructionKind::None,
+        second_callee: run_ast.function_name[0..0],
+        second_argument_kind: ValueKind::None,
+        second_argument_name: run_ast.function_name[0..0],
+        second_argument_payload: run_ast.function_name[0..0],
+        third_kind: InstructionKind::ReturnVoid,
+        from_codegen_lowering: true,
+        i64_function_name: run_ast.function_name[0..0],
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: run_ast.function_name[0..0],
         i64_call_arg0: 0,
         i64_call_arg1: 0
     };

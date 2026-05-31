@@ -2726,9 +2726,10 @@ fn append_lower_run_ast_block_globals(stmt: &compiled_mir::MirLowerRunAstBlockSt
 // statements): the stateful run-block traversal (tracker 961, scope 4 prerequisite). It threads a
 // mutable LocalTable + index through a bounded loop over statements (two head phis); each
 // non-terminal statement must be a Let binding (lower_let_binding, inserted via insert_local) and
-// the terminal statement must be an ExprStmt forwarded to lower_print_statement. Any rejection
-// returns the wrapped unsupported_run_ast(); the checked Ast.child_at failure propagates as the
-// !RunAst error. The AstData payload slot is hoisted to entry so the loop body allocates no stack.
+// the terminal statement must be an ExprStmt forwarded to lower_print_statement or an empty Return
+// lowered to a return-void RunAst. Any rejection returns the wrapped unsupported_run_ast(); the
+// checked Ast.child_at failure propagates as the !RunAst error. The AstData payload slot is hoisted
+// to entry so the loop body allocates no stack.
 fn append_multi_lower_run_ast_block(
     out: &var std::string::String,
     stmt: &compiled_mir::MirLowerRunAstBlockStmt
@@ -2829,12 +2830,12 @@ fn append_multi_lower_run_ast_block(
         ", %kizu.selfhost.codegen.local_table %lrb_locals, %kizu.selfhost.codegen.local_binding %lrb_binding)");
     try append_ll_line(out, "  %lrb_index_next = add i64 %lrb_index, 1");
     try append_ll_line(out, "  br label %lrb_head");
-    // Terminal: must be an ExprStmt forwarded to lower_print_statement.
+    // Terminal: either an ExprStmt forwarded to lower_print_statement or an empty Return.
     try append_ll_line(out, "lrb_terminal_stmt:");
     try out.append_bytes("  %lrb_is_exprstmt = icmp eq i64 %lrb_tag, ");
     try std::fmt::append_i64(out, stmt.expr_stmt_tag);
     try out.append_byte(cast<u8>(10));
-    try append_ll_line(out, "  br i1 %lrb_is_exprstmt, label %lrb_exprstmt, label %lrb_unsupported");
+    try append_ll_line(out, "  br i1 %lrb_is_exprstmt, label %lrb_exprstmt, label %lrb_check_return");
     try append_ll_line(out, "lrb_exprstmt:");
     try append_ll_line(out, "  store %kizu.kizu.ast.ast_data %lrb_data, ptr %lrb_data_slot, align 8");
     try append_ll_line(out,
@@ -2858,6 +2859,44 @@ fn append_multi_lower_run_ast_block(
     try append_ll_line(out,
         ", i64 %lrb_stmts_len, %kizu.selfhost.codegen.local_table %lrb_locals, %kizu.kizu.ast.node_id %lrb_expr)");
     try append_ll_line(out, "  ret %kizu.error.run_ast %lrb_ps");
+    try append_ll_line(out, "lrb_check_return:");
+    try out.append_bytes("  %lrb_is_return = icmp eq i64 %lrb_tag, ");
+    try std::fmt::append_i64(out, stmt.return_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  br i1 %lrb_is_return, label %lrb_return, label %lrb_unsupported");
+    try append_ll_line(out, "lrb_return:");
+    try append_ll_line(out, "  store %kizu.kizu.ast.ast_data %lrb_data, ptr %lrb_data_slot, align 8");
+    try append_ll_line(out,
+        "  %lrb_return_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %lrb_data_slot, i32 0, i32 1");
+    try append_ll_line(out,
+        "  %lrb_return_node = load %kizu.kizu.ast.return_node, ptr %lrb_return_ptr, align 8");
+    try append_ll_line(out,
+        "  %lrb_return_value = extractvalue %kizu.kizu.ast.return_node %lrb_return_node, 0");
+    try out.append_bytes("  %lrb_return_value_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.node_id %lrb_return_value)");
+    try append_ll_line(out,
+        "  %lrb_return_value_data = extractvalue %kizu.kizu.ast.ast_node %lrb_return_value_node, 1");
+    try append_ll_line(out,
+        "  %lrb_return_value_tag = extractvalue %kizu.kizu.ast.ast_data %lrb_return_value_data, 0");
+    try out.append_bytes("  %lrb_return_empty = icmp eq i64 %lrb_return_value_tag, ");
+    try std::fmt::append_i64(out, stmt.empty_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_ll_line(out, "  br i1 %lrb_return_empty, label %lrb_return_void, label %lrb_unsupported");
+    try append_ll_line(out, "lrb_return_void:");
+    try out.append_bytes("  %lrb_rv = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_return_void_run_ast(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", %kizu.slice.u8 %");
+    try out.append_bytes(stmt.function_name_name);
+    try append_ll_line(out, ", i64 %lrb_stmts_len)");
+    try append_ll_line(out, "  %lrb_rv0 = insertvalue %kizu.error.run_ast poison, i1 true, 0");
+    try append_ll_line(out,
+        "  %lrb_rv1 = insertvalue %kizu.error.run_ast %lrb_rv0, %kizu.selfhost.codegen.run_ast %lrb_rv, 1");
+    try append_ll_line(out,
+        "  %lrb_rv2 = insertvalue %kizu.error.run_ast %lrb_rv1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrb_rv2");
     // Shared rejection exit: the wrapped unsupported_run_ast(text[0..0]).
     try append_ll_line(out, "lrb_unsupported:");
     try out.append_bytes("  %lrb_us_ptr = extractvalue %kizu.slice.u8 %");
