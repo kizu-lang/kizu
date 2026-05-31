@@ -1,6 +1,7 @@
 pub enum ValueKind {
     None,
     ConstString,
+    FsReadBytes,
 }
 
 pub struct Value {
@@ -72,12 +73,14 @@ pub enum RunStatementKind {
     ReturnVoid,
     TryVoidPrintReturn,
     LoopI64Print,
+    FsReadPrintReturn,
 }
 
 pub enum RunArgumentKind {
     None,
     ConstString,
     I64Call,
+    FsReadFile,
 }
 
 pub enum RunBinaryOp {
@@ -206,6 +209,9 @@ pub fn program_supported(program: &Program) -> bool {
     if loop_i64_program_supported(program) {
         return true;
     }
+    if fs_read_program_supported(program) {
+        return true;
+    }
     if program.function_count != 2 {
         return false;
     }
@@ -259,6 +265,46 @@ pub fn stdout_payload(program: &Program) -> ![]u8 {
         return program.second_argument_payload;
     }
     return error("unsupported codegen stdout payload");
+}
+
+pub fn fs_read_program_supported(program: &Program) -> bool {
+    if program.function_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.function_name, "main") {
+        return false;
+    }
+    if program.block_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.block_label, "entry") {
+        return false;
+    }
+    if program.instruction_count != 4 {
+        return false;
+    }
+    if program.first_kind != InstructionKind::Call {
+        return false;
+    }
+    if program.first_result_kind != ValueKind::FsReadBytes {
+        return false;
+    }
+    if std::mem::len(program.first_result_payload) == 0 {
+        return false;
+    }
+    if program.second_kind != InstructionKind::Call {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.second_callee, "print") {
+        return false;
+    }
+    if program.second_argument_kind != ValueKind::FsReadBytes {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.first_result_name, program.second_argument_name) {
+        return false;
+    }
+    return program.third_kind == InstructionKind::ReturnVoid;
 }
 
 pub fn i64_call_program_supported(program: &Program) -> bool {
@@ -592,6 +638,10 @@ fn lower_run_ast_block(
     function_name: []u8,
     statements: std::kizu::ast::ChildRange
 ) -> !RunAst {
+    let fs_read = try lower_fs_read_block(text, ast, function_name, statements);
+    if fs_read.ok {
+        return fs_read;
+    }
     let try_void = try lower_try_void_block(text, ast, declarations, function_name, statements);
     if try_void.ok {
         return try_void;
@@ -640,6 +690,244 @@ fn lower_run_ast_block(
         }
     }
     return unsupported_run_ast(text[0..0]);
+}
+
+struct FsReadBinding {
+    name: []u8,
+    path_start: i64,
+    path_end: i64,
+}
+
+fn lower_fs_read_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statements: std::kizu::ast::ChildRange
+) -> !RunAst {
+    if statements.len != 4 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let io_statement = try ast.child_at(statements, 0);
+    let io_name = fs_io_binding_name(text, ast, io_statement);
+    if std::mem::len(io_name) == 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let read_statement = try ast.child_at(statements, 1);
+    let read_binding = try fs_read_binding(text, ast, read_statement, io_name);
+    if std::mem::len(read_binding.name) == 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let print_statement = try ast.child_at(statements, 2);
+    if !(try fs_read_print_statement_ok(text, ast, print_statement, read_binding.name)) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let return_statement = try ast.child_at(statements, 3);
+    if !return_void_statement_ok(ast, return_statement) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let path = text[read_binding.path_start..read_binding.path_end];
+    return fs_read_run_ast(function_name, statements.len, "print", path);
+}
+
+fn fs_io_binding_name(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId
+) -> []u8 borrows text {
+    let node = ast.get(statement);
+    match node.data {
+        Let(let_node) => return fs_io_let_name(
+            text,
+            ast,
+            let_node.mutable,
+            let_node.name,
+            let_node.value
+        );,
+        _ => return text[0..0];,
+    }
+}
+
+fn fs_io_let_name(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    mutable: bool,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId
+) -> []u8 borrows text {
+    if mutable {
+        return text[0..0];
+    }
+    if !zero_arg_call_named(text, ast, value, "std::io::blocking") {
+        return text[0..0];
+    }
+    return ast_node_text(text, ast, name);
+}
+
+fn fs_read_binding(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId,
+    io_name: []u8
+) -> !FsReadBinding {
+    let node = ast.get(statement);
+    match node.data {
+        Let(let_node) => return try fs_read_let_binding(
+            text,
+            ast,
+            let_node.mutable,
+            let_node.name,
+            let_node.value,
+            io_name
+        );,
+        _ => return empty_fs_read_binding(text);,
+    }
+}
+
+fn fs_read_let_binding(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    mutable: bool,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    io_name: []u8
+) -> !FsReadBinding {
+    if mutable {
+        return empty_fs_read_binding(text);
+    }
+    let local_name = ast_node_text(text, ast, name);
+    if std::mem::len(local_name) == 0 or std::mem::equal_bytes(local_name, io_name) {
+        return empty_fs_read_binding(text);
+    }
+    let path = try fs_read_try_path(text, ast, value, io_name);
+    if path.start < 0 {
+        return empty_fs_read_binding(text);
+    }
+    return FsReadBinding {
+        name: local_name,
+        path_start: path.start,
+        path_end: path.end
+    };
+}
+
+fn fs_read_try_path(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    io_name: []u8
+) -> !PayloadSpan {
+    let node = ast.get(value);
+    match node.data {
+        TryExpr(try_expr) => return try fs_read_call_path(text, ast, try_expr.value, io_name);,
+        _ => return empty_payload_span();,
+    }
+}
+
+fn fs_read_call_path(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    io_name: []u8
+) -> !PayloadSpan {
+    let node = ast.get(value);
+    match node.data {
+        Call(call_node) => return try fs_read_call_args_path(
+            text,
+            ast,
+            call_node.callee,
+            call_node.args,
+            io_name
+        );,
+        _ => return empty_payload_span();,
+    }
+}
+
+fn fs_read_call_args_path(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    io_name: []u8
+) -> !PayloadSpan {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "std::fs::read_file") {
+        return empty_payload_span();
+    }
+    if args.len != 2 {
+        return empty_payload_span();
+    }
+    let io_arg = try ast.child_at(args, 0);
+    if !node_text_is_var(text, ast, io_arg, io_name) {
+        return empty_payload_span();
+    }
+    let path_arg = try ast.child_at(args, 1);
+    return string_literal_span(text, ast, path_arg);
+}
+
+fn fs_read_print_statement_ok(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId,
+    local_name: []u8
+) -> !bool {
+    let node = ast.get(statement);
+    match node.data {
+        ExprStmt(expr_stmt) => return try fs_read_print_expr_ok(text, ast, expr_stmt.expr, local_name);,
+        _ => return false;,
+    }
+}
+
+fn fs_read_print_expr_ok(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId,
+    local_name: []u8
+) -> !bool {
+    let node = ast.get(expr);
+    match node.data {
+        Call(call_node) => return try fs_read_print_call_ok(
+            text,
+            ast,
+            call_node.callee,
+            call_node.args,
+            local_name
+        );,
+        _ => return false;,
+    }
+}
+
+fn fs_read_print_call_ok(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    local_name: []u8
+) -> !bool {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
+        return false;
+    }
+    let arg = try ast.child_at(args, 0);
+    return node_text_is_var(text, ast, arg, local_name);
+}
+
+fn zero_arg_call_named(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    expected: []u8
+) -> bool {
+    let node = ast.get(value);
+    match node.data {
+        Call(call_node) => return call_node.args.len == 0 and
+            std::mem::equal_bytes(ast_node_text(text, ast, call_node.callee), expected);,
+        _ => return false;,
+    }
+}
+
+fn empty_fs_read_binding(text: []u8) -> FsReadBinding {
+    return FsReadBinding {
+        name: text[0..0],
+        path_start: -1,
+        path_end: -1
+    };
 }
 
 fn lower_try_void_block(
@@ -1728,6 +2016,9 @@ fn lower_run_ast_to_program(text: []u8, run_ast: &RunAst) -> Program {
     if run_ast.final_statement_kind == RunStatementKind::TryVoidPrintReturn {
         return lowered_try_void_program(run_ast);
     }
+    if run_ast.final_statement_kind == RunStatementKind::FsReadPrintReturn {
+        return lowered_fs_read_program(run_ast);
+    }
     if run_ast.final_statement_kind == RunStatementKind::ReturnVoid {
         return lowered_return_void_program(run_ast);
     }
@@ -1755,6 +2046,9 @@ fn run_ast_supported(run_ast: &RunAst) -> bool {
     }
     if run_ast.final_statement_kind == RunStatementKind::LoopI64Print {
         return loop_i64_run_ast_supported(run_ast);
+    }
+    if run_ast.final_statement_kind == RunStatementKind::FsReadPrintReturn {
+        return fs_read_run_ast_supported(run_ast);
     }
     if run_ast.final_statement_kind != RunStatementKind::Print {
         return false;
@@ -1787,6 +2081,22 @@ fn run_ast_supported(run_ast: &RunAst) -> bool {
         run_ast.i64_return_op == RunBinaryOp::Sub or
         run_ast.i64_return_op == RunBinaryOp::Mul or
         run_ast.i64_return_op == RunBinaryOp::Div;
+}
+
+fn fs_read_run_ast_supported(run_ast: &RunAst) -> bool {
+    if run_ast.function_count != 1 {
+        return false;
+    }
+    if run_ast.statement_count != 4 {
+        return false;
+    }
+    if !std::mem::equal_bytes(run_ast.final_callee, "print") {
+        return false;
+    }
+    if run_ast.final_argument_kind != RunArgumentKind::FsReadFile {
+        return false;
+    }
+    return std::mem::len(run_ast.final_argument_payload) != 0;
 }
 
 fn try_void_run_ast_supported(run_ast: &RunAst) -> bool {
@@ -1985,6 +2295,35 @@ fn loop_i64_run_ast(
     };
 }
 
+fn fs_read_run_ast(
+    function_name: []u8,
+    statement_count: i64,
+    print_callee: []u8,
+    path: []u8
+) -> RunAst {
+    return RunAst {
+        ok: true,
+        function_count: 1,
+        function_name: function_name,
+        block_count: 1,
+        statement_count: statement_count,
+        final_statement_kind: RunStatementKind::FsReadPrintReturn,
+        final_callee: print_callee,
+        final_argument_kind: RunArgumentKind::FsReadFile,
+        final_argument_payload: path,
+        i64_function_name: function_name[0..0],
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: function_name[0..0],
+        i64_call_arg0: 0,
+        i64_call_arg1: 0,
+        loop_start_value: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
+    };
+}
+
 fn return_void_run_ast(text: []u8, function_name: []u8, statement_count: i64) -> RunAst {
     return RunAst {
         ok: true,
@@ -2150,6 +2489,37 @@ fn lowered_i64_call_program(run_ast: &RunAst) -> Program {
         i64_call_callee: run_ast.i64_call_callee,
         i64_call_arg0: run_ast.i64_call_arg0,
         i64_call_arg1: run_ast.i64_call_arg1,
+        loop_start_value: 0,
+        loop_bound: 0,
+        loop_continue_value: 0,
+        loop_break_value: 0
+    };
+}
+
+fn lowered_fs_read_program(run_ast: &RunAst) -> Program {
+    return Program {
+        function_count: 1,
+        function_name: run_ast.function_name,
+        block_count: 1,
+        block_label: "entry",
+        instruction_count: 4,
+        first_kind: InstructionKind::Call,
+        first_result_kind: ValueKind::FsReadBytes,
+        first_result_name: "text",
+        first_result_payload: run_ast.final_argument_payload,
+        second_kind: InstructionKind::Call,
+        second_callee: run_ast.final_callee,
+        second_argument_kind: ValueKind::FsReadBytes,
+        second_argument_name: "text",
+        second_argument_payload: run_ast.function_name[0..0],
+        third_kind: InstructionKind::ReturnVoid,
+        from_codegen_lowering: true,
+        i64_function_name: run_ast.function_name[0..0],
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: run_ast.function_name[0..0],
+        i64_call_arg0: 0,
+        i64_call_arg1: 0,
         loop_start_value: 0,
         loop_bound: 0,
         loop_continue_value: 0,
