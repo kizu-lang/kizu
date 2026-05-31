@@ -290,18 +290,46 @@ func nativeSourceRunStem(stem string) runParityCase {
 	return nativeSourceRunOK(stem, stem+".kizu", stem+".stdout", stem)
 }
 
-// nativeSourceRunReturn is the explicit-return case that the bounded run path
-// rejects with the usage error.
+// nativeSourceRunReturn is the explicit void-return case that emits a no-output
+// hosted artifact.
 func nativeSourceRunReturn() runParityCase {
 	return runParityCase{
 		name:         "run_return",
 		command:      "run",
 		fixture:      "selfhost/tests/cli/run_return.kizu",
-		exitCode:     64,
+		exitCode:     0,
 		stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-		stderrGolden: "selfhost/tests/cli/golden/usage.stderr",
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
 		artifactMode: "hosted-artifact",
-		artifactStem: "-",
+		artifactStem: "run_return",
+	}
+}
+
+// nativeSourceRunExampleErrorUnionVoid checks try-void success through a source-built runner.
+func nativeSourceRunExampleErrorUnionVoid() runParityCase {
+	return runParityCase{
+		name:         "run_example_error_union_void",
+		command:      "run",
+		fixture:      "examples/error_union_void.kizu",
+		exitCode:     0,
+		stdoutGolden: "selfhost/tests/cli/golden/run_ok.stdout",
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		artifactMode: "hosted-artifact",
+		artifactStem: "error_union_void",
+	}
+}
+
+// nativeSourceRunErrorUnionVoidFail checks try-void failure artifact execution.
+func nativeSourceRunErrorUnionVoidFail() runParityCase {
+	return runParityCase{
+		name:         "run_error_union_void_fail",
+		command:      "run",
+		fixture:      "selfhost/tests/cli/run_error_union_void_fail.kizu",
+		exitCode:     1,
+		stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		artifactMode: "hosted-artifact",
+		artifactStem: "run_error_union_void_fail",
 	}
 }
 
@@ -310,6 +338,8 @@ func nativeSourceRunCases() []runParityCase {
 	return []runParityCase{
 		nativeSourceRunStem("run_hello"),
 		nativeSourceRunReturn(),
+		nativeSourceRunExampleErrorUnionVoid(),
+		nativeSourceRunErrorUnionVoidFail(),
 		nativeSourceRunOK("run_local_string", "run_local_string.kizu",
 			"run_print_custom.stdout", "run_local_string"),
 		nativeSourceRunStem("run_two_local_strings"),
@@ -336,7 +366,7 @@ func runNativeSourceRunCase(
 		t.Errorf("read native source run goldens for %s: %v", item.name, err)
 		return result, 1
 	}
-	if result.compiler.code != 0 {
+	if result.compiler.code != 0 && item.artifactStem == "-" {
 		return result, compareRunCompilerResult(t, item, result.compiler, expectedOut, expectedErr) +
 			countUnexpectedRunArtifacts(t, item)
 	}

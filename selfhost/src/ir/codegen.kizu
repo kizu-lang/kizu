@@ -65,6 +65,8 @@ pub struct Program {
 pub enum RunStatementKind {
     None,
     Print,
+    ReturnVoid,
+    TryVoidPrintReturn,
 }
 
 pub enum RunArgumentKind {
@@ -178,6 +180,12 @@ pub fn program_supported(program: &Program) -> bool {
     if main_print_payload(program).kind == ValueKind::ConstString {
         return true;
     }
+    if return_void_program_supported(program) {
+        return true;
+    }
+    if try_void_program_supported(program) {
+        return true;
+    }
     if program.function_count != 2 {
         return false;
     }
@@ -224,10 +232,13 @@ pub fn require_lowered_main_print(program: &Program) -> !void {
 
 pub fn stdout_payload(program: &Program) -> ![]u8 {
     let payload = main_print_payload(program);
-    if payload.kind != ValueKind::ConstString {
-        return error("unsupported codegen stdout payload");
+    if payload.kind == ValueKind::ConstString {
+        return payload.string_payload;
     }
-    return payload.string_payload;
+    if try_void_program_supported(program) {
+        return program.second_argument_payload;
+    }
+    return error("unsupported codegen stdout payload");
 }
 
 pub fn i64_call_program_supported(program: &Program) -> bool {
@@ -250,6 +261,77 @@ pub fn i64_call_program_supported(program: &Program) -> bool {
         program.i64_return_op == RunBinaryOp::Sub or
         program.i64_return_op == RunBinaryOp::Mul or
         program.i64_return_op == RunBinaryOp::Div;
+}
+
+pub fn return_void_program_supported(program: &Program) -> bool {
+    if program.function_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.function_name, "main") {
+        return false;
+    }
+    if program.block_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.block_label, "entry") {
+        return false;
+    }
+    if program.instruction_count != 1 {
+        return false;
+    }
+    if program.first_kind != InstructionKind::None {
+        return false;
+    }
+    if program.second_kind != InstructionKind::None {
+        return false;
+    }
+    return program.third_kind == InstructionKind::ReturnVoid;
+}
+
+pub fn try_void_program_supported(program: &Program) -> bool {
+    if program.function_count != 2 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.function_name, "main") {
+        return false;
+    }
+    if program.block_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.block_label, "entry") {
+        return false;
+    }
+    if program.instruction_count != 3 {
+        return false;
+    }
+    if program.first_kind != InstructionKind::Call {
+        return false;
+    }
+    if program.first_result_kind != ValueKind::None {
+        return false;
+    }
+    if program.second_kind != InstructionKind::Call {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.second_callee, "print") {
+        return false;
+    }
+    if program.second_argument_kind != ValueKind::ConstString {
+        return false;
+    }
+    if program.third_kind != InstructionKind::ReturnVoid {
+        return false;
+    }
+    if program.i64_param_count != 0 {
+        return false;
+    }
+    if std::mem::len(program.i64_function_name) == 0 {
+        return false;
+    }
+    if !std::mem::equal_bytes(program.i64_function_name, program.i64_call_callee) {
+        return false;
+    }
+    return program.i64_call_arg0 == 0 or program.i64_call_arg0 == 1;
 }
 
 pub fn metadata_for_program(program: &Program) -> []u8 {
@@ -446,6 +528,11 @@ fn lower_run_ast_block(
     function_name: []u8,
     statements: std::kizu::ast::ChildRange
 ) -> !RunAst {
+    let try_void = try lower_try_void_block(text, ast, declarations, function_name, statements);
+    if try_void.ok {
+        return try_void;
+    }
+
     var locals = empty_local_table(text);
     var index = 0;
     while index < statements.len {
@@ -473,11 +560,273 @@ fn lower_run_ast_block(
                     &locals,
                     expr_stmt.expr
                 ),
+                Return(return_node) => lower_return_void_statement(
+                    text,
+                    ast,
+                    function_name,
+                    statements.len,
+                    return_node.value
+                ),
                 _ => unsupported_run_ast(text[0..0]),
             };
         }
     }
     return unsupported_run_ast(text[0..0]);
+}
+
+fn lower_try_void_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_name: []u8,
+    statements: std::kizu::ast::ChildRange
+) -> !RunAst {
+    if statements.len != 3 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let try_statement = try ast.child_at(statements, 0);
+    let try_callee = try_void_statement_callee(text, ast, try_statement);
+    if std::mem::len(try_callee) == 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let helper_exit_code = try try_void_helper_exit_code(text, ast, declarations, try_callee);
+    if helper_exit_code < 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let print_statement = try ast.child_at(statements, 1);
+    let payload = try print_statement_payload(text, ast, print_statement);
+    if payload.start < 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let payload_text = text[payload.start..payload.end];
+    if std::mem::len(payload_text) == 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    let return_statement = try ast.child_at(statements, 2);
+    if !return_void_statement_ok(ast, return_statement) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    return try_void_run_ast(
+        function_name,
+        statements.len,
+        "print",
+        payload_text,
+        try_callee,
+        helper_exit_code
+    );
+}
+
+fn try_void_statement_callee(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId
+) -> []u8 borrows text {
+    let node = ast.get(statement);
+    match node.data {
+        ExprStmt(expr_stmt) => return try_void_expr_callee(text, ast, expr_stmt.expr);,
+        _ => return text[0..0];,
+    }
+}
+
+fn try_void_expr_callee(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> []u8 borrows text {
+    let node = ast.get(expr);
+    match node.data {
+        TryExpr(try_expr) => return try_void_value_callee(text, ast, try_expr.value);,
+        _ => return text[0..0];,
+    }
+}
+
+fn try_void_value_callee(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> []u8 borrows text {
+    let node = ast.get(value);
+    match node.data {
+        Call(call_node) => return try_void_call_callee(text, ast, call_node.callee, call_node.args);,
+        _ => return text[0..0];,
+    }
+}
+
+fn try_void_call_callee(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> []u8 borrows text {
+    if args.len != 0 {
+        return text[0..0];
+    }
+    return ast_node_text(text, ast, callee);
+}
+
+fn try_void_helper_exit_code(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    callee: []u8
+) -> !i64 {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let exit_code = try try_void_helper_function_exit_code(text, ast, child, callee);
+        if exit_code >= 0 {
+            return exit_code;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn try_void_helper_function_exit_code(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declaration: std::kizu::ast::NodeId,
+    callee: []u8
+) -> !i64 {
+    let node = ast.get(declaration);
+    match node.data {
+        FnDecl(fn_decl) => return try try_void_helper_decl_exit_code(
+            text,
+            ast,
+            callee,
+            fn_decl.name,
+            fn_decl.params,
+            fn_decl.return_type,
+            fn_decl.body
+        );,
+        _ => return -1;,
+    }
+}
+
+fn try_void_helper_decl_exit_code(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: []u8,
+    name: std::kizu::ast::NodeId,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !i64 {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, name), callee) {
+        return -1;
+    }
+    if params.len != 0 or !type_node_is_error_union_void(text, ast, return_type) {
+        return -1;
+    }
+    let node = ast.get(body);
+    match node.data {
+        Block(block) => return try try_void_helper_block_exit_code(text, ast, block.statements);,
+        _ => return -1;,
+    }
+}
+
+fn try_void_helper_block_exit_code(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !i64 {
+    if statements.len != 1 {
+        return -1;
+    }
+    let statement = try ast.child_at(statements, 0);
+    let node = ast.get(statement);
+    match node.data {
+        Return(return_node) => return try try_void_return_exit_code(text, ast, return_node.value);,
+        _ => return -1;,
+    }
+}
+
+fn try_void_return_exit_code(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> !i64 {
+    if is_empty_node(ast, value) {
+        return 0;
+    }
+    return try error_void_return_exit_code(text, ast, value);
+}
+
+fn error_void_return_exit_code(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(value);
+    match node.data {
+        Call(call_node) => return try error_void_call_exit_code(text, ast, call_node.callee, call_node.args);,
+        _ => return -1;,
+    }
+}
+
+fn error_void_call_exit_code(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !i64 {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "error") {
+        return -1;
+    }
+    if args.len != 1 {
+        return -1;
+    }
+    let arg = try ast.child_at(args, 0);
+    let payload = string_literal_span(text, ast, arg);
+    if payload.start < 0 {
+        return -1;
+    }
+    return 1;
+}
+
+fn print_statement_payload(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId
+) -> !PayloadSpan {
+    let node = ast.get(statement);
+    match node.data {
+        ExprStmt(expr_stmt) => return try print_expr_payload(text, ast, expr_stmt.expr);,
+        _ => return empty_payload_span();,
+    }
+}
+
+fn print_expr_payload(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> !PayloadSpan {
+    let node = ast.get(expr);
+    match node.data {
+        Call(call_node) => return try print_call_payload(text, ast, call_node.callee, call_node.args);,
+        _ => return empty_payload_span();,
+    }
+}
+
+fn print_call_payload(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !PayloadSpan {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
+        return empty_payload_span();
+    }
+    let arg = try ast.child_at(args, 0);
+    return string_literal_span(text, ast, arg);
+}
+
+fn return_void_statement_ok(ast: std::kizu::ast::Ast, statement: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(statement);
+    return match node.data {
+        Return(return_node) => is_empty_node(ast, return_node.value),
+        _ => false,
+    };
 }
 
 fn lower_let_binding(
@@ -500,6 +849,19 @@ fn lower_let_binding(
         payload_start: payload.start,
         payload_end: payload.end
     };
+}
+
+fn lower_return_void_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
+    value: std::kizu::ast::NodeId
+) -> RunAst {
+    if !is_empty_node(ast, value) {
+        return unsupported_run_ast(text[0..0]);
+    }
+    return return_void_run_ast(text, function_name, statement_count);
 }
 
 fn lower_print_statement(
@@ -787,6 +1149,14 @@ fn node_text_is_var(
     };
 }
 
+fn is_empty_node(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Empty => true,
+        _ => false,
+    };
+}
+
 fn param_i64_name(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -826,6 +1196,14 @@ fn type_node_is_i64(
     return std::mem::equal_bytes(ast_node_text(text, ast, type_node), "i64");
 }
 
+fn type_node_is_error_union_void(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> bool {
+    return std::mem::equal_bytes(ast_node_text(text, ast, type_node), "!void");
+}
+
 fn run_binary_op(op: std::kizu::ast::BinaryOp) -> RunBinaryOp {
     if op == std::kizu::ast::binary_add() {
         return RunBinaryOp::Add;
@@ -849,6 +1227,12 @@ fn lower_run_ast_to_program(text: []u8, run_ast: &RunAst) -> Program {
     if run_ast_i64_call_supported(run_ast) {
         return lowered_i64_call_program(run_ast);
     }
+    if run_ast.final_statement_kind == RunStatementKind::TryVoidPrintReturn {
+        return lowered_try_void_program(run_ast);
+    }
+    if run_ast.final_statement_kind == RunStatementKind::ReturnVoid {
+        return lowered_return_void_program(run_ast);
+    }
     return lowered_main_print_program(run_ast.final_argument_payload);
 }
 
@@ -864,6 +1248,12 @@ fn run_ast_supported(run_ast: &RunAst) -> bool {
     }
     if run_ast.statement_count < 1 {
         return false;
+    }
+    if run_ast.final_statement_kind == RunStatementKind::ReturnVoid {
+        return run_ast.function_count == 1;
+    }
+    if run_ast.final_statement_kind == RunStatementKind::TryVoidPrintReturn {
+        return try_void_run_ast_supported(run_ast);
     }
     if run_ast.final_statement_kind != RunStatementKind::Print {
         return false;
@@ -896,6 +1286,34 @@ fn run_ast_supported(run_ast: &RunAst) -> bool {
         run_ast.i64_return_op == RunBinaryOp::Sub or
         run_ast.i64_return_op == RunBinaryOp::Mul or
         run_ast.i64_return_op == RunBinaryOp::Div;
+}
+
+fn try_void_run_ast_supported(run_ast: &RunAst) -> bool {
+    if run_ast.function_count != 2 {
+        return false;
+    }
+    if run_ast.statement_count != 3 {
+        return false;
+    }
+    if !std::mem::equal_bytes(run_ast.final_callee, "print") {
+        return false;
+    }
+    if run_ast.final_argument_kind != RunArgumentKind::ConstString {
+        return false;
+    }
+    if std::mem::len(run_ast.i64_function_name) == 0 {
+        return false;
+    }
+    if !std::mem::equal_bytes(run_ast.i64_function_name, run_ast.i64_call_callee) {
+        return false;
+    }
+    if run_ast.i64_param_count != 0 {
+        return false;
+    }
+    if run_ast.i64_call_arg0 == 0 {
+        return true;
+    }
+    return run_ast.i64_call_arg0 == 1;
 }
 
 fn run_ast_i64_call_supported(run_ast: &RunAst) -> bool {
@@ -991,6 +1409,53 @@ fn i64_call_run_ast(
     };
 }
 
+fn return_void_run_ast(text: []u8, function_name: []u8, statement_count: i64) -> RunAst {
+    return RunAst {
+        ok: true,
+        function_count: 1,
+        function_name: function_name,
+        block_count: 1,
+        statement_count: statement_count,
+        final_statement_kind: RunStatementKind::ReturnVoid,
+        final_callee: text[0..0],
+        final_argument_kind: RunArgumentKind::None,
+        final_argument_payload: text[0..0],
+        i64_function_name: text[0..0],
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: text[0..0],
+        i64_call_arg0: 0,
+        i64_call_arg1: 0
+    };
+}
+
+fn try_void_run_ast(
+    function_name: []u8,
+    statement_count: i64,
+    print_callee: []u8,
+    payload: []u8,
+    try_callee: []u8,
+    helper_exit_code: i64
+) -> RunAst {
+    return RunAst {
+        ok: true,
+        function_count: 2,
+        function_name: function_name,
+        block_count: 1,
+        statement_count: statement_count,
+        final_statement_kind: RunStatementKind::TryVoidPrintReturn,
+        final_callee: print_callee,
+        final_argument_kind: RunArgumentKind::ConstString,
+        final_argument_payload: payload,
+        i64_function_name: try_callee,
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: try_callee,
+        i64_call_arg0: helper_exit_code,
+        i64_call_arg1: 0
+    };
+}
+
 fn unsupported_run_ast(empty: []u8) -> RunAst {
     return RunAst {
         ok: false,
@@ -1007,6 +1472,60 @@ fn unsupported_run_ast(empty: []u8) -> RunAst {
         i64_return_op: RunBinaryOp::None,
         i64_call_callee: empty[0..0],
         i64_call_arg0: 0,
+        i64_call_arg1: 0
+    };
+}
+
+fn lowered_return_void_program(run_ast: &RunAst) -> Program {
+    return Program {
+        function_count: 1,
+        function_name: run_ast.function_name,
+        block_count: 1,
+        block_label: "entry",
+        instruction_count: 1,
+        first_kind: InstructionKind::None,
+        first_result_kind: ValueKind::None,
+        first_result_name: run_ast.function_name[0..0],
+        first_result_payload: run_ast.function_name[0..0],
+        second_kind: InstructionKind::None,
+        second_callee: run_ast.function_name[0..0],
+        second_argument_kind: ValueKind::None,
+        second_argument_name: run_ast.function_name[0..0],
+        second_argument_payload: run_ast.function_name[0..0],
+        third_kind: InstructionKind::ReturnVoid,
+        from_codegen_lowering: true,
+        i64_function_name: run_ast.function_name[0..0],
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: run_ast.function_name[0..0],
+        i64_call_arg0: 0,
+        i64_call_arg1: 0
+    };
+}
+
+fn lowered_try_void_program(run_ast: &RunAst) -> Program {
+    return Program {
+        function_count: 2,
+        function_name: run_ast.function_name,
+        block_count: 1,
+        block_label: "entry",
+        instruction_count: 3,
+        first_kind: InstructionKind::Call,
+        first_result_kind: ValueKind::None,
+        first_result_name: run_ast.i64_function_name,
+        first_result_payload: run_ast.function_name[0..0],
+        second_kind: InstructionKind::Call,
+        second_callee: run_ast.final_callee,
+        second_argument_kind: ValueKind::ConstString,
+        second_argument_name: "s0",
+        second_argument_payload: run_ast.final_argument_payload,
+        third_kind: InstructionKind::ReturnVoid,
+        from_codegen_lowering: true,
+        i64_function_name: run_ast.i64_function_name,
+        i64_param_count: 0,
+        i64_return_op: RunBinaryOp::None,
+        i64_call_callee: run_ast.i64_call_callee,
+        i64_call_arg0: run_ast.i64_call_arg0,
         i64_call_arg1: 0
     };
 }

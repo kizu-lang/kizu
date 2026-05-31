@@ -2013,8 +2013,8 @@ pub fn lower_run_parse_result_function(
 // lower_run_ast_block_function lowers selfhost::ir::codegen::lower_run_ast_block into a single
 // LowerRunAstBlock statement: the stateful run-block traversal that threads a mutable LocalTable
 // and index through a bounded loop over the block statements, lowering non-terminal Let bindings
-// and the terminal ExprStmt print (tracker 961, scope 4 prerequisite). The Let / ExprStmt
-// discriminant tags come from the union-variant facts.
+// and terminal ExprStmt print or empty Return (tracker 961, scope 4 prerequisite). The
+// needed discriminant tags come from the union-variant facts.
 pub fn lower_run_ast_block_function(
     ir_bytes: []u8,
     function_name: []u8,
@@ -2043,11 +2043,23 @@ pub fn lower_run_ast_block_function(
     if !expr_stmt_variant.found {
         return error("compiled mir: lower_run_ast_block ExprStmt variant not found");
     }
+    let return_variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, ir_bytes[0..0], "std::kizu::ast::AstData", "Return"
+    );
+    if !return_variant.found {
+        return error("compiled mir: lower_run_ast_block Return variant not found");
+    }
+    let empty_variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, ir_bytes[0..0], "std::kizu::ast::AstData", "Empty"
+    );
+    if !empty_variant.found {
+        return error("compiled mir: lower_run_ast_block Empty variant not found");
+    }
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::lower_run_ast_block_stmt(
         text_name, ast_name, ast_type, declarations_name, declarations_type,
         function_name_name, statements_name, statements_type, "%kizu.selfhost.codegen.local_table",
-        let_variant.tag, expr_stmt_variant.tag
+        let_variant.tag, expr_stmt_variant.tag, return_variant.tag, empty_variant.tag
     ));
     return compiled_mir_function::multi_statement_function(
         llvm_symbol, llvm_return_type, params_spec, stmts

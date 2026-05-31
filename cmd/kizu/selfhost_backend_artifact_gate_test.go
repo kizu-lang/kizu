@@ -540,23 +540,21 @@ func requiredLLVMAstAccessorFragments() []string {
 	}
 }
 
-// requiredLLVMReturnErrorFragments returns the tracker-961 `return error("...")`
-// lowering members compiled into stage2. stdout_payload's error branch is the
-// first compiled error-union failure return: instead of the prior `unreachable`
-// placeholder it materializes the "unsupported codegen stdout payload" message
-// global, builds the %kizu.error.slice.u8 failure value (i1 false ok flag at
-// field 0, success value left as zeroinitializer, the message %kizu.slice.u8 at
-// the failure index 2) and returns it. The success branch still wraps the
-// payload slice as the field-1 success value.
+// requiredLLVMReturnErrorFragments returns the stdout_payload error-union
+// contract used by the hosted compiler. Both the direct print payload and the
+// try-void payload are wrapped as successful %kizu.error.slice.u8 values; the
+// unsupported branch materializes the diagnostic slice at failure field 2.
 func requiredLLVMReturnErrorFragments() []string {
 	return []string{
-		"@.kizu.compiled.kizu_selfhost__ir_codegen_stdout_payload.s0 = " +
+		"@.kizu.cli.stdout_payload_error = " +
 			"private unnamed_addr constant [34 x i8] c\"unsupported codegen stdout payload\"",
-		"%t3 = insertvalue %kizu.slice.u8 %t3_base, i64 34, 1",
-		"%errfail3_flag = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 false, 0",
-		"%errfail3 = insertvalue %kizu.error.slice.u8 %errfail3_flag, %kizu.slice.u8 %t3, 2",
-		"  ret %kizu.error.slice.u8 %errfail3",
-		"%retwrap_val = insertvalue %kizu.error.slice.u8 %retwrap_ok, %kizu.slice.u8 %t4, 1",
+		"%string_result = insertvalue %kizu.error.slice.u8 %string_ok, %kizu.slice.u8 %string_payload, 1",
+		"%try_void = call i1 @kizu_selfhost__ir_codegen_try_void_program_supported",
+		"%try_result = insertvalue %kizu.error.slice.u8 %try_ok, %kizu.slice.u8 %second_payload, 1",
+		"%err = insertvalue %kizu.slice.u8 %err_base, i64 34, 1",
+		"%fail0 = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 false, 0",
+		"%fail1 = insertvalue %kizu.error.slice.u8 %fail0, %kizu.slice.u8 %err, 2",
+		"  ret %kizu.error.slice.u8 %fail1",
 	}
 }
 
@@ -1002,18 +1000,21 @@ func requiredLLVMLowerLetBindingFragments() []string {
 
 // requiredLLVMLowerRunAstBlockFragments returns the tracker-961 scope-4 prerequisite
 // lower_run_ast_block AST traversal lowering compiled into stage2: the stateful run-block
-// traversal. It threads a mutable LocalTable + index through a bounded loop (two head phis),
-// lowering non-terminal Let bindings (lower_let_binding + insert_local) and the terminal ExprStmt
-// (lower_print_statement), propagating the checked Ast.child_at failure and returning the wrapped
-// unsupported_run_ast() on rejection. These fragments lock the lowered body shape.
+// traversal. It first probes the try-void block shape, then threads a mutable LocalTable + index
+// through a bounded loop (two head phis), lowering non-terminal Let bindings
+// (lower_let_binding + insert_local) and the terminal ExprStmt (lower_print_statement),
+// propagating the checked Ast.child_at failure and returning the wrapped unsupported_run_ast() on
+// rejection. These fragments lock the lowered body shape.
 func requiredLLVMLowerRunAstBlockFragments() []string {
 	return []string{
 		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_block(",
+		"%lrb_try_result = call %kizu.error.run_ast " +
+			"@kizu_selfhost__ir_codegen_lower_try_void_block(",
 		"%lrb_locals0 = call %kizu.selfhost.codegen.local_table " +
 			"@kizu_selfhost__ir_codegen_empty_local_table(%kizu.slice.u8 %text)",
 		"%lrb_locals = phi %kizu.selfhost.codegen.local_table " +
-			"[ %lrb_locals0, %entry ], [ %lrb_locals_next, %lrb_insert ]",
-		"%lrb_index = phi i64 [ 0, %entry ], [ %lrb_index_next, %lrb_insert ]",
+			"[ %lrb_locals0, %lrb_try_continue ], [ %lrb_locals_next, %lrb_insert ]",
+		"%lrb_index = phi i64 [ 0, %lrb_try_continue ], [ %lrb_index_next, %lrb_insert ]",
 		"%lrb_child = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(",
 		"%lrb_terminal = icmp eq i64 %lrb_index1, %lrb_stmts_len",
 		"%lrb_is_let = icmp eq i64 %lrb_tag, 21",
@@ -2055,6 +2056,7 @@ func countHostedCompilerCLISmokeFailures(t *testing.T) int {
 	compile := exec.Command(
 		clang,
 		"-Wno-override-module",
+		"-fno-integrated-as",
 		"target/selfhost/selfhost.ll",
 		"target/selfhost/selfhost.host.ll",
 		"selfhost/runtime/selfhost.hosted.c",
@@ -2461,9 +2463,9 @@ func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	failures := countHostedCompilerCLIUnsupportedRunSourceFailures(
 		t,
 		exePath,
-		"hosted_run_return.kizu",
-		"hosted_run_return",
-		"fn main(){return;}\n",
+		"hosted_run_if_unsupported.kizu",
+		"hosted_run_if_unsupported",
+		"fn main(){if true {print(\"ok\");}else{print(\"no\");}}\n",
 	)
 	return failures
 }
@@ -2496,7 +2498,7 @@ func countHostedCompilerCLIUnsupportedRunSourceFailures(
 		t.Errorf("hosted compiler run stdout mismatch: %q", stdout)
 		return 1
 	}
-	if !strings.Contains(stderr, "usage: selfhost") {
+	if !strings.Contains(stderr, "unsupported run codegen program") {
 		t.Errorf("hosted compiler run stderr mismatch: %q", stderr)
 		return 1
 	}

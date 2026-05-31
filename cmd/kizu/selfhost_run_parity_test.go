@@ -196,7 +196,7 @@ func runRunParityCase(
 		return result, 1
 	}
 	compilerFailures := compareRunCompilerResult(t, item, result.compiler, expectedOut, expectedErr)
-	if item.exitCode != 0 {
+	if item.exitCode != 0 && item.artifactStem == "-" {
 		return result, compilerFailures + countUnexpectedRunArtifacts(t, item)
 	}
 	linkFailures := linkAndRunRunParityArtifact(t, clang, item, &result)
@@ -369,7 +369,7 @@ func runParityGuardCases() []runParityGuardCase {
 			name:     "unsupported_target",
 			args:     []string{"run", "selfhost/tests/cli/test_expect_ok.kizu"},
 			exitCode: 64,
-			stderr:   selfhostUsageStderr(),
+			stderr:   "unsupported run codegen program\n",
 		},
 		{
 			name:     "unsupported_command",
