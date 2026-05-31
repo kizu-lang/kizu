@@ -11,6 +11,7 @@ import selfhost::backend::cli_run_llvm;
 import selfhost::backend::cli_run_i64_codegen_llvm;
 import selfhost::backend::cli_test_ast_llvm;
 import selfhost::backend::cli_test_llvm;
+import selfhost::backend::compiled_fact_lookup;
 import selfhost::backend::compiled_llvm;
 import selfhost::backend::ir_contract;
 
@@ -21,6 +22,10 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_llvm_constant(out, "run", "3", "run");
     try append_llvm_constant(out, "run_main", "4", "main");
     try append_llvm_constant(out, "run_entry", "5", "entry");
+    try append_llvm_constant(out, "run_print", "5", "print");
+    try append_llvm_constant(out, "error_union_void_type", "5", "!void");
+    try append_llvm_constant(out, "error_call", "5", "error");
+    try append_llvm_constant(out, "stdout_payload_error", "34", "unsupported codegen stdout payload");
     try append_llvm_constant(out, "test", "4", "test");
     try append_llvm_constant(out, "fmt", "3", "fmt");
     try append_llvm_constant(out, "fmt_write", "7", "--write");
@@ -141,6 +146,9 @@ fn append_lower_run_ast_to_program_function(out: &var std::string::String, ir_by
     let return_void_kind = try ir_contract::enum_variant_tag(
         ir_bytes, "selfhost::ir::codegen::RunStatementKind", "ReturnVoid"
     );
+    let try_void_kind = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::RunStatementKind", "TryVoidPrintReturn"
+    );
     try append_line(out, "define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lower_run_ast_to_program(");
     try append_line(out, "  %kizu.slice.u8 %text,");
     try append_line(out, "  %kizu.selfhost.codegen.run_ast %run_ast");
@@ -159,6 +167,15 @@ fn append_lower_run_ast_to_program_function(out: &var std::string::String, ir_by
     try append_line(out, "  ret %kizu.selfhost.codegen.program %i64_result");
     try append_line(out, "string_program:");
     try append_line(out, "  %statement_kind = extractvalue %kizu.selfhost.codegen.run_ast %run_ast, 5");
+    try out.append_bytes("  %try_void = icmp eq i64 %statement_kind, ");
+    try std::fmt::append_i64(out, try_void_kind);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %try_void, label %try_void_program, label %check_return_void_program");
+    try append_line(out, "try_void_program:");
+    try append_line(out,
+        "  %try_void_result = call %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_try_void_program(%kizu.selfhost.codegen.run_ast %run_ast)");
+    try append_line(out, "  ret %kizu.selfhost.codegen.program %try_void_result");
+    try append_line(out, "check_return_void_program:");
     try out.append_bytes("  %return_void = icmp eq i64 %statement_kind, ");
     try std::fmt::append_i64(out, return_void_kind);
     try out.append_byte(cast<u8>(10));
@@ -206,9 +223,52 @@ fn append_program_supported_function(out: &var std::string::String, ir_bytes: []
     try append_line(out, "check_return_void:");
     try append_line(out,
         "  %return_void_supported = call i1 @kizu_selfhost__ir_codegen_return_void_program_supported(%kizu.selfhost.codegen.program %program)");
-    try append_line(out, "  ret i1 %return_void_supported");
+    try append_line(out, "  br i1 %return_void_supported, label %supported, label %check_try_void");
+    try append_line(out, "check_try_void:");
+    try append_line(out,
+        "  %try_void_supported = call i1 @kizu_selfhost__ir_codegen_try_void_program_supported(%kizu.selfhost.codegen.program %program)");
+    try append_line(out, "  ret i1 %try_void_supported");
     try append_line(out, "supported:");
     try append_line(out, "  ret i1 true");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_stdout_payload_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let const_string_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::ValueKind", "ConstString"
+    );
+    try append_line(out, "define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload(");
+    try append_line(out, "  %kizu.selfhost.codegen.program %program");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %payload = call %kizu.selfhost.codegen.value @kizu_selfhost__ir_codegen_main_print_payload(%kizu.selfhost.codegen.program %program)");
+    try append_line(out, "  %payload_kind = extractvalue %kizu.selfhost.codegen.value %payload, 0");
+    try out.append_bytes("  %is_const_string = icmp eq i64 %payload_kind, ");
+    try std::fmt::append_i64(out, const_string_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_const_string, label %const_string, label %check_try_void");
+    try append_line(out, "const_string:");
+    try append_line(out, "  %string_payload = extractvalue %kizu.selfhost.codegen.value %payload, 2");
+    try append_line(out, "  %string_ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
+    try append_line(out, "  %string_result = insertvalue %kizu.error.slice.u8 %string_ok, %kizu.slice.u8 %string_payload, 1");
+    try append_line(out, "  ret %kizu.error.slice.u8 %string_result");
+    try append_line(out, "check_try_void:");
+    try append_line(out, "  %try_void = call i1 @kizu_selfhost__ir_codegen_try_void_program_supported(%kizu.selfhost.codegen.program %program)");
+    try append_line(out, "  br i1 %try_void, label %try_void_payload, label %unsupported");
+    try append_line(out, "try_void_payload:");
+    try append_line(out, "  %second_payload = extractvalue %kizu.selfhost.codegen.program %program, 13");
+    try append_line(out, "  %try_ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
+    try append_line(out, "  %try_result = insertvalue %kizu.error.slice.u8 %try_ok, %kizu.slice.u8 %second_payload, 1");
+    try append_line(out, "  ret %kizu.error.slice.u8 %try_result");
+    try append_line(out, "unsupported:");
+    try append_line(out, "  %err_ptr = getelementptr inbounds [34 x i8], ptr @.kizu.cli.stdout_payload_error, i64 0, i64 0");
+    try append_line(out, "  %err_base = insertvalue %kizu.slice.u8 poison, ptr %err_ptr, 0");
+    try append_line(out, "  %err = insertvalue %kizu.slice.u8 %err_base, i64 34, 1");
+    try append_line(out, "  %fail0 = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 false, 0");
+    try append_line(out, "  %fail1 = insertvalue %kizu.error.slice.u8 %fail0, %kizu.slice.u8 %err, 2");
+    try append_line(out, "  ret %kizu.error.slice.u8 %fail1");
     try append_line(out, "}");
     try append_line(out, "");
     return;
@@ -272,6 +332,972 @@ fn append_return_void_program_supported_function(out: &var std::string::String, 
     try append_line(out, "  ret i1 %shape_ok");
     try append_line(out, "unsupported:");
     try append_line(out, "  ret i1 false");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_try_void_program_supported_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let call_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::InstructionKind", "Call"
+    );
+    let return_void_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::InstructionKind", "ReturnVoid"
+    );
+    let none_value_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::ValueKind", "None"
+    );
+    let const_string_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::ValueKind", "ConstString"
+    );
+    try append_line(out, "define i1 @kizu_selfhost__ir_codegen_try_void_program_supported(");
+    try append_line(out, "  %kizu.selfhost.codegen.program %program");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %function_count = extractvalue %kizu.selfhost.codegen.program %program, 0");
+    try append_line(out, "  %one_function_pair = icmp eq i64 %function_count, 2");
+    try append_line(out, "  br i1 %one_function_pair, label %check_main, label %unsupported");
+    try append_line(out, "check_main:");
+    try append_line(out, "  %function_name = extractvalue %kizu.selfhost.codegen.program %program, 1");
+    try append_line(out,
+        "  %main_ptr = getelementptr inbounds [4 x i8], ptr @.kizu.cli.run_main, i64 0, i64 0");
+    try append_line(out, "  %main_base = insertvalue %kizu.slice.u8 poison, ptr %main_ptr, 0");
+    try append_line(out, "  %main_slice = insertvalue %kizu.slice.u8 %main_base, i64 4, 1");
+    try append_line(out,
+        "  %main_ok = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %function_name, %kizu.slice.u8 %main_slice)");
+    try append_line(out, "  br i1 %main_ok, label %check_block, label %unsupported");
+    try append_line(out, "check_block:");
+    try append_line(out, "  %block_count = extractvalue %kizu.selfhost.codegen.program %program, 2");
+    try append_line(out, "  %one_block = icmp eq i64 %block_count, 1");
+    try append_line(out, "  %block_label = extractvalue %kizu.selfhost.codegen.program %program, 3");
+    try append_line(out,
+        "  %entry_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.run_entry, i64 0, i64 0");
+    try append_line(out, "  %entry_base = insertvalue %kizu.slice.u8 poison, ptr %entry_ptr, 0");
+    try append_line(out, "  %entry_slice = insertvalue %kizu.slice.u8 %entry_base, i64 5, 1");
+    try append_line(out,
+        "  %entry_ok = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %block_label, %kizu.slice.u8 %entry_slice)");
+    try append_line(out, "  %block_ok = and i1 %one_block, %entry_ok");
+    try append_line(out, "  br i1 %block_ok, label %check_instructions, label %unsupported");
+    try append_line(out, "check_instructions:");
+    try append_line(out, "  %instruction_count = extractvalue %kizu.selfhost.codegen.program %program, 4");
+    try append_line(out, "  %three_instructions = icmp eq i64 %instruction_count, 3");
+    try append_line(out, "  br i1 %three_instructions, label %check_kinds, label %unsupported");
+    try append_line(out, "check_kinds:");
+    try append_line(out, "  %first_kind = extractvalue %kizu.selfhost.codegen.program %program, 5");
+    try append_line(out, "  %first_result_kind = extractvalue %kizu.selfhost.codegen.program %program, 6");
+    try append_line(out, "  %second_kind = extractvalue %kizu.selfhost.codegen.program %program, 9");
+    try append_line(out, "  %second_callee = extractvalue %kizu.selfhost.codegen.program %program, 10");
+    try append_line(out, "  %second_argument_kind = extractvalue %kizu.selfhost.codegen.program %program, 11");
+    try append_line(out, "  %third_kind = extractvalue %kizu.selfhost.codegen.program %program, 14");
+    try out.append_bytes("  %first_call = icmp eq i64 %first_kind, ");
+    try std::fmt::append_i64(out, call_tag);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %first_none = icmp eq i64 %first_result_kind, ");
+    try std::fmt::append_i64(out, none_value_tag);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %second_call = icmp eq i64 %second_kind, ");
+    try std::fmt::append_i64(out, call_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out,
+        "  %print_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.run_print, i64 0, i64 0");
+    try append_line(out, "  %print_base = insertvalue %kizu.slice.u8 poison, ptr %print_ptr, 0");
+    try append_line(out, "  %print_slice = insertvalue %kizu.slice.u8 %print_base, i64 5, 1");
+    try append_line(out,
+        "  %second_print = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %second_callee, %kizu.slice.u8 %print_slice)");
+    try out.append_bytes("  %second_const = icmp eq i64 %second_argument_kind, ");
+    try std::fmt::append_i64(out, const_string_tag);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %third_return = icmp eq i64 %third_kind, ");
+    try std::fmt::append_i64(out, return_void_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  %shape_0 = and i1 %first_call, %first_none");
+    try append_line(out, "  %shape_1 = and i1 %shape_0, %second_call");
+    try append_line(out, "  %shape_2 = and i1 %shape_1, %second_print");
+    try append_line(out, "  %shape_3 = and i1 %shape_2, %second_const");
+    try append_line(out, "  %shape_ok = and i1 %shape_3, %third_return");
+    try append_line(out, "  br i1 %shape_ok, label %check_helper, label %unsupported");
+    try append_line(out, "check_helper:");
+    try append_line(out, "  %helper_name = extractvalue %kizu.selfhost.codegen.program %program, 16");
+    try append_line(out, "  %helper_callee = extractvalue %kizu.selfhost.codegen.program %program, 19");
+    try append_line(out, "  %helper_len = extractvalue %kizu.slice.u8 %helper_name, 1");
+    try append_line(out, "  %helper_present = icmp ne i64 %helper_len, 0");
+    try append_line(out, "  %helper_match = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %helper_name, %kizu.slice.u8 %helper_callee)");
+    try append_line(out, "  %helper_ok = and i1 %helper_present, %helper_match");
+    try append_line(out, "  br i1 %helper_ok, label %check_exit, label %unsupported");
+    try append_line(out, "check_exit:");
+    try append_line(out, "  %param_count = extractvalue %kizu.selfhost.codegen.program %program, 17");
+    try append_line(out, "  %zero_params = icmp eq i64 %param_count, 0");
+    try append_line(out, "  %exit_code = extractvalue %kizu.selfhost.codegen.program %program, 20");
+    try append_line(out, "  %exit_success = icmp eq i64 %exit_code, 0");
+    try append_line(out, "  %exit_failure = icmp eq i64 %exit_code, 1");
+    try append_line(out, "  %exit_supported = or i1 %exit_success, %exit_failure");
+    try append_line(out, "  %result = and i1 %zero_params, %exit_supported");
+    try append_line(out, "  ret i1 %result");
+    try append_line(out, "unsupported:");
+    try append_line(out, "  ret i1 false");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn ast_data_tag(ir_bytes: []u8, name: []u8) -> !i64 {
+    let variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, ir_bytes[0..0], "std::kizu::ast::AstData", name
+    );
+    if !variant.found {
+        return error("missing AstData variant fact");
+    }
+    return variant.tag;
+}
+
+fn append_is_empty_node_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let empty_tag = try ast_data_tag(ir_bytes, "Empty");
+    try append_line(out, "define i1 @kizu_selfhost__ir_codegen_is_empty_node(");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %node_id");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %node_id)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_empty = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, empty_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  ret i1 %is_empty");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_type_node_is_error_union_void_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define i1 @kizu_selfhost__ir_codegen_type_node_is_error_union_void(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %type_node");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %type_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %type_node)");
+    try append_line(out, "  %void_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.error_union_void_type, i64 0, i64 0");
+    try append_line(out, "  %void_base = insertvalue %kizu.slice.u8 poison, ptr %void_ptr, 0");
+    try append_line(out, "  %void_slice = insertvalue %kizu.slice.u8 %void_base, i64 5, 1");
+    try append_line(out, "  %ok = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %type_text, %kizu.slice.u8 %void_slice)");
+    try append_line(out, "  ret i1 %ok");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_empty_text_return(out: &var std::string::String, value_name: []u8) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ptr = extractvalue %kizu.slice.u8 %text, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ptr, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes(" = insertvalue %kizu.slice.u8 %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_base, i64 0, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.slice.u8 %");
+    try out.append_bytes(value_name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_try_void_callee_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let call_tag = try ast_data_tag(ir_bytes, "Call");
+    let try_expr_tag = try ast_data_tag(ir_bytes, "TryExpr");
+    let expr_stmt_tag = try ast_data_tag(ir_bytes, "ExprStmt");
+
+    try append_line(out, "define %kizu.slice.u8 @kizu_selfhost__ir_codegen_try_void_call_callee(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %callee,");
+    try append_line(out, "  %kizu.kizu.ast.child_range %args");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %args_len = extractvalue %kizu.kizu.ast.child_range %args, 1");
+    try append_line(out, "  %no_args = icmp eq i64 %args_len, 0");
+    try append_line(out, "  br i1 %no_args, label %ok, label %empty");
+    try append_line(out, "ok:");
+    try append_line(out, "  %callee_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %callee)");
+    try append_line(out, "  ret %kizu.slice.u8 %callee_text");
+    try append_line(out, "empty:");
+    try append_empty_text_return(out, "empty_call");
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.slice.u8 @kizu_selfhost__ir_codegen_try_void_value_callee(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %value");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %value)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_call = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, call_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_call, label %call, label %empty");
+    try append_line(out, "call:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.call_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %callee = extractvalue %kizu.kizu.ast.call_node %payload, 0");
+    try append_line(out, "  %args = extractvalue %kizu.kizu.ast.call_node %payload, 1");
+    try append_line(out, "  %result = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_try_void_call_callee(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %callee, %kizu.kizu.ast.child_range %args)");
+    try append_line(out, "  ret %kizu.slice.u8 %result");
+    try append_line(out, "empty:");
+    try append_empty_text_return(out, "empty_value");
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.slice.u8 @kizu_selfhost__ir_codegen_try_void_expr_callee(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %expr");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %expr)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_try = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, try_expr_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_try, label %try_expr, label %empty");
+    try append_line(out, "try_expr:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.try_expr_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %value = extractvalue %kizu.kizu.ast.try_expr_node %payload, 0");
+    try append_line(out, "  %result = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_try_void_value_callee(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %value)");
+    try append_line(out, "  ret %kizu.slice.u8 %result");
+    try append_line(out, "empty:");
+    try append_empty_text_return(out, "empty_expr");
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.slice.u8 @kizu_selfhost__ir_codegen_try_void_statement_callee(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %statement");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %statement)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_expr_stmt = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, expr_stmt_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_expr_stmt, label %expr_stmt, label %empty");
+    try append_line(out, "expr_stmt:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.expr_stmt_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %expr = extractvalue %kizu.kizu.ast.expr_stmt_node %payload, 0");
+    try append_line(out, "  %result = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_try_void_expr_callee(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %expr)");
+    try append_line(out, "  ret %kizu.slice.u8 %result");
+    try append_line(out, "empty:");
+    try append_empty_text_return(out, "empty_statement");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_return_void_statement_ok_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let return_tag = try ast_data_tag(ir_bytes, "Return");
+    try append_line(out, "define i1 @kizu_selfhost__ir_codegen_return_void_statement_ok(");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %statement");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %statement)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_return = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, return_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_return, label %return_payload, label %no");
+    try append_line(out, "return_payload:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.return_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %value = extractvalue %kizu.kizu.ast.return_node %payload, 0");
+    try append_line(out, "  %ok = call i1 @kizu_selfhost__ir_codegen_is_empty_node(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %value)");
+    try append_line(out, "  ret i1 %ok");
+    try append_line(out, "no:");
+    try append_line(out, "  ret i1 false");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_payload_span_success_return(out: &var std::string::String, value_name: []u8) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok0 = insertvalue %kizu.error.payload_span poison, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok1 = insertvalue %kizu.error.payload_span %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok0, %kizu.selfhost.codegen.payload_span %");
+    try out.append_bytes(value_name);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok2 = insertvalue %kizu.error.payload_span %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok1, %kizu.slice.u8 zeroinitializer, 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.error.payload_span %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok2");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_empty_payload_span_success_return(out: &var std::string::String, value_name: []u8) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes(" = call %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_empty_payload_span()");
+    try out.append_byte(cast<u8>(10));
+    try append_payload_span_success_return(out, value_name);
+    return;
+}
+
+fn append_payload_span_child_fail_return(out: &var std::string::String, result_name: []u8) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_err = extractvalue %kizu.error.node_id %");
+    try out.append_bytes(result_name);
+    try out.append_bytes(", 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail0 = insertvalue %kizu.error.payload_span poison, i1 false, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail1 = insertvalue %kizu.error.payload_span %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail0, %kizu.selfhost.codegen.payload_span zeroinitializer, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail2 = insertvalue %kizu.error.payload_span %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail1, %kizu.slice.u8 %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_err, 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.error.payload_span %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail2");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_print_payload_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let call_tag = try ast_data_tag(ir_bytes, "Call");
+    let expr_stmt_tag = try ast_data_tag(ir_bytes, "ExprStmt");
+
+    try append_line(out, "define %kizu.error.payload_span @kizu_selfhost__ir_codegen_print_call_payload(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %callee,");
+    try append_line(out, "  %kizu.kizu.ast.child_range %args");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %callee_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %callee)");
+    try append_line(out, "  %print_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.run_print, i64 0, i64 0");
+    try append_line(out, "  %print_base = insertvalue %kizu.slice.u8 poison, ptr %print_ptr, 0");
+    try append_line(out, "  %print_slice = insertvalue %kizu.slice.u8 %print_base, i64 5, 1");
+    try append_line(out, "  %callee_ok = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %callee_text, %kizu.slice.u8 %print_slice)");
+    try append_line(out, "  %args_len = extractvalue %kizu.kizu.ast.child_range %args, 1");
+    try append_line(out, "  %one_arg = icmp eq i64 %args_len, 1");
+    try append_line(out, "  %shape_ok = and i1 %callee_ok, %one_arg");
+    try append_line(out, "  br i1 %shape_ok, label %load_arg, label %unsupported");
+    try append_line(out, "load_arg:");
+    try append_line(out, "  %arg_result = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %args, i64 0)");
+    try append_line(out, "  %arg_ok = extractvalue %kizu.error.node_id %arg_result, 0");
+    try append_line(out, "  br i1 %arg_ok, label %arg_bound, label %child_fail");
+    try append_line(out, "arg_bound:");
+    try append_line(out, "  %arg = extractvalue %kizu.error.node_id %arg_result, 1");
+    try append_line(out, "  %payload = call %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_string_literal_span(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg)");
+    try append_payload_span_success_return(out, "payload");
+    try append_line(out, "child_fail:");
+    try append_payload_span_child_fail_return(out, "arg_result");
+    try append_line(out, "unsupported:");
+    try append_empty_payload_span_success_return(out, "empty_call_payload");
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.error.payload_span @kizu_selfhost__ir_codegen_print_expr_payload(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %expr");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %expr)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_call = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, call_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_call, label %call, label %unsupported");
+    try append_line(out, "call:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.call_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %callee = extractvalue %kizu.kizu.ast.call_node %payload, 0");
+    try append_line(out, "  %args = extractvalue %kizu.kizu.ast.call_node %payload, 1");
+    try append_line(out, "  %result = call %kizu.error.payload_span @kizu_selfhost__ir_codegen_print_call_payload(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %callee, %kizu.kizu.ast.child_range %args)");
+    try append_line(out, "  ret %kizu.error.payload_span %result");
+    try append_line(out, "unsupported:");
+    try append_empty_payload_span_success_return(out, "empty_expr_payload");
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.error.payload_span @kizu_selfhost__ir_codegen_print_statement_payload(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %statement");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %statement)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_expr_stmt = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, expr_stmt_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_expr_stmt, label %expr_stmt, label %unsupported");
+    try append_line(out, "expr_stmt:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.expr_stmt_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %expr = extractvalue %kizu.kizu.ast.expr_stmt_node %payload, 0");
+    try append_line(out, "  %result = call %kizu.error.payload_span @kizu_selfhost__ir_codegen_print_expr_payload(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %expr)");
+    try append_line(out, "  ret %kizu.error.payload_span %result");
+    try append_line(out, "unsupported:");
+    try append_empty_payload_span_success_return(out, "empty_statement_payload");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_i64_literal_success_return(
+    out: &var std::string::String,
+    value_name: []u8,
+    value: i64
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok0 = insertvalue %kizu.error.i64 poison, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok1 = insertvalue %kizu.error.i64 %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok0, i64 ");
+    try std::fmt::append_i64(out, value);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok2 = insertvalue %kizu.error.i64 %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok1, %kizu.slice.u8 zeroinitializer, 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.error.i64 %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok2");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_i64_child_fail_return(out: &var std::string::String, result_name: []u8) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_err = extractvalue %kizu.error.node_id %");
+    try out.append_bytes(result_name);
+    try out.append_bytes(", 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail0 = insertvalue %kizu.error.i64 poison, i1 false, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail1 = insertvalue %kizu.error.i64 %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail0, i64 0, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail2 = insertvalue %kizu.error.i64 %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail1, %kizu.slice.u8 %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_err, 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.error.i64 %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail2");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_error_void_exit_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let call_tag = try ast_data_tag(ir_bytes, "Call");
+
+    try append_line(out, "define %kizu.error.i64 @kizu_selfhost__ir_codegen_error_void_call_exit_code(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %callee,");
+    try append_line(out, "  %kizu.kizu.ast.child_range %args");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %callee_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %callee)");
+    try append_line(out, "  %error_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.error_call, i64 0, i64 0");
+    try append_line(out, "  %error_base = insertvalue %kizu.slice.u8 poison, ptr %error_ptr, 0");
+    try append_line(out, "  %error_slice = insertvalue %kizu.slice.u8 %error_base, i64 5, 1");
+    try append_line(out, "  %callee_ok = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %callee_text, %kizu.slice.u8 %error_slice)");
+    try append_line(out, "  %args_len = extractvalue %kizu.kizu.ast.child_range %args, 1");
+    try append_line(out, "  %one_arg = icmp eq i64 %args_len, 1");
+    try append_line(out, "  %shape_ok = and i1 %callee_ok, %one_arg");
+    try append_line(out, "  br i1 %shape_ok, label %load_arg, label %unsupported");
+    try append_line(out, "load_arg:");
+    try append_line(out, "  %arg_result = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %args, i64 0)");
+    try append_line(out, "  %arg_ok = extractvalue %kizu.error.node_id %arg_result, 0");
+    try append_line(out, "  br i1 %arg_ok, label %arg_bound, label %child_fail");
+    try append_line(out, "arg_bound:");
+    try append_line(out, "  %arg = extractvalue %kizu.error.node_id %arg_result, 1");
+    try append_line(out, "  %payload = call %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_string_literal_span(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg)");
+    try append_line(out, "  %payload_start = extractvalue %kizu.selfhost.codegen.payload_span %payload, 0");
+    try append_line(out, "  %payload_bad = icmp slt i64 %payload_start, 0");
+    try append_line(out, "  br i1 %payload_bad, label %unsupported, label %error_exit");
+    try append_line(out, "error_exit:");
+    try append_i64_literal_success_return(out, "error_exit", 1);
+    try append_line(out, "child_fail:");
+    try append_i64_child_fail_return(out, "arg_result");
+    try append_line(out, "unsupported:");
+    try append_i64_literal_success_return(out, "unsupported_error_call", -1);
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.error.i64 @kizu_selfhost__ir_codegen_error_void_return_exit_code(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %value");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %value)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_call = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, call_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_call, label %call, label %unsupported");
+    try append_line(out, "call:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.call_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %callee = extractvalue %kizu.kizu.ast.call_node %payload, 0");
+    try append_line(out, "  %args = extractvalue %kizu.kizu.ast.call_node %payload, 1");
+    try append_line(out, "  %result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_error_void_call_exit_code(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %callee, %kizu.kizu.ast.child_range %args)");
+    try append_line(out, "  ret %kizu.error.i64 %result");
+    try append_line(out, "unsupported:");
+    try append_i64_literal_success_return(out, "unsupported_error_return", -1);
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_return_exit_code(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %value");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %empty = call i1 @kizu_selfhost__ir_codegen_is_empty_node(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %value)");
+    try append_line(out, "  br i1 %empty, label %success, label %error_return");
+    try append_line(out, "success:");
+    try append_i64_literal_success_return(out, "success_return_void", 0);
+    try append_line(out, "error_return:");
+    try append_line(out, "  %result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_error_void_return_exit_code(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %value)");
+    try append_line(out, "  ret %kizu.error.i64 %result");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_try_void_helper_exit_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let return_tag = try ast_data_tag(ir_bytes, "Return");
+    let block_tag = try ast_data_tag(ir_bytes, "Block");
+    let fn_decl_tag = try ast_data_tag(ir_bytes, "FnDecl");
+
+    try append_line(out, "define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_helper_block_exit_code(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.child_range %statements");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %statement_len = extractvalue %kizu.kizu.ast.child_range %statements, 1");
+    try append_line(out, "  %one_statement = icmp eq i64 %statement_len, 1");
+    try append_line(out, "  br i1 %one_statement, label %load_statement, label %unsupported");
+    try append_line(out, "load_statement:");
+    try append_line(out, "  %statement_result = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %statements, i64 0)");
+    try append_line(out, "  %statement_ok = extractvalue %kizu.error.node_id %statement_result, 0");
+    try append_line(out, "  br i1 %statement_ok, label %statement_bound, label %child_fail");
+    try append_line(out, "statement_bound:");
+    try append_line(out, "  %statement = extractvalue %kizu.error.node_id %statement_result, 1");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %statement)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_return = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, return_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_return, label %return_payload, label %unsupported");
+    try append_line(out, "return_payload:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.return_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %value = extractvalue %kizu.kizu.ast.return_node %payload, 0");
+    try append_line(out, "  %result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_return_exit_code(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %value)");
+    try append_line(out, "  ret %kizu.error.i64 %result");
+    try append_line(out, "child_fail:");
+    try append_i64_child_fail_return(out, "statement_result");
+    try append_line(out, "unsupported:");
+    try append_i64_literal_success_return(out, "unsupported_helper_block", -1);
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_helper_decl_exit_code(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.slice.u8 %callee,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %name,");
+    try append_line(out, "  %kizu.kizu.ast.child_range %params,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %return_type,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %body");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %name_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %name)");
+    try append_line(out, "  %name_ok = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %name_text, %kizu.slice.u8 %callee)");
+    try append_line(out, "  %param_len = extractvalue %kizu.kizu.ast.child_range %params, 1");
+    try append_line(out, "  %zero_params = icmp eq i64 %param_len, 0");
+    try append_line(out, "  %return_ok = call i1 @kizu_selfhost__ir_codegen_type_node_is_error_union_void(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %return_type)");
+    try append_line(out, "  %shape_0 = and i1 %name_ok, %zero_params");
+    try append_line(out, "  %shape_ok = and i1 %shape_0, %return_ok");
+    try append_line(out, "  br i1 %shape_ok, label %load_body, label %unsupported");
+    try append_line(out, "load_body:");
+    try append_line(out, "  %body_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %body)");
+    try append_line(out, "  %body_data = extractvalue %kizu.kizu.ast.ast_node %body_node, 1");
+    try append_line(out, "  %body_tag = extractvalue %kizu.kizu.ast.ast_data %body_data, 0");
+    try out.append_bytes("  %is_block = icmp eq i64 %body_tag, ");
+    try std::fmt::append_i64(out, block_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_block, label %block_payload, label %unsupported");
+    try append_line(out, "block_payload:");
+    try append_line(out, "  %block_slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %body_data, ptr %block_slot, align 8");
+    try append_line(out, "  %block_payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %block_slot, i32 0, i32 1");
+    try append_line(out, "  %block_node_payload = load %kizu.kizu.ast.block_node, ptr %block_payload_ptr, align 8");
+    try append_line(out, "  %statements = extractvalue %kizu.kizu.ast.block_node %block_node_payload, 0");
+    try append_line(out, "  %result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_helper_block_exit_code(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %statements)");
+    try append_line(out, "  ret %kizu.error.i64 %result");
+    try append_line(out, "unsupported:");
+    try append_i64_literal_success_return(out, "unsupported_helper_decl", -1);
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_helper_function_exit_code(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %declaration,");
+    try append_line(out, "  %kizu.slice.u8 %callee");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %declaration)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_fn = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, fn_decl_tag);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_fn, label %fn_payload, label %unsupported");
+    try append_line(out, "fn_payload:");
+    try append_line(out, "  %slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %data, ptr %slot, align 8");
+    try append_line(out, "  %payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %slot, i32 0, i32 1");
+    try append_line(out, "  %payload = load %kizu.kizu.ast.fn_decl_node, ptr %payload_ptr, align 8");
+    try append_line(out, "  %name = extractvalue %kizu.kizu.ast.fn_decl_node %payload, 3");
+    try append_line(out, "  %params = extractvalue %kizu.kizu.ast.fn_decl_node %payload, 5");
+    try append_line(out, "  %return_type = extractvalue %kizu.kizu.ast.fn_decl_node %payload, 6");
+    try append_line(out, "  %body = extractvalue %kizu.kizu.ast.fn_decl_node %payload, 8");
+    try append_line(out, "  %result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_helper_decl_exit_code(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %callee, %kizu.kizu.ast.node_id %name, %kizu.kizu.ast.child_range %params, %kizu.kizu.ast.node_id %return_type, %kizu.kizu.ast.node_id %body)");
+    try append_line(out, "  ret %kizu.error.i64 %result");
+    try append_line(out, "unsupported:");
+    try append_i64_literal_success_return(out, "unsupported_helper_function", -1);
+    try append_line(out, "}");
+    try append_line(out, "");
+
+    try append_line(out, "define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_helper_exit_code(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.child_range %declarations,");
+    try append_line(out, "  %kizu.slice.u8 %callee");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %declaration_len = extractvalue %kizu.kizu.ast.child_range %declarations, 1");
+    try append_line(out, "  br label %loop");
+    try append_line(out, "loop:");
+    try append_line(out, "  %index = phi i64 [ 0, %entry ], [ %next, %continue ]");
+    try append_line(out, "  %done = icmp eq i64 %index, %declaration_len");
+    try append_line(out, "  br i1 %done, label %unsupported, label %load_child");
+    try append_line(out, "load_child:");
+    try append_line(out, "  %child_result = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, i64 %index)");
+    try append_line(out, "  %child_ok = extractvalue %kizu.error.node_id %child_result, 0");
+    try append_line(out, "  br i1 %child_ok, label %child_bound, label %child_fail");
+    try append_line(out, "child_bound:");
+    try append_line(out, "  %child = extractvalue %kizu.error.node_id %child_result, 1");
+    try append_line(out, "  %result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_helper_function_exit_code(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %child, %kizu.slice.u8 %callee)");
+    try append_line(out, "  %result_ok = extractvalue %kizu.error.i64 %result, 0");
+    try append_line(out, "  br i1 %result_ok, label %check_code, label %return_result");
+    try append_line(out, "check_code:");
+    try append_line(out, "  %exit_code = extractvalue %kizu.error.i64 %result, 1");
+    try append_line(out, "  %supported = icmp sge i64 %exit_code, 0");
+    try append_line(out, "  br i1 %supported, label %return_result, label %continue");
+    try append_line(out, "continue:");
+    try append_line(out, "  %next = add i64 %index, 1");
+    try append_line(out, "  br label %loop");
+    try append_line(out, "return_result:");
+    try append_line(out, "  ret %kizu.error.i64 %result");
+    try append_line(out, "child_fail:");
+    try append_i64_child_fail_return(out, "child_result");
+    try append_line(out, "unsupported:");
+    try append_i64_literal_success_return(out, "unsupported_helper_exit", -1);
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_run_ast_success_return(out: &var std::string::String, value_name: []u8) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok0 = insertvalue %kizu.error.run_ast poison, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok1 = insertvalue %kizu.error.run_ast %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok0, %kizu.selfhost.codegen.run_ast %");
+    try out.append_bytes(value_name);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok2 = insertvalue %kizu.error.run_ast %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok1, %kizu.slice.u8 zeroinitializer, 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.error.run_ast %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_ok2");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_run_ast_child_fail_return(out: &var std::string::String, result_name: []u8) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_err = extractvalue %kizu.error.node_id %");
+    try out.append_bytes(result_name);
+    try out.append_bytes(", 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail0 = insertvalue %kizu.error.run_ast poison, i1 false, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail1 = insertvalue %kizu.error.run_ast %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail0, %kizu.selfhost.codegen.run_ast zeroinitializer, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail2 = insertvalue %kizu.error.run_ast %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail1, %kizu.slice.u8 %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_err, 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.error.run_ast %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail2");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_run_ast_error_union_fail_return(
+    out: &var std::string::String,
+    result_name: []u8,
+    result_type: []u8
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_err = extractvalue ");
+    try out.append_bytes(result_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(result_name);
+    try out.append_bytes(", 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail0 = insertvalue %kizu.error.run_ast poison, i1 false, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail1 = insertvalue %kizu.error.run_ast %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail0, %kizu.selfhost.codegen.run_ast zeroinitializer, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail2 = insertvalue %kizu.error.run_ast %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail1, %kizu.slice.u8 %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_err, 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.error.run_ast %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_fail2");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_unsupported_run_ast_success_return(out: &var std::string::String, value_name: []u8) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_text_ptr = extractvalue %kizu.slice.u8 %text, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_empty_base = insertvalue %kizu.slice.u8 poison, ptr %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_text_ptr, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_empty = insertvalue %kizu.slice.u8 %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_empty_base, i64 0, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(value_name);
+    try out.append_bytes(" = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %");
+    try out.append_bytes(value_name);
+    try out.append_bytes("_empty)");
+    try out.append_byte(cast<u8>(10));
+    try append_run_ast_success_return(out, value_name);
+    return;
+}
+
+fn append_lower_try_void_block_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_try_void_block(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.child_range %declarations,");
+    try append_line(out, "  %kizu.slice.u8 %function_name,");
+    try append_line(out, "  %kizu.kizu.ast.child_range %statements");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %statement_len = extractvalue %kizu.kizu.ast.child_range %statements, 1");
+    try append_line(out, "  %three_statements = icmp eq i64 %statement_len, 3");
+    try append_line(out, "  br i1 %three_statements, label %load_try, label %unsupported");
+    try append_line(out, "load_try:");
+    try append_line(out, "  %try_statement_result = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %statements, i64 0)");
+    try append_line(out, "  %try_statement_ok = extractvalue %kizu.error.node_id %try_statement_result, 0");
+    try append_line(out, "  br i1 %try_statement_ok, label %try_statement_bound, label %try_statement_fail");
+    try append_line(out, "try_statement_bound:");
+    try append_line(out, "  %try_statement = extractvalue %kizu.error.node_id %try_statement_result, 1");
+    try append_line(out, "  %try_callee = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_try_void_statement_callee(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %try_statement)");
+    try append_line(out, "  %try_callee_len = extractvalue %kizu.slice.u8 %try_callee, 1");
+    try append_line(out, "  %try_callee_present = icmp ne i64 %try_callee_len, 0");
+    try append_line(out, "  br i1 %try_callee_present, label %helper_exit, label %unsupported");
+    try append_line(out, "helper_exit:");
+    try append_line(out, "  %helper_result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_try_void_helper_exit_code(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, %kizu.slice.u8 %try_callee)");
+    try append_line(out, "  %helper_ok = extractvalue %kizu.error.i64 %helper_result, 0");
+    try append_line(out, "  br i1 %helper_ok, label %helper_bound, label %helper_fail");
+    try append_line(out, "helper_bound:");
+    try append_line(out, "  %helper_exit_code = extractvalue %kizu.error.i64 %helper_result, 1");
+    try append_line(out, "  %helper_supported = icmp sge i64 %helper_exit_code, 0");
+    try append_line(out, "  br i1 %helper_supported, label %load_print, label %unsupported");
+    try append_line(out, "load_print:");
+    try append_line(out, "  %print_statement_result = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %statements, i64 1)");
+    try append_line(out, "  %print_statement_ok = extractvalue %kizu.error.node_id %print_statement_result, 0");
+    try append_line(out, "  br i1 %print_statement_ok, label %print_statement_bound, label %print_statement_fail");
+    try append_line(out, "print_statement_bound:");
+    try append_line(out, "  %print_statement = extractvalue %kizu.error.node_id %print_statement_result, 1");
+    try append_line(out, "  %payload_result = call %kizu.error.payload_span @kizu_selfhost__ir_codegen_print_statement_payload(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %print_statement)");
+    try append_line(out, "  %payload_ok = extractvalue %kizu.error.payload_span %payload_result, 0");
+    try append_line(out, "  br i1 %payload_ok, label %payload_bound, label %payload_fail");
+    try append_line(out, "payload_bound:");
+    try append_line(out, "  %payload = extractvalue %kizu.error.payload_span %payload_result, 1");
+    try append_line(out, "  %payload_start = extractvalue %kizu.selfhost.codegen.payload_span %payload, 0");
+    try append_line(out, "  %payload_end = extractvalue %kizu.selfhost.codegen.payload_span %payload, 1");
+    try append_line(out, "  %payload_bad = icmp slt i64 %payload_start, 0");
+    try append_line(out, "  br i1 %payload_bad, label %unsupported, label %payload_len");
+    try append_line(out, "payload_len:");
+    try append_line(out, "  %payload_byte_len = sub i64 %payload_end, %payload_start");
+    try append_line(out, "  %payload_present = icmp ne i64 %payload_byte_len, 0");
+    try append_line(out, "  br i1 %payload_present, label %load_return, label %unsupported");
+    try append_line(out, "load_return:");
+    try append_line(out, "  %return_statement_result = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %statements, i64 2)");
+    try append_line(out, "  %return_statement_ok = extractvalue %kizu.error.node_id %return_statement_result, 0");
+    try append_line(out, "  br i1 %return_statement_ok, label %return_statement_bound, label %return_statement_fail");
+    try append_line(out, "return_statement_bound:");
+    try append_line(out, "  %return_statement = extractvalue %kizu.error.node_id %return_statement_result, 1");
+    try append_line(out, "  %return_ok = call i1 @kizu_selfhost__ir_codegen_return_void_statement_ok(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %return_statement)");
+    try append_line(out, "  br i1 %return_ok, label %build, label %unsupported");
+    try append_line(out, "build:");
+    try append_line(out, "  %text_ptr = extractvalue %kizu.slice.u8 %text, 0");
+    try append_line(out, "  %payload_ptr = getelementptr i8, ptr %text_ptr, i64 %payload_start");
+    try append_line(out, "  %payload_text_base = insertvalue %kizu.slice.u8 poison, ptr %payload_ptr, 0");
+    try append_line(out, "  %payload_text = insertvalue %kizu.slice.u8 %payload_text_base, i64 %payload_byte_len, 1");
+    try append_line(out, "  %print_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.run_print, i64 0, i64 0");
+    try append_line(out, "  %print_base = insertvalue %kizu.slice.u8 poison, ptr %print_ptr, 0");
+    try append_line(out, "  %print_slice = insertvalue %kizu.slice.u8 %print_base, i64 5, 1");
+    try append_line(out, "  %run_ast = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_try_void_run_ast(%kizu.slice.u8 %function_name, i64 %statement_len, %kizu.slice.u8 %print_slice, %kizu.slice.u8 %payload_text, %kizu.slice.u8 %try_callee, i64 %helper_exit_code)");
+    try append_run_ast_success_return(out, "run_ast");
+    try append_line(out, "try_statement_fail:");
+    try append_run_ast_child_fail_return(out, "try_statement_result");
+    try append_line(out, "print_statement_fail:");
+    try append_run_ast_child_fail_return(out, "print_statement_result");
+    try append_line(out, "return_statement_fail:");
+    try append_run_ast_child_fail_return(out, "return_statement_result");
+    try append_line(out, "helper_fail:");
+    try append_run_ast_error_union_fail_return(out, "helper_result", "%kizu.error.i64");
+    try append_line(out, "payload_fail:");
+    try append_run_ast_error_union_fail_return(out, "payload_result", "%kizu.error.payload_span");
+    try append_line(out, "unsupported:");
+    try append_unsupported_run_ast_success_return(out, "unsupported_try_void");
     try append_line(out, "}");
     try append_line(out, "");
     return;
@@ -404,6 +1430,12 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     );
     try compiled_llvm::append_compiled_function_auto(
         out, ir_bytes,
+        "selfhost::ir::codegen::try_void_run_ast_supported",
+        "kizu_selfhost__ir_codegen_try_void_run_ast_supported",
+        "%kizu.selfhost.codegen.run_ast run_ast"
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
         "selfhost::ir::codegen::run_ast_supported",
         "kizu_selfhost__ir_codegen_run_ast_supported",
         "%kizu.selfhost.codegen.run_ast run_ast"
@@ -428,6 +1460,12 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     );
     try compiled_llvm::append_compiled_function_auto(
         out, ir_bytes,
+        "selfhost::ir::codegen::try_void_run_ast",
+        "kizu_selfhost__ir_codegen_try_void_run_ast",
+        "%kizu.slice.u8 function_name;i64 statement_count;%kizu.slice.u8 print_callee;%kizu.slice.u8 payload;%kizu.slice.u8 try_callee;i64 helper_exit_code"
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
         "selfhost::ir::codegen::lowered_i64_call_program",
         "kizu_selfhost__ir_codegen_lowered_i64_call_program",
         "%kizu.selfhost.codegen.run_ast run_ast"
@@ -436,6 +1474,12 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         out, ir_bytes,
         "selfhost::ir::codegen::lowered_return_void_program",
         "kizu_selfhost__ir_codegen_lowered_return_void_program",
+        "%kizu.selfhost.codegen.run_ast run_ast"
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "selfhost::ir::codegen::lowered_try_void_program",
+        "kizu_selfhost__ir_codegen_lowered_try_void_program",
         "%kizu.selfhost.codegen.run_ast run_ast"
     );
     try append_lower_run_ast_to_program_function(out, ir_bytes);
@@ -463,15 +1507,11 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "kizu_selfhost__ir_codegen_main_print_payload",
         "%kizu.selfhost.codegen.program program"
     );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::stdout_payload",
-        "kizu_selfhost__ir_codegen_stdout_payload",
-        "%kizu.selfhost.codegen.program program"
-    );
+    try append_stdout_payload_function(out, ir_bytes);
     try append_program_supported_function(out, ir_bytes);
     try append_i64_call_program_supported_function(out, ir_bytes);
     try append_return_void_program_supported_function(out, ir_bytes);
+    try append_try_void_program_supported_function(out, ir_bytes);
     try compiled_llvm::append_compiled_function_auto(
         out, ir_bytes,
         "selfhost::ir::codegen::print_run_ast",
@@ -619,6 +1659,14 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "kizu_selfhost__ir_codegen_lower_let_binding",
         "%kizu.slice.u8 text;%kizu.kizu.ast.ast ast;%kizu.selfhost.codegen.local_table locals;%kizu.kizu.ast.node_id name;%kizu.kizu.ast.node_id value"
     );
+    try append_is_empty_node_function(out, ir_bytes);
+    try append_type_node_is_error_union_void_function(out);
+    try append_try_void_callee_functions(out, ir_bytes);
+    try append_return_void_statement_ok_function(out, ir_bytes);
+    try append_print_payload_functions(out, ir_bytes);
+    try append_error_void_exit_functions(out, ir_bytes);
+    try append_try_void_helper_exit_functions(out, ir_bytes);
+    try append_lower_try_void_block_function(out);
     // lower_run_ast_block is the stateful run-block traversal (tracker 961, scope 4 prerequisite):
     // a bounded loop threading a mutable LocalTable + index, lowering non-terminal Let bindings via
     // lower_let_binding / insert_local and the terminal ExprStmt via lower_print_statement. Its

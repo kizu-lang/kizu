@@ -21,6 +21,10 @@ pub fn run_linker_llvm_module_flag() -> []u8 {
     return "-Wno-override-module";
 }
 
+pub fn run_linker_external_assembler_flag() -> []u8 {
+    return "-fno-integrated-as";
+}
+
 pub fn run_host_runtime_source() -> []u8 {
     return "selfhost/runtime/selfhost.hosted.c";
 }
@@ -187,14 +191,18 @@ pub fn emit_run_codegen_artifact(
     if codegen::i64_call_program_supported(&program) {
         module_len = try write_i64_call_module(allocator, io, source_path, ll_path_view, &program);
     } else {
-        let hosted = try hosted_executable_from_codegen(run_print_executable(), program);
-        module_len = try write_hosted_module(
-            allocator,
-            io,
-            source_path,
-            ll_path_view,
-            &hosted
-        );
+        if codegen::try_void_program_supported(&program) {
+            module_len = try write_try_void_module(allocator, io, source_path, ll_path_view, &program);
+        } else {
+            let hosted = try hosted_executable_from_codegen(run_print_executable(), program);
+            module_len = try write_hosted_module(
+                allocator,
+                io,
+                source_path,
+                ll_path_view,
+                &hosted
+            );
+        }
     }
     let metadata_len = try write_run_metadata(
         allocator,
@@ -241,15 +249,15 @@ pub fn link_run_artifact(
     executable_path: &[]u8
 ) -> !i64 {
     return try std::process::spawn_wait8(
-        7,
+        8,
         run_linker_tool(),
         run_linker_llvm_module_flag(),
+        run_linker_external_assembler_flag(),
         ll_path,
         run_host_runtime_artifact(),
         run_host_runtime_source(),
         run_linker_output_flag(),
-        executable_path,
-        ""
+        executable_path
     );
 }
 
@@ -486,6 +494,41 @@ fn write_i64_call_module(
     return module_len;
 }
 
+fn write_try_void_module(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8,
+    ll_path: &[]u8,
+    program: &codegen::Program
+) -> !i64 {
+    var module = try render_try_void_llvm(allocator, source_path, program);
+    let module_view = module.as_bytes();
+    let module_len = try write_backend_bytes(
+        io,
+        ll_path,
+        module_view,
+        module.len()
+    );
+    module.deinit();
+    return module_len;
+}
+
+fn render_try_void_llvm(
+    allocator: Allocator,
+    source_path: []u8,
+    program: &codegen::Program
+) -> !std::string::String {
+    let template = run_print_executable();
+    let payload = try codegen::stdout_payload(program);
+    let output_len = hosted_output_len(payload, true);
+    var out = std::string::String(allocator);
+    try append_hosted_header(out, source_path, template.comment, template.output_stream);
+    try append_hosted_global(out, template.global, payload, true, output_len);
+    try append_try_void_body(out, template.global, output_len, program.i64_call_arg0);
+    try append_host_main(out, "kizu_run_main");
+    return out;
+}
+
 fn render_i64_call_llvm(
     allocator: Allocator,
     source_path: []u8,
@@ -521,6 +564,61 @@ fn append_i64_call_header(out: &var std::string::String, source_path: []u8) -> !
     try append_line(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
     try append_line(out, "declare i64 @kizu_rt_process_exit_code(i64)");
     try append_line(out, "");
+    return;
+}
+
+fn append_try_void_body(
+    out: &var std::string::String,
+    global: []u8,
+    output_len: i64,
+    helper_exit_code: i64
+) -> !void {
+    try append_line(out, "");
+    try append_line(out, "declare %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
+    try append_line(out, "declare i64 @kizu_rt_process_exit_code(i64)");
+    try append_line(out, "");
+    try append_line(out, "define %kizu.error.void @kizu_run_try_void() {");
+    try append_line(out, "entry:");
+    try out.append_bytes("  %result = insertvalue %kizu.error.void zeroinitializer, i1 ");
+    try append_try_void_ok_literal(out, helper_exit_code);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  ret %kizu.error.void %result");
+    try append_line(out, "}");
+    try append_line(out, "");
+    try append_line(out, "define i64 @kizu_run_main() {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out, "  %try_result = call %kizu.error.void @kizu_run_try_void()");
+    try append_line(out, "  %try_ok = extractvalue %kizu.error.void %try_result, 0");
+    try append_line(out, "  br i1 %try_ok, label %try_ok_block, label %try_err");
+    try append_line(out, "try_err:");
+    try append_line(out, "  %err_code = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try append_line(out, "  ret i64 %err_code");
+    try append_line(out, "try_ok_block:");
+    try out.append_bytes("  %ptr = getelementptr inbounds [");
+    try std::fmt::append_i64(out, output_len);
+    try out.append_bytes(" x i8], ptr @.");
+    try out.append_bytes(global);
+    try out.append_bytes(", i64 0, i64 0");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0");
+    try out.append_bytes("  %slice = insertvalue %kizu.slice.u8 %base, i64 ");
+    try std::fmt::append_i64(out, output_len);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)");
+    try append_exit(out, 0);
+    return;
+}
+
+fn append_try_void_ok_literal(out: &var std::string::String, helper_exit_code: i64) -> !void {
+    if helper_exit_code == 0 {
+        try out.append_bytes("true");
+        return;
+    }
+    try out.append_bytes("false");
     return;
 }
 

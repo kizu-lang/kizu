@@ -183,6 +183,7 @@ func linkBootstrapStage(clang string, stage string, exePath string) error {
 	compile := exec.Command(
 		clang,
 		"-Wno-override-module",
+		"-fno-integrated-as",
 		filepath.Join(stageDir, "selfhost.ll"),
 		filepath.Join(stageDir, "selfhost.host.ll"),
 		"selfhost/runtime/selfhost.hosted.c",

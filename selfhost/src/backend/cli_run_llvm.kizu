@@ -11,6 +11,7 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_llvm_constant_bytes(out, "run_meta_suffix", hosted::artifact_metadata_suffix());
     try append_llvm_constant_bytes(out, "run_linker_tool", hosted::run_linker_tool());
     try append_llvm_constant_bytes(out, "run_linker_module_flag", hosted::run_linker_llvm_module_flag());
+    try append_llvm_constant_bytes(out, "run_linker_external_assembler_flag", hosted::run_linker_external_assembler_flag());
     try append_llvm_constant_bytes(out, "run_host_runtime_source", hosted::run_host_runtime_source());
     try append_llvm_constant_bytes(out, "run_linker_output_flag", hosted::run_linker_output_flag());
     try cli_hosted_metadata_llvm::append_prefix_constant(
@@ -95,10 +96,11 @@ pub fn append_cli_run_blocks(out: &var std::string::String, ir_bytes: []u8) -> !
     try append_global_slice(out, "run", "stage2_host", "stage2_host_path", 39);
     try append_global_slice(out, "run", "linker_tool", "run_linker_tool", std::mem::len(hosted::run_linker_tool()));
     try append_global_slice(out, "run", "linker_module_flag", "run_linker_module_flag", std::mem::len(hosted::run_linker_llvm_module_flag()));
+    try append_global_slice(out, "run", "linker_external_assembler_flag", "run_linker_external_assembler_flag", std::mem::len(hosted::run_linker_external_assembler_flag()));
     try append_global_slice(out, "run", "host_runtime_source", "run_host_runtime_source", std::mem::len(hosted::run_host_runtime_source()));
     try append_global_slice(out, "run", "linker_output_flag", "run_linker_output_flag", std::mem::len(hosted::run_linker_output_flag()));
     try append_line(out,
-        "  %run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8(i64 7, %kizu.slice.u8 %run_linker_tool_slice, %kizu.slice.u8 %run_linker_module_flag_slice, %kizu.slice.u8 %run_ll_path, %kizu.slice.u8 %run_stage2_host_slice, %kizu.slice.u8 %run_host_runtime_source_slice, %kizu.slice.u8 %run_linker_output_flag_slice, %kizu.slice.u8 %run_exe_path, %kizu.slice.u8 %run_empty_slice)");
+        "  %run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8(i64 8, %kizu.slice.u8 %run_linker_tool_slice, %kizu.slice.u8 %run_linker_module_flag_slice, %kizu.slice.u8 %run_linker_external_assembler_flag_slice, %kizu.slice.u8 %run_ll_path, %kizu.slice.u8 %run_stage2_host_slice, %kizu.slice.u8 %run_host_runtime_source_slice, %kizu.slice.u8 %run_linker_output_flag_slice, %kizu.slice.u8 %run_exe_path)");
     try append_line(out, "  %run_link_ok = extractvalue %kizu.error.i64 %run_link_result, 0");
     try append_line(out, "  br i1 %run_link_ok, label %run_check_link_code, label %usage");
     try append_line(out, "run_check_link_code:");
@@ -127,6 +129,8 @@ fn append_emit_run_codegen_artifact_function(out: &var std::string::String, ir_b
         "  %i64_supported = call i1 @kizu_selfhost__ir_codegen_i64_call_program_supported(%kizu.selfhost.codegen.program %program)");
     try append_line(out,
         "  %return_void_supported = call i1 @kizu_selfhost__ir_codegen_return_void_program_supported(%kizu.selfhost.codegen.program %program)");
+    try append_line(out,
+        "  %try_void_supported = call i1 @kizu_selfhost__ir_codegen_try_void_program_supported(%kizu.selfhost.codegen.program %program)");
     try append_line(out, "  %non_stdout_supported = or i1 %i64_supported, %return_void_supported");
     try append_line(out, "  %emit_empty_slice = insertvalue %kizu.slice.u8 zeroinitializer, i64 0, 1");
     try append_line(out, "  br i1 %non_stdout_supported, label %make_dir, label %encode_stdout_payload");
@@ -185,7 +189,9 @@ fn append_emit_run_codegen_artifact_function(out: &var std::string::String, ir_b
     try append_line(out, "  %meta_path = extractvalue %kizu.error.slice.u8 %meta_path_result, 1");
     try append_line(out, "  br i1 %i64_supported, label %write_i64_ll, label %check_return_void_ll");
     try append_line(out, "check_return_void_ll:");
-    try append_line(out, "  br i1 %return_void_supported, label %write_return_void_ll, label %write_stdout_ll");
+    try append_line(out, "  br i1 %return_void_supported, label %write_return_void_ll, label %check_try_void_ll");
+    try append_line(out, "check_try_void_ll:");
+    try append_line(out, "  br i1 %try_void_supported, label %write_try_void_ll, label %write_stdout_ll");
     try append_line(out, "write_stdout_ll:");
     try append_line(out,
         "  %ll_write = call %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll(%kizu.owned %io, %kizu.slice.u8 %ll_path, %kizu.slice.u8 %target, %kizu.slice.u8 %output_len_text, %kizu.slice.u8 %encoded_payload)");
@@ -201,6 +207,11 @@ fn append_emit_run_codegen_artifact_function(out: &var std::string::String, ir_b
         "  %return_ll_write = call %kizu.error.void @kizu_selfhost__cli_hosted_write_return_void_ll(%kizu.owned %io, %kizu.slice.u8 %ll_path, %kizu.slice.u8 %target)");
     try append_line(out, "  %return_ll_write_ok = extractvalue %kizu.error.void %return_ll_write, 0");
     try append_line(out, "  br i1 %return_ll_write_ok, label %write_meta, label %failed");
+    try append_line(out, "write_try_void_ll:");
+    try append_line(out,
+        "  %try_void_ll_write = call %kizu.error.void @kizu_selfhost__cli_hosted_write_try_void_ll(%kizu.owned %io, %kizu.slice.u8 %ll_path, %kizu.slice.u8 %target, %kizu.slice.u8 %output_len_text, %kizu.slice.u8 %encoded_payload, %kizu.selfhost.codegen.program %program)");
+    try append_line(out, "  %try_void_ll_write_ok = extractvalue %kizu.error.void %try_void_ll_write, 0");
+    try append_line(out, "  br i1 %try_void_ll_write_ok, label %write_meta, label %failed");
     try append_line(out, "write_meta:");
     try append_global_slice(out, "run_emit", "meta_prefix", "run_meta_prefix", try cli_hosted_metadata_llvm::prefix_size(hosted::run_metadata_title(), hosted::run_metadata_issue()));
     try append_global_slice(out, "run_emit", "meta_output_prefix", "artifact_output_prefix", try cli_hosted_metadata_llvm::output_prefix_size());

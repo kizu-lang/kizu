@@ -34,6 +34,7 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_add_binary_function(out);
     try append_add_field_expr_function(out);
     try append_add_call_function(out);
+    try append_add_try_expr_function(out);
     return;
 }
 
@@ -435,7 +436,9 @@ fn append_parse_fn_decl_function(out: &var std::string::String) -> !void {
     try append_line(out, "  %type_is_ident = icmp eq i64 %type_kind, 26");
     try append_line(out, "  br i1 %type_is_ident, label %return_type_ok, label %fail");
     try append_line(out, "return_type_ok:");
-    try append_line(out, "  %type_start = extractvalue %kizu.kizu.lexer.token %type_token, 1");
+    try append_line(out, "  %type_token_start = extractvalue %kizu.kizu.lexer.token %type_token, 1");
+    try append_line(out, "  %bang_start = extractvalue %kizu.kizu.lexer.token %ret_token, 1");
+    try append_line(out, "  %type_start = select i1 %ret_is_bang, i64 %bang_start, i64 %type_token_start");
     try append_line(out, "  %type_end = extractvalue %kizu.kizu.lexer.token %type_token, 2");
     try append_line(out,
         "  %return_type = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %type_start, i64 %type_end, i64 3)");
@@ -653,7 +656,10 @@ fn append_parse_statement_function(out: &var std::string::String) -> !void {
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %return_result");
     try append_line(out, "maybe_expr:");
     try append_line(out, "  %is_ident = icmp eq i64 %kind, 26");
-    try append_line(out, "  br i1 %is_ident, label %parse_expr_stmt, label %fail");
+    try append_line(out, "  br i1 %is_ident, label %parse_expr_stmt, label %maybe_try_expr");
+    try append_line(out, "maybe_try_expr:");
+    try append_line(out, "  %is_try_expr = icmp eq i64 %kind, 21");
+    try append_line(out, "  br i1 %is_try_expr, label %parse_expr_stmt, label %fail");
     try append_line(out, "parse_expr_stmt:");
     try append_line(out,
         "  %expr_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr_statement(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
@@ -972,11 +978,37 @@ fn append_parse_primary_expr_function(out: &var std::string::String) -> !void {
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %number_ok2");
     try append_line(out, "maybe_ident:");
     try append_line(out, "  %is_ident = icmp eq i64 %kind, 26");
-    try append_line(out, "  br i1 %is_ident, label %ident_expr, label %fail");
+    try append_line(out, "  br i1 %is_ident, label %ident_expr, label %maybe_try");
     try append_line(out, "ident_expr:");
     try append_line(out,
         "  %ident_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_ident_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %ident_result");
+    try append_line(out, "maybe_try:");
+    try append_line(out, "  %is_try = icmp eq i64 %kind, 21");
+    try append_line(out, "  br i1 %is_try, label %try_expr, label %fail");
+    try append_line(out, "try_expr:");
+    try append_line(out, "  %value_index = add i64 %index, 1");
+    try append_line(out,
+        "  %value_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %value_index)");
+    try append_line(out, "  %value_ok = extractvalue %kizu.selfhost.cli.parse_node_result %value_result, 0");
+    try append_line(out, "  br i1 %value_ok, label %build_try, label %fail");
+    try append_line(out, "build_try:");
+    try append_line(out, "  %try_start = extractvalue %kizu.kizu.lexer.token %token, 1");
+    try append_line(out, "  %try_next = extractvalue %kizu.selfhost.cli.parse_node_result %value_result, 1");
+    try append_line(out, "  %try_value = extractvalue %kizu.selfhost.cli.parse_node_result %value_result, 2");
+    try append_line(out,
+        "  %try_value_ast = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %try_value)");
+    try append_line(out, "  %try_value_span = extractvalue %kizu.kizu.ast.ast_node %try_value_ast, 0");
+    try append_line(out, "  %try_end = extractvalue %kizu.kizu.ast.span %try_value_span, 1");
+    try append_line(out,
+        "  %try_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_try_expr(%kizu.kizu.ast.ast %ast, i64 %try_start, i64 %try_end, %kizu.kizu.ast.node_id %try_value)");
+    try append_line(out,
+        "  %try_ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
+    try append_line(out,
+        "  %try_ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %try_ok0, i64 %try_next, 1");
+    try append_line(out,
+        "  %try_ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %try_ok1, %kizu.kizu.ast.node_id %try_node, 2");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %try_ok2");
     try append_line(out, "fail:");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result zeroinitializer");
     try append_line(out, "}");
@@ -1373,6 +1405,20 @@ fn append_add_call_function(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %payload = insertvalue %kizu.kizu.ast.call_node %p0, %kizu.kizu.ast.child_range %range, 1");
     try append_node_with_payload(out, "%kizu.kizu.ast.call_node", "payload", "10");
+    return;
+}
+
+fn append_add_try_expr_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_try_expr(");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  i64 %start,");
+    try append_line(out, "  i64 %end,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %value");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out,
+        "  %payload = insertvalue %kizu.kizu.ast.try_expr_node poison, %kizu.kizu.ast.node_id %value, 0");
+    try append_node_with_payload(out, "%kizu.kizu.ast.try_expr_node", "payload", "17");
     return;
 }
 

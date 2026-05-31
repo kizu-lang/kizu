@@ -264,6 +264,7 @@ func linkTestParityExecutableWithHost(
 	compile := exec.Command(
 		clang,
 		"-Wno-override-module",
+		"-fno-integrated-as",
 		llPath,
 		hostLLPath,
 		"selfhost/runtime/selfhost.hosted.c",

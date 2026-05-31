@@ -2727,9 +2727,10 @@ fn append_lower_run_ast_block_globals(stmt: &compiled_mir::MirLowerRunAstBlockSt
 // mutable LocalTable + index through a bounded loop over statements (two head phis); each
 // non-terminal statement must be a Let binding (lower_let_binding, inserted via insert_local) and
 // the terminal statement must be an ExprStmt forwarded to lower_print_statement or an empty Return
-// lowered to a return-void RunAst. Any rejection returns the wrapped unsupported_run_ast(); the
-// checked Ast.child_at failure propagates as the !RunAst error. The AstData payload slot is hoisted
-// to entry so the loop body allocates no stack.
+// lowered to a return-void RunAst. A leading fixed-shape try-void probe handles
+// try helper(); print(...); return; before falling back to the local-binding loop. Any rejection
+// returns the wrapped unsupported_run_ast(); the checked Ast.child_at failure propagates as the
+// !RunAst error. The AstData payload slot is hoisted to entry so the loop body allocates no stack.
 fn append_multi_lower_run_ast_block(
     out: &var std::string::String,
     stmt: &compiled_mir::MirLowerRunAstBlockStmt
@@ -2744,13 +2745,41 @@ fn append_multi_lower_run_ast_block(
     try out.append_bytes(stmt.statements_name);
     try append_ll_line(out, ", 1");
     try append_ll_line(out, "  %lrb_data_slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try out.append_bytes("  %lrb_try_result = call %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_try_void_block(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.declarations_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.declarations_name);
+    try out.append_bytes(", %kizu.slice.u8 %");
+    try out.append_bytes(stmt.function_name_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.statements_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.statements_name);
+    try append_ll_line(out, ")");
+    try append_ll_line(out, "  %lrb_try_result_ok = extractvalue %kizu.error.run_ast %lrb_try_result, 0");
+    try append_ll_line(out, "  br i1 %lrb_try_result_ok, label %lrb_try_check, label %lrb_try_error");
+    try append_ll_line(out, "lrb_try_error:");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrb_try_result");
+    try append_ll_line(out, "lrb_try_check:");
+    try append_ll_line(out, "  %lrb_try_ast = extractvalue %kizu.error.run_ast %lrb_try_result, 1");
+    try append_ll_line(out, "  %lrb_try_ast_ok = extractvalue %kizu.selfhost.codegen.run_ast %lrb_try_ast, 0");
+    try append_ll_line(out, "  br i1 %lrb_try_ast_ok, label %lrb_try_return, label %lrb_try_continue");
+    try append_ll_line(out, "lrb_try_return:");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrb_try_result");
+    try append_ll_line(out, "lrb_try_continue:");
     try append_ll_line(out, "  br label %lrb_head");
     // Loop head: two phis carry the mutable LocalTable and index.
     try append_ll_line(out, "lrb_head:");
     try append_ll_line(out,
-        "  %lrb_locals = phi %kizu.selfhost.codegen.local_table [ %lrb_locals0, %entry ], [ %lrb_locals_next, %lrb_insert ]");
+        "  %lrb_locals = phi %kizu.selfhost.codegen.local_table [ %lrb_locals0, %lrb_try_continue ], [ %lrb_locals_next, %lrb_insert ]");
     try append_ll_line(out,
-        "  %lrb_index = phi i64 [ 0, %entry ], [ %lrb_index_next, %lrb_insert ]");
+        "  %lrb_index = phi i64 [ 0, %lrb_try_continue ], [ %lrb_index_next, %lrb_insert ]");
     try append_ll_line(out, "  %lrb_cond = icmp slt i64 %lrb_index, %lrb_stmts_len");
     try append_ll_line(out, "  br i1 %lrb_cond, label %lrb_body, label %lrb_unsupported");
     // Body: fetch the statement node + tag, decide terminal vs non-terminal.

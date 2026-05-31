@@ -196,7 +196,7 @@ func runRunParityCase(
 		return result, 1
 	}
 	compilerFailures := compareRunCompilerResult(t, item, result.compiler, expectedOut, expectedErr)
-	if item.exitCode != 0 {
+	if item.exitCode != 0 && item.artifactStem == "-" {
 		return result, compilerFailures + countUnexpectedRunArtifacts(t, item)
 	}
 	linkFailures := linkAndRunRunParityArtifact(t, clang, item, &result)
