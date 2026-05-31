@@ -1186,6 +1186,15 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%wt_kw0_eq = call i1 @kizu_selfhost__slice_equal(" +
 			"%kizu.slice.u8 %wt_text, %kizu.slice.u8 %wt_kw0_slice)",
 		"br i1 %wt_kw0_eq, label %wt_kw0_ret, label %wt_kw1_check",
+		// raw_token_at: an Eof guard, an operator dispatch table over the byte at start, then the
+		// quote / digit / word fallbacks to string_token / number_token / word_token.
+		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_raw_token_at(",
+		"%rt_eof = icmp sge i64 %start, %rt_length",
+		"%rt_byte = load i8, ptr %rt_bptr",
+		"%op0_is = icmp eq i8 %rt_byte, 123",
+		"%rt_isd = call i1 @kizu_kizu__lexer_is_digit(i8 %rt_byte)",
+		"%rt_wt = call %kizu.kizu.lexer.token @kizu_kizu__lexer_word_token(" +
+			"%kizu.slice.u8 %source, i64 %start, %kizu.kizu.lexer.position %current)",
 	}
 }
 
