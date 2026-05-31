@@ -124,6 +124,11 @@ fn append_emit_run_codegen_artifact_function(out: &var std::string::String, ir_b
     try append_line(out, ") {");
     try append_line(out, "entry:");
     try append_line(out,
+        "  %i64_supported = call i1 @kizu_selfhost__ir_codegen_i64_call_program_supported(%kizu.selfhost.codegen.program %program)");
+    try append_line(out, "  %emit_empty_slice = insertvalue %kizu.slice.u8 zeroinitializer, i64 0, 1");
+    try append_line(out, "  br i1 %i64_supported, label %make_dir, label %encode_stdout_payload");
+    try append_line(out, "encode_stdout_payload:");
+    try append_line(out,
         "  %payload_result = call %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload(%kizu.selfhost.codegen.program %program)");
     try append_line(out, "  %payload_ok = extractvalue %kizu.error.slice.u8 %payload_result, 0");
     try append_line(out, "  br i1 %payload_ok, label %encode_payload, label %failed");
@@ -134,15 +139,19 @@ fn append_emit_run_codegen_artifact_function(out: &var std::string::String, ir_b
     try append_line(out, "  %encoded_ok = extractvalue %kizu.error.slice.u8 %encoded_result, 0");
     try append_line(out, "  br i1 %encoded_ok, label %build_len, label %failed");
     try append_line(out, "build_len:");
-    try append_line(out, "  %encoded_payload = extractvalue %kizu.error.slice.u8 %encoded_result, 1");
+    try append_line(out, "  %payload_encoded_payload = extractvalue %kizu.error.slice.u8 %encoded_result, 1");
     try append_line(out, "  %payload_len = extractvalue %kizu.slice.u8 %payload, 1");
     try append_line(out, "  %output_len = add i64 %payload_len, 1");
     try append_line(out,
         "  %output_len_result = call %kizu.error.slice.u8 @kizu_selfhost__i64_decimal(i64 %output_len)");
     try append_line(out, "  %output_len_ok = extractvalue %kizu.error.slice.u8 %output_len_result, 0");
+    try append_line(out, "  %payload_output_len_text = extractvalue %kizu.error.slice.u8 %output_len_result, 1");
     try append_line(out, "  br i1 %output_len_ok, label %make_dir, label %failed");
     try append_line(out, "make_dir:");
-    try append_line(out, "  %output_len_text = extractvalue %kizu.error.slice.u8 %output_len_result, 1");
+    try append_line(out,
+        "  %output_len_text = phi %kizu.slice.u8 [ %emit_empty_slice, %entry ], [ %payload_output_len_text, %build_len ]");
+    try append_line(out,
+        "  %encoded_payload = phi %kizu.slice.u8 [ %emit_empty_slice, %entry ], [ %payload_encoded_payload, %build_len ]");
     try append_global_slice(out, "run_emit", "cache_dir", "run_cache_dir", std::mem::len(hosted::run_artifact_cache_dir()));
     try append_line(out,
         "  %cache_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir(%kizu.owned %io, %kizu.slice.u8 %run_emit_cache_dir_slice)");
@@ -171,10 +180,17 @@ fn append_emit_run_codegen_artifact_function(out: &var std::string::String, ir_b
     try append_line(out, "  br i1 %meta_path_ok, label %write_ll, label %failed");
     try append_line(out, "write_ll:");
     try append_line(out, "  %meta_path = extractvalue %kizu.error.slice.u8 %meta_path_result, 1");
+    try append_line(out, "  br i1 %i64_supported, label %write_i64_ll, label %write_stdout_ll");
+    try append_line(out, "write_stdout_ll:");
     try append_line(out,
         "  %ll_write = call %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll(%kizu.owned %io, %kizu.slice.u8 %ll_path, %kizu.slice.u8 %target, %kizu.slice.u8 %output_len_text, %kizu.slice.u8 %encoded_payload)");
     try append_line(out, "  %ll_write_ok = extractvalue %kizu.error.void %ll_write, 0");
     try append_line(out, "  br i1 %ll_write_ok, label %write_meta, label %failed");
+    try append_line(out, "write_i64_ll:");
+    try append_line(out,
+        "  %i64_ll_write = call %kizu.error.void @kizu_selfhost__cli_hosted_write_i64_call_ll(%kizu.owned %io, %kizu.slice.u8 %ll_path, %kizu.slice.u8 %target, %kizu.selfhost.codegen.program %program)");
+    try append_line(out, "  %i64_ll_write_ok = extractvalue %kizu.error.void %i64_ll_write, 0");
+    try append_line(out, "  br i1 %i64_ll_write_ok, label %write_meta, label %failed");
     try append_line(out, "write_meta:");
     try append_global_slice(out, "run_emit", "meta_prefix", "run_meta_prefix", try cli_hosted_metadata_llvm::prefix_size(hosted::run_metadata_title(), hosted::run_metadata_issue()));
     try append_global_slice(out, "run_emit", "meta_output_prefix", "artifact_output_prefix", try cli_hosted_metadata_llvm::output_prefix_size());

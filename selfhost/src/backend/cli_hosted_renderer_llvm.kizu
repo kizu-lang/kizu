@@ -1,4 +1,5 @@
 import selfhost::backend::hosted;
+import selfhost::backend::ir_contract;
 
 pub fn append_globals(out: &var std::string::String) -> !void {
     let stdout_executable = hosted::run_print_executable();
@@ -32,11 +33,46 @@ pub fn append_globals(out: &var std::string::String) -> !void {
         llvm_c_decoded_len(hosted_stdout_suffix(stdout_executable.entry)),
         hosted_stdout_suffix(stdout_executable.entry)
     );
+    try append_llvm_constant_decoded(
+        out,
+        "hosted_i64_prefix",
+        llvm_c_decoded_len(hosted_i64_prefix()),
+        hosted_i64_prefix()
+    );
+    try append_llvm_constant_decoded(
+        out,
+        "hosted_i64_after_source_before_op",
+        llvm_c_decoded_len(hosted_i64_after_source_before_op()),
+        hosted_i64_after_source_before_op()
+    );
+    try append_llvm_constant_decoded(out, "hosted_i64_op_add", 3, "add");
+    try append_llvm_constant_decoded(out, "hosted_i64_op_sub", 3, "sub");
+    try append_llvm_constant_decoded(out, "hosted_i64_op_mul", 3, "mul");
+    try append_llvm_constant_decoded(out, "hosted_i64_op_div", 4, "sdiv");
+    try append_llvm_constant_decoded(
+        out,
+        "hosted_i64_after_op_before_arg0",
+        llvm_c_decoded_len(hosted_i64_after_op_before_arg0()),
+        hosted_i64_after_op_before_arg0()
+    );
+    try append_llvm_constant_decoded(
+        out,
+        "hosted_i64_between_args",
+        llvm_c_decoded_len(hosted_i64_between_args()),
+        hosted_i64_between_args()
+    );
+    try append_llvm_constant_decoded(
+        out,
+        "hosted_i64_suffix",
+        llvm_c_decoded_len(hosted_i64_suffix()),
+        hosted_i64_suffix()
+    );
     return;
 }
 
-pub fn append_functions(out: &var std::string::String) -> !void {
+pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_write_stdout_ll_function(out);
+    try append_write_i64_call_ll_function(out, ir_bytes);
     return;
 }
 
@@ -66,6 +102,89 @@ fn append_write_stdout_ll_function(out: &var std::string::String) -> !void {
     return;
 }
 
+fn append_write_i64_call_ll_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let add_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::RunBinaryOp", "Add"
+    );
+    let sub_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::RunBinaryOp", "Sub"
+    );
+    let mul_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::RunBinaryOp", "Mul"
+    );
+    let div_tag = try ir_contract::enum_variant_tag(
+        ir_bytes, "selfhost::ir::codegen::RunBinaryOp", "Div"
+    );
+    try append_line(out, "define %kizu.error.void @kizu_selfhost__cli_hosted_write_i64_call_ll(");
+    try append_line(out, "  %kizu.owned %io,");
+    try append_line(out, "  %kizu.slice.u8 %ll_path,");
+    try append_line(out, "  %kizu.slice.u8 %source_path,");
+    try append_line(out, "  %kizu.selfhost.codegen.program %program");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %op_tag = extractvalue %kizu.selfhost.codegen.program %program, 18");
+    try append_op_tag_compare(out, "op_is_add", add_tag);
+    try append_line(out, "  br i1 %op_is_add, label %op_add, label %check_sub");
+    try append_line(out, "check_sub:");
+    try append_op_tag_compare(out, "op_is_sub", sub_tag);
+    try append_line(out, "  br i1 %op_is_sub, label %op_sub, label %check_mul");
+    try append_line(out, "check_mul:");
+    try append_op_tag_compare(out, "op_is_mul", mul_tag);
+    try append_line(out, "  br i1 %op_is_mul, label %op_mul, label %check_div");
+    try append_line(out, "check_div:");
+    try append_op_tag_compare(out, "op_is_div", div_tag);
+    try append_line(out, "  br i1 %op_is_div, label %op_div, label %failed");
+    try append_line(out, "op_add:");
+    try append_global_slice(out, "hosted_i64", "op_add", "hosted_i64_op_add", 3);
+    try append_line(out, "  br label %op_ready");
+    try append_line(out, "op_sub:");
+    try append_global_slice(out, "hosted_i64", "op_sub", "hosted_i64_op_sub", 3);
+    try append_line(out, "  br label %op_ready");
+    try append_line(out, "op_mul:");
+    try append_global_slice(out, "hosted_i64", "op_mul", "hosted_i64_op_mul", 3);
+    try append_line(out, "  br label %op_ready");
+    try append_line(out, "op_div:");
+    try append_global_slice(out, "hosted_i64", "op_div", "hosted_i64_op_div", 4);
+    try append_line(out, "  br label %op_ready");
+    try append_line(out, "op_ready:");
+    try append_line(out,
+        "  %op_text = phi %kizu.slice.u8 [ %hosted_i64_op_add_slice, %op_add ], [ %hosted_i64_op_sub_slice, %op_sub ], [ %hosted_i64_op_mul_slice, %op_mul ], [ %hosted_i64_op_div_slice, %op_div ]");
+    try append_line(out, "  %arg0 = extractvalue %kizu.selfhost.codegen.program %program, 20");
+    try append_line(out, "  %arg0_result = call %kizu.error.slice.u8 @kizu_selfhost__i64_decimal(i64 %arg0)");
+    try append_line(out, "  %arg0_ok = extractvalue %kizu.error.slice.u8 %arg0_result, 0");
+    try append_line(out, "  br i1 %arg0_ok, label %arg1_decimal, label %failed");
+    try append_line(out, "arg1_decimal:");
+    try append_line(out, "  %arg0_text = extractvalue %kizu.error.slice.u8 %arg0_result, 1");
+    try append_line(out, "  %arg1 = extractvalue %kizu.selfhost.codegen.program %program, 21");
+    try append_line(out, "  %arg1_result = call %kizu.error.slice.u8 @kizu_selfhost__i64_decimal(i64 %arg1)");
+    try append_line(out, "  %arg1_ok = extractvalue %kizu.error.slice.u8 %arg1_result, 0");
+    try append_line(out, "  br i1 %arg1_ok, label %write, label %failed");
+    try append_line(out, "write:");
+    try append_line(out, "  %arg1_text = extractvalue %kizu.error.slice.u8 %arg1_result, 1");
+    try append_global_slice(out, "hosted_i64", "prefix", "hosted_i64_prefix", llvm_c_decoded_len(hosted_i64_prefix()));
+    try append_global_slice(out, "hosted_i64", "after_source", "hosted_i64_after_source_before_op", llvm_c_decoded_len(hosted_i64_after_source_before_op()));
+    try append_global_slice(out, "hosted_i64", "after_op", "hosted_i64_after_op_before_arg0", llvm_c_decoded_len(hosted_i64_after_op_before_arg0()));
+    try append_global_slice(out, "hosted_i64", "between_args", "hosted_i64_between_args", llvm_c_decoded_len(hosted_i64_between_args()));
+    try append_global_slice(out, "hosted_i64", "suffix", "hosted_i64_suffix", llvm_c_decoded_len(hosted_i64_suffix()));
+    try append_line(out,
+        "  %write_result = call %kizu.error.void @kizu_selfhost__write_concat9(%kizu.owned %io, %kizu.slice.u8 %ll_path, %kizu.slice.u8 %hosted_i64_prefix_slice, %kizu.slice.u8 %source_path, %kizu.slice.u8 %hosted_i64_after_source_slice, %kizu.slice.u8 %op_text, %kizu.slice.u8 %hosted_i64_after_op_slice, %kizu.slice.u8 %arg0_text, %kizu.slice.u8 %hosted_i64_between_args_slice, %kizu.slice.u8 %arg1_text, %kizu.slice.u8 %hosted_i64_suffix_slice)");
+    try append_line(out, "  ret %kizu.error.void %write_result");
+    try append_line(out, "failed:");
+    try append_line(out, "  ret %kizu.error.void zeroinitializer");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_op_tag_compare(out: &var std::string::String, local: []u8, tag: i64) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(local);
+    try out.append_bytes(" = icmp eq i64 %op_tag, ");
+    try std::fmt::append_i64(out, tag);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 fn hosted_stdout_prefix(comment: []u8) -> []u8 {
     return "; kizu codegen run artifact ll v0\0Asource_filename = \22";
 }
@@ -84,6 +203,26 @@ fn hosted_stdout_slice_middle(global: []u8) -> []u8 {
 
 fn hosted_stdout_suffix(entry: []u8) -> []u8 {
     return ", 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 0)\0A  ret i64 %code\0A}\0A\0Adeclare void @kizu_host_init(i32, ptr)\0A\0Adefine i32 @main(i32 %argc, ptr %argv) {\0Aentry:\0A  call void @kizu_host_init(i32 %argc, ptr %argv)\0A  %code = call i64 @kizu_run_main()\0A  %exit = trunc i64 %code to i32\0A  ret i32 %exit\0A}\0A";
+}
+
+fn hosted_i64_prefix() -> []u8 {
+    return "; kizu codegen run artifact ll v0\0Asource_filename = \22";
+}
+
+fn hosted_i64_after_source_before_op() -> []u8 {
+    return "\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.run.newline = private unnamed_addr constant [1 x i8] [i8 10]\0A\0Adeclare %kizu.owned @kizu_rt_mem_page_allocator()\0Adeclare ptr @kizu_rt_alloc(ptr, i64)\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_run_fn0(i64 %arg0, i64 %arg1) {\0Aentry:\0A  %result = ";
+}
+
+fn hosted_i64_after_op_before_arg0() -> []u8 {
+    return " i64 %arg0, %arg1\0A  ret i64 %result\0A}\0A\0Adefine %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %value) {\0Aentry:\0A  %allocator = call %kizu.owned @kizu_rt_mem_page_allocator()\0A  %allocator_ptr = extractvalue %kizu.owned %allocator, 0\0A  %buffer = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 20)\0A  %allocated = icmp ne ptr %buffer, null\0A  br i1 %allocated, label %check_zero, label %alloc_failed\0Acheck_zero:\0A  %is_zero = icmp eq i64 %value, 0\0A  br i1 %is_zero, label %zero, label %loop\0Azero:\0A  %zero_ptr = getelementptr i8, ptr %buffer, i64 19\0A  store i8 48, ptr %zero_ptr\0A  br label %finish_zero\0Aloop:\0A  %current = phi i64 [ %value, %check_zero ], [ %quotient, %loop ]\0A  %write_index = phi i64 [ 19, %check_zero ], [ %next_index, %loop ]\0A  %digit = srem i64 %current, 10\0A  %digit_byte_i64 = add i64 %digit, 48\0A  %digit_byte = trunc i64 %digit_byte_i64 to i8\0A  %digit_ptr = getelementptr i8, ptr %buffer, i64 %write_index\0A  store i8 %digit_byte, ptr %digit_ptr\0A  %quotient = sdiv i64 %current, 10\0A  %next_index = sub i64 %write_index, 1\0A  %done = icmp eq i64 %quotient, 0\0A  br i1 %done, label %finish_loop, label %loop\0Afinish_zero:\0A  br label %success\0Afinish_loop:\0A  br label %success\0Asuccess:\0A  %start = phi i64 [ 19, %finish_zero ], [ %write_index, %finish_loop ]\0A  %len = sub i64 20, %start\0A  %start_ptr = getelementptr i8, ptr %buffer, i64 %start\0A  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %start_ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %len, 1\0A  %ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0\0A  %result = insertvalue %kizu.error.slice.u8 %ok, %kizu.slice.u8 %slice, 1\0A  ret %kizu.error.slice.u8 %result\0Aalloc_failed:\0A  ret %kizu.error.slice.u8 zeroinitializer\0A}\0A\0Adefine i64 @kizu_run_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %value = call i64 @kizu_run_fn0(i64 ";
+}
+
+fn hosted_i64_between_args() -> []u8 {
+    return ", i64 ";
+}
+
+fn hosted_i64_suffix() -> []u8 {
+    return ")\0A  %decimal_result = call %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %value)\0A  %decimal = extractvalue %kizu.error.slice.u8 %decimal_result, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %decimal)\0A  %newline_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.newline, 0\0A  %newline = insertvalue %kizu.slice.u8 %newline_base, i64 1, 1\0A  %write_newline = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %newline)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 0)\0A  ret i64 %code\0A}\0A\0Adeclare void @kizu_host_init(i32, ptr)\0A\0Adefine i32 @main(i32 %argc, ptr %argv) {\0Aentry:\0A  call void @kizu_host_init(i32 %argc, ptr %argv)\0A  %code = call i64 @kizu_run_main()\0A  %exit = trunc i64 %code to i32\0A  ret i32 %exit\0A}\0A";
 }
 
 fn append_global_slice(
