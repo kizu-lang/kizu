@@ -89,6 +89,23 @@ type serverCapabilities struct {
 	ImplementationProvider     bool                   `json:"implementationProvider,omitempty"`
 	CallHierarchyProvider      bool                   `json:"callHierarchyProvider,omitempty"`
 	CodeLensProvider           *codeLensOptions       `json:"codeLensProvider,omitempty"`
+	CodeActionProvider         *codeActionOptions     `json:"codeActionProvider,omitempty"`
+}
+
+type codeActionOptions struct {
+	CodeActionKinds []string `json:"codeActionKinds"`
+}
+
+type codeActionParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Range        Range                  `json:"range"`
+}
+
+// codeAction is a refactor or fix the editor can apply, carrying its workspace edit.
+type codeAction struct {
+	Title string         `json:"title"`
+	Kind  string         `json:"kind,omitempty"`
+	Edit  *workspaceEdit `json:"edit,omitempty"`
 }
 
 type codeLensOptions struct {
