@@ -226,6 +226,23 @@ just selfhost-backend-artifact-gate
 just selfhost-cli-gate
 ```
 
+`TestSelfhostBackendArtifactGate` records the old BackendArtifactGate contract
+inventory in `target/selfhost/reports/backend-artifact-stage0-native.txt`:
+
+```text
+contract.report artifact-paths-and-byte-counts
+contract.textual-llvm required-runtime-cli-executable-fragments
+contract.textual-llvm forbids-fixed-cli-fixture-paths
+contract.textual-llvm forbids-source-shape-dispatch
+contract.metadata selfhost-checked-package-no-go-fallback
+contract.runtime-storage textual-metadata-link-smoke
+contract.host-capability textual-metadata-link-smoke
+contract.hosted-cli link-and-smoke
+```
+
+The gate applies that contract to native-source stage0 artifacts; bootstrap and
+production gates then carry the same artifacts through stage1/stage2.
+
 Measured locally during #456/#503:
 
 | Command | Elapsed |
