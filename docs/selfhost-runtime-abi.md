@@ -630,12 +630,13 @@ parse branches are no longer bound to a single path. Broader parse and
 diagnostic recovery remain deferred. The current CLI parity support and
 deferrals are recorded in `docs/selfhost-cli-parity.md`.
 
-For #648/#650, hosted `fmt <file>` is routed through the same selfhost formatter
-writer used by the bounded parse stdout path, but has its own dispatch and does
-not require the parse command's `fn main` source-shape guard. For #629, hosted
-`fmt --write <file>` reuses the same formatted byte buffer and writes it through
-the existing `fs_write_file` ABI. Broader formatter behavior remains under
-#629.
+For #1073, hosted `fmt <file>` is routed through the selfhost formatter writer
+and has its own dispatch instead of the parse command's `fn main` source-shape
+guard. Hosted `fmt --write <file>` reuses the same formatted byte buffer and
+writes it through the existing `fs_write_file` ABI. The dedicated
+`selfhost/tests/cli/fmt-parity.tsv` gate records source-preserving comment,
+doc-comment, import sorting, and deterministic no-write rows. Inline-comment
+preservation and syntax surfaces outside that manifest remain deferred.
 
 For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
 emit/link/execute instead of a selfhost interpreter. The first runnable fixture
