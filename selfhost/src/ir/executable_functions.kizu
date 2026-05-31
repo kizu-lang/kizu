@@ -1170,42 +1170,300 @@ fn append_source_function_facts(
         "SourceKind",
         "selfhost::source::SourceKind"
     );
-    try append_selected_helper_body(
+    try append_source_reachable_helper_bodies(
         out,
         file.text,
         parsed.ast,
-        parsed.root,
-        "is_source_code",
-        "selfhost::source::is_source_code",
-        "source-kind"
+        parsed.root
     );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "is_frontend_source",
-        "selfhost::source::is_frontend_source",
-        "source-kind"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "module_path",
-        "selfhost::source::module_path",
-        "source-file"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "starts_with_package_prefix",
-        "selfhost::source::starts_with_package_prefix",
-        "source-file"
-    );
+    return;
+}
+
+// append_source_reachable_helper_bodies keeps the source-module frontend slice on a seed +
+// direct-callee closure instead of one append_selected_helper_body entry per helper. The seed list
+// is deliberately explicit for this first step; local source callees reached from those seeds are
+// appended automatically, while unsupported call forms fail closed.
+fn append_source_reachable_helper_bodies(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("is_source_code");
+    try pending.append("is_frontend_source");
+    try pending.append("module_path");
+    try pending.append("is_absolute_name_for_file");
+    var index = 0;
+    while index < pending.len() {
+        let local_name = try pending.get(index);
+        if !(try source_closure_name_seen(&emitted, local_name)) {
+            try append_source_closure_helper_body(
+                out,
+                text,
+                ast,
+                root,
+                local_name,
+                &var pending
+            );
+            try emitted.append(local_name);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_source_closure_helper_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    local_name: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let qualified_name = try source_closure_qualified_name(local_name);
+    let role = source_closure_role(local_name);
+    let function_node_id = try function_node(text, ast, root, local_name);
+    try function_signature::append(out, text, ast, function_node_id, qualified_name);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_helper_body_ir(out, text, ast, qualified_name, role, body);
+    try collect_source_direct_callees(text, ast, root, body, pending);
+    return;
+}
+
+fn source_closure_name_seen(
+    names: &std::array::Array<[]u8>,
+    name: []u8
+) -> !bool {
+    var index = 0;
+    while index < names.len() {
+        let existing = try names.get(index);
+        if std::mem::equal_bytes(existing, name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn source_closure_supported_local(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "is_source_code") or
+        std::mem::equal_bytes(name, "is_frontend_source") or
+        std::mem::equal_bytes(name, "module_path") or
+        std::mem::equal_bytes(name, "is_absolute_name_for_file") or
+        std::mem::equal_bytes(name, "starts_with_package_prefix");
+}
+
+fn source_closure_qualified_name(local_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(local_name, "is_source_code") {
+        return "selfhost::source::is_source_code";
+    }
+    if std::mem::equal_bytes(local_name, "is_frontend_source") {
+        return "selfhost::source::is_frontend_source";
+    }
+    if std::mem::equal_bytes(local_name, "module_path") {
+        return "selfhost::source::module_path";
+    }
+    if std::mem::equal_bytes(local_name, "is_absolute_name_for_file") {
+        return "selfhost::source::is_absolute_name_for_file";
+    }
+    if std::mem::equal_bytes(local_name, "starts_with_package_prefix") {
+        return "selfhost::source::starts_with_package_prefix";
+    }
+    return error("source closure: unsupported local helper");
+}
+
+fn source_closure_role(local_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(local_name, "is_source_code") or
+        std::mem::equal_bytes(local_name, "is_frontend_source") {
+        return "source-kind";
+    }
+    return "source-file";
+}
+
+fn collect_source_direct_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => try collect_source_direct_callees_in_range(text, ast, root, program.declarations, pending);,
+        Prefix(prefix) => try collect_source_direct_callees(text, ast, root, prefix.right, pending);,
+        Binary(binary) => try collect_source_two_node_callees(text, ast, root, binary.left, binary.right, pending);,
+        FieldExpr(field) => try collect_source_direct_callees(text, ast, root, field.receiver, pending);,
+        DerefExpr(deref) => try collect_source_direct_callees(text, ast, root, deref.receiver, pending);,
+        Call(call) => try collect_source_call_parts(text, ast, root, call.callee, call.args, pending);,
+        TypeApplyExpr(type_apply) => try collect_source_node_range_callees(text, ast, root, type_apply.callee, type_apply.type_args, pending);,
+        CastExpr(cast_expr) => try collect_source_direct_callees(text, ast, root, cast_expr.value, pending);,
+        IndexExpr(index_expr) => try collect_source_three_node_callees(
+            text, ast, root, index_expr.target, index_expr.start, index_expr.end, pending
+        );,
+        StructLiteralExpr(struct_literal) => try collect_source_direct_callees_in_range(text, ast, root, struct_literal.fields, pending);,
+        StructFieldInit(field_init) => try collect_source_direct_callees(text, ast, root, field_init.value, pending);,
+        ArenaNewExpr(arena_new) => try collect_source_direct_callees(text, ast, root, arena_new.allocator, pending);,
+        TryExpr(try_expr) => try collect_source_direct_callees(text, ast, root, try_expr.value, pending);,
+        ComptimeExpr(comptime_expr) => try collect_source_direct_callees(text, ast, root, comptime_expr.value, pending);,
+        Block(block) => try collect_source_direct_callees_in_range(text, ast, root, block.statements, pending);,
+        If(if_node) => try collect_source_three_node_callees(
+            text, ast, root, if_node.condition, if_node.then_block, if_node.else_block, pending
+        );,
+        Let(let_node) => try collect_source_direct_callees(text, ast, root, let_node.value, pending);,
+        Assign(assign) => try collect_source_two_node_callees(text, ast, root, assign.target, assign.value, pending);,
+        Return(return_node) => try collect_source_direct_callees(text, ast, root, return_node.value, pending);,
+        Defer(defer_node) => try collect_source_direct_callees(text, ast, root, defer_node.expr, pending);,
+        ExprStmt(expr_stmt) => try collect_source_direct_callees(text, ast, root, expr_stmt.expr, pending);,
+        While(while_node) => try collect_source_three_node_callees(
+            text, ast, root, while_node.label, while_node.condition, while_node.body, pending
+        );,
+        For(for_node) => try collect_source_five_node_callees(
+            text, ast, root, for_node.label, for_node.name, for_node.start, for_node.end,
+            for_node.body, pending
+        );,
+        Match(match_node) => try collect_source_node_range_callees(text, ast, root, match_node.value, match_node.arms, pending);,
+        MatchArm(match_arm) => try collect_source_direct_callees(text, ast, root, match_arm.body, pending);,
+        Unsafe(unsafe_node) => try collect_source_direct_callees(text, ast, root, unsafe_node.body, pending);,
+        ComptimeIf(comptime_if) => try collect_source_three_node_callees(
+            text, ast, root, comptime_if.condition, comptime_if.then_block,
+            comptime_if.else_block, pending
+        );,
+        FnDecl(fn_decl) => try collect_source_direct_callees(text, ast, root, fn_decl.body, pending);,
+        _ => return;,
+    }
+    return;
+}
+
+fn collect_source_direct_callees_in_range(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        try collect_source_direct_callees(text, ast, root, child, pending);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_source_two_node_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    try collect_source_direct_callees(text, ast, root, first, pending);
+    try collect_source_direct_callees(text, ast, root, second, pending);
+    return;
+}
+
+fn collect_source_three_node_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    try collect_source_direct_callees(text, ast, root, first, pending);
+    try collect_source_direct_callees(text, ast, root, second, pending);
+    try collect_source_direct_callees(text, ast, root, third, pending);
+    return;
+}
+
+fn collect_source_five_node_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    fourth: std::kizu::ast::NodeId,
+    fifth: std::kizu::ast::NodeId,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    try collect_source_direct_callees(text, ast, root, first, pending);
+    try collect_source_direct_callees(text, ast, root, second, pending);
+    try collect_source_direct_callees(text, ast, root, third, pending);
+    try collect_source_direct_callees(text, ast, root, fourth, pending);
+    try collect_source_direct_callees(text, ast, root, fifth, pending);
+    return;
+}
+
+fn collect_source_node_range_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    try collect_source_direct_callees(text, ast, root, node_id, pending);
+    try collect_source_direct_callees_in_range(text, ast, root, range, pending);
+    return;
+}
+
+fn collect_source_call_parts(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    try collect_source_call_callee(text, ast, root, callee, pending);
+    try collect_source_direct_callees_in_range(text, ast, root, args, pending);
+    return;
+}
+
+fn collect_source_call_callee(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let callee_text = ast_node_text(text, ast, callee);
+    if std::mem::starts_with(callee_text, "std::mem::") {
+        return;
+    }
+    if std::mem::starts_with(callee_text, "selfhost::source::") {
+        let prefix = "selfhost::source::";
+        let local = callee_text[std::mem::len(prefix)..std::mem::len(callee_text)];
+        if !source_closure_supported_local(local) {
+            return error("source closure: unsupported qualified source callee");
+        }
+        try pending.append(local);
+        return;
+    }
+    let node = ast.get(callee);
+    match node.data {
+        Var(_) => try collect_source_var_callee(callee_text, pending);,
+        FieldExpr(_) => return error("source closure: unsupported qualified callee");,
+        _ => return error("source closure: unsupported call form");,
+    }
+    return;
+}
+
+fn collect_source_var_callee(
+    callee_text: []u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    if !source_closure_supported_local(callee_text) {
+        return error("source closure: unsupported local callee");
+    }
+    try pending.append(callee_text);
     return;
 }
 
