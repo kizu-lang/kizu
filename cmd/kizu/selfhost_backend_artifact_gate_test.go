@@ -441,6 +441,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMTokenizerFragments()...)
 	fragments = append(fragments, requiredLLVMParserPredicateFragments()...)
 	fragments = append(fragments, requiredLLVMSourcePredicateFragments()...)
+	fragments = append(fragments, requiredLLVMSourceModulePathFragments()...)
 	fragments = append(fragments, requiredLLVMSourceLoaderFragments()...)
 	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
@@ -471,6 +472,28 @@ func requiredLLVMSourcePredicateFragments() []string {
 		"%t5 = icmp eq i64 %kind, 3",
 		"%t6 = or i1 %t2, %t5",
 		"ret i1 %t6",
+	}
+}
+
+// requiredLLVMSourceModulePathFragments locks source::module_path compiled through
+// mini MIR field access plus the generic checked slice-expression return.
+func requiredLLVMSourceModulePathFragments() []string {
+	return []string{
+		"@.kizu.compiled.kizu_selfhost__source_module_path.s0 = " +
+			"private unnamed_addr constant [8 x i8] c\"manifest\"",
+		"define %kizu.slice.u8 @kizu_selfhost__source_module_path",
+		"%t0 = extractvalue %kizu.selfhost.source.source_file %file, 1",
+		"%t2 = icmp eq i64 %t0, 0",
+		"%t4 = extractvalue %kizu.selfhost.source.source_file %file, 5",
+		"%t5 = extractvalue %kizu.selfhost.source.source_file %file, 3",
+		"%t6 = extractvalue %kizu.selfhost.source.source_file %file, 4",
+		"%t7_srclen = extractvalue %kizu.slice.u8 %t4, 1",
+		"%t7_endbefore = icmp slt i64 %t6, %t5",
+		"%t7_bad = or i1 %t7_badlower, %t7_endhigh",
+		"br i1 %t7_bad, label %t7_slice_oob, label %t7_slice_ok",
+		"%t7_gep = getelementptr i8, ptr %t7_baseptr, i64 %t5",
+		"%t7_len = sub i64 %t6, %t5",
+		"ret %kizu.slice.u8 %t7",
 	}
 }
 
