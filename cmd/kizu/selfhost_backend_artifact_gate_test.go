@@ -1032,9 +1032,9 @@ func requiredLLVMLowerRunAstBlockFragments() []string {
 // requiredLLVMLowerRunAstFunctionFragments returns the tracker-961 scope-4 prerequisite
 // lower_run_ast_function AST traversal lowering compiled into stage2: it requires the function
 // name text to equal the "main" literal global, binds the body AstNode via Ast.get, and on the
-// Block variant (tag 19) forwards lower_run_ast_block's !RunAst result (passing the block
-// statements and the recomputed name text); a non-main name or non-Block body returns the wrapped
-// unsupported_run_ast(). These fragments lock the lowered body shape.
+// Block variant (tag 19) forwards lower_run_ast_block's !RunAst result (passing declarations,
+// the block statements, and the recomputed name text); a non-main name or non-Block body returns
+// the wrapped unsupported_run_ast(). These fragments lock the lowered body shape.
 func requiredLLVMLowerRunAstFunctionFragments() []string {
 	return []string{
 		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_function(",
@@ -1047,7 +1047,8 @@ func requiredLLVMLowerRunAstFunctionFragments() []string {
 		"%lraf_stmts = extractvalue %kizu.kizu.ast.block_node %lraf_block_node, 0",
 		"%lraf_result = call %kizu.error.run_ast " +
 			"@kizu_selfhost__ir_codegen_lower_run_ast_block(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.slice.u8 %lraf_name_text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, " +
+			"%kizu.slice.u8 %lraf_name_text, " +
 			"%kizu.kizu.ast.child_range %lraf_stmts)",
 		"  ret %kizu.error.run_ast %lraf_result",
 	}
