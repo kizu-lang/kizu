@@ -314,10 +314,13 @@ func TestSelfhostSourceClosureUsesComponentCatalog(t *testing.T) {
 		"\"selfhost::source\"",
 		"function_signature::append_catalog(",
 		"executable_body::append_catalog_helper_body_ir(",
-		"source_catalog_local_index(",
-		"source_catalog_qualified_index(",
+		"component_function_catalog::find_local_function_index(catalog, \"is_source_code\")",
+		"component_function_catalog::find_local_function_index(catalog, \"is_frontend_source\")",
+		"component_function_catalog::find_local_function_index(catalog, \"module_path\")",
+		"component_function_catalog::find_local_function_index(catalog, \"is_absolute_name_for_file\")",
+		"component_function_catalog::find_local_function_index(catalog, callee_text)",
+		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
 		"component_function_catalog::function_node_id(",
-		"component_function_catalog::qualified_function_name_matches(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(executableFunctions, fragment) {
@@ -329,6 +332,8 @@ func TestSelfhostSourceClosureUsesComponentCatalog(t *testing.T) {
 		"fn source_closure_qualified_name(",
 		"source_closure_supported_local(name)",
 		"source_closure_qualified_name(local_name)",
+		"source_catalog_local_index",
+		"source_catalog_qualified_index",
 	}
 	for _, fragment := range forbiddenGlobal {
 		if strings.Contains(executableFunctions, fragment) {
@@ -357,14 +362,15 @@ func TestSelfhostLoaderClosureUsesComponentCatalog(t *testing.T) {
 	required := []string{
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::source::loader\"",
-		"loader_catalog_local_index(catalog, \"package_module_end\")",
-		"loader_catalog_local_index(catalog, \"is_manifest_root_source\")",
-		"loader_catalog_local_index(catalog, \"package_module_start\")",
-		"loader_catalog_local_index(catalog, \"source_file\")",
+		"component_function_catalog::find_local_function_index(catalog, \"package_module_end\")",
+		"component_function_catalog::find_local_function_index(catalog, \"is_manifest_root_source\")",
+		"component_function_catalog::find_local_function_index(catalog, \"package_module_start\")",
+		"component_function_catalog::find_local_function_index(catalog, \"source_file\")",
+		"component_function_catalog::find_local_function_index(catalog, callee_text)",
+		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
 		"function_signature::append_catalog(",
 		"executable_body::append_catalog_helper_body_ir(",
 		"component_function_catalog::function_node_id(",
-		"component_function_catalog::qualified_function_name_matches(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(executableFunctions, fragment) {
@@ -376,6 +382,8 @@ func TestSelfhostLoaderClosureUsesComponentCatalog(t *testing.T) {
 		"fn loader_closure_qualified_name(",
 		"loader_closure_supported_local(name)",
 		"loader_closure_qualified_name(local_name)",
+		"loader_catalog_local_index",
+		"loader_catalog_qualified_index",
 	}
 	for _, fragment := range forbiddenGlobal {
 		if strings.Contains(executableFunctions, fragment) {
@@ -392,9 +400,9 @@ func TestSelfhostLoaderClosureUsesComponentCatalog(t *testing.T) {
 	}
 }
 
-// TestSelfhostKizuLexerClosureUsesComponentCatalog keeps std::kizu::lexer
+// TestSelfhostStdLexerClosureUsesComponentCatalog keeps std::kizu::lexer
 // helper body closure resolution tied to the AST-derived component catalog.
-func TestSelfhostKizuLexerClosureUsesComponentCatalog(t *testing.T) {
+func TestSelfhostStdLexerClosureUsesComponentCatalog(t *testing.T) {
 	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	kizuLexerClosureBody := selfhostKizuFunctionBody(
 		t,
@@ -404,13 +412,13 @@ func TestSelfhostKizuLexerClosureUsesComponentCatalog(t *testing.T) {
 	required := []string{
 		"component_function_catalog::collect_from_ast(",
 		"\"std::kizu::lexer\"",
-		"kizu_lexer_catalog_local_index(catalog, \"first_token\")",
-		"kizu_lexer_catalog_local_index(catalog, \"next_token\")",
+		"component_function_catalog::find_local_function_index(catalog, \"first_token\")",
+		"component_function_catalog::find_local_function_index(catalog, \"next_token\")",
+		"component_function_catalog::find_local_function_index(catalog, callee_text)",
+		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
 		"function_signature::append_catalog(",
 		"executable_body::append_catalog_helper_body_ir(",
 		"component_function_catalog::function_node_id(",
-		"component_function_catalog::qualified_function_name_matches(",
-		"kizu_lexer_catalog_qualified_index(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(executableFunctions, fragment) {
@@ -422,6 +430,8 @@ func TestSelfhostKizuLexerClosureUsesComponentCatalog(t *testing.T) {
 		"fn kizu_lexer_closure_qualified_name(",
 		"kizu_lexer_closure_supported_local(name)",
 		"kizu_lexer_closure_qualified_name(local_name)",
+		"kizu_lexer_catalog_local_index",
+		"kizu_lexer_catalog_qualified_index",
 	}
 	for _, fragment := range forbiddenGlobal {
 		if strings.Contains(executableFunctions, fragment) {
@@ -450,13 +460,13 @@ func TestSelfhostLexerClosureUsesComponentCatalog(t *testing.T) {
 	required := []string{
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::lexer\"",
-		"lexer_catalog_local_index(catalog, \"is_identifier_continue\")",
-		"lexer_catalog_local_index(catalog, \"invalid_token_display\")",
+		"component_function_catalog::find_local_function_index(catalog, \"is_identifier_continue\")",
+		"component_function_catalog::find_local_function_index(catalog, \"invalid_token_display\")",
+		"component_function_catalog::find_local_function_index(catalog, callee_text)",
+		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
 		"function_signature::append_catalog(",
 		"executable_body::append_catalog_helper_body_ir(",
 		"component_function_catalog::function_node_id(",
-		"component_function_catalog::qualified_function_name_matches(",
-		"lexer_catalog_qualified_index(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(executableFunctions, fragment) {
@@ -471,6 +481,8 @@ func TestSelfhostLexerClosureUsesComponentCatalog(t *testing.T) {
 		"frontend_closure_supported_local",
 		"frontend_closure_qualified_prefix",
 		"collect_frontend_",
+		"lexer_catalog_local_index",
+		"lexer_catalog_qualified_index",
 	}
 	for _, fragment := range forbiddenGlobal {
 		if strings.Contains(executableFunctions, fragment) {
