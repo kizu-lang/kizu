@@ -586,31 +586,32 @@ func TestSelfhostLexerClosureUsesComponentCatalog(t *testing.T) {
 }
 
 // TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
-// compiled closure params tied to function-signature-param facts. The
-// append_kizu_lexer_compiled_function helper builds its fully qualified name
-// from the "std::kizu::lexer::" prefix plus the local name and delegates to
-// append_compiled_closure_function, which derives the params_spec from the IR
-// facts. The handwritten supported/qualified lookup tables are gone, and a
-// local helper is only treated as supported when its function-signature-return
-// fact actually exists, resolved through component_compiled_local_present.
+// compiled closure params tied to function-signature-param facts. The std lexer
+// closure seeds the shared BFS with the "std::kizu::lexer::" prefix, which builds
+// each member's fully qualified name and derives the params_spec from the IR
+// facts. The handwritten supported/qualified lookup tables are gone, and a local
+// helper is only treated as supported when its function-signature-return fact
+// actually exists, resolved through the shared collector's
+// component_compiled_local_present gate.
 func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	abi := readSelfhostFile(t, "../../selfhost/src/backend/compiled_abi_params.kizu")
-	body := selfhostKizuFunctionBody(t, cli, "fn append_kizu_lexer_compiled_function(")
-	required := []string{
-		"try append_component_qualified_name(&var function_name, \"std::kizu::lexer::\", local_name);",
-		"let function_name_bytes = function_name.as_bytes();",
-		"try append_compiled_closure_function(out, ir_bytes, function_name_bytes);",
-	}
-	for _, fragment := range required {
-		if !strings.Contains(body, fragment) {
-			t.Fatalf("std lexer compiled function delegation missing %q", fragment)
-		}
-	}
+
+	assertComponentReachableCompiledClosure(
+		t,
+		cli,
+		"fn append_kizu_lexer_reachable_compiled_functions(",
+		"std::kizu::lexer::",
+		false,
+		[]string{"first_token", "next_token"},
+	)
+
 	if !strings.Contains(cli, "import selfhost::backend::compiled_abi_params;") {
 		t.Fatal("std lexer compiled params derivation missing ABI params import")
 	}
-	assertCompiledClosureParamsDerivation(t, cli)
+	assertSharedCompiledClosurePath(t, cli)
+	assertComponentCompiledCalleeFactGate(t, cli)
+	assertNoPerComponentCompiledClosureHelpers(t, cli)
 	removed := []string{
 		"fn kizu_lexer_compiled_supported_local(",
 		"fn kizu_lexer_compiled_qualified_name(",
@@ -618,15 +619,6 @@ func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 	for _, fragment := range removed {
 		if strings.Contains(cli, fragment) {
 			t.Fatalf("std lexer compiled closure keeps hand-written lookup %q", fragment)
-		}
-	}
-	callee := selfhostKizuFunctionBody(t, cli, "fn collect_kizu_lexer_compiled_callee(")
-	for _, fragment := range []string{
-		"if !component_compiled_local_present(ir_bytes, \"std::kizu::lexer::\", local) {",
-		"if component_compiled_local_present(ir_bytes, \"std::kizu::lexer::\", callee) {",
-	} {
-		if !strings.Contains(callee, fragment) {
-			t.Fatalf("collect_kizu_lexer_compiled_callee missing fact-based gate %q", fragment)
 		}
 	}
 	forbidden := []string{
@@ -653,14 +645,6 @@ func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 		}
 	}
 	reachable := selfhostKizuFunctionBody(t, cli, "fn append_kizu_lexer_reachable_compiled_functions(")
-	for _, seed := range []string{
-		"try pending.append(\"first_token\");",
-		"try pending.append(\"next_token\");",
-	} {
-		if !strings.Contains(reachable, seed) {
-			t.Fatalf("std lexer compiled closure seed changed, missing %q", seed)
-		}
-	}
 	if strings.Contains(reachable, "\"tokenize\"") {
 		t.Fatal("std lexer compiled closure expands to tokenize")
 	}
@@ -668,15 +652,16 @@ func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 
 // assertCompiledClosureParamsDerivation pins that the shared compiled-closure
 // emitter derives its params_spec from function-signature-param facts and guards
-// the empty case, instead of a handwritten params_spec table.
+// the empty case behind allow_empty_params, instead of a handwritten params_spec
+// table.
 func assertCompiledClosureParamsDerivation(t *testing.T, cli string) {
 	t.Helper()
-	closureBody := selfhostKizuFunctionBody(t, cli, "fn append_compiled_closure_function(")
+	closureBody := selfhostKizuFunctionBody(t, cli, "fn emit_compiled_closure_member(")
 	closureRequired := []string{
 		"var params_spec = std::string::String(std::mem::page_allocator());",
 		"defer params_spec.deinit();",
 		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name)",
-		"if params_spec.len() == 0 {",
+		"if params_spec.len() == 0 and !allow_empty_params {",
 		"compiled closure: missing signature params",
 		"let params_spec_bytes = params_spec.as_bytes();",
 		"params_spec_bytes",
@@ -689,64 +674,32 @@ func assertCompiledClosureParamsDerivation(t *testing.T, cli string) {
 }
 
 // assertSelfhostLexerCompiledClosureFactDriven pins that the selfhost::lexer
-// compiled closure resolves from IR facts: the qualified name is built from the
-// component prefix, the member emitter derives params_spec without an empty
-// guard (so the parameterless seed invalid_token_display survives), the callee
-// gate uses component_compiled_local_present, and the seed is unchanged.
+// compiled closure resolves from IR facts through the shared path: the closure
+// seeds the shared BFS with the "selfhost::lexer::" prefix and allow_empty_params
+// set to true, so the parameterless seed member invalid_token_display survives the
+// shared emitter's empty guard. The shared member builder, params derivation, and
+// callee fact-gate are pinned by the shared assertions; here the lexer-specific
+// expectation is the allow_empty_params=true seeding.
 func assertSelfhostLexerCompiledClosureFactDriven(t *testing.T, cli string) {
 	t.Helper()
-	lexerBody := selfhostKizuFunctionBody(t, cli, "fn append_lexer_compiled_function(")
-	for _, fragment := range []string{
-		"try append_component_qualified_name(&var function_name, \"selfhost::lexer::\", local_name);",
-		"let function_name_bytes = function_name.as_bytes();",
-		"try append_lexer_compiled_closure_member(out, ir_bytes, function_name_bytes);",
-	} {
-		if !strings.Contains(lexerBody, fragment) {
-			t.Fatalf("lexer compiled function delegation missing %q", fragment)
-		}
-	}
+	assertComponentReachableCompiledClosure(
+		t,
+		cli,
+		"fn append_lexer_reachable_compiled_functions(",
+		"selfhost::lexer::",
+		true,
+		[]string{"is_identifier_continue", "invalid_token_display"},
+	)
+	assertSharedCompiledClosurePath(t, cli)
+	assertComponentCompiledCalleeFactGate(t, cli)
+	assertNoPerComponentCompiledClosureHelpers(t, cli)
 
-	// The lexer closure member derives its params_spec from
-	// function-signature-param facts. Unlike the shared emitter it deliberately
-	// has no empty-params guard, because the seed member invalid_token_display is
-	// parameterless and must be emitted with an empty params_spec.
-	memberBody := selfhostKizuFunctionBody(t, cli, "fn append_lexer_compiled_closure_member(")
-	for _, fragment := range []string{
-		"var params_spec = std::string::String(std::mem::page_allocator());",
-		"defer params_spec.deinit();",
-		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name)",
-		"let params_spec_bytes = params_spec.as_bytes();",
-		"params_spec_bytes",
-	} {
-		if !strings.Contains(memberBody, fragment) {
-			t.Fatalf("lexer compiled closure member params derivation missing %q", fragment)
-		}
-	}
-	if strings.Contains(memberBody, "compiled closure: missing signature params") {
-		t.Fatal("lexer compiled closure member must allow parameterless invalid_token_display")
-	}
-
-	// The local-helper gate is resolved from IR facts, never a hand-written list.
-	lexerCallee := selfhostKizuFunctionBody(t, cli, "fn collect_lexer_compiled_callee(")
-	for _, fragment := range []string{
-		"if !component_compiled_local_present(ir_bytes, \"selfhost::lexer::\", local) {",
-		"if component_compiled_local_present(ir_bytes, \"selfhost::lexer::\", callee) {",
-	} {
-		if !strings.Contains(lexerCallee, fragment) {
-			t.Fatalf("collect_lexer_compiled_callee missing fact-based gate %q", fragment)
-		}
-	}
-
-	// The selfhost::lexer compiled closure seed stays is_identifier_continue and
-	// invalid_token_display; nothing else is hand-seeded to force a pass.
-	lexerReachable := selfhostKizuFunctionBody(t, cli, "fn append_lexer_reachable_compiled_functions(")
-	for _, seed := range []string{
-		"try pending.append(\"is_identifier_continue\");",
-		"try pending.append(\"invalid_token_display\");",
-	} {
-		if !strings.Contains(lexerReachable, seed) {
-			t.Fatalf("selfhost lexer compiled closure seed changed, missing %q", seed)
-		}
+	// The shared emitter tolerates an empty params_spec only behind
+	// allow_empty_params, which the selfhost::lexer closure passes as true so the
+	// parameterless invalid_token_display member is emitted with empty params.
+	emitter := selfhostKizuFunctionBody(t, cli, "fn emit_compiled_closure_member(")
+	if !strings.Contains(emitter, "if params_spec.len() == 0 and !allow_empty_params {") {
+		t.Fatal("compiled closure emitter must gate the empty params_spec behind allow_empty_params")
 	}
 }
 
@@ -764,22 +717,26 @@ func TestSelfhostLexerLoaderCompiledParamsSpecDerivedFromSignatures(t *testing.T
 
 	assertSelfhostLexerCompiledClosureFactDriven(t, cli)
 
-	loaderBody := selfhostKizuFunctionBody(t, cli, "fn append_loader_compiled_function(")
-	loaderRequired := []string{
-		"try append_component_qualified_name(",
-		"\"selfhost::source::loader::\",",
-		"let function_name_bytes = function_name.as_bytes();",
-		"try append_compiled_closure_function(out, ir_bytes, function_name_bytes);",
-	}
-	for _, fragment := range loaderRequired {
-		if !strings.Contains(loaderBody, fragment) {
-			t.Fatalf("loader compiled function delegation missing %q", fragment)
-		}
-	}
+	// The loader closure seeds the shared BFS with the loader prefix and keeps the
+	// missing-params guard (allow_empty_params is false) because every loader
+	// helper takes at least one parameter.
+	assertComponentReachableCompiledClosure(
+		t,
+		cli,
+		"fn append_loader_reachable_compiled_functions(",
+		"selfhost::source::loader::",
+		false,
+		[]string{
+			"package_module_end",
+			"is_manifest_root_source",
+			"package_module_start",
+			"source_file",
+		},
+	)
 
 	// The shared compiled-closure emitter keeps the params_spec derived from
-	// function-signature-param facts and guards the empty case (every loader
-	// helper takes at least one parameter).
+	// function-signature-param facts and guards the empty case behind
+	// allow_empty_params.
 	assertCompiledClosureParamsDerivation(t, cli)
 
 	forbidden := []string{
