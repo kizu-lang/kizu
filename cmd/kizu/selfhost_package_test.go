@@ -345,6 +345,53 @@ func TestSelfhostSourceClosureUsesComponentCatalog(t *testing.T) {
 	}
 }
 
+// TestSelfhostLoaderClosureUsesComponentCatalog keeps source loader helper body
+// closure resolution tied to the AST-derived component function catalog.
+func TestSelfhostLoaderClosureUsesComponentCatalog(t *testing.T) {
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	loaderClosureBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_loader_closure_helper_body(",
+	)
+	required := []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::source::loader\"",
+		"loader_catalog_local_index(catalog, \"package_module_end\")",
+		"loader_catalog_local_index(catalog, \"is_manifest_root_source\")",
+		"loader_catalog_local_index(catalog, \"package_module_start\")",
+		"loader_catalog_local_index(catalog, \"source_file\")",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+		"component_function_catalog::function_node_id(",
+		"component_function_catalog::qualified_function_name_matches(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("loader closure catalog path missing %q", fragment)
+		}
+	}
+	forbiddenGlobal := []string{
+		"fn loader_closure_supported_local(",
+		"fn loader_closure_qualified_name(",
+		"loader_closure_supported_local(name)",
+		"loader_closure_qualified_name(local_name)",
+	}
+	for _, fragment := range forbiddenGlobal {
+		if strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("loader closure keeps handwritten lookup %q", fragment)
+		}
+	}
+	forbiddenBody := []string{
+		"try function_node(text, ast, root, local_name)",
+	}
+	for _, fragment := range forbiddenBody {
+		if strings.Contains(loaderClosureBody, fragment) {
+			t.Fatalf("loader closure keeps handwritten lookup %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
 // compiled closure params tied to function-signature-param facts.
 func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
