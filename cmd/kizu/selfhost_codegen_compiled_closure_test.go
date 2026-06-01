@@ -101,6 +101,68 @@ func TestSelfhostCodegenCompiledClosureDerivedFromSharedBFS(t *testing.T) {
 	}
 }
 
+// TestSelfhostCodegenLoopI64SupportedUsesCompiledAuto keeps the loop-i64
+// support predicate on real body lowering instead of restoring the old
+// hand-written LLVM renderer.
+func TestSelfhostCodegenLoopI64SupportedUsesCompiledAuto(t *testing.T) {
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+
+	required := []string{
+		`"selfhost::ir::codegen::loop_i64_run_ast_supported"`,
+		`"kizu_selfhost__ir_codegen_loop_i64_run_ast_supported"`,
+		`"%kizu.selfhost.codegen.run_ast run_ast"`,
+	}
+	for _, fragment := range required {
+		if !strings.Contains(cli, fragment) {
+			t.Fatalf("loop_i64_run_ast_supported compiled-auto registration missing %q", fragment)
+		}
+	}
+
+	forbidden := []string{
+		"fn append_loop_i64_run_ast_supported_function(",
+		"try append_loop_i64_run_ast_supported_function(out, ir_bytes);",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("loop_i64_run_ast_supported keeps hand-written renderer fragment %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostCodegenLoopI64BuildersUseCompiledAuto keeps the loop-i64 RunAst
+// and Program builders on compiled lowering instead of the old hand-written LLVM
+// emitters.
+func TestSelfhostCodegenLoopI64BuildersUseCompiledAuto(t *testing.T) {
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+
+	required := []string{
+		`"selfhost::ir::codegen::loop_i64_run_ast"`,
+		`"kizu_selfhost__ir_codegen_loop_i64_run_ast"`,
+		"\"%kizu.slice.u8 function_name;i64 statement_count;" +
+			"%kizu.slice.u8 print_callee;i64 start_value;i64 bound;" +
+			"i64 continue_value;i64 break_value\"",
+		`"selfhost::ir::codegen::lowered_loop_i64_program"`,
+		`"kizu_selfhost__ir_codegen_lowered_loop_i64_program"`,
+	}
+	for _, fragment := range required {
+		if !strings.Contains(cli, fragment) {
+			t.Fatalf("loop-i64 compiled-auto builder registration missing %q", fragment)
+		}
+	}
+
+	forbidden := []string{
+		"fn append_loop_i64_run_ast_function(",
+		"try append_loop_i64_run_ast_function(out, ir_bytes);",
+		"fn append_lowered_loop_i64_program_function(",
+		"try append_lowered_loop_i64_program_function(out, ir_bytes);",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("loop-i64 builder keeps hand-written renderer fragment %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening pins that the
 // codegen cluster admits no cross-component external accessor. Its only non-local
 // callee is the std::mem equal_bytes intrinsic (handled by the shared collector's

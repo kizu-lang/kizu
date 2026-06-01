@@ -878,6 +878,7 @@ func requiredLLVMNodeCountTypeFragments() []string {
 		"%kizu.kizu.ast.assign_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.return_node = type { %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.defer_node = type { %kizu.kizu.ast.node_id }",
+		"%kizu.kizu.ast.err_defer_node = type { %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.expr_stmt_node = type { %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.while_node = type { %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
@@ -915,7 +916,7 @@ func requiredLLVMNodeCountTypeFragments() []string {
 }
 
 // requiredLLVMNodeCountLoweringFragments returns the tracker-961 node_count recursive
-// AST-traversal cluster compiled into stage2: node_count (the 44-arm match-over-AstData
+// AST-traversal cluster compiled into stage2: node_count (the 45-arm match-over-AstData
 // traversal), count_range (the two-phi accumulator loop calling Ast.child_at + node_count),
 // and the count_* helpers (let-try / return-try arithmetic). The whole mutually-recursive
 // cluster is defined so selfhost.ll links with no undefined symbol; every arm returns a real
@@ -935,7 +936,7 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_ranges(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_fn_decl_parts(",
 		// node_count: bind the AstNode via Ast.get, extract the union tag, and dispatch over
-		// the exhaustive icmp/br arm chain (Program tag 0 first, FnDecl tag 42, ...).
+		// the exhaustive icmp/br arm chain (Program tag 0 first, FnDecl tag 43, ...).
 		"%match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %node_id)",
 		"%match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0",
@@ -1184,7 +1185,7 @@ func requiredLLVMLowerRunAstBlockFragments() []string {
 			"@kizu_selfhost__ir_codegen_lower_let_binding(",
 		"%lrb_locals_next = call %kizu.selfhost.codegen.local_table " +
 			"@kizu_selfhost__ir_codegen_insert_local(",
-		"%lrb_is_exprstmt = icmp eq i64 %lrb_tag, 25",
+		"%lrb_is_exprstmt = icmp eq i64 %lrb_tag, 26",
 		"%lrb_ps = call %kizu.error.run_ast " +
 			"@kizu_selfhost__ir_codegen_lower_print_statement(",
 		"  ret %kizu.error.run_ast %lrb_ps",
@@ -1218,7 +1219,7 @@ func requiredLLVMLowerRunAstFunctionFragments() []string {
 
 // requiredLLVMLowerRunAstDeclarationsFragments returns the tracker-961 scope-4 prerequisite
 // lower_run_ast_declarations AST traversal lowering compiled into stage2: it scans the program
-// declarations for the first FnDecl (tag 42, name field 3 / body field 8) whose
+// declarations for the first FnDecl (tag 43, name field 3 / body field 8) whose
 // lower_run_ast_function produces a run_ast_supported RunAst, returning it wrapped, propagating the
 // checked Ast.child_at / lower_run_ast_function failure, and falling through to the wrapped
 // unsupported_run_ast(). These fragments lock the lowered body shape.
@@ -1226,7 +1227,7 @@ func requiredLLVMLowerRunAstDeclarationsFragments() []string {
 	return []string{
 		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_declarations(",
 		"%lrad_index = phi i64 [ 0, %entry ], [ %lrad_index_next, %lrad_advance ]",
-		"%lrad_is_fndecl = icmp eq i64 %lrad_tag, 42",
+		"%lrad_is_fndecl = icmp eq i64 %lrad_tag, 43",
 		"%lrad_name = extractvalue %kizu.kizu.ast.fn_decl_node %lrad_fn_node, 3",
 		"%lrad_fn_body = extractvalue %kizu.kizu.ast.fn_decl_node %lrad_fn_node, 8",
 		"%lrad_fcall = call %kizu.error.run_ast " +
