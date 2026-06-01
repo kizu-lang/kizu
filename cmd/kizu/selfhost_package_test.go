@@ -259,9 +259,13 @@ func TestSelfhostComponentFunctionCatalogAPI(t *testing.T) {
 		"pub struct ComponentFunctionCatalog",
 		"pub struct ComponentFunctionEntry",
 		"pub struct ComponentFunctionSignature",
+		"pub struct ComponentFunctionName",
 		"pub fn collect_from_ast(",
+		"pub fn single_function_name(",
 		"pub fn local_function_name(",
 		"pub fn append_qualified_function_name(",
+		"pub fn function_name(",
+		"pub fn append_function_name(",
 		"pub fn qualified_function_name(",
 		"pub fn function_node_id(",
 		"pub fn function_signature(",
@@ -291,6 +295,52 @@ func TestSelfhostComponentFunctionCatalogAPI(t *testing.T) {
 	for _, fragment := range forbidden {
 		if strings.Contains(catalog, fragment) {
 			t.Fatalf("component function catalog includes out-of-scope fragment %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostSourceClosureUsesComponentCatalog keeps source helper body closure
+// resolution tied to the AST-derived component function catalog.
+func TestSelfhostSourceClosureUsesComponentCatalog(t *testing.T) {
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	sourceClosureBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_source_closure_helper_body(",
+	)
+	required := []string{
+		"import selfhost::ir::component_function_catalog;",
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::source\"",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+		"source_catalog_local_index(",
+		"source_catalog_qualified_index(",
+		"component_function_catalog::function_node_id(",
+		"component_function_catalog::qualified_function_name_matches(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("source closure catalog path missing %q", fragment)
+		}
+	}
+	forbiddenGlobal := []string{
+		"fn source_closure_supported_local(",
+		"fn source_closure_qualified_name(",
+		"source_closure_supported_local(name)",
+		"source_closure_qualified_name(local_name)",
+	}
+	for _, fragment := range forbiddenGlobal {
+		if strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("source closure keeps handwritten lookup %q", fragment)
+		}
+	}
+	forbiddenBody := []string{
+		"try function_node(text, ast, root, local_name)",
+	}
+	for _, fragment := range forbiddenBody {
+		if strings.Contains(sourceClosureBody, fragment) {
+			t.Fatalf("source closure keeps handwritten lookup %q", fragment)
 		}
 	}
 }
