@@ -3931,11 +3931,14 @@ fn collect_component_compiled_body_callees(
 }
 
 // collect_component_compiled_callee classifies one callee relative to the
-// component prefix. std::mem callees are intrinsic and ignored. A callee inside
-// the component prefix contributes its local name once the IR facts confirm the
-// helper, while a nested sub-namespace under the prefix or any other qualified
-// callee is rejected as an explicit error. A bare local name is also resolved
-// through the IR facts so nothing is treated as supported without a signature.
+// component prefix. std::mem callees are intrinsic and ignored. The narrow set of
+// external accessors compiled separately into selfhost.ll (the std::kizu::ast read
+// accessors, called as tree.get / tree.child_at) is admitted without expansion
+// so the BFS neither re-emits nor walks them. A callee inside the component prefix
+// contributes its local name once the IR facts confirm the helper, while a nested
+// sub-namespace under the prefix or any other qualified callee is rejected as an
+// explicit error. A bare local name is also resolved through the IR facts so nothing
+// is treated as supported without a signature.
 fn collect_component_compiled_callee(
     ir_bytes: []u8,
     prefix: []u8,
@@ -3943,6 +3946,9 @@ fn collect_component_compiled_callee(
     pending: &var std::array::Array<[]u8>
 ) -> !void {
     if std::mem::starts_with(callee, "std::mem::") {
+        return;
+    }
+    if compiled_external_accessor_allowed(callee) {
         return;
     }
     if std::mem::starts_with(callee, prefix) {
@@ -3964,6 +3970,25 @@ fn collect_component_compiled_callee(
         return;
     }
     return error("compiled closure: unsupported callee");
+}
+
+// compiled_external_accessor_allowed reports whether a method-call callee names one
+// of the std::kizu::ast read accessors that are compiled separately and linked into
+// selfhost.ll on their own: Ast.get (kizu_kizu__ast_ast_get) and Ast.child_at
+// (kizu_kizu__ast_ast_child_at). The selfhost::ast traversal members bind their
+// tree: std::kizu::ast::Ast parameter and invoke these accessors as tree.get /
+// tree.child_at, so both spellings are admitted: the BFS must not re-emit the
+// external accessor and must not try to walk it as a component-local helper. Only
+// these two exact accessor calls are allowed; every other cross-component callee
+// stays an explicit error so nothing is admitted by fallback.
+fn compiled_external_accessor_allowed(callee: []u8) -> bool {
+    if std::mem::equal_bytes(callee, "tree.get") {
+        return true;
+    }
+    if std::mem::equal_bytes(callee, "tree.child_at") {
+        return true;
+    }
+    return false;
 }
 
 // compiled_callee_has_namespace reports whether a name still carries a "::"
