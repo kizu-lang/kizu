@@ -655,8 +655,38 @@ fn dump_string(
     span: &std::kizu::ast::Span
 ) -> !void {
     print("String");
-    let text = try std::mem::slice(source, span.start + 1, span.end - 1);
-    print(text);
+    if source[span.start] == cast<u8>(34) {
+        let text = try std::mem::slice(source, span.start + 1, span.end - 1);
+        print(text);
+        return;
+    }
+    let allocator = std::mem::page_allocator();
+    var value = std::string::String(allocator);
+    var index = span.start;
+    var first = true;
+    while index < span.end {
+        index = index + 2;
+        let segment_start = index;
+        while index < span.end and source[index] != cast<u8>(10) {
+            index = index + 1;
+        }
+        if first {
+            first = false;
+        } else {
+            try value.append_byte(cast<u8>(10));
+        }
+        let segment = try std::mem::slice(source, segment_start, index);
+        try value.append_bytes(segment);
+        if index < span.end {
+            index = index + 1;
+            while index < span.end and (source[index] == cast<u8>(32) or
+                source[index] == cast<u8>(9) or source[index] == cast<u8>(13)) {
+                index = index + 1;
+            }
+        }
+    }
+    print(value.as_bytes());
+    value.deinit();
     return;
 }
 `
@@ -1013,6 +1043,18 @@ func parserParityExpressionSeedCases() []parserParityCase {
 			source: "fn main() { let color = Color::Green; " +
 				`let name = match color { Red => "red", Green => "green", }; }`,
 		},
+		{
+			name:   "seed/fn_multiline_string",
+			source: "fn banner() -> []u8 {\n    return\n\\\\hello world\n;\n}",
+		},
+		{
+			name:   "seed/fn_multiline_string_join",
+			source: "fn banner() -> []u8 {\n    return\n\\\\foo\n\\\\bar\n;\n}",
+		},
+		{
+			name:   "seed/fn_multiline_string_indent",
+			source: "fn banner() -> []u8 {\n    return\n\\\\foo\n    \\\\bar\n;\n}",
+		},
 	}
 }
 
@@ -1078,6 +1120,14 @@ func unsupportedStdParserSource(source string) string {
 		}
 		if r == '"' {
 			inString = true
+			continue
+		}
+		if r == '\\' && index+1 < len(source) && source[index+1] == '\\' {
+			end := lexerParityStringTokenEnd(source, index)
+			if end <= index {
+				return "source contains tokens outside std parser subset"
+			}
+			index = end - 1
 			continue
 		}
 		if isStdParserSpace(r) || isStdParserPunctuation(r) {
