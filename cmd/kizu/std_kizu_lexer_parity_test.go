@@ -410,6 +410,7 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 		{name: "seed/multiline_string", source: "\\\\hello world"},
 		{name: "seed/multiline_string_join", source: "\\\\foo\n\\\\bar"},
 		{name: "seed/multiline_string_indent", source: "\\\\foo\n  \\\\bar"},
+		{name: "seed/multiline_string_then_token", source: "\\\\foo\nrest"},
 		{
 			name: "seed/declaration_tokens",
 			source: "import app::lexer; pub struct User { pub name: []u8, } " +
