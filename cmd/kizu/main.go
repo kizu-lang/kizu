@@ -78,6 +78,9 @@ func dispatch(cmd string, args []string) error {
 	case "parse":
 		return runSelfhostFrontendCommand("parse", args)
 	case "run":
+		if selfhostRunEnabled() {
+			return runSelfhostFrontendCommand("run", args)
+		}
 		path, programArgs := splitProgramArgs(args)
 		return runFile(path, programArgs)
 	case "check":
@@ -103,6 +106,25 @@ func dispatch(cmd string, args []string) error {
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
 	}
+}
+
+// selfhostRunEnvVar is the rollback-friendly switch point for routing the public
+// `kizu run <file>` command through the selfhost-owned compiled artifact path
+// (selfhost::cli::execute::run_file_cli, which lowers a run-codegen program, links
+// it, and executes the native artifact) instead of the Go interpreter. It defaults
+// off so the general Go-owned run surface is unchanged; supported shapes that the
+// selfhost backend can lower are owned end to end when it is on, and unsupported
+// shapes surface explicit selfhost diagnostics rather than falling back to Go.
+//
+// This gate is the deliberate switch boundary for #1151 / parent #1070. It is not a
+// permanent compatibility branch: it is removed (default flipped to selfhost) once
+// `run` is selfhost-owned for the general language/runtime surface tracked by #1070.
+const selfhostRunEnvVar = "KIZU_SELFHOST_RUN"
+
+// selfhostRunEnabled reports whether the public `run` command is routed through the
+// selfhost-owned compiled artifact path. See selfhostRunEnvVar.
+func selfhostRunEnabled() bool {
+	return os.Getenv(selfhostRunEnvVar) == "1"
 }
 
 // runSelfhostFrontendCommand executes frontend commands through Kizu-owned code.

@@ -106,7 +106,7 @@ any additional production behavior by itself.
 | `parse <file>` | mixed: Go general CLI, hosted artifact for bounded parity rows | `selfhost::cli`, `selfhost::parser` | no fallback in hosted parity rows | `just selfhost-parse-parity-gate` | broader parse recovery and diagnostics are deferred to command-slice issues |
 | `check selfhost` | hosted stage2 artifact | `selfhost::cli::check` plus selfhost source/resolver/type/ownership gates | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
 | `check <file>` | mixed: Go general CLI, hosted artifact for bounded parity rows | `selfhost::cli::check` | no fallback in hosted parity rows | `just selfhost-check-parity-gate` | broader type/ownership surface remains deferred |
-| `run <file>` | mixed: Go general CLI, hosted artifact for bounded run rows | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows | `just selfhost-run-parity-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader execution is deferred until package IR and backend slices expand |
+| `run <file>` | mixed: Go general CLI by default, hosted artifact for bounded run rows, public CLI selfhost path behind `KIZU_SELFHOST_RUN` (#1151) | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows; no Go fallback in the gated public CLI path | `just selfhost-run-parity-gate`, `just selfhost-run-cli-switch-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader execution and default-on switch deferred to #1157 (parent #1070) |
 | `test <file>` | mixed: Go general CLI, hosted artifact for bounded test rows | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows | `just selfhost-test-parity-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader discovery and execution are deferred |
 | `stage selfhost` | hosted stage2 artifact | `selfhost::backend`, hosted runtime ABI | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
 | `fmt <file>` / `fmt --write <file>` | mixed: Go general CLI, hosted artifact for #1073 formatter parity rows | selfhost formatter writer | no fallback in hosted rows | `just selfhost-fmt-parity-gate` | broader formatter syntax surfaces outside the parity manifest are deferred |
@@ -194,6 +194,32 @@ source-literal, fixture-path, or static LLVM case dispatch:
 The smallest next real codegen slice is a `main` function with a string
 constant, direct `print` call, and void return lowered from the mini IR rather
 than from a run/test-specific hosted template branch.
+
+## Run CLI Switch Point For #1151
+
+The first public `cmd/kizu` CLI command routed through the selfhost-owned
+compiled artifact path (beyond the `target/selfhost/stage2/selfhost` parity
+gates) is `run <file>`, behind the rollback-friendly switch point
+`KIZU_SELFHOST_RUN=1`.
+
+| Field | Value |
+| --- | --- |
+| switched path | `selfhost::cli::execute::run_file_cli` (lower run-codegen program → link → execute native artifact) |
+| switch point | env `KIZU_SELFHOST_RUN` (default off → Go interpreter path unchanged) |
+| Go fallback when enabled | none; unsupported shapes raise explicit selfhost diagnostics |
+| evidence report | `target/selfhost/reports/run-cli-switch.txt` (`go.fallback none`) |
+| gate | `just selfhost-run-cli-switch-gate` |
+| deletion condition | flip default to selfhost and remove the gate once `run` is selfhost-owned for the general surface (#1157, parent #1070) |
+
+Deliberately not switched by #1151, kept explicit in #1157:
+
+- General `run` shapes the selfhost backend cannot lower yet stay explicit
+  diagnostics under the gate (for example arena allocation, unsupported integer
+  expressions, package/directory targets), so the default stays on the Go path.
+- `test <file>` is not switched: through the public CLI the selfhost `test` path
+  only emits a test-executable artifact without executing it, so routing it would
+  regress the Go `testFile` behavior. It needs test-artifact execution semantics
+  first.
 
 ## Failure Policy
 
