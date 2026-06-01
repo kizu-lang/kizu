@@ -77,12 +77,13 @@ func TestSelfhostAstCompiledClosureExternalAccessorAllowPolicy(t *testing.T) {
 	assertComponentCompiledCalleeFactGate(t, cli)
 
 	callee := selfhostKizuFunctionBody(t, cli, "fn collect_component_compiled_callee(")
-	if !strings.Contains(callee, "if compiled_external_accessor_allowed(callee) {") {
+	if !strings.Contains(callee, "if compiled_external_accessor_allowed(prefix, callee) {") {
 		t.Fatalf("collect_component_compiled_callee missing external accessor allow check")
 	}
 
 	allow := selfhostKizuFunctionBody(t, cli, "fn compiled_external_accessor_allowed(")
 	required := []string{
+		"if !std::mem::equal_bytes(prefix, \"selfhost::ast::\") {",
 		"if std::mem::equal_bytes(callee, \"tree.get\") {",
 		"if std::mem::equal_bytes(callee, \"tree.child_at\") {",
 		"return true;",
