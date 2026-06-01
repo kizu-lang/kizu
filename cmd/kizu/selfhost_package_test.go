@@ -501,6 +501,28 @@ func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 	}
 }
 
+// assertCompiledClosureParamsDerivation pins that the shared compiled-closure
+// emitter derives its params_spec from function-signature-param facts and guards
+// the empty case, instead of a handwritten params_spec table.
+func assertCompiledClosureParamsDerivation(t *testing.T, cli string) {
+	t.Helper()
+	closureBody := selfhostKizuFunctionBody(t, cli, "fn append_compiled_closure_function(")
+	closureRequired := []string{
+		"var params_spec = std::string::String(std::mem::page_allocator());",
+		"defer params_spec.deinit();",
+		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name)",
+		"if params_spec.len() == 0 {",
+		"compiled closure: missing signature params",
+		"let params_spec_bytes = params_spec.as_bytes();",
+		"params_spec_bytes",
+	}
+	for _, fragment := range closureRequired {
+		if !strings.Contains(closureBody, fragment) {
+			t.Fatalf("compiled closure params derivation missing %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostLexerLoaderCompiledParamsSpecDerivedFromSignatures keeps the
 // selfhost::lexer and selfhost::source::loader compiled closures tied to
 // function-signature-param facts instead of handwritten params_spec tables. The
@@ -530,20 +552,21 @@ func TestSelfhostLexerLoaderCompiledParamsSpecDerivedFromSignatures(t *testing.T
 
 	loaderBody := selfhostKizuFunctionBody(t, cli, "fn append_loader_compiled_function(")
 	loaderRequired := []string{
-		"let function_name = try loader_compiled_qualified_name(local_name);",
-		"var params_spec = std::string::String(std::mem::page_allocator());",
-		"defer params_spec.deinit();",
-		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name)",
-		"if params_spec.len() == 0 {",
-		"loader compiled closure: missing signature params",
-		"let params_spec_bytes = params_spec.as_bytes();",
-		"params_spec_bytes",
+		"try append_component_qualified_name(",
+		"\"selfhost::source::loader::\",",
+		"let function_name_bytes = function_name.as_bytes();",
+		"try append_compiled_closure_function(out, ir_bytes, function_name_bytes);",
 	}
 	for _, fragment := range loaderRequired {
 		if !strings.Contains(loaderBody, fragment) {
-			t.Fatalf("loader compiled params derivation missing %q", fragment)
+			t.Fatalf("loader compiled function delegation missing %q", fragment)
 		}
 	}
+
+	// The shared compiled-closure emitter keeps the params_spec derived from
+	// function-signature-param facts and guards the empty case (every loader
+	// helper takes at least one parameter).
+	assertCompiledClosureParamsDerivation(t, cli)
 
 	forbidden := []string{
 		"fn lexer_compiled_params_spec(",
