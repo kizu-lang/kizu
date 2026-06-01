@@ -3977,7 +3977,7 @@ func (c *Checker) checkAstAddStmtMethod(
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
-	case "add_return", "add_defer", "add_expr_stmt":
+	case "add_return", "add_defer", "add_err_defer", "add_expr_stmt":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
@@ -5653,7 +5653,7 @@ func astNodeIDMethod(name string) bool {
 		"add_var_with_doc", "add_bool",
 		"add_prefix", "add_binary", "add_field_expr", "add_deref_expr", "add_call", "add_try_expr",
 		"add_comptime_expr", "add_block", "add_if", "add_let", "add_assign",
-		"add_return", "add_defer", "add_expr_stmt", "add_while", "add_for", "add_break",
+		"add_return", "add_defer", "add_err_defer", "add_expr_stmt", "add_while", "add_for", "add_break",
 		"add_continue", "add_program", "add_param", "add_import_decl", "add_field",
 		"add_field_with_doc", "add_struct_decl", "add_struct_decl_with_doc",
 		"add_enum_decl", "add_enum_decl_with_doc", "add_union_decl",

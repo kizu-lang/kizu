@@ -66,6 +66,7 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         Var => false,
         Return => false,
         Defer => false,
+        ErrDefer => false,
         If => false,
         Else => false,
         While => false,
@@ -131,6 +132,7 @@ fn dump_token(source: []u8, token: std::kizu::lexer::Token) -> !void {
         Var => print("Var");,
         Return => print("Return");,
         Defer => print("Defer");,
+        ErrDefer => print("ErrDefer");,
         If => print("If");,
         Else => print("Else");,
         While => print("While");,
@@ -219,6 +221,7 @@ var lexerParityTokenKinds = map[token.Type]string{
 	token.Var:         "Var",
 	token.Return:      "Return",
 	token.Defer:       "Defer",
+	token.ErrDefer:    "ErrDefer",
 	token.If:          "If",
 	token.Else:        "Else",
 	token.While:       "While",
@@ -398,6 +401,10 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 				"while y != true { break; continue; } for 0..3 |i| { print(i); } " +
 				"match x { Yes => print(\"yes\");, } @unsafe(ptr_read) { return; } " +
 				"comptime if 1 <= 2 { return; } }",
+		},
+		{
+			name:   "seed/errdefer_token",
+			source: "fn main() -> !void { defer release(); errdefer rollback(); }",
 		},
 		{name: "seed/operator_tokens", source: "a = b - c / d % e != f <= g > h >= i.x .. j | k => l"},
 		{name: "seed/multiline_string", source: "\\\\hello world"},
