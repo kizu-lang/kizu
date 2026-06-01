@@ -3967,25 +3967,11 @@ fn append_kizu_lexer_compiled_function(
     ir_bytes: []u8,
     local_name: []u8
 ) -> !void {
-    let function_name = try kizu_lexer_compiled_qualified_name(local_name);
-    var params_spec = std::string::String(std::mem::page_allocator());
-    defer params_spec.deinit();
-    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name);
-    if params_spec.len() == 0 {
-        return error("std lexer compiled closure: missing signature params");
-    }
-    let params_spec_bytes = params_spec.as_bytes();
-    var llvm_symbol = std::string::String(std::mem::page_allocator());
-    defer llvm_symbol.deinit();
-    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, function_name);
-    let llvm_symbol_bytes = llvm_symbol.as_bytes();
-    try compiled_llvm::append_compiled_function_auto(
-        out,
-        ir_bytes,
-        function_name,
-        llvm_symbol_bytes,
-        params_spec_bytes
-    );
+    var function_name = std::string::String(std::mem::page_allocator());
+    defer function_name.deinit();
+    try append_component_qualified_name(&var function_name, "std::kizu::lexer::", local_name);
+    let function_name_bytes = function_name.as_bytes();
+    try append_compiled_closure_function(out, ir_bytes, function_name_bytes);
     return;
 }
 
@@ -3994,18 +3980,31 @@ fn collect_kizu_lexer_compiled_callees(
     local_name: []u8,
     pending: &var std::array::Array<[]u8>
 ) -> !void {
-    let function_name = try kizu_lexer_compiled_qualified_name(local_name);
-    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var function_name = std::string::String(std::mem::page_allocator());
+    defer function_name.deinit();
+    try append_component_qualified_name(&var function_name, "std::kizu::lexer::", local_name);
+    let function_name_bytes = function_name.as_bytes();
+    try collect_kizu_lexer_compiled_body_callees(ir_bytes, function_name_bytes, pending);
+    return;
+}
+
+fn collect_kizu_lexer_compiled_body_callees(
+    ir_bytes: []u8,
+    function_name: &[]u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let name = function_name.*;
+    let count = try ir_contract::body_node_count(ir_bytes, name);
     var sequence = 0;
     while sequence < count {
-        let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+        let kind = try ir_contract::body_node_kind(ir_bytes, name, sequence);
         if std::mem::equal_bytes(kind, "Call") {
             let callee = try ir_contract::body_call_callee_or_empty(
                 ir_bytes,
-                function_name,
+                name,
                 sequence
             );
-            try collect_kizu_lexer_compiled_callee(callee, pending);
+            try collect_kizu_lexer_compiled_callee(ir_bytes, callee, pending);
         }
         sequence = sequence + 1;
     }
@@ -4013,6 +4012,7 @@ fn collect_kizu_lexer_compiled_callees(
 }
 
 fn collect_kizu_lexer_compiled_callee(
+    ir_bytes: []u8,
     callee: []u8,
     pending: &var std::array::Array<[]u8>
 ) -> !void {
@@ -4022,7 +4022,7 @@ fn collect_kizu_lexer_compiled_callee(
     if std::mem::starts_with(callee, "std::kizu::lexer::") {
         let prefix = "std::kizu::lexer::";
         let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
-        if !kizu_lexer_compiled_supported_local(local) {
+        if !component_compiled_local_present(ir_bytes, "std::kizu::lexer::", local) {
             return error("std lexer compiled closure: unsupported local helper");
         }
         try pending.append(local);
@@ -4031,90 +4031,11 @@ fn collect_kizu_lexer_compiled_callee(
     if std::mem::starts_with(callee, "std::kizu::") {
         return error("std lexer compiled closure: unsupported std callee");
     }
-    if kizu_lexer_compiled_supported_local(callee) {
+    if component_compiled_local_present(ir_bytes, "std::kizu::lexer::", callee) {
         try pending.append(callee);
         return;
     }
     return error("std lexer compiled closure: unsupported callee");
-}
-
-fn kizu_lexer_compiled_supported_local(name: []u8) -> bool {
-    return std::mem::equal_bytes(name, "position") or
-        std::mem::equal_bytes(name, "is_alpha") or
-        std::mem::equal_bytes(name, "is_digit") or
-        std::mem::equal_bytes(name, "is_word") or
-        std::mem::equal_bytes(name, "is_space") or
-        std::mem::equal_bytes(name, "advance_byte") or
-        std::mem::equal_bytes(name, "advance_position") or
-        std::mem::equal_bytes(name, "token") or
-        std::mem::equal_bytes(name, "attach_doc") or
-        std::mem::equal_bytes(name, "number_token") or
-        std::mem::equal_bytes(name, "string_token") or
-        std::mem::equal_bytes(name, "skip_line_comment") or
-        std::mem::equal_bytes(name, "is_doc_comment_start") or
-        std::mem::equal_bytes(name, "word_token") or
-        std::mem::equal_bytes(name, "raw_token_at") or
-        std::mem::equal_bytes(name, "token_at") or
-        std::mem::equal_bytes(name, "first_token") or
-        std::mem::equal_bytes(name, "next_token");
-}
-
-fn kizu_lexer_compiled_qualified_name(local_name: []u8) -> ![]u8 {
-    if std::mem::equal_bytes(local_name, "position") {
-        return "std::kizu::lexer::position";
-    }
-    if std::mem::equal_bytes(local_name, "is_alpha") {
-        return "std::kizu::lexer::is_alpha";
-    }
-    if std::mem::equal_bytes(local_name, "is_digit") {
-        return "std::kizu::lexer::is_digit";
-    }
-    if std::mem::equal_bytes(local_name, "is_word") {
-        return "std::kizu::lexer::is_word";
-    }
-    if std::mem::equal_bytes(local_name, "is_space") {
-        return "std::kizu::lexer::is_space";
-    }
-    if std::mem::equal_bytes(local_name, "advance_byte") {
-        return "std::kizu::lexer::advance_byte";
-    }
-    if std::mem::equal_bytes(local_name, "advance_position") {
-        return "std::kizu::lexer::advance_position";
-    }
-    if std::mem::equal_bytes(local_name, "token") {
-        return "std::kizu::lexer::token";
-    }
-    if std::mem::equal_bytes(local_name, "attach_doc") {
-        return "std::kizu::lexer::attach_doc";
-    }
-    if std::mem::equal_bytes(local_name, "number_token") {
-        return "std::kizu::lexer::number_token";
-    }
-    if std::mem::equal_bytes(local_name, "string_token") {
-        return "std::kizu::lexer::string_token";
-    }
-    if std::mem::equal_bytes(local_name, "skip_line_comment") {
-        return "std::kizu::lexer::skip_line_comment";
-    }
-    if std::mem::equal_bytes(local_name, "is_doc_comment_start") {
-        return "std::kizu::lexer::is_doc_comment_start";
-    }
-    if std::mem::equal_bytes(local_name, "word_token") {
-        return "std::kizu::lexer::word_token";
-    }
-    if std::mem::equal_bytes(local_name, "raw_token_at") {
-        return "std::kizu::lexer::raw_token_at";
-    }
-    if std::mem::equal_bytes(local_name, "token_at") {
-        return "std::kizu::lexer::token_at";
-    }
-    if std::mem::equal_bytes(local_name, "first_token") {
-        return "std::kizu::lexer::first_token";
-    }
-    if std::mem::equal_bytes(local_name, "next_token") {
-        return "std::kizu::lexer::next_token";
-    }
-    return error("std lexer compiled closure: unsupported local helper");
 }
 
 fn append_lexer_reachable_compiled_functions(

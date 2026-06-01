@@ -346,25 +346,47 @@ func TestSelfhostSourceClosureUsesComponentCatalog(t *testing.T) {
 }
 
 // TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
-// compiled closure params tied to function-signature-param facts.
+// compiled closure params tied to function-signature-param facts. The
+// append_kizu_lexer_compiled_function helper builds its fully qualified name
+// from the "std::kizu::lexer::" prefix plus the local name and delegates to
+// append_compiled_closure_function, which derives the params_spec from the IR
+// facts. The handwritten supported/qualified lookup tables are gone, and a
+// local helper is only treated as supported when its function-signature-return
+// fact actually exists, resolved through component_compiled_local_present.
 func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	abi := readSelfhostFile(t, "../../selfhost/src/backend/compiled_abi_params.kizu")
 	body := selfhostKizuFunctionBody(t, cli, "fn append_kizu_lexer_compiled_function(")
 	required := []string{
-		"import selfhost::backend::compiled_abi_params;",
-		"let function_name = try kizu_lexer_compiled_qualified_name(local_name);",
-		"var params_spec = std::string::String(std::mem::page_allocator());",
-		"defer params_spec.deinit();",
-		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name)",
-		"if params_spec.len() == 0 {",
-		"std lexer compiled closure: missing signature params",
-		"let params_spec_bytes = params_spec.as_bytes();",
-		"params_spec_bytes",
+		"try append_component_qualified_name(&var function_name, \"std::kizu::lexer::\", local_name);",
+		"let function_name_bytes = function_name.as_bytes();",
+		"try append_compiled_closure_function(out, ir_bytes, function_name_bytes);",
 	}
 	for _, fragment := range required {
-		if !strings.Contains(cli+body, fragment) {
-			t.Fatalf("std lexer compiled params derivation missing %q", fragment)
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("std lexer compiled function delegation missing %q", fragment)
+		}
+	}
+	if !strings.Contains(cli, "import selfhost::backend::compiled_abi_params;") {
+		t.Fatal("std lexer compiled params derivation missing ABI params import")
+	}
+	assertCompiledClosureParamsDerivation(t, cli)
+	removed := []string{
+		"fn kizu_lexer_compiled_supported_local(",
+		"fn kizu_lexer_compiled_qualified_name(",
+	}
+	for _, fragment := range removed {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("std lexer compiled closure keeps hand-written lookup %q", fragment)
+		}
+	}
+	callee := selfhostKizuFunctionBody(t, cli, "fn collect_kizu_lexer_compiled_callee(")
+	for _, fragment := range []string{
+		"if !component_compiled_local_present(ir_bytes, \"std::kizu::lexer::\", local) {",
+		"if component_compiled_local_present(ir_bytes, \"std::kizu::lexer::\", callee) {",
+	} {
+		if !strings.Contains(callee, fragment) {
+			t.Fatalf("collect_kizu_lexer_compiled_callee missing fact-based gate %q", fragment)
 		}
 	}
 	forbidden := []string{
@@ -389,10 +411,6 @@ func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 		if !strings.Contains(abi, fragment) {
 			t.Fatalf("compiled ABI params mapper missing %q", fragment)
 		}
-	}
-	supported := selfhostKizuFunctionBody(t, cli, "fn kizu_lexer_compiled_supported_local(")
-	if got := strings.Count(supported, "std::mem::equal_bytes(name, "); got != 18 {
-		t.Fatalf("std lexer compiled supported helper count changed: got %d, want 18", got)
 	}
 	reachable := selfhostKizuFunctionBody(t, cli, "fn append_kizu_lexer_reachable_compiled_functions(")
 	for _, seed := range []string{
