@@ -299,6 +299,58 @@ func TestSelfhostComponentFunctionCatalogAPI(t *testing.T) {
 	}
 }
 
+// assertSelfhostClosureUsesCommonCalleeCollector keeps the four closure paths
+// on the shared AST callee traversal helper.
+func assertSelfhostClosureUsesCommonCalleeCollector(
+	t *testing.T,
+	executableFunctions string,
+	closureBody string,
+	qualifiedPrefix string,
+	unsupportedCallForm string,
+	unsupportedQualifiedCallee string,
+) {
+	t.Helper()
+	requiredGlobal := []string{
+		"fn collect_catalog_closure_direct_callees(",
+		"fn collect_catalog_closure_call_callee(",
+		"fn collect_catalog_closure_var_callee(",
+		"fn collect_catalog_closure_qualified_callee(",
+		"component_function_catalog::find_local_function_index(catalog, callee_text)",
+		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
+		"std::mem::starts_with(callee_text, \"std::mem::\")",
+		"std::mem::starts_with(callee_text, qualified_prefix)",
+		"return error(unsupported_call_form_error);",
+		"return error(unsupported_qualified_callee_error);",
+	}
+	for _, fragment := range requiredGlobal {
+		if !strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("common closure callee collector missing %q", fragment)
+		}
+	}
+	requiredBody := []string{
+		"collect_catalog_closure_direct_callees(",
+		qualifiedPrefix,
+		unsupportedCallForm,
+		unsupportedQualifiedCallee,
+	}
+	for _, fragment := range requiredBody {
+		if !strings.Contains(closureBody, fragment) {
+			t.Fatalf("closure helper body missing common collector fragment %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"collect_source_",
+		"collect_loader_",
+		"collect_lexer_",
+		"collect_kizu_lexer_",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("common closure callee collector left old collector family %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostSourceClosureUsesComponentCatalog keeps source helper body closure
 // resolution tied to the AST-derived component function catalog.
 func TestSelfhostSourceClosureUsesComponentCatalog(t *testing.T) {
@@ -327,6 +379,14 @@ func TestSelfhostSourceClosureUsesComponentCatalog(t *testing.T) {
 			t.Fatalf("source closure catalog path missing %q", fragment)
 		}
 	}
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		executableFunctions,
+		sourceClosureBody,
+		"\"selfhost::source::\"",
+		"\"source closure: unsupported call form\"",
+		"\"source closure: unsupported qualified callee\"",
+	)
 	forbiddenGlobal := []string{
 		"fn source_closure_supported_local(",
 		"fn source_closure_qualified_name(",
@@ -377,6 +437,14 @@ func TestSelfhostLoaderClosureUsesComponentCatalog(t *testing.T) {
 			t.Fatalf("loader closure catalog path missing %q", fragment)
 		}
 	}
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		executableFunctions,
+		loaderClosureBody,
+		"\"selfhost::source::loader::\"",
+		"\"loader closure: unsupported call form\"",
+		"\"loader closure: unsupported qualified callee\"",
+	)
 	forbiddenGlobal := []string{
 		"fn loader_closure_supported_local(",
 		"fn loader_closure_qualified_name(",
@@ -425,6 +493,14 @@ func TestSelfhostStdLexerClosureUsesComponentCatalog(t *testing.T) {
 			t.Fatalf("std kizu lexer closure catalog path missing %q", fragment)
 		}
 	}
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		executableFunctions,
+		kizuLexerClosureBody,
+		"\"std::kizu::lexer::\"",
+		"\"std lexer closure: unsupported call form\"",
+		"\"std lexer closure: unsupported qualified callee\"",
+	)
 	forbiddenGlobal := []string{
 		"fn kizu_lexer_closure_supported_local(",
 		"fn kizu_lexer_closure_qualified_name(",
@@ -473,6 +549,14 @@ func TestSelfhostLexerClosureUsesComponentCatalog(t *testing.T) {
 			t.Fatalf("selfhost lexer closure catalog path missing %q", fragment)
 		}
 	}
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		executableFunctions,
+		lexerClosureBody,
+		"\"selfhost::lexer::\"",
+		"\"lexer closure: unsupported call form\"",
+		"\"lexer closure: unsupported qualified callee\"",
+	)
 	forbiddenGlobal := []string{
 		"fn lexer_closure_supported_local(",
 		"fn lexer_closure_qualified_name(",
