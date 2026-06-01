@@ -248,7 +248,7 @@ func selfhostCLIFrontendTestHappyCases(
 		{
 			name:    "test_temp_expect_ok",
 			args:    []string{"test", fixtures.expectOK},
-			wantOut: "exit-code\n0\n",
+			wantOut: "test: ok\nexit-code\n0\n",
 			wantFiles: selfhostTestArtifactExpectations(
 				fixtures.expectOK,
 				selfhostArtifactStem(fixtures.expectOK),
@@ -258,7 +258,7 @@ func selfhostCLIFrontendTestHappyCases(
 		{
 			name:    "test_temp_expect_void_ok",
 			args:    []string{"test", fixtures.expectVoidOK},
-			wantOut: "exit-code\n0\n",
+			wantOut: "test: ok\nexit-code\n0\n",
 			wantFiles: selfhostTestArtifactExpectations(
 				fixtures.expectVoidOK,
 				selfhostArtifactStem(fixtures.expectVoidOK),
@@ -268,7 +268,7 @@ func selfhostCLIFrontendTestHappyCases(
 		{
 			name:    "test_temp_expect_failure",
 			args:    []string{"test", fixtures.expectFail},
-			wantOut: "exit-code\n0\n",
+			wantOut: "error: runtime error: expected condition to be true\nexit-code\n1\n",
 			wantFiles: selfhostTestArtifactExpectations(
 				fixtures.expectFail,
 				selfhostArtifactStem(fixtures.expectFail),

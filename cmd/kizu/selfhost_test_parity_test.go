@@ -250,7 +250,14 @@ func linkTestParityExecutable(clang string, llPath string, exePath string) error
 	)
 }
 
-// linkTestParityExecutableWithHost links one emitted test artifact with a host runtime.
+// linkTestParityExecutableWithHost links one emitted test artifact with a host
+// runtime. The stage2/native compiled bounded test renderer (cli_test_llvm) emits
+// the `kizu_test_main` entry without a self-contained @main, so this links an
+// external main-providing C harness. (The checked-AST/interpreter renderer in
+// selfhost::backend::hosted now emits a self-contained @main, mirroring the run
+// artifact boundary, and is linked harness-free through link_run_artifact in the
+// public selfhost test path. Unifying the compiled renderer onto the same
+// self-contained boundary is tracked as remaining work in docs/selfhost-switch.md.)
 func linkTestParityExecutableWithHost(
 	clang string,
 	llPath string,
