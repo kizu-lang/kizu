@@ -4066,19 +4066,36 @@ fn append_lexer_compiled_function(
     ir_bytes: []u8,
     local_name: []u8
 ) -> !void {
-    let function_name = try lexer_compiled_qualified_name(local_name);
+    var function_name = std::string::String(std::mem::page_allocator());
+    defer function_name.deinit();
+    try append_component_qualified_name(&var function_name, "selfhost::lexer::", local_name);
+    let function_name_bytes = function_name.as_bytes();
+    try append_lexer_compiled_closure_member(out, ir_bytes, function_name_bytes);
+    return;
+}
+
+// append_lexer_compiled_closure_member mirrors append_compiled_closure_function
+// but tolerates an empty params_spec. The selfhost::lexer seed member
+// invalid_token_display is parameterless, so the shared helper's empty-params
+// guard would reject it; emitting it with an empty params_spec is correct here.
+fn append_lexer_compiled_closure_member(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: &[]u8
+) -> !void {
+    let name = function_name.*;
     var params_spec = std::string::String(std::mem::page_allocator());
     defer params_spec.deinit();
-    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name);
+    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name);
     let params_spec_bytes = params_spec.as_bytes();
     var llvm_symbol = std::string::String(std::mem::page_allocator());
     defer llvm_symbol.deinit();
-    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, function_name);
+    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, name);
     let llvm_symbol_bytes = llvm_symbol.as_bytes();
     try compiled_llvm::append_compiled_function_auto(
         out,
         ir_bytes,
-        function_name,
+        name,
         llvm_symbol_bytes,
         params_spec_bytes
     );
@@ -4090,18 +4107,31 @@ fn collect_lexer_compiled_callees(
     local_name: []u8,
     pending: &var std::array::Array<[]u8>
 ) -> !void {
-    let function_name = try lexer_compiled_qualified_name(local_name);
-    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var function_name = std::string::String(std::mem::page_allocator());
+    defer function_name.deinit();
+    try append_component_qualified_name(&var function_name, "selfhost::lexer::", local_name);
+    let function_name_bytes = function_name.as_bytes();
+    try collect_lexer_compiled_body_callees(ir_bytes, function_name_bytes, pending);
+    return;
+}
+
+fn collect_lexer_compiled_body_callees(
+    ir_bytes: []u8,
+    function_name: &[]u8,
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    let name = function_name.*;
+    let count = try ir_contract::body_node_count(ir_bytes, name);
     var sequence = 0;
     while sequence < count {
-        let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+        let kind = try ir_contract::body_node_kind(ir_bytes, name, sequence);
         if std::mem::equal_bytes(kind, "Call") {
             let callee = try ir_contract::body_call_callee_or_empty(
                 ir_bytes,
-                function_name,
+                name,
                 sequence
             );
-            try collect_lexer_compiled_callee(callee, pending);
+            try collect_lexer_compiled_callee(ir_bytes, callee, pending);
         }
         sequence = sequence + 1;
     }
@@ -4109,6 +4139,7 @@ fn collect_lexer_compiled_callees(
 }
 
 fn collect_lexer_compiled_callee(
+    ir_bytes: []u8,
     callee: []u8,
     pending: &var std::array::Array<[]u8>
 ) -> !void {
@@ -4118,7 +4149,7 @@ fn collect_lexer_compiled_callee(
     if std::mem::starts_with(callee, "selfhost::lexer::") {
         let prefix = "selfhost::lexer::";
         let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
-        if !lexer_compiled_supported_local(local) {
+        if !component_compiled_local_present(ir_bytes, "selfhost::lexer::", local) {
             return error("lexer compiled closure: unsupported local helper");
         }
         try pending.append(local);
@@ -4127,38 +4158,11 @@ fn collect_lexer_compiled_callee(
     if std::mem::starts_with(callee, "selfhost::") {
         return error("lexer compiled closure: unsupported selfhost callee");
     }
-    if lexer_compiled_supported_local(callee) {
+    if component_compiled_local_present(ir_bytes, "selfhost::lexer::", callee) {
         try pending.append(callee);
         return;
     }
     return error("lexer compiled closure: unsupported callee");
-}
-
-fn lexer_compiled_supported_local(name: []u8) -> bool {
-    return std::mem::equal_bytes(name, "is_digit") or
-        std::mem::equal_bytes(name, "is_alpha") or
-        std::mem::equal_bytes(name, "is_identifier_start") or
-        std::mem::equal_bytes(name, "is_identifier_continue") or
-        std::mem::equal_bytes(name, "invalid_token_display");
-}
-
-fn lexer_compiled_qualified_name(local_name: []u8) -> ![]u8 {
-    if std::mem::equal_bytes(local_name, "is_digit") {
-        return "selfhost::lexer::is_digit";
-    }
-    if std::mem::equal_bytes(local_name, "is_alpha") {
-        return "selfhost::lexer::is_alpha";
-    }
-    if std::mem::equal_bytes(local_name, "is_identifier_start") {
-        return "selfhost::lexer::is_identifier_start";
-    }
-    if std::mem::equal_bytes(local_name, "is_identifier_continue") {
-        return "selfhost::lexer::is_identifier_continue";
-    }
-    if std::mem::equal_bytes(local_name, "invalid_token_display") {
-        return "selfhost::lexer::invalid_token_display";
-    }
-    return error("lexer compiled closure: unsupported local helper");
 }
 
 fn append_loader_reachable_compiled_functions(
