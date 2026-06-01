@@ -3016,48 +3016,16 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     try cli_match_llvm::append_functions(out);
     try cli_test_ast_llvm::append_functions(out);
     try cli_test_llvm::append_functions(out, ir_bytes);
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::metadata_line",
-        "kizu_selfhost__ir_codegen_metadata_line",
-        ""
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::return_void_instruction",
-        "kizu_selfhost__ir_codegen_return_void_instruction",
-        ""
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::const_string_value",
-        "kizu_selfhost__ir_codegen_const_string_value",
-        "%kizu.slice.u8 name;%kizu.slice.u8 payload"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::const_string_instruction",
-        "kizu_selfhost__ir_codegen_const_string_instruction",
-        "%kizu.selfhost.codegen.value value"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::call_instruction",
-        "kizu_selfhost__ir_codegen_call_instruction",
-        "%kizu.slice.u8 callee;%kizu.selfhost.codegen.value argument"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::build_main_print_program",
-        "kizu_selfhost__ir_codegen_build_main_print_program",
-        "%kizu.slice.u8 payload;i1 from_codegen_lowering"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::lowered_main_print_program",
-        "kizu_selfhost__ir_codegen_lowered_main_print_program",
-        "%kizu.slice.u8 payload"
-    );
+    // The selfhost::ir::codegen Program builder / metadata / Value helper closure
+    // compiled into stage2: the const-string main-print Program builder and its
+    // lowered alias, the program-metadata line, the unsupported/none sentinels, and
+    // the Value / Instruction constructors that assemble the const-string program
+    // shape. The shared BFS walks the whole cluster from the four in-degree-zero
+    // roots (lowered_main_print_program / metadata_for_program / main_print_payload /
+    // unsupported_program) and derives each member's llvm symbol and params_spec from
+    // signature facts, so the cluster no longer needs a handwritten
+    // append_compiled_function_auto per helper.
+    try append_codegen_reachable_compiled_functions(out, ir_bytes);
     try compiled_llvm::append_compiled_function_auto(
         out, ir_bytes,
         "selfhost::ir::codegen::try_void_run_ast_supported",
@@ -3134,24 +3102,6 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "selfhost::ir::codegen::lower_run_parse_result",
         "kizu_selfhost__ir_codegen_lower_run_parse_result",
         "%kizu.slice.u8 text;%kizu.kizu.ast.parse_result parsed"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::unsupported_program",
-        "kizu_selfhost__ir_codegen_unsupported_program",
-        "%kizu.slice.u8 empty"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::none_value",
-        "kizu_selfhost__ir_codegen_none_value",
-        "%kizu.slice.u8 empty"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::main_print_payload",
-        "kizu_selfhost__ir_codegen_main_print_payload",
-        "%kizu.selfhost.codegen.program program"
     );
     try append_stdout_payload_function(out, ir_bytes);
     try append_program_supported_function(out, ir_bytes);
@@ -3519,12 +3469,6 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         out, ir_bytes,
         "selfhost::ir::codegen::lowered_program_supported",
         "kizu_selfhost__ir_codegen_lowered_program_supported",
-        "%kizu.selfhost.codegen.program program"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::metadata_for_program",
-        "kizu_selfhost__ir_codegen_metadata_for_program",
         "%kizu.selfhost.codegen.program program"
     );
     try append_lexer_reachable_compiled_functions(out, ir_bytes);
@@ -3913,6 +3857,40 @@ fn append_kizu_parser_reachable_compiled_functions(
         "std::kizu::parser::",
         &var pending,
         false
+    );
+    pending.deinit();
+    return;
+}
+
+// append_codegen_reachable_compiled_functions emits the selfhost::ir::codegen
+// Program builder / metadata / Value helper closure through the shared BFS. The
+// seeds are the four in-degree-zero cluster roots: lowered_main_print_program (the
+// const-string main-print builder alias), metadata_for_program (the program
+// metadata selector), main_print_payload (the program-shape Value reader), and
+// unsupported_program (the empty-program sentinel). The BFS pulls in the remaining
+// members through their body callees -- lowered_main_print_program reaches
+// build_main_print_program, which reaches const_string_value / const_string_instruction
+// / call_instruction / return_void_instruction; metadata_for_program reaches
+// metadata_line; main_print_payload reaches none_value and const_string_value. Each
+// member's llvm symbol and params_spec are derived from signature facts, so the
+// cluster no longer needs a handwritten append_compiled_function_auto per helper.
+// allow_empty_params is set because the parameterless members metadata_line and
+// return_void_instruction derive an empty params_spec from their zero-arg signatures.
+fn append_codegen_reachable_compiled_functions(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("lowered_main_print_program");
+    try pending.append("metadata_for_program");
+    try pending.append("main_print_payload");
+    try pending.append("unsupported_program");
+    try append_component_reachable_compiled_functions(
+        out,
+        ir_bytes,
+        "selfhost::ir::codegen::",
+        &var pending,
+        true
     );
     pending.deinit();
     return;
