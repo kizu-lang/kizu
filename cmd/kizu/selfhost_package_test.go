@@ -729,6 +729,7 @@ func TestSelfhostExecutableHelperClosureUsesComponentCatalog(t *testing.T) {
 	seedRequired := []string{
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::backend::executable\"",
+		"component_function_catalog::find_local_function_index(catalog, \"lower_test_executable\")",
 		"component_function_catalog::find_local_function_index(catalog, \"is_empty_node\")",
 		"component_function_catalog::find_local_function_index(catalog, \"unsupported_executable\")",
 		"component_function_catalog::find_local_function_index(catalog, \"ast_node_text\")",
@@ -744,10 +745,11 @@ func TestSelfhostExecutableHelperClosureUsesComponentCatalog(t *testing.T) {
 		t.Fatal("executable helper body facts keep hand-written helper body selection")
 	}
 	closureRequired := []string{
+		"component_function_catalog::local_function_name(catalog, function_index)",
 		"component_function_catalog::function_node_id(",
 		"function_signature::append_catalog(",
 		"executable_body::append_catalog_helper_body_ir(",
-		"\"checked-executable-shared-helper\"",
+		"executable_closure_role(local_name)",
 	}
 	for _, fragment := range closureRequired {
 		if !strings.Contains(helperClosureBody, fragment) {
@@ -757,6 +759,7 @@ func TestSelfhostExecutableHelperClosureUsesComponentCatalog(t *testing.T) {
 	if strings.Contains(helperClosureBody, "try function_node(text, ast, root, local_name)") {
 		t.Fatal("executable helper closure keeps handwritten function_node lookup")
 	}
+	assertExecutableClosureRoleMapping(t, executableFunctions)
 	assertSelfhostClosureUsesCommonCalleeCollector(
 		t,
 		executableFunctions,
@@ -765,15 +768,56 @@ func TestSelfhostExecutableHelperClosureUsesComponentCatalog(t *testing.T) {
 		"\"executable helper closure: unsupported call form\"",
 		"\"executable helper closure: unsupported qualified callee\"",
 	)
-	// is_empty_node / ast_node_text bind their node via the read-only ast.get
-	// accessor, so the external callee allowlist must admit it for this prefix
-	// without widening to a broad std::kizu:: / selfhost:: match.
+	assertExecutableClosureExternalCalleePolicy(t, executableFunctions, policyBody)
+}
+
+// assertExecutableClosureRoleMapping keeps the wrapper on its checked-test-wrapper
+// role while shared helpers keep the checked-executable-shared-helper role, both
+// resolved through the role mapping rather than the hand-written
+// append_selected_function_with_body call.
+func assertExecutableClosureRoleMapping(t *testing.T, executableFunctions string) {
+	t.Helper()
+	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn executable_closure_role(")
 	for _, fragment := range []string{
-		"std::mem::equal_bytes(qualified_prefix, \"selfhost::backend::executable::\")",
-		"std::mem::equal_bytes(callee_text, \"ast.get\")",
+		"std::mem::equal_bytes(local_name, \"lower_test_executable\")",
+		"\"checked-test-wrapper\"",
+		"\"checked-executable-shared-helper\"",
 	} {
-		if !strings.Contains(policyBody, fragment) {
-			t.Fatalf("executable helper external accessor policy missing %q", fragment)
+		if !strings.Contains(roleBody, fragment) {
+			t.Fatalf("executable closure role mapping missing %q", fragment)
+		}
+	}
+}
+
+// assertExecutableClosureExternalCalleePolicy keeps the executable prefix
+// delegating to the dedicated allowlist, which admits the read-only ast.get
+// accessor and the executable_lowering module boundary callee explicitly without
+// widening to a broad std::kizu:: / selfhost:: fallback.
+func assertExecutableClosureExternalCalleePolicy(
+	t *testing.T,
+	executableFunctions string,
+	policyBody string,
+) {
+	t.Helper()
+	prefixBranch := "std::mem::equal_bytes(qualified_prefix, " +
+		"\"selfhost::backend::executable::\")"
+	if !strings.Contains(policyBody, prefixBranch) {
+		t.Fatal("executable helper external accessor policy missing prefix branch")
+	}
+	if !strings.Contains(policyBody, "executable_closure_external_callee_allowed(callee_text)") {
+		t.Fatal("executable prefix does not delegate to the executable closure allowlist")
+	}
+	executablePolicyBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn executable_closure_external_callee_allowed(",
+	)
+	for _, fragment := range []string{
+		"std::mem::equal_bytes(callee_text, \"ast.get\")",
+		"std::mem::equal_bytes(callee_text, \"executable_lowering::lower_test_executable\")",
+	} {
+		if !strings.Contains(executablePolicyBody, fragment) {
+			t.Fatalf("executable closure allowlist missing %q", fragment)
 		}
 	}
 }
@@ -2994,6 +3038,10 @@ func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm str
 			assertCodegenCatalogSignatureOrigin(t, selected, fact)
 			return
 		}
+		if strings.HasPrefix(name, "selfhost::backend::executable::") {
+			assertExecutableCatalogSignatureOrigin(t, selected, fact)
+			return
+		}
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("function signature emitter does not publish %q via %q", fact, fragment)
 		}
@@ -3012,6 +3060,23 @@ func assertCodegenCatalogSignatureOrigin(t *testing.T, selected string, fact str
 	} {
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("codegen signature fact %q is not catalog-derived via %q", fact, fragment)
+		}
+	}
+}
+
+// assertExecutableCatalogSignatureOrigin keeps the executable wrapper/helper
+// signature facts derived from the component catalog closure instead of
+// per-function qualified-name literals.
+func assertExecutableCatalogSignatureOrigin(t *testing.T, selected string, fact string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::backend::executable\"",
+		"append_executable_helper_body_facts(",
+		"function_signature::append_catalog(",
+	} {
+		if !strings.Contains(selected, fragment) {
+			t.Fatalf("executable signature fact %q is not catalog-derived via %q", fact, fragment)
 		}
 	}
 }
@@ -3128,6 +3193,7 @@ func assertExecutableHelperBodyFactsAreCatalogDriven(t *testing.T, selected stri
 	for _, fragment := range []string{
 		"component_function_catalog::collect_from_ast(",
 		`"selfhost::backend::executable"`,
+		`component_function_catalog::find_local_function_index(catalog, "lower_test_executable")`,
 		`component_function_catalog::find_local_function_index(catalog, "is_empty_node")`,
 		`component_function_catalog::find_local_function_index(catalog, "unsupported_executable")`,
 		`component_function_catalog::find_local_function_index(catalog, "ast_node_text")`,
@@ -3137,6 +3203,10 @@ func assertExecutableHelperBodyFactsAreCatalogDriven(t *testing.T, selected stri
 		if !strings.Contains(helperFactsBody, fragment) {
 			t.Fatalf("executable helper body facts no longer catalog-driven, missing %q", fragment)
 		}
+	}
+	// The wrapper must no longer be hand-selected through append_selected_function_with_body.
+	if strings.Contains(helperFactsBody, "append_selected_function_with_body(") {
+		t.Fatal("executable function body facts keep hand-written wrapper selection")
 	}
 	if strings.Contains(helperFactsBody, "append_selected_helper_body(") {
 		t.Fatal("executable helper body facts reverted to hand-written append_selected_helper_body")

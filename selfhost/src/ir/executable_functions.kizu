@@ -1640,7 +1640,7 @@ fn collect_catalog_closure_external_callee_allowed(
         return codegen_closure_external_callee_allowed(callee_text);
     }
     if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::executable::") {
-        return std::mem::equal_bytes(callee_text, "ast.get");
+        return executable_closure_external_callee_allowed(callee_text);
     }
     if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::hosted::") {
         return hosted_closure_external_callee_allowed(callee_text);
@@ -1650,6 +1650,18 @@ fn collect_catalog_closure_external_callee_allowed(
     }
     return std::mem::equal_bytes(callee_text, "tree.get") or
         std::mem::equal_bytes(callee_text, "tree.child_at");
+}
+
+// executable_closure_external_callee_allowed enumerates the executable_lowering
+// module boundary callees the selected executable closure is allowed to cross
+// without emitting their bodies. lower_test_executable delegates to
+// executable_lowering::lower_test_executable, whose body facts are owned by the
+// executable lowering IR rather than this backend closure. Anything outside this
+// explicit allowlist falls through to the shared collector's qualified-callee
+// error instead of being silently dropped.
+fn executable_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "ast.get") or
+        std::mem::equal_bytes(callee_text, "executable_lowering::lower_test_executable");
 }
 
 // hosted_closure_external_callee_allowed enumerates the codegen module boundary
@@ -2479,16 +2491,6 @@ fn append_executable_function_facts(
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
 
-    try append_selected_function_with_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_test_executable",
-        "selfhost::backend::executable::lower_test_executable",
-        "checked-test-wrapper"
-    );
-
     try append_executable_helper_body_facts(allocator, out, file.text, parsed.ast, parsed.root);
     return;
 }
@@ -2511,6 +2513,7 @@ fn append_executable_helper_body_facts(
 
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "lower_test_executable"));
     try pending.append(try component_function_catalog::find_local_function_index(catalog, "is_empty_node"));
     try pending.append(try component_function_catalog::find_local_function_index(catalog, "unsupported_executable"));
     try pending.append(try component_function_catalog::find_local_function_index(catalog, "ast_node_text"));
@@ -2543,6 +2546,7 @@ fn append_executable_helper_closure_body(
     function_index: i64,
     pending: &var std::array::Array<i64>
 ) -> !void {
+    let local_name = try component_function_catalog::local_function_name(catalog, function_index);
     let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
     try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
     let body = try function_body_from_node(ast, function_node_id);
@@ -2552,7 +2556,7 @@ fn append_executable_helper_closure_body(
         ast,
         catalog,
         function_index,
-        "checked-executable-shared-helper",
+        executable_closure_role(local_name),
         body
     );
     try collect_catalog_closure_direct_callees(
@@ -2566,6 +2570,17 @@ fn append_executable_helper_closure_body(
         "executable helper closure: unsupported qualified callee"
     );
     return;
+}
+
+// executable_closure_role keeps the catalog-driven executable closure on the
+// same body-fact roles the hand-written selection used: lower_test_executable
+// stays the checked-test-wrapper entry while the shared helpers keep the
+// checked-executable-shared-helper role.
+fn executable_closure_role(local_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(local_name, "lower_test_executable") {
+        return "checked-test-wrapper";
+    }
+    return "checked-executable-shared-helper";
 }
 
 fn append_hosted_function_facts(
