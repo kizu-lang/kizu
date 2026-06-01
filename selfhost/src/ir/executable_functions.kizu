@@ -1608,6 +1608,9 @@ fn collect_catalog_closure_call_callee(
     if std::mem::starts_with(callee_text, "std::mem::") {
         return;
     }
+    if std::mem::equal_bytes(callee_text, "error") {
+        return;
+    }
     if collect_catalog_closure_external_callee_allowed(callee_text, qualified_prefix) {
         return;
     }
@@ -1629,11 +1632,44 @@ fn collect_catalog_closure_external_callee_allowed(
     if std::mem::equal_bytes(qualified_prefix, "std::kizu::parser::") {
         return std::mem::equal_bytes(callee_text, "ast.get");
     }
+    if std::mem::equal_bytes(qualified_prefix, "selfhost::ir::codegen::") {
+        return codegen_closure_external_callee_allowed(callee_text);
+    }
     if !std::mem::equal_bytes(qualified_prefix, "selfhost::ast::") {
         return false;
     }
     return std::mem::equal_bytes(callee_text, "tree.get") or
         std::mem::equal_bytes(callee_text, "tree.child_at");
+}
+
+fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    if std::mem::equal_bytes(callee_text, "ast.get") {
+        return true;
+    }
+    if std::mem::equal_bytes(callee_text, "ast.child_at") {
+        return true;
+    }
+    if std::mem::starts_with(callee_text, "std::kizu::ast::binary_") {
+        return codegen_closure_binary_op_accessor_allowed(callee_text);
+    }
+    // lower_run_int_program is documented in codegen.kizu as outside the selected
+    // stage2 IR body-fact set because it depends on mutable String scratch APIs.
+    return std::mem::equal_bytes(callee_text, "lower_run_int_program");
+}
+
+fn codegen_closure_binary_op_accessor_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_add") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_sub") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_mul") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_div") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_eq") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_not_eq") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_lt") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_lte") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_gt") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_gte") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_and") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_or");
 }
 
 fn collect_catalog_closure_var_callee(
@@ -1845,6 +1881,14 @@ fn append_codegen_function_facts(
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "selfhost::ir::codegen"
+    );
+    defer catalog.deinit();
 
     try append_selected_enum_variant_facts(
         out,
@@ -1958,6 +2002,14 @@ fn append_codegen_function_facts(
         "RunAst",
         "selfhost::ir::codegen::RunAst"
     );
+    try append_selected_struct_field_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "FsReadBinding",
+        "selfhost::ir::codegen::FsReadBinding"
+    );
     // IntEnv carries the program's top-level declarations as a real
     // std::kizu::ast::ChildRange (tracker 961). Emitting its struct fields plus
     // the ChildRange type-llvm mapping is the first read-only AST value type
@@ -1977,6 +2029,7 @@ fn append_codegen_function_facts(
     try append_type_llvm_fact(out, "selfhost::ir::codegen::CodegenFunction", "%kizu.selfhost.codegen.function");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::Program", "%kizu.selfhost.codegen.program");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::RunAst", "%kizu.selfhost.codegen.run_ast");
+    try append_type_llvm_fact(out, "selfhost::ir::codegen::FsReadBinding", "%kizu.selfhost.codegen.fs_read_binding");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::LocalBinding", "%kizu.selfhost.codegen.local_binding");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::LocalTable", "%kizu.selfhost.codegen.local_table");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::PayloadSpan", "%kizu.selfhost.codegen.payload_span");
@@ -1984,740 +2037,147 @@ fn append_codegen_function_facts(
     try append_type_llvm_fact(out, "selfhost::ir::codegen::IntEnv", "%kizu.selfhost.codegen.int_env");
     try append_stdlib_symbol_fact(out, "std::mem::equal_bytes", "kizu_selfhost__slice_equal", "bool");
     try append_stdlib_symbol_fact(out, "std::mem::len", "kizu_selfhost__slice_len", "i64");
-    try append_selected_function_with_body(
+    try append_codegen_reachable_helper_bodies(
         out,
         file.text,
         parsed.ast,
-        parsed.root,
-        "lower_run_program",
-        "selfhost::ir::codegen::lower_run_program",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_run_parse_result",
-        "selfhost::ir::codegen::lower_run_parse_result",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_run_ast",
-        "selfhost::ir::codegen::lower_run_ast",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_run_ast_declarations",
-        "selfhost::ir::codegen::lower_run_ast_declarations",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_run_ast_function",
-        "selfhost::ir::codegen::lower_run_ast_function",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_run_ast_block",
-        "selfhost::ir::codegen::lower_run_ast_block",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_let_binding",
-        "selfhost::ir::codegen::lower_let_binding",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_print_statement",
-        "selfhost::ir::codegen::lower_print_statement",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_print_call",
-        "selfhost::ir::codegen::lower_print_call",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_print_i64_call",
-        "selfhost::ir::codegen::lower_print_i64_call",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_direct_i64_print_call",
-        "selfhost::ir::codegen::lower_direct_i64_print_call",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "call_arg_i64_literal",
-        "selfhost::ir::codegen::call_arg_i64_literal",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "find_i64_binary_function",
-        "selfhost::ir::codegen::find_i64_binary_function",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_i64_function_node",
-        "selfhost::ir::codegen::lower_i64_function_node",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_i64_function_decl",
-        "selfhost::ir::codegen::lower_i64_function_decl",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_i64_function_block",
-        "selfhost::ir::codegen::lower_i64_function_block",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_i64_return_expr",
-        "selfhost::ir::codegen::lower_i64_return_expr",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_i64_return_binary",
-        "selfhost::ir::codegen::lower_i64_return_binary",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "node_text_is_var",
-        "selfhost::ir::codegen::node_text_is_var",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "param_i64_name",
-        "selfhost::ir::codegen::param_i64_name",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "param_name_if_i64",
-        "selfhost::ir::codegen::param_name_if_i64",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "type_node_is_i64",
-        "selfhost::ir::codegen::type_node_is_i64",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "run_binary_op",
-        "selfhost::ir::codegen::run_binary_op",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_run_ast_to_program",
-        "selfhost::ir::codegen::lower_run_ast_to_program",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "try_void_run_ast_supported",
-        "selfhost::ir::codegen::try_void_run_ast_supported",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "fs_read_run_ast_supported",
-        "selfhost::ir::codegen::fs_read_run_ast_supported",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "run_ast_supported",
-        "selfhost::ir::codegen::run_ast_supported",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "run_ast_i64_call_supported",
-        "selfhost::ir::codegen::run_ast_i64_call_supported",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "print_run_ast",
-        "selfhost::ir::codegen::print_run_ast",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "return_void_run_ast",
-        "selfhost::ir::codegen::return_void_run_ast",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "try_void_run_ast",
-        "selfhost::ir::codegen::try_void_run_ast",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "fs_read_run_ast",
-        "selfhost::ir::codegen::fs_read_run_ast",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "i64_call_run_ast",
-        "selfhost::ir::codegen::i64_call_run_ast",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lowered_i64_call_program",
-        "selfhost::ir::codegen::lowered_i64_call_program",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "print_payload",
-        "selfhost::ir::codegen::print_payload",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "string_literal_span",
-        "selfhost::ir::codegen::string_literal_span",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "is_empty_node",
-        "selfhost::ir::codegen::is_empty_node",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "type_node_is_error_union_void",
-        "selfhost::ir::codegen::type_node_is_error_union_void",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_call_callee",
-        "selfhost::ir::codegen::try_void_call_callee",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_value_callee",
-        "selfhost::ir::codegen::try_void_value_callee",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_expr_callee",
-        "selfhost::ir::codegen::try_void_expr_callee",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_statement_callee",
-        "selfhost::ir::codegen::try_void_statement_callee",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "return_void_statement_ok",
-        "selfhost::ir::codegen::return_void_statement_ok",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "print_call_payload",
-        "selfhost::ir::codegen::print_call_payload",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "print_expr_payload",
-        "selfhost::ir::codegen::print_expr_payload",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "print_statement_payload",
-        "selfhost::ir::codegen::print_statement_payload",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "error_void_call_exit_code",
-        "selfhost::ir::codegen::error_void_call_exit_code",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "error_void_return_exit_code",
-        "selfhost::ir::codegen::error_void_return_exit_code",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_return_exit_code",
-        "selfhost::ir::codegen::try_void_return_exit_code",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_helper_block_exit_code",
-        "selfhost::ir::codegen::try_void_helper_block_exit_code",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_helper_decl_exit_code",
-        "selfhost::ir::codegen::try_void_helper_decl_exit_code",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_helper_function_exit_code",
-        "selfhost::ir::codegen::try_void_helper_function_exit_code",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "try_void_helper_exit_code",
-        "selfhost::ir::codegen::try_void_helper_exit_code",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "lower_try_void_block",
-        "selfhost::ir::codegen::lower_try_void_block",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "local_table_contains",
-        "selfhost::ir::codegen::local_table_contains",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "empty_payload_span",
-        "selfhost::ir::codegen::empty_payload_span",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "empty_local",
-        "selfhost::ir::codegen::empty_local",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "local_payload_span",
-        "selfhost::ir::codegen::local_payload_span",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "empty_local_table",
-        "selfhost::ir::codegen::empty_local_table",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "insert_local",
-        "selfhost::ir::codegen::insert_local",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "is_payload_supported",
-        "selfhost::ir::codegen::is_payload_supported",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "empty_int_env",
-        "selfhost::ir::codegen::empty_int_env",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "main_print_program",
-        "selfhost::ir::codegen::main_print_program",
-        "checked-run-codegen-builder"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lowered_return_void_program",
-        "selfhost::ir::codegen::lowered_return_void_program",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lowered_try_void_program",
-        "selfhost::ir::codegen::lowered_try_void_program",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lowered_fs_read_program",
-        "selfhost::ir::codegen::lowered_fs_read_program",
-        "checked-run-codegen-lowering"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lowered_main_print_program",
-        "selfhost::ir::codegen::lowered_main_print_program",
-        "checked-run-codegen-builder"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "build_main_print_program",
-        "selfhost::ir::codegen::build_main_print_program",
-        "checked-run-codegen-builder"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "const_string_value",
-        "selfhost::ir::codegen::const_string_value",
-        "checked-run-codegen-builder"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "const_string_instruction",
-        "selfhost::ir::codegen::const_string_instruction",
-        "checked-run-codegen-builder"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "call_instruction",
-        "selfhost::ir::codegen::call_instruction",
-        "checked-run-codegen-builder"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "return_void_instruction",
-        "selfhost::ir::codegen::return_void_instruction",
-        "checked-run-codegen-builder"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "program_supported",
-        "selfhost::ir::codegen::program_supported",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "i64_call_program_supported",
-        "selfhost::ir::codegen::i64_call_program_supported",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "return_void_program_supported",
-        "selfhost::ir::codegen::return_void_program_supported",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "try_void_program_supported",
-        "selfhost::ir::codegen::try_void_program_supported",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "fs_read_program_supported",
-        "selfhost::ir::codegen::fs_read_program_supported",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lowered_program_supported",
-        "selfhost::ir::codegen::lowered_program_supported",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "require_lowered_main_print",
-        "selfhost::ir::codegen::require_lowered_main_print",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "stdout_payload",
-        "selfhost::ir::codegen::stdout_payload",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "metadata_for_program",
-        "selfhost::ir::codegen::metadata_for_program",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "metadata_line",
-        "selfhost::ir::codegen::metadata_line",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "main_print_payload",
-        "selfhost::ir::codegen::main_print_payload",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "unsupported_program",
-        "selfhost::ir::codegen::unsupported_program",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "none_value",
-        "selfhost::ir::codegen::none_value",
-        "checked-run-codegen-consumer"
-    );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "unsupported_run_ast",
-        "selfhost::ir::codegen::unsupported_run_ast",
-        "checked-run-codegen-consumer"
-    );
-    // ast_node_text is the span-based text slicing accessor the run-codegen AST traversal
-    // depends on (tracker 961): it binds an AstNode via Ast.get, slices the source text by the
-    // node's span, and trims the slice via std::mem::trim_ascii. It is registered in the codegen
-    // module so the run path's recursive callee symbol resolves once the scanner is removed.
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "ast_node_text",
-        "selfhost::ir::codegen::ast_node_text",
-        "checked-text-accessor"
+        &catalog
     );
     return;
+}
+
+fn append_codegen_reachable_helper_bodies(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog
+) -> !void {
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try append_codegen_closure_seed(&var pending, catalog, "lower_run_program");
+    try append_codegen_closure_seed(&var pending, catalog, "lower_run_parse_result");
+    try append_codegen_closure_seed(&var pending, catalog, "lower_run_ast");
+    try append_codegen_closure_seed(&var pending, catalog, "main_print_program");
+    try append_codegen_closure_seed(&var pending, catalog, "unsupported_program");
+    try append_codegen_closure_seed(&var pending, catalog, "program_supported");
+    try append_codegen_closure_seed(&var pending, catalog, "lowered_program_supported");
+    try append_codegen_closure_seed(&var pending, catalog, "require_main_print");
+    try append_codegen_closure_seed(&var pending, catalog, "require_lowered_main_print");
+    try append_codegen_closure_seed(&var pending, catalog, "stdout_payload");
+    try append_codegen_closure_seed(&var pending, catalog, "fs_read_program_supported");
+    try append_codegen_closure_seed(&var pending, catalog, "i64_call_program_supported");
+    try append_codegen_closure_seed(&var pending, catalog, "return_void_program_supported");
+    try append_codegen_closure_seed(&var pending, catalog, "try_void_program_supported");
+    try append_codegen_closure_seed(&var pending, catalog, "loop_i64_program_supported");
+    try append_codegen_closure_seed(&var pending, catalog, "metadata_for_program");
+    try append_codegen_closure_seed(&var pending, catalog, "metadata_line");
+    // empty_int_env is a direct stage2 backend root: cli_llvm compiles it to keep
+    // std::kizu::ast::ChildRange value-type ABI coverage, while lower_run_int_program
+    // itself stays outside the selected body-fact set.
+    try append_codegen_closure_seed(&var pending, catalog, "empty_int_env");
+    var index = 0;
+    while index < pending.len() {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
+            try append_codegen_closure_helper_body(
+                out,
+                text,
+                ast,
+                catalog,
+                function_index,
+                &var pending
+            );
+            try emitted.append(function_index);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_codegen_closure_seed(
+    pending: &var std::array::Array<i64>,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    local_name: []u8
+) -> !void {
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, local_name));
+    return;
+}
+
+fn append_codegen_closure_helper_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_catalog_helper_body_ir(
+        out,
+        text,
+        ast,
+        catalog,
+        function_index,
+        codegen_closure_role(local_name),
+        body
+    );
+    try collect_catalog_closure_direct_callees(
+        text,
+        ast,
+        body,
+        catalog,
+        pending,
+        "selfhost::ir::codegen::",
+        "codegen closure: unsupported call form",
+        "codegen closure: unsupported qualified callee"
+    );
+    return;
+}
+
+fn codegen_closure_role(local_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(local_name, "ast_node_text") {
+        return "checked-text-accessor";
+    }
+    if codegen_closure_builder_role(local_name) {
+        return "checked-run-codegen-builder";
+    }
+    if codegen_closure_consumer_role(local_name) {
+        return "checked-run-codegen-consumer";
+    }
+    return "checked-run-codegen-lowering";
+}
+
+fn codegen_closure_builder_role(local_name: []u8) -> bool {
+    return std::mem::equal_bytes(local_name, "main_print_program") or
+        std::mem::equal_bytes(local_name, "lowered_main_print_program") or
+        std::mem::equal_bytes(local_name, "build_main_print_program") or
+        std::mem::equal_bytes(local_name, "const_string_value") or
+        std::mem::equal_bytes(local_name, "const_string_instruction") or
+        std::mem::equal_bytes(local_name, "call_instruction") or
+        std::mem::equal_bytes(local_name, "return_void_instruction");
+}
+
+fn codegen_closure_consumer_role(local_name: []u8) -> bool {
+    return std::mem::equal_bytes(local_name, "program_supported") or
+        std::mem::equal_bytes(local_name, "i64_call_program_supported") or
+        std::mem::equal_bytes(local_name, "return_void_program_supported") or
+        std::mem::equal_bytes(local_name, "try_void_program_supported") or
+        std::mem::equal_bytes(local_name, "loop_i64_program_supported") or
+        std::mem::equal_bytes(local_name, "fs_read_program_supported") or
+        std::mem::equal_bytes(local_name, "lowered_program_supported") or
+        std::mem::equal_bytes(local_name, "require_main_print") or
+        std::mem::equal_bytes(local_name, "require_lowered_main_print") or
+        std::mem::equal_bytes(local_name, "stdout_payload") or
+        std::mem::equal_bytes(local_name, "metadata_for_program") or
+        std::mem::equal_bytes(local_name, "metadata_line") or
+        std::mem::equal_bytes(local_name, "main_print_payload") or
+        std::mem::equal_bytes(local_name, "unsupported_program") or
+        std::mem::equal_bytes(local_name, "none_value");
 }
 
 fn append_selected_enum_variant_facts(

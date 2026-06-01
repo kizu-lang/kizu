@@ -2490,10 +2490,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"enum-variant ",
 		"InstructionKind",
 		"function_signature::append(",
-		"selfhost::ir::codegen::const_string_value",
-		"selfhost::ir::codegen::const_string_instruction",
-		"selfhost::ir::codegen::call_instruction",
-		"selfhost::ir::codegen::return_void_instruction",
+		"fn append_codegen_reachable_helper_bodies(",
+		"fn append_codegen_closure_helper_body(",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
 		"fn append_selected_function_with_body(",
 		"fn function_node(",
 		"executable_body::append_function_body_ir(",
@@ -2916,8 +2916,28 @@ func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm str
 		`"` + parts[0] + ` "`,
 		`"` + name + `"`,
 	} {
+		if strings.HasPrefix(name, "selfhost::ir::codegen::") {
+			assertCodegenCatalogSignatureOrigin(t, selected, fact)
+			return
+		}
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("function signature emitter does not publish %q via %q", fact, fragment)
+		}
+	}
+}
+
+// assertCodegenCatalogSignatureOrigin keeps codegen signature facts derived from
+// the component catalog closure instead of per-helper qualified-name literals.
+func assertCodegenCatalogSignatureOrigin(t *testing.T, selected string, fact string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::ir::codegen\"",
+		"append_codegen_reachable_helper_bodies(",
+		"function_signature::append_catalog(",
+	} {
+		if !strings.Contains(selected, fragment) {
+			t.Fatalf("codegen signature fact %q is not catalog-derived via %q", fact, fragment)
 		}
 	}
 }
