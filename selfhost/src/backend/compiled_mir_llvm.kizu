@@ -752,10 +752,11 @@ fn append_string_token_globals(stmt: &compiled_mir::MirStringTokenStmt) -> !void
     return;
 }
 
-// append_multi_string_token renders string_token(source, start, current): an i64 end phi seeded
-// from start + 1 that scans forward while source[end] is not the closing quote (byte 34), then
-// builds the String Token spanning the closing quote (end + 1) when the run was terminated in
-// bounds or the raw run (end) otherwise (tracker 961, scope 4 prerequisite). len(source) is the
+// append_multi_string_token renders string_token(source, start, current): quoted strings scan to
+// the closing quote, and double-slash multiline strings scan line-by-line through indented
+// continuations.
+// Both paths build the String Token directly, matching std/src/kizu/lexer.kizu while keeping the
+// selected stage2 helper set unchanged (tracker 961, scope 4 prerequisite). len(source) is the
 // slice length field read inline as extractvalue field 1.
 fn append_multi_string_token(
     out: &var std::string::String,
@@ -767,13 +768,36 @@ fn append_multi_string_token(
     try out.append_bytes("  %st_source_ptr = extractvalue %kizu.slice.u8 %");
     try out.append_bytes(stmt.source_name);
     try append_ll_line(out, ", 0");
-    try out.append_bytes("  %st_init = add i64 %");
+    try out.append_bytes("  %st_start_next = add i64 %");
     try out.append_bytes(stmt.start_name);
     try append_ll_line(out, ", 1");
-    try append_ll_line(out, "  br label %st_head");
-    try append_ll_line(out, "st_head:");
+    try append_ll_line(out, "  %st_has_next = icmp slt i64 %st_start_next, %st_length");
     try append_ll_line(out,
-        "  %st_end = phi i64 [ %st_init, %entry ], [ %st_next, %st_body ]");
+        "  br i1 %st_has_next, label %st_check_multiline_pair, label %st_head");
+    try append_ll_line(out, "st_check_multiline_pair:");
+    try out.append_bytes("  %st_first_ptr = getelementptr i8, ptr %st_source_ptr, i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, "");
+    try append_ll_line(out, "  %st_first_byte = load i8, ptr %st_first_ptr");
+    try append_ll_line(out, "  %st_first_bs = icmp eq i8 %st_first_byte, 92");
+    try append_ll_line(out,
+        "  %st_second_ptr = getelementptr i8, ptr %st_source_ptr, i64 %st_start_next");
+    try append_ll_line(out, "  %st_second_byte = load i8, ptr %st_second_ptr");
+    try append_ll_line(out, "  %st_second_bs = icmp eq i8 %st_second_byte, 92");
+    try append_ll_line(out, "  %st_multiline_pair = and i1 %st_first_bs, %st_second_bs");
+    try append_ll_line(out,
+        "  br i1 %st_multiline_pair, label %st_ml_head, label %st_head");
+    try append_quoted_string_token(out, stmt);
+    try append_multiline_string_token(out, stmt);
+    return;
+}
+
+fn append_quoted_string_token(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirStringTokenStmt
+) -> !void {
+    try append_ll_line(out, "st_head:");
+    try append_ll_line(out, "  %st_end = phi i64 [ %st_start_next, %entry ], [ %st_start_next, %st_check_multiline_pair ], [ %st_next, %st_body ]");
     try append_ll_line(out, "  %st_inb = icmp slt i64 %st_end, %st_length");
     try append_ll_line(out, "  br i1 %st_inb, label %st_check, label %st_exit");
     try append_ll_line(out, "st_check:");
@@ -793,6 +817,66 @@ fn append_multi_string_token(
     try append_string_token_return(out, stmt, "st_tok_c", "%st_endp1");
     try append_ll_line(out, "st_unterminated:");
     try append_string_token_return(out, stmt, "st_tok_u", "%st_end");
+    return;
+}
+
+fn append_multiline_string_token(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirStringTokenStmt
+) -> !void {
+    try append_ll_line(out, "st_ml_head:");
+    try out.append_bytes("  %st_ml_base = phi i64 [ %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", %st_check_multiline_pair ], [ %st_probe, %st_probe_check_second ]");
+    try append_ll_line(out, "  %st_ml_after_slashes = add i64 %st_ml_base, 2");
+    try append_ll_line(out, "  br label %st_ml_line_head");
+    try append_ll_line(out, "st_ml_line_head:");
+    try append_ll_line(out, "  %st_ml_end = phi i64 [ %st_ml_after_slashes, %st_ml_head ], [ %st_ml_line_next, %st_ml_line_body ]");
+    try append_ll_line(out, "  %st_ml_inb = icmp slt i64 %st_ml_end, %st_length");
+    try append_ll_line(out, "  br i1 %st_ml_inb, label %st_ml_line_check, label %st_ml_ret");
+    try append_ll_line(out, "st_ml_line_check:");
+    try append_ll_line(out, "  %st_ml_ptr = getelementptr i8, ptr %st_source_ptr, i64 %st_ml_end");
+    try append_ll_line(out, "  %st_ml_byte = load i8, ptr %st_ml_ptr");
+    try append_ll_line(out, "  %st_ml_notnl = icmp ne i8 %st_ml_byte, 10");
+    try append_ll_line(out, "  br i1 %st_ml_notnl, label %st_ml_line_body, label %st_probe_init");
+    try append_ll_line(out, "st_ml_line_body:");
+    try append_ll_line(out, "  %st_ml_line_next = add i64 %st_ml_end, 1");
+    try append_ll_line(out, "  br label %st_ml_line_head");
+    try append_ll_line(out, "st_probe_init:");
+    try append_ll_line(out, "  %st_probe_first = add i64 %st_ml_end, 1");
+    try append_ll_line(out, "  br label %st_probe_head");
+    try append_ll_line(out, "st_probe_head:");
+    try append_ll_line(out, "  %st_probe = phi i64 [ %st_probe_first, %st_probe_init ], [ %st_probe_next, %st_probe_skip ]");
+    try append_ll_line(out, "  %st_probe_inb = icmp slt i64 %st_probe, %st_length");
+    try append_ll_line(out, "  br i1 %st_probe_inb, label %st_probe_check, label %st_ml_ret");
+    try append_ll_line(out, "st_probe_check:");
+    try append_ll_line(out, "  %st_probe_ptr = getelementptr i8, ptr %st_source_ptr, i64 %st_probe");
+    try append_ll_line(out, "  %st_probe_byte = load i8, ptr %st_probe_ptr");
+    try append_ll_line(out, "  %st_probe_space = icmp eq i8 %st_probe_byte, 32");
+    try append_ll_line(out, "  %st_probe_tab = icmp eq i8 %st_probe_byte, 9");
+    try append_ll_line(out, "  %st_probe_cr = icmp eq i8 %st_probe_byte, 13");
+    try append_ll_line(out, "  %st_probe_ws0 = or i1 %st_probe_space, %st_probe_tab");
+    try append_ll_line(out, "  %st_probe_ws = or i1 %st_probe_ws0, %st_probe_cr");
+    try append_ll_line(out, "  br i1 %st_probe_ws, label %st_probe_skip, label %st_probe_nonspace");
+    try append_ll_line(out, "st_probe_skip:");
+    try append_ll_line(out, "  %st_probe_next = add i64 %st_probe, 1");
+    try append_ll_line(out, "  br label %st_probe_head");
+    try append_ll_line(out, "st_probe_nonspace:");
+    try append_ll_line(out, "  %st_probe_bs = icmp eq i8 %st_probe_byte, 92");
+    try append_ll_line(out, "  br i1 %st_probe_bs, label %st_probe_bound, label %st_ml_ret");
+    try append_ll_line(out, "st_probe_bound:");
+    try append_ll_line(out, "  %st_probe_second_index = add i64 %st_probe, 1");
+    try append_ll_line(out, "  %st_probe_has_second = icmp slt i64 %st_probe_second_index, %st_length");
+    try append_ll_line(out,
+        "  br i1 %st_probe_has_second, label %st_probe_check_second, label %st_ml_ret");
+    try append_ll_line(out, "st_probe_check_second:");
+    try append_ll_line(out, "  %st_probe_second_ptr = getelementptr i8, ptr %st_source_ptr, i64 %st_probe_second_index");
+    try append_ll_line(out, "  %st_probe_second_byte = load i8, ptr %st_probe_second_ptr");
+    try append_ll_line(out, "  %st_probe_second_bs = icmp eq i8 %st_probe_second_byte, 92");
+    try append_ll_line(out,
+        "  br i1 %st_probe_second_bs, label %st_ml_head, label %st_ml_ret");
+    try append_ll_line(out, "st_ml_ret:");
+    try append_string_token_return(out, stmt, "st_tok_ml", "%st_ml_end");
     return;
 }
 
@@ -1418,11 +1502,30 @@ fn append_multi_raw_token(
         try append_raw_operator(out, stmt, index, &op, is_last);
         index = index + 1;
     }
-    // Fallback dispatch: a double-quote byte (34) goes to string_token, a digit to number_token,
-    // and anything else to word_token.
+    // Fallback dispatch: a double-quote byte (34) or a double-slash multiline prefix goes to
+    // string_token, a digit to number_token, and anything else to word_token.
     try append_ll_line(out, "rt_dispatch_string:");
     try append_ll_line(out, "  %rt_isq = icmp eq i8 %rt_byte, 34");
-    try append_ll_line(out, "  br i1 %rt_isq, label %rt_string, label %rt_dispatch_number");
+    try append_ll_line(out,
+        "  br i1 %rt_isq, label %rt_string, label %rt_dispatch_multiline");
+    try append_ll_line(out, "rt_dispatch_multiline:");
+    try append_ll_line(out, "  %rt_isbs = icmp eq i8 %rt_byte, 92");
+    try append_ll_line(out,
+        "  br i1 %rt_isbs, label %rt_check_multiline_bound, label %rt_dispatch_number");
+    try append_ll_line(out, "rt_check_multiline_bound:");
+    try out.append_bytes("  %rt_next_index = add i64 %");
+    try out.append_bytes(stmt.start_name);
+    try append_ll_line(out, ", 1");
+    try append_ll_line(out, "  %rt_has_next = icmp slt i64 %rt_next_index, %rt_length");
+    try append_ll_line(out,
+        "  br i1 %rt_has_next, label %rt_load_multiline_second, label %rt_dispatch_number");
+    try append_ll_line(out, "rt_load_multiline_second:");
+    try append_ll_line(out,
+        "  %rt_next_ptr = getelementptr i8, ptr %rt_source_ptr, i64 %rt_next_index");
+    try append_ll_line(out, "  %rt_next_byte = load i8, ptr %rt_next_ptr");
+    try append_ll_line(out, "  %rt_is_multiline = icmp eq i8 %rt_next_byte, 92");
+    try append_ll_line(out,
+        "  br i1 %rt_is_multiline, label %rt_string, label %rt_dispatch_number");
     try append_ll_line(out, "rt_string:");
     try append_raw_dispatch_call(out, stmt, "rt_st", stmt.string_token_symbol);
     try append_ll_line(out, "rt_dispatch_number:");

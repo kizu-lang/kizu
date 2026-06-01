@@ -1370,10 +1370,15 @@ func requiredLLVMLexerTokenFragments() []string {
 		"%nt_end = phi i64 [ %start, %entry ], [ %nt_next, %nt_body ]",
 		"%nt_isd = call i1 @kizu_kizu__lexer_is_digit(i8 %nt_byte)",
 		"i64 %start, i64 %nt_end, %kizu.kizu.lexer.position %current)",
-		// string_token scans to the closing quote: an i64 end phi (seeded start + 1) advancing
-		// while source[end] != 34, then token(String, ...) over the terminated/unterminated run.
+		// string_token handles both quoted strings and `\\` multiline strings inside the selected
+		// helper body, so raw_token_at does not need a separate multiline helper body fact.
 		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_string_token(",
-		"%st_end = phi i64 [ %st_init, %entry ], [ %st_next, %st_body ]",
+		"%st_multiline_pair = and i1 %st_first_bs, %st_second_bs",
+		"%st_ml_end = phi i64 [ %st_ml_after_slashes, %st_ml_head ], " +
+			"[ %st_ml_line_next, %st_ml_line_body ]",
+		"%st_probe_second_bs = icmp eq i8 %st_probe_second_byte, 92",
+		"%st_end = phi i64 [ %st_start_next, %entry ], " +
+			"[ %st_start_next, %st_check_multiline_pair ], [ %st_next, %st_body ]",
 		"%st_notq = icmp ne i8 %st_byte, 34",
 		"%st_endp1 = add i64 %st_end, 1",
 		// skip_line_comment threads a two-phi loop (i64 end + Position current) past a comment line,
@@ -1407,11 +1412,14 @@ func requiredLLVMLexerTokenFragments() []string {
 func requiredLLVMTokenizerFragments() []string {
 	return []string{
 		// raw_token_at: an Eof guard, an operator dispatch table over the byte at start, then the
-		// quote / digit / word fallbacks to string_token / number_token / word_token.
+		// quote / multiline-string / digit / word fallbacks to string_token / number_token /
+		// word_token.
 		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_raw_token_at(",
 		"%rt_eof = icmp sge i64 %start, %rt_length",
 		"%rt_byte = load i8, ptr %rt_bptr",
 		"%op0_is = icmp eq i8 %rt_byte, 123",
+		"%rt_isbs = icmp eq i8 %rt_byte, 92",
+		"%rt_is_multiline = icmp eq i8 %rt_next_byte, 92",
 		"%rt_isd = call i1 @kizu_kizu__lexer_is_digit(i8 %rt_byte)",
 		"%rt_wt = call %kizu.kizu.lexer.token @kizu_kizu__lexer_word_token(" +
 			"%kizu.slice.u8 %source, i64 %start, %kizu.kizu.lexer.position %current)",
