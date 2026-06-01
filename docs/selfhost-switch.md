@@ -107,7 +107,7 @@ any additional production behavior by itself.
 | `check selfhost` | hosted stage2 artifact | `selfhost::cli::check` plus selfhost source/resolver/type/ownership gates | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
 | `check <file>` | mixed: Go general CLI, hosted artifact for bounded parity rows | `selfhost::cli::check` | no fallback in hosted parity rows | `just selfhost-check-parity-gate` | broader type/ownership surface remains deferred |
 | `run <file>` | mixed: Go general CLI by default, hosted artifact for bounded run rows, public CLI selfhost path behind `KIZU_SELFHOST_RUN` (#1151) | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows; no Go fallback in the gated public CLI path | `just selfhost-run-parity-gate`, `just selfhost-run-cli-switch-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader execution and default-on switch deferred to #1157 (parent #1070) |
-| `test <file>` | mixed: Go general CLI, hosted artifact for bounded test rows | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows | `just selfhost-test-parity-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader discovery and execution are deferred |
+| `test <file>` | mixed: Go general CLI by default, hosted artifact for bounded test rows, public CLI selfhost path behind `KIZU_SELFHOST_TEST` (#1157) | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows; no Go fallback in the gated public CLI path | `just selfhost-test-parity-gate`, `just selfhost-test-cli-switch-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader discovery and default-on switch deferred to #1157 (parent #1070) |
 | `stage selfhost` | hosted stage2 artifact | `selfhost::backend`, hosted runtime ABI | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
 | `fmt <file>` / `fmt --write <file>` | mixed: Go general CLI, hosted artifact for #1073 formatter parity rows | selfhost formatter writer | no fallback in hosted rows | `just selfhost-fmt-parity-gate` | broader formatter syntax surfaces outside the parity manifest are deferred |
 | `build`, `ir`, `wasm`, `native` | Go general CLI | no production selfhost owner yet | no hidden fallback because no selfhost switch is claimed | Go tests and backend-specific gates | explicit deferral until package/codegen IR replaces the Go backend boundary |
@@ -220,6 +220,52 @@ Deliberately not switched by #1151, kept explicit in #1157:
   only emits a test-executable artifact without executing it, so routing it would
   regress the Go `testFile` behavior. It needs test-artifact execution semantics
   first.
+
+## Test CLI Switch Point For #1157
+
+The second public `cmd/kizu` CLI command routed through the selfhost-owned
+compiled artifact path is `test <file>`, behind the rollback-friendly switch
+point `KIZU_SELFHOST_TEST=1`. The selfhost `test` path now lowers the test
+executable, emits LLVM, links a self-contained native artifact (the
+checked-AST/interpreter renderer `selfhost::backend::hosted` emits its own
+`@main` for the `kizu_test_main` entry, mirroring the run artifact boundary),
+and **executes** it, so the observable output (`test: ok` on stdout for a
+supported passing test, the runtime error on stderr for a failing one) matches
+the Go `testFile` path for supported shapes.
+
+| Field | Value |
+| --- | --- |
+| switched path | `selfhost::cli::execute::test_file_cli` (lower test executable → emit LLVM → link → execute native artifact) |
+| switch point | env `KIZU_SELFHOST_TEST` (default off → Go `testFile` interpreter path unchanged) |
+| Go fallback when enabled | none; unsupported shapes raise explicit selfhost diagnostics (usage, exit 64) |
+| evidence report | `target/selfhost/reports/test-cli-switch.txt` (`go.fallback none`) |
+| gate | `just selfhost-test-cli-switch-gate` |
+| deletion condition | flip default to selfhost and remove the gate once `test` is selfhost-owned for the general discovery/runtime surface (#1157, parent #1070) |
+
+Supported selected shape under the gate: a top-level `test` whose body is a
+single `std::testing::expect(true|false)` call (for example
+`selfhost/tests/cli/test_expect_ok.kizu`). It lowers, links, and executes end to
+end; `expect(true)` prints `test: ok` and exits 0, `expect(false)` prints the
+runtime error and exits 1.
+
+Deliberately not switched / remaining unsupported, kept explicit in #1157:
+
+- Unsupported test shapes under the gate (for example a `test` body wrapping the
+  expectation in an `if`, as in `selfhost/tests/cli/test_if_unsupported.kizu`)
+  stay explicit selfhost diagnostics (usage, exit 64) with **no Go fallback**;
+  the gate-off default Go `testFile` path still runs them through the
+  interpreter, which is why the switch stays gated rather than default-on.
+- Broader test discovery (multiple `test` blocks, helper-driven assertions,
+  non-`std::testing::expect` bodies) is not switched; those shapes are not yet
+  lowerable by the selfhost test executable backend.
+- The **stage2/native compiled bounded test renderer** (`cli_test_llvm`) still
+  emits the `kizu_test_main` entry without a self-contained `@main`, so the
+  `just selfhost-test-parity-gate` and native-source gates link it with an
+  external main-providing C harness. Only the checked-AST/interpreter renderer
+  used by the public selfhost test path is self-contained today. Unifying the
+  compiled bounded renderer onto the same self-contained `@main` boundary
+  (removing the harness everywhere) remains follow-up work and is the deletion
+  condition for the harness in `linkTestParityExecutableWithHost`.
 
 ## Failure Policy
 
