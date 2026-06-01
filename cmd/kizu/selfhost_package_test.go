@@ -3042,6 +3042,11 @@ func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm str
 			assertExecutableCatalogSignatureOrigin(t, selected, fact)
 			return
 		}
+		if name == "selfhost::backend::lower_run_codegen_program" ||
+			name == "selfhost::backend::emit_run_codegen_artifact" {
+			assertBackendWrapperCatalogSignatureOrigin(t, selected, fact)
+			return
+		}
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("function signature emitter does not publish %q via %q", fact, fragment)
 		}
@@ -3077,6 +3082,23 @@ func assertExecutableCatalogSignatureOrigin(t *testing.T, selected string, fact 
 	} {
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("executable signature fact %q is not catalog-derived via %q", fact, fragment)
+		}
+	}
+}
+
+// assertBackendWrapperCatalogSignatureOrigin keeps the backend run-codegen
+// wrapper signature facts derived from the component catalog closure instead of
+// per-function qualified-name literals.
+func assertBackendWrapperCatalogSignatureOrigin(t *testing.T, selected string, fact string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::backend\"",
+		"append_backend_wrapper_body_facts(",
+		"function_signature::append_catalog(",
+	} {
+		if !strings.Contains(selected, fragment) {
+			t.Fatalf("backend wrapper signature fact %q is not catalog-derived via %q", fact, fragment)
 		}
 	}
 }
