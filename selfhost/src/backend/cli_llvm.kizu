@@ -3766,28 +3766,18 @@ fn append_source_reachable_compiled_functions(
     ir_bytes: []u8
 ) -> !void {
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
-    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
     try pending.append("is_source_code");
     try pending.append("is_frontend_source");
     try pending.append("module_path");
     try pending.append("is_absolute_name_for_file");
-    var index = 0;
-    while index < pending.len() {
-        let local_name = try pending.get(index);
-        if !(try compiled_closure_name_seen(&emitted, local_name)) {
-            try append_source_compiled_function(out, ir_bytes, local_name);
-            try collect_component_compiled_callees(
-                ir_bytes,
-                "selfhost::source::",
-                local_name,
-                &var pending
-            );
-            try emitted.append(local_name);
-        }
-        index = index + 1;
-    }
+    try append_component_reachable_compiled_functions(
+        out,
+        ir_bytes,
+        "selfhost::source::",
+        &var pending,
+        false
+    );
     pending.deinit();
-    emitted.deinit();
     return;
 }
 
@@ -3806,16 +3796,94 @@ fn compiled_closure_name_seen(
     return false;
 }
 
-fn append_source_compiled_function(
+// append_component_reachable_compiled_functions walks one component's compiled
+// closure breadth-first from its seed members. Each pending local name is emitted
+// once and its body callees are queued through the shared collector, so the
+// source, loader, std lexer, and selfhost lexer closures share a single BFS. The
+// allow_empty_params flag lets the selfhost::lexer closure admit the parameterless
+// invalid_token_display member while the other components keep the missing-params
+// guard.
+fn append_component_reachable_compiled_functions(
     out: &var std::string::String,
     ir_bytes: []u8,
-    local_name: []u8
+    prefix: []u8,
+    pending: &var std::array::Array<[]u8>,
+    allow_empty_params: bool
+) -> !void {
+    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
+    var index = 0;
+    while index < pending.len() {
+        let local_name = try pending.get(index);
+        if !(try compiled_closure_name_seen(&emitted, local_name)) {
+            try append_component_compiled_closure_member(
+                out,
+                ir_bytes,
+                prefix,
+                local_name,
+                allow_empty_params
+            );
+            try collect_component_compiled_callees(ir_bytes, prefix, local_name, pending);
+            try emitted.append(local_name);
+        }
+        index = index + 1;
+    }
+    emitted.deinit();
+    return;
+}
+
+// append_component_compiled_closure_member emits the LLVM definition for one
+// compiled closure member. The fully qualified name is built from the component
+// prefix plus the local name, and the params_spec and llvm_symbol are derived from
+// the IR signature facts. allow_empty_params keeps the parameterless
+// selfhost::lexer member invalid_token_display while every other component rejects
+// an empty params_spec as a missing-signature error.
+fn append_component_compiled_closure_member(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    prefix: []u8,
+    local_name: []u8,
+    allow_empty_params: bool
 ) -> !void {
     var function_name = std::string::String(std::mem::page_allocator());
     defer function_name.deinit();
-    try append_component_qualified_name(&var function_name, "selfhost::source::", local_name);
+    try append_component_qualified_name(&var function_name, prefix, local_name);
     let function_name_bytes = function_name.as_bytes();
-    try append_compiled_closure_function(out, ir_bytes, function_name_bytes);
+    try emit_compiled_closure_member(out, ir_bytes, function_name_bytes, allow_empty_params);
+    return;
+}
+
+// emit_compiled_closure_member writes the LLVM definition for one compiled closure
+// member from its fully qualified name. The name arrives as a borrow so the
+// component member builder can construct it from the prefix plus the local name
+// without the borrowed view escaping into the plain []u8 helper parameters. The
+// params_spec is derived from the IR signature facts and an empty result is only
+// tolerated when allow_empty_params is set (the parameterless selfhost::lexer
+// member invalid_token_display); otherwise it is a missing-signature error.
+fn emit_compiled_closure_member(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: &[]u8,
+    allow_empty_params: bool
+) -> !void {
+    let name = function_name.*;
+    var params_spec = std::string::String(std::mem::page_allocator());
+    defer params_spec.deinit();
+    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name);
+    if params_spec.len() == 0 and !allow_empty_params {
+        return error("compiled closure: missing signature params");
+    }
+    let params_spec_bytes = params_spec.as_bytes();
+    var llvm_symbol = std::string::String(std::mem::page_allocator());
+    defer llvm_symbol.deinit();
+    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, name);
+    let llvm_symbol_bytes = llvm_symbol.as_bytes();
+    try compiled_llvm::append_compiled_function_auto(
+        out,
+        ir_bytes,
+        name,
+        llvm_symbol_bytes,
+        params_spec_bytes
+    );
     return;
 }
 
@@ -3916,37 +3984,6 @@ fn compiled_callee_has_namespace(name: []u8) -> bool {
     return false;
 }
 
-// append_compiled_closure_function emits the LLVM definition for one compiled
-// closure member. The fully qualified name arrives as a borrow so the caller can
-// build it from the component prefix plus the local name without the borrowed
-// view escaping into the plain []u8 helper parameters.
-fn append_compiled_closure_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: &[]u8
-) -> !void {
-    let name = function_name.*;
-    var params_spec = std::string::String(std::mem::page_allocator());
-    defer params_spec.deinit();
-    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name);
-    if params_spec.len() == 0 {
-        return error("compiled closure: missing signature params");
-    }
-    let params_spec_bytes = params_spec.as_bytes();
-    var llvm_symbol = std::string::String(std::mem::page_allocator());
-    defer llvm_symbol.deinit();
-    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, name);
-    let llvm_symbol_bytes = llvm_symbol.as_bytes();
-    try compiled_llvm::append_compiled_function_auto(
-        out,
-        ir_bytes,
-        name,
-        llvm_symbol_bytes,
-        params_spec_bytes
-    );
-    return;
-}
-
 fn append_component_qualified_name(
     out: &var std::string::String,
     prefix: []u8,
@@ -3980,39 +4017,16 @@ fn append_kizu_lexer_reachable_compiled_functions(
     ir_bytes: []u8
 ) -> !void {
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
-    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
     try pending.append("first_token");
     try pending.append("next_token");
-    var index = 0;
-    while index < pending.len() {
-        let local_name = try pending.get(index);
-        if !(try compiled_closure_name_seen(&emitted, local_name)) {
-            try append_kizu_lexer_compiled_function(out, ir_bytes, local_name);
-            try collect_component_compiled_callees(
-                ir_bytes,
-                "std::kizu::lexer::",
-                local_name,
-                &var pending
-            );
-            try emitted.append(local_name);
-        }
-        index = index + 1;
-    }
+    try append_component_reachable_compiled_functions(
+        out,
+        ir_bytes,
+        "std::kizu::lexer::",
+        &var pending,
+        false
+    );
     pending.deinit();
-    emitted.deinit();
-    return;
-}
-
-fn append_kizu_lexer_compiled_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    local_name: []u8
-) -> !void {
-    var function_name = std::string::String(std::mem::page_allocator());
-    defer function_name.deinit();
-    try append_component_qualified_name(&var function_name, "std::kizu::lexer::", local_name);
-    let function_name_bytes = function_name.as_bytes();
-    try append_compiled_closure_function(out, ir_bytes, function_name_bytes);
     return;
 }
 
@@ -4021,67 +4035,16 @@ fn append_lexer_reachable_compiled_functions(
     ir_bytes: []u8
 ) -> !void {
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
-    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
     try pending.append("is_identifier_continue");
     try pending.append("invalid_token_display");
-    var index = 0;
-    while index < pending.len() {
-        let local_name = try pending.get(index);
-        if !(try compiled_closure_name_seen(&emitted, local_name)) {
-            try append_lexer_compiled_function(out, ir_bytes, local_name);
-            try collect_component_compiled_callees(
-                ir_bytes,
-                "selfhost::lexer::",
-                local_name,
-                &var pending
-            );
-            try emitted.append(local_name);
-        }
-        index = index + 1;
-    }
-    pending.deinit();
-    emitted.deinit();
-    return;
-}
-
-fn append_lexer_compiled_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    local_name: []u8
-) -> !void {
-    var function_name = std::string::String(std::mem::page_allocator());
-    defer function_name.deinit();
-    try append_component_qualified_name(&var function_name, "selfhost::lexer::", local_name);
-    let function_name_bytes = function_name.as_bytes();
-    try append_lexer_compiled_closure_member(out, ir_bytes, function_name_bytes);
-    return;
-}
-
-// append_lexer_compiled_closure_member mirrors append_compiled_closure_function
-// but tolerates an empty params_spec. The selfhost::lexer seed member
-// invalid_token_display is parameterless, so the shared helper's empty-params
-// guard would reject it; emitting it with an empty params_spec is correct here.
-fn append_lexer_compiled_closure_member(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: &[]u8
-) -> !void {
-    let name = function_name.*;
-    var params_spec = std::string::String(std::mem::page_allocator());
-    defer params_spec.deinit();
-    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name);
-    let params_spec_bytes = params_spec.as_bytes();
-    var llvm_symbol = std::string::String(std::mem::page_allocator());
-    defer llvm_symbol.deinit();
-    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, name);
-    let llvm_symbol_bytes = llvm_symbol.as_bytes();
-    try compiled_llvm::append_compiled_function_auto(
+    try append_component_reachable_compiled_functions(
         out,
         ir_bytes,
-        name,
-        llvm_symbol_bytes,
-        params_spec_bytes
+        "selfhost::lexer::",
+        &var pending,
+        true
     );
+    pending.deinit();
     return;
 }
 
@@ -4090,45 +4053,18 @@ fn append_loader_reachable_compiled_functions(
     ir_bytes: []u8
 ) -> !void {
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
-    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
     try pending.append("package_module_end");
     try pending.append("is_manifest_root_source");
     try pending.append("package_module_start");
     try pending.append("source_file");
-    var index = 0;
-    while index < pending.len() {
-        let local_name = try pending.get(index);
-        if !(try compiled_closure_name_seen(&emitted, local_name)) {
-            try append_loader_compiled_function(out, ir_bytes, local_name);
-            try collect_component_compiled_callees(
-                ir_bytes,
-                "selfhost::source::loader::",
-                local_name,
-                &var pending
-            );
-            try emitted.append(local_name);
-        }
-        index = index + 1;
-    }
-    pending.deinit();
-    emitted.deinit();
-    return;
-}
-
-fn append_loader_compiled_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    local_name: []u8
-) -> !void {
-    var function_name = std::string::String(std::mem::page_allocator());
-    defer function_name.deinit();
-    try append_component_qualified_name(
-        &var function_name,
+    try append_component_reachable_compiled_functions(
+        out,
+        ir_bytes,
         "selfhost::source::loader::",
-        local_name
+        &var pending,
+        false
     );
-    let function_name_bytes = function_name.as_bytes();
-    try append_compiled_closure_function(out, ir_bytes, function_name_bytes);
+    pending.deinit();
     return;
 }
 
