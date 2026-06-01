@@ -358,6 +358,76 @@ func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 	}
 }
 
+// TestSelfhostLexerLoaderCompiledParamsSpecDerivedFromSignatures keeps the
+// selfhost::lexer and selfhost::source::loader compiled closures tied to
+// function-signature-param facts instead of handwritten params_spec tables. The
+// lexer closures admit a parameterless helper (invalid_token_display) so they
+// derive without a non-empty guard, while the loader closures keep the guard
+// because every loader helper takes at least one parameter. The forbidden
+// fragments pin that the handwritten tables and their literal entries are gone,
+// and the ABI mapper learns SourceKind without any new params_spec literal.
+func TestSelfhostLexerLoaderCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	abi := readSelfhostFile(t, "../../selfhost/src/backend/compiled_abi_params.kizu")
+
+	lexerBody := selfhostKizuFunctionBody(t, cli, "fn append_lexer_compiled_function(")
+	lexerRequired := []string{
+		"let function_name = try lexer_compiled_qualified_name(local_name);",
+		"var params_spec = std::string::String(std::mem::page_allocator());",
+		"defer params_spec.deinit();",
+		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name)",
+		"let params_spec_bytes = params_spec.as_bytes();",
+		"params_spec_bytes",
+	}
+	for _, fragment := range lexerRequired {
+		if !strings.Contains(lexerBody, fragment) {
+			t.Fatalf("lexer compiled params derivation missing %q", fragment)
+		}
+	}
+
+	loaderBody := selfhostKizuFunctionBody(t, cli, "fn append_loader_compiled_function(")
+	loaderRequired := []string{
+		"let function_name = try loader_compiled_qualified_name(local_name);",
+		"var params_spec = std::string::String(std::mem::page_allocator());",
+		"defer params_spec.deinit();",
+		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name)",
+		"if params_spec.len() == 0 {",
+		"loader compiled closure: missing signature params",
+		"let params_spec_bytes = params_spec.as_bytes();",
+		"params_spec_bytes",
+	}
+	for _, fragment := range loaderRequired {
+		if !strings.Contains(loaderBody, fragment) {
+			t.Fatalf("loader compiled params derivation missing %q", fragment)
+		}
+	}
+
+	forbidden := []string{
+		"fn lexer_compiled_params_spec(",
+		"fn loader_compiled_params_spec(",
+		"\"%kizu.slice.u8 path;i64 start\"",
+		"\"%kizu.slice.u8 module_root;%kizu.slice.u8 path\"",
+		"\"i64 source_root_len;%kizu.slice.u8 path\"",
+		"\"i64 id;i64 kind;%kizu.slice.u8 package_name;i64 module_start;" +
+			"i64 module_end;%kizu.slice.u8 path;%kizu.slice.u8 text\"",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("lexer/loader compiled params keeps hand-written fragment %q", fragment)
+		}
+	}
+
+	abiRequired := []string{
+		"std::mem::equal_bytes(kizu_type, \"source::SourceKind\")",
+		"std::mem::equal_bytes(kizu_type, \"selfhost::source::SourceKind\")",
+	}
+	for _, fragment := range abiRequired {
+		if !strings.Contains(abi, fragment) {
+			t.Fatalf("compiled ABI params mapper missing %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST keeps the AST check entry parsed.
 func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
 	typeRefs := readSelfhostFile(t, "../../selfhost/src/types/type_ref_ast.kizu")

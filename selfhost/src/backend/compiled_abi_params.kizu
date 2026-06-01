@@ -36,6 +36,16 @@ pub fn kizu_type_to_abi(kizu_type: []u8) -> ![]u8 {
     if std::mem::equal_bytes(kizu_type, "std::kizu::lexer::TokenKind") {
         return "i64";
     }
+    // SourceKind is a selfhost enum, so it shares the native i64 ABI. The loader
+    // closures spell it as 'source::SourceKind' through their 'import
+    // selfhost::source' alias; the fully qualified form is accepted too so a
+    // resolved spelling maps identically.
+    if std::mem::equal_bytes(kizu_type, "source::SourceKind") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(kizu_type, "selfhost::source::SourceKind") {
+        return "i64";
+    }
     if std::mem::equal_bytes(kizu_type, "Position") {
         return "%kizu.kizu.lexer.position";
     }
@@ -147,12 +157,39 @@ function-body demo";
     std::testing::expect_equal<[]u8>("%kizu.slice.u8", try kizu_type_to_abi("[]u8"));
     std::testing::expect_equal<[]u8>("%kizu.slice.u8", try kizu_type_to_abi("&[]u8"));
 
+    // The loader 'source_file' closure mixes a SourceKind enum (i64 ABI) with
+    // scalar and slice params, so derive its compiled params_spec end-to-end to
+    // confirm the loader closures no longer need a handwritten table. SourceKind
+    // appears via the 'import selfhost::source' alias spelling.
+    let loader_facts = "function-signature-param source_file 0 id:runtime:i64
+function-signature-param source_file 1 kind:runtime:source::SourceKind
+function-signature-param source_file 2 package_name:runtime:[]u8
+function-signature-param source_file 3 module_start:runtime:i64
+function-signature-param source_file 4 module_end:runtime:i64
+function-signature-param source_file 5 path:runtime:[]u8
+function-signature-param source_file 6 text:runtime:[]u8
+function-body source_file";
+
+    var loader_spec = std::string::String(allocator);
+    try append_params_spec(loader_spec, loader_facts, "source_file");
+
+    let loader_expected = "i64 id;i64 kind;%kizu.slice.u8 package_name;i64 module_start;i64 module_end;%kizu.slice.u8 path;%kizu.slice.u8 text";
+    let loader_spec_bytes = loader_spec.as_bytes();
+    std::testing::expect_equal<[]u8>(loader_expected, loader_spec_bytes);
+
+    // Both SourceKind spellings (aliased and fully qualified) share the i64 ABI.
+    std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("source::SourceKind"));
+    std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("selfhost::source::SourceKind"));
+
     spec.deinit();
+    loader_spec.deinit();
 
     print("abi-params-spec");
     print(expected);
     print("abi-params-count");
     print(7);
+    print("abi-params-loader-spec");
+    print(loader_expected);
     return;
 }
 

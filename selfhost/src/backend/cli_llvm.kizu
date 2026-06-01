@@ -4116,6 +4116,10 @@ fn append_lexer_compiled_function(
     local_name: []u8
 ) -> !void {
     let function_name = try lexer_compiled_qualified_name(local_name);
+    var params_spec = std::string::String(std::mem::page_allocator());
+    defer params_spec.deinit();
+    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name);
+    let params_spec_bytes = params_spec.as_bytes();
     var llvm_symbol = std::string::String(std::mem::page_allocator());
     defer llvm_symbol.deinit();
     try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, function_name);
@@ -4125,7 +4129,7 @@ fn append_lexer_compiled_function(
         ir_bytes,
         function_name,
         llvm_symbol_bytes,
-        try lexer_compiled_params_spec(local_name)
+        params_spec_bytes
     );
     return;
 }
@@ -4206,19 +4210,6 @@ fn lexer_compiled_qualified_name(local_name: []u8) -> ![]u8 {
     return error("lexer compiled closure: unsupported local helper");
 }
 
-fn lexer_compiled_params_spec(local_name: []u8) -> ![]u8 {
-    if std::mem::equal_bytes(local_name, "is_digit") or
-        std::mem::equal_bytes(local_name, "is_alpha") or
-        std::mem::equal_bytes(local_name, "is_identifier_start") or
-        std::mem::equal_bytes(local_name, "is_identifier_continue") {
-        return "i8 byte";
-    }
-    if std::mem::equal_bytes(local_name, "invalid_token_display") {
-        return "";
-    }
-    return error("lexer compiled closure: unsupported local helper");
-}
-
 fn append_loader_reachable_compiled_functions(
     out: &var std::string::String,
     ir_bytes: []u8
@@ -4250,6 +4241,13 @@ fn append_loader_compiled_function(
     local_name: []u8
 ) -> !void {
     let function_name = try loader_compiled_qualified_name(local_name);
+    var params_spec = std::string::String(std::mem::page_allocator());
+    defer params_spec.deinit();
+    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name);
+    if params_spec.len() == 0 {
+        return error("loader compiled closure: missing signature params");
+    }
+    let params_spec_bytes = params_spec.as_bytes();
     var llvm_symbol = std::string::String(std::mem::page_allocator());
     defer llvm_symbol.deinit();
     try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, function_name);
@@ -4259,7 +4257,7 @@ fn append_loader_compiled_function(
         ir_bytes,
         function_name,
         llvm_symbol_bytes,
-        try loader_compiled_params_spec(local_name)
+        params_spec_bytes
     );
     return;
 }
@@ -4336,25 +4334,6 @@ fn loader_compiled_qualified_name(local_name: []u8) -> ![]u8 {
     }
     if std::mem::equal_bytes(local_name, "source_file") {
         return "selfhost::source::loader::source_file";
-    }
-    return error("loader compiled closure: unsupported local helper");
-}
-
-fn loader_compiled_params_spec(local_name: []u8) -> ![]u8 {
-    if std::mem::equal_bytes(local_name, "module_end_for") {
-        return "%kizu.slice.u8 path";
-    }
-    if std::mem::equal_bytes(local_name, "package_module_end") {
-        return "%kizu.slice.u8 path;i64 start";
-    }
-    if std::mem::equal_bytes(local_name, "is_manifest_root_source") {
-        return "%kizu.slice.u8 module_root;%kizu.slice.u8 path";
-    }
-    if std::mem::equal_bytes(local_name, "package_module_start") {
-        return "i64 source_root_len;%kizu.slice.u8 path";
-    }
-    if std::mem::equal_bytes(local_name, "source_file") {
-        return "i64 id;i64 kind;%kizu.slice.u8 package_name;i64 module_start;i64 module_end;%kizu.slice.u8 path;%kizu.slice.u8 text";
     }
     return error("loader compiled closure: unsupported local helper");
 }
