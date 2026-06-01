@@ -271,6 +271,50 @@ pub fn derive_callee_llvm_symbol(
     return;
 }
 
+// append_function_llvm_symbol derives the LLVM symbol for a fully qualified
+// Kizu function name and appends it to 'out'. The scheme is 'kizu_' followed by
+// the module path with its first '::' lowered to '__' and any remaining '::'
+// lowered to '_'. Functions reached through the std re-export 'std::kizu::*' are
+// mangled from their bare 'kizu::*' module path, so a leading 'std::' is
+// stripped when the qualified name begins with 'std::kizu::'.
+//   std::kizu::lexer::first_token -> kizu_kizu__lexer_first_token
+//   std::kizu::lexer::next_token  -> kizu_kizu__lexer_next_token
+//   std::mem::starts_with         -> kizu_std__mem_starts_with
+//   selfhost::source::module_path -> kizu_selfhost__source_module_path
+pub fn append_function_llvm_symbol(
+    out: &var std::string::String,
+    qualified_name: []u8
+) -> !void {
+    var path = qualified_name;
+    if std::mem::starts_with(qualified_name, "std::kizu::") {
+        let std_prefix = "std::";
+        path = qualified_name[std::mem::len(std_prefix)..std::mem::len(qualified_name)];
+    }
+    try out.append_bytes("kizu_");
+    let colon = cast<u8>(58);
+    let underscore = cast<u8>(95);
+    let path_len = std::mem::len(path);
+    var index = 0;
+    var first_separator = true;
+    while index < path_len {
+        let byte = path[index];
+        if byte == colon and index + 1 < path_len and path[index + 1] == colon {
+            if first_separator {
+                try out.append_byte(underscore);
+                try out.append_byte(underscore);
+                first_separator = false;
+            } else {
+                try out.append_byte(underscore);
+            }
+            index = index + 2;
+        } else {
+            try out.append_byte(byte);
+            index = index + 1;
+        }
+    }
+    return;
+}
+
 pub fn extend_locals_spec(
     ir_bytes: []u8,
     current_spec: []u8,
@@ -295,4 +339,46 @@ pub fn derive_return_type(
         return error("compiled signature: function return type not found");
     }
     return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_return_type);
+}
+
+// gate_llvm_symbol is the append_function_llvm_symbol behavior gate (tracker
+// 1112). It pins the qualified-name -> LLVM symbol derivation that the std
+// lexer compiled closure now relies on instead of a handwritten helper table:
+// the std re-export 'std::kizu::lexer::*' mangles from its bare 'kizu::lexer'
+// module path, while other modules keep their full path. Each derived symbol is
+// printed so the Go gate can assert the exact bytes.
+pub fn gate_llvm_symbol() -> !void {
+    let allocator = std::mem::page_allocator();
+
+    var first_token = std::string::String(allocator);
+    try append_function_llvm_symbol(first_token, "std::kizu::lexer::first_token");
+    let first_token_bytes = first_token.as_bytes();
+    std::testing::expect_equal<[]u8>("kizu_kizu__lexer_first_token", first_token_bytes);
+
+    var next_token = std::string::String(allocator);
+    try append_function_llvm_symbol(next_token, "std::kizu::lexer::next_token");
+    let next_token_bytes = next_token.as_bytes();
+    std::testing::expect_equal<[]u8>("kizu_kizu__lexer_next_token", next_token_bytes);
+
+    var starts_with = std::string::String(allocator);
+    try append_function_llvm_symbol(starts_with, "std::mem::starts_with");
+    let starts_with_bytes = starts_with.as_bytes();
+    std::testing::expect_equal<[]u8>("kizu_std__mem_starts_with", starts_with_bytes);
+
+    var module_path = std::string::String(allocator);
+    try append_function_llvm_symbol(module_path, "selfhost::source::module_path");
+    let module_path_bytes = module_path.as_bytes();
+    std::testing::expect_equal<[]u8>("kizu_selfhost__source_module_path", module_path_bytes);
+
+    print("llvm-symbol");
+    print(first_token_bytes);
+    print(next_token_bytes);
+    print(starts_with_bytes);
+    print(module_path_bytes);
+
+    first_token.deinit();
+    next_token.deinit();
+    starts_with.deinit();
+    module_path.deinit();
+    return;
 }
