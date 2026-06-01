@@ -2116,32 +2116,23 @@ func assertCompiledMirPaths(t *testing.T, compiled string) {
 	}
 }
 
-// assertCliCompiledSymbols keeps the compiled helper symbol list wired.
+// assertCliCompiledSymbols keeps the compiled helper symbol list wired. The
+// selfhost::ir::codegen Program builder / metadata / Value helper cluster
+// (metadata_line, return_void_instruction, const_string_value,
+// const_string_instruction, call_instruction, build_main_print_program,
+// lowered_main_print_program, plus the unsupported_program / none_value /
+// main_print_payload / metadata_for_program roots) is now derived through the
+// shared compiled closure BFS, so cli_llvm delegates to
+// append_codegen_reachable_compiled_functions instead of carrying a handwritten
+// mangled symbol per member. The dedicated derivation is pinned in
+// selfhost_codegen_compiled_closure_test.go.
 func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
 	t.Helper()
 	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto(") {
 		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto")
 	}
-	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_metadata_line") {
-		t.Fatal("cli_llvm does not emit compiled metadata_line symbol")
-	}
-	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_return_void_instruction") {
-		t.Fatal("cli_llvm does not emit compiled return_void_instruction symbol")
-	}
-	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_const_string_value") {
-		t.Fatal("cli_llvm does not emit compiled const_string_value symbol")
-	}
-	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_const_string_instruction") {
-		t.Fatal("cli_llvm does not emit compiled const_string_instruction symbol")
-	}
-	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_call_instruction") {
-		t.Fatal("cli_llvm does not emit compiled call_instruction symbol")
-	}
-	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_build_main_print_program") {
-		t.Fatal("cli_llvm does not emit compiled build_main_print_program symbol")
-	}
-	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_lowered_main_print_program") {
-		t.Fatal("cli_llvm does not emit compiled lowered_main_print_program symbol")
+	if !strings.Contains(cliLlvm, "try append_codegen_reachable_compiled_functions(out, ir_bytes);") {
+		t.Fatal("cli_llvm does not delegate to the shared codegen compiled closure")
 	}
 }
 
