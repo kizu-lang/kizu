@@ -771,6 +771,121 @@ func TestSelfhostExecutableHelperClosureUsesComponentCatalog(t *testing.T) {
 	assertExecutableClosureExternalCalleePolicy(t, executableFunctions, policyBody)
 }
 
+// TestSelfhostBackendWrapperClosureUsesComponentCatalog keeps the backend
+// run-codegen wrapper body facts seeded from the component catalog and expanded
+// by the shared BFS instead of the hand-written
+// append_selected_function_with_body table.
+func TestSelfhostBackendWrapperClosureUsesComponentCatalog(t *testing.T) {
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	wrapperFactsBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_backend_wrapper_body_facts(",
+	)
+	wrapperClosureBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_backend_wrapper_closure_body(",
+	)
+	policyBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn collect_catalog_closure_external_callee_allowed(",
+	)
+	seedRequired := []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::backend\"",
+		"component_function_catalog::find_local_function_index(catalog, \"lower_run_codegen_program\")",
+		"component_function_catalog::find_local_function_index(catalog, \"emit_run_codegen_artifact\")",
+		"append_backend_wrapper_closure_body(",
+		"closure_index_seen(&emitted, function_index)",
+	}
+	for _, fragment := range seedRequired {
+		if !strings.Contains(wrapperFactsBody, fragment) {
+			t.Fatalf("backend wrapper closure seed path missing %q", fragment)
+		}
+	}
+	// The wrappers must no longer be hand-selected through append_selected_function_with_body.
+	if strings.Contains(wrapperFactsBody, "append_selected_function_with_body(") {
+		t.Fatal("backend wrapper body facts keep hand-written wrapper selection")
+	}
+	closureRequired := []string{
+		"component_function_catalog::local_function_name(catalog, function_index)",
+		"component_function_catalog::function_node_id(",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+		"backend_wrapper_role(local_name)",
+	}
+	for _, fragment := range closureRequired {
+		if !strings.Contains(wrapperClosureBody, fragment) {
+			t.Fatalf("backend wrapper closure body missing %q", fragment)
+		}
+	}
+	if strings.Contains(wrapperClosureBody, "try function_node(text, ast, root, local_name)") {
+		t.Fatal("backend wrapper closure keeps handwritten function_node lookup")
+	}
+	assertBackendWrapperClosureRoleMapping(t, executableFunctions)
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		executableFunctions,
+		wrapperClosureBody,
+		"\"selfhost::backend::\"",
+		"\"backend wrapper closure: unsupported call form\"",
+		"\"backend wrapper closure: unsupported qualified callee\"",
+	)
+	assertBackendWrapperClosureExternalCalleePolicy(t, executableFunctions, policyBody)
+}
+
+// assertBackendWrapperClosureRoleMapping keeps lower_run_codegen_program on its
+// checked-run-codegen-wrapper role and emit_run_codegen_artifact on its
+// checked-run-codegen-artifact-wrapper role, both resolved through the role
+// mapping rather than the hand-written append_selected_function_with_body call.
+func assertBackendWrapperClosureRoleMapping(t *testing.T, executableFunctions string) {
+	t.Helper()
+	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn backend_wrapper_role(")
+	for _, fragment := range []string{
+		"std::mem::equal_bytes(local_name, \"lower_run_codegen_program\")",
+		"\"checked-run-codegen-wrapper\"",
+		"\"checked-run-codegen-artifact-wrapper\"",
+	} {
+		if !strings.Contains(roleBody, fragment) {
+			t.Fatalf("backend wrapper closure role mapping missing %q", fragment)
+		}
+	}
+}
+
+// assertBackendWrapperClosureExternalCalleePolicy keeps the backend prefix
+// delegating to the dedicated allowlist, which admits only the codegen and hosted
+// module boundary callees the run-codegen wrappers delegate to without widening
+// to a broad selfhost:: fallback.
+func assertBackendWrapperClosureExternalCalleePolicy(
+	t *testing.T,
+	executableFunctions string,
+	policyBody string,
+) {
+	t.Helper()
+	prefixBranch := "std::mem::equal_bytes(qualified_prefix, \"selfhost::backend::\")"
+	if !strings.Contains(policyBody, prefixBranch) {
+		t.Fatal("backend wrapper external accessor policy missing prefix branch")
+	}
+	if !strings.Contains(policyBody, "backend_wrapper_external_callee_allowed(callee_text)") {
+		t.Fatal("backend prefix does not delegate to the backend wrapper closure allowlist")
+	}
+	backendPolicyBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn backend_wrapper_external_callee_allowed(",
+	)
+	for _, fragment := range []string{
+		"std::mem::equal_bytes(callee_text, \"codegen::lower_run_program\")",
+		"std::mem::equal_bytes(callee_text, \"hosted::emit_run_codegen_artifact\")",
+	} {
+		if !strings.Contains(backendPolicyBody, fragment) {
+			t.Fatalf("backend wrapper closure allowlist missing %q", fragment)
+		}
+	}
+}
+
 // assertExecutableClosureRoleMapping keeps the wrapper on its checked-test-wrapper
 // role while shared helpers keep the checked-executable-shared-helper role, both
 // resolved through the role mapping rather than the hand-written
@@ -3042,6 +3157,11 @@ func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm str
 			assertExecutableCatalogSignatureOrigin(t, selected, fact)
 			return
 		}
+		if name == "selfhost::backend::lower_run_codegen_program" ||
+			name == "selfhost::backend::emit_run_codegen_artifact" {
+			assertBackendWrapperCatalogSignatureOrigin(t, selected, fact)
+			return
+		}
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("function signature emitter does not publish %q via %q", fact, fragment)
 		}
@@ -3077,6 +3197,23 @@ func assertExecutableCatalogSignatureOrigin(t *testing.T, selected string, fact 
 	} {
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("executable signature fact %q is not catalog-derived via %q", fact, fragment)
+		}
+	}
+}
+
+// assertBackendWrapperCatalogSignatureOrigin keeps the backend run-codegen
+// wrapper signature facts derived from the component catalog closure instead of
+// per-function qualified-name literals.
+func assertBackendWrapperCatalogSignatureOrigin(t *testing.T, selected string, fact string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::backend\"",
+		"append_backend_wrapper_body_facts(",
+		"function_signature::append_catalog(",
+	} {
+		if !strings.Contains(selected, fragment) {
+			t.Fatalf("backend wrapper signature fact %q is not catalog-derived via %q", fact, fragment)
 		}
 	}
 }

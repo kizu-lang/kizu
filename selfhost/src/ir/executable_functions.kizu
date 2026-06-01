@@ -1645,6 +1645,9 @@ fn collect_catalog_closure_external_callee_allowed(
     if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::hosted::") {
         return hosted_closure_external_callee_allowed(callee_text);
     }
+    if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::") {
+        return backend_wrapper_external_callee_allowed(callee_text);
+    }
     if !std::mem::equal_bytes(qualified_prefix, "selfhost::ast::") {
         return false;
     }
@@ -1673,6 +1676,19 @@ fn hosted_closure_external_callee_allowed(callee_text: []u8) -> bool {
     return std::mem::equal_bytes(callee_text, "codegen::return_void_program_supported") or
         std::mem::equal_bytes(callee_text, "codegen::metadata_for_program") or
         std::mem::equal_bytes(callee_text, "codegen::stdout_payload");
+}
+
+// backend_wrapper_external_callee_allowed enumerates the cross-component module
+// boundary callees the selected backend wrapper closure is allowed to cross
+// without emitting their bodies. lower_run_codegen_program delegates to
+// codegen::lower_run_program and emit_run_codegen_artifact delegates to
+// hosted::emit_run_codegen_artifact, whose body facts are owned by the codegen
+// and hosted closures respectively. Anything outside this explicit allowlist
+// falls through to the shared collector's qualified-callee error instead of being
+// silently dropped.
+fn backend_wrapper_external_callee_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "codegen::lower_run_program") or
+        std::mem::equal_bytes(callee_text, "hosted::emit_run_codegen_artifact");
 }
 
 fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
@@ -2462,25 +2478,96 @@ fn append_backend_function_facts(
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
 
-    try append_selected_function_with_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "lower_run_codegen_program",
-        "selfhost::backend::lower_run_codegen_program",
-        "checked-run-codegen-wrapper"
+    try append_backend_wrapper_body_facts(allocator, out, file.text, parsed.ast, parsed.root);
+    return;
+}
+
+fn append_backend_wrapper_body_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
+        text,
+        ast,
+        root,
+        "selfhost::backend"
     );
-    try append_selected_function_with_body(
+    defer catalog.deinit();
+
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "lower_run_codegen_program"));
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "emit_run_codegen_artifact"));
+    var index = 0;
+    while index < pending.len() {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
+            try append_backend_wrapper_closure_body(
+                out,
+                text,
+                ast,
+                &catalog,
+                function_index,
+                &var pending
+            );
+            try emitted.append(function_index);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_backend_wrapper_closure_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_catalog_helper_body_ir(
         out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "emit_run_codegen_artifact",
-        "selfhost::backend::emit_run_codegen_artifact",
-        "checked-run-codegen-artifact-wrapper"
+        text,
+        ast,
+        catalog,
+        function_index,
+        backend_wrapper_role(local_name),
+        body
+    );
+    try collect_catalog_closure_direct_callees(
+        text,
+        ast,
+        body,
+        catalog,
+        pending,
+        "selfhost::backend::",
+        "backend wrapper closure: unsupported call form",
+        "backend wrapper closure: unsupported qualified callee"
     );
     return;
+}
+
+// backend_wrapper_role keeps the catalog-driven backend wrapper closure on the
+// same body-fact roles the hand-written selection used: lower_run_codegen_program
+// stays the checked-run-codegen-wrapper entry while emit_run_codegen_artifact
+// keeps the checked-run-codegen-artifact-wrapper entry. The two seeds delegate
+// only to allowlisted cross-component callees, so no other catalog member is
+// reachable through the closure.
+fn backend_wrapper_role(local_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(local_name, "lower_run_codegen_program") {
+        return "checked-run-codegen-wrapper";
+    }
+    return "checked-run-codegen-artifact-wrapper";
 }
 
 fn append_executable_function_facts(
