@@ -86,6 +86,9 @@ func dispatch(cmd string, args []string) error {
 	case "check":
 		return runSelfhostFrontendCommand("check", args)
 	case "test":
+		if selfhostTestEnabled() {
+			return runSelfhostFrontendCommand("test", args)
+		}
 		path, programArgs := splitProgramArgs(args)
 		return testFile(path, programArgs)
 	case "fmt":
@@ -125,6 +128,27 @@ const selfhostRunEnvVar = "KIZU_SELFHOST_RUN"
 // selfhost-owned compiled artifact path. See selfhostRunEnvVar.
 func selfhostRunEnabled() bool {
 	return os.Getenv(selfhostRunEnvVar) == "1"
+}
+
+// selfhostTestEnvVar is the rollback-friendly switch point for routing the public
+// `kizu test <file>` command through the selfhost-owned compiled artifact path
+// (selfhost::cli::execute::test_file_cli, which lowers a test executable, emits
+// LLVM, links the artifact, and executes the native artifact) instead of the Go
+// interpreter `testFile` path. It defaults off so the general Go-owned test surface
+// is unchanged; supported selected test shapes that the selfhost backend can lower
+// are owned end to end when it is on, and unsupported shapes surface explicit
+// selfhost diagnostics rather than falling back to Go.
+//
+// This gate is the deliberate switch boundary for #1157 / parent #1070. It is not a
+// permanent compatibility branch: it is removed (default flipped to selfhost) once
+// `test` is selfhost-owned for the general discovery/runtime surface tracked by
+// #1070.
+const selfhostTestEnvVar = "KIZU_SELFHOST_TEST"
+
+// selfhostTestEnabled reports whether the public `test` command is routed through
+// the selfhost-owned compiled artifact path. See selfhostTestEnvVar.
+func selfhostTestEnabled() bool {
+	return os.Getenv(selfhostTestEnvVar) == "1"
 }
 
 // runSelfhostFrontendCommand executes frontend commands through Kizu-owned code.
