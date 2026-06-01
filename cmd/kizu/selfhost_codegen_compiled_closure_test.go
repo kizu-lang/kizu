@@ -134,6 +134,42 @@ func TestSelfhostCodegenLoopI64SupportedUsesCompiledAuto(t *testing.T) {
 	}
 }
 
+// TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto keeps converted
+// Program support predicates on real body lowering instead of restoring their
+// hand-written LLVM renderers.
+func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+
+	required := []string{
+		`"selfhost::ir::codegen::i64_call_program_supported"`,
+		`"kizu_selfhost__ir_codegen_i64_call_program_supported"`,
+		`"selfhost::ir::codegen::return_void_program_supported"`,
+		`"kizu_selfhost__ir_codegen_return_void_program_supported"`,
+		`"selfhost::ir::codegen::try_void_program_supported"`,
+		`"kizu_selfhost__ir_codegen_try_void_program_supported"`,
+		`"%kizu.selfhost.codegen.program program"`,
+	}
+	for _, fragment := range required {
+		if !strings.Contains(cli, fragment) {
+			t.Fatalf("program support compiled-auto registration missing %q", fragment)
+		}
+	}
+
+	forbidden := []string{
+		"fn append_i64_call_program_supported_function(",
+		"try append_i64_call_program_supported_function(out, ir_bytes);",
+		"fn append_return_void_program_supported_function(",
+		"try append_return_void_program_supported_function(out, ir_bytes);",
+		"fn append_try_void_program_supported_function(",
+		"try append_try_void_program_supported_function(out, ir_bytes);",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("program support keeps hand-written renderer fragment %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostCodegenLoopI64BuildersUseCompiledAuto keeps the loop-i64 RunAst
 // and Program builders on compiled lowering instead of the old hand-written LLVM
 // emitters.
