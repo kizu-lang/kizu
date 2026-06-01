@@ -518,11 +518,12 @@ func runNativeSourceTestCase(
 		t.Errorf("read native source test goldens for %s: %v", item.name, err)
 		return result, 1
 	}
-	if result.compiler.code != 0 || result.compiler.stdout != "" || result.compiler.stderr != "" {
-		t.Errorf("native source test %s compiler output mismatch", item.name)
-		return result, 1
-	}
-	failures := fillNativeSourceArtifactResult(t, "test", item, &result)
+	// The source-built `test` command lowers, links, and executes the artifact
+	// inline (mirroring run_file_cli), so its stdout/stderr/exit already carry the
+	// program output. Compare that against the goldens, then re-link the emitted
+	// self-contained artifact harness-free to prove it stands alone.
+	failures := compareTestCompilerResult(t, item, result.compiler, expectedOut, expectedErr)
+	failures += fillNativeSourceArtifactResult(t, "test", item, &result)
 	if failures > 0 {
 		return result, failures
 	}
