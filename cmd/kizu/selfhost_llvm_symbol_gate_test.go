@@ -11,13 +11,16 @@ const selfhostLLVMSymbolGateOutput = "llvm-symbol\n" +
 	"kizu_kizu__lexer_first_token\n" +
 	"kizu_kizu__lexer_next_token\n" +
 	"kizu_std__mem_starts_with\n" +
-	"kizu_selfhost__source_module_path\n"
+	"kizu_selfhost__source_module_path\n" +
+	"kizu_selfhost__lexer_is_digit\n" +
+	"kizu_selfhost__source_loader_module_end_for\n"
 
 // TestSelfhostLLVMSymbolGate executes the compiled_signature behavior gate that
 // derives LLVM symbols from fully qualified Kizu function names via
-// append_function_llvm_symbol, which the std lexer compiled closure now relies
-// on instead of a handwritten symbol table (tracker 1112). It pins the
-// std::kizu::* re-export mangling alongside ordinary std and selfhost modules.
+// append_function_llvm_symbol, which the std lexer, source, lexer, and loader
+// compiled closures now rely on instead of handwritten symbol tables (tracker
+// 1112). It pins the std::kizu::* re-export mangling alongside ordinary std and
+// selfhost modules, including the deeper selfhost::source::loader::* chain.
 func TestSelfhostLLVMSymbolGate(t *testing.T) {
 	entry := "selfhost::backend::compiled_signature::gate_llvm_symbol"
 	out, err := runSelfhostLLVMSymbolGate(t, entry)
