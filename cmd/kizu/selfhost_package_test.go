@@ -1852,6 +1852,7 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	)
 	assertExecuteRoutesRunThroughCodegenIR(t, execute)
 	assertHostedOmitsRunCodegenArtifact(t, hosted)
+	assertHostedMainPrintUsesCodegenRenderer(t, hosted)
 	assertCodegenIRShape(t, codegen)
 	assertCodegenIRForbiddenBridges(t, hosted, codegen)
 	assertHostedRunLLVMResponsibilities(t, cliRun, cliAstBoundary, cliCodegen, cliHostedRenderer)
@@ -1932,6 +1933,51 @@ func assertHostedOmitsRunCodegenArtifact(t *testing.T, hosted string) {
 	} {
 		if strings.Contains(hosted, forbidden) {
 			t.Fatalf("hosted backend keeps static executable-to-codegen bridge %q", forbidden)
+		}
+	}
+}
+
+// assertHostedMainPrintUsesCodegenRenderer keeps the main-print run slice on a
+// backend-owned renderer that emits LLVM directly from codegen::Program fields,
+// instead of routing back through the data::HostedExecutable run_print template
+// (hosted_executable_from_codegen(run_print_executable(), program) + the generic
+// render_hosted_llvm template renderer).
+func assertHostedMainPrintUsesCodegenRenderer(t *testing.T, hosted string) {
+	t.Helper()
+	emitBody := selfhostKizuFunctionBody(t, hosted, "pub fn emit_run_codegen_artifact(")
+	if !strings.Contains(
+		emitBody,
+		"write_main_print_module(allocator, io, source_path, ll_path_view, &program)",
+	) {
+		t.Fatal("emit_run_codegen_artifact main-print slice skips write_main_print_module")
+	}
+	for _, fragment := range []string{
+		"fn write_main_print_module(",
+		"fn render_main_print_llvm(",
+	} {
+		if !strings.Contains(hosted, fragment) {
+			t.Fatalf("hosted backend missing codegen-direct main-print renderer %q", fragment)
+		}
+	}
+	renderBody := selfhostKizuFunctionBody(t, hosted, "fn render_main_print_llvm(")
+	for _, fragment := range []string{
+		"codegen::stdout_payload(program)",
+		"append_hosted_global(out, \"kizu.run.stdout\"",
+		"append_hosted_output_body(",
+		"append_host_main(out, \"kizu_run_main\")",
+	} {
+		if !strings.Contains(renderBody, fragment) {
+			t.Fatalf("render_main_print_llvm does not emit from codegen::Program fields with %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"run_print_executable",
+		"hosted_executable_from_codegen",
+		"render_hosted_llvm",
+		"write_hosted_module",
+	} {
+		if strings.Contains(renderBody, forbidden) {
+			t.Fatalf("render_main_print_llvm regressed onto the run_print hosted template via %q", forbidden)
 		}
 	}
 }

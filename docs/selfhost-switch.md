@@ -195,6 +195,35 @@ The smallest next real codegen slice is a `main` function with a string
 constant, direct `print` call, and void return lowered from the mini IR rather
 than from a run/test-specific hosted template branch.
 
+### Main-Print Codegen Renderer (#953, #1070)
+
+The `main` string-print run slice (`fn main() { print("..."); }`, e.g.
+`examples/hello.kizu` and `selfhost/tests/cli/run_hello.kizu`) is the first run
+shape moved off the `data::HostedExecutable` run_print template. The
+checked-AST/interpreter path
+(`selfhost::backend::hosted::emit_run_codegen_artifact`) now renders this slice
+through the backend-owned `render_main_print_llvm` / `write_main_print_module`,
+which emit LLVM directly from `codegen::Program` fields (the const-string payload
+via `codegen::stdout_payload`) instead of building a `data::HostedExecutable`
+through `hosted_executable_from_codegen(run_print_executable(), program)`. This
+joins the `i64`, loop, `try`/`!void`, and `fs::read` slices that already render
+straight from `codegen::Program`.
+
+| Field | Value |
+| --- | --- |
+| switched renderer | `selfhost::backend::hosted::render_main_print_llvm` (emits from `codegen::Program` fields) |
+| prior path | `hosted_executable_from_codegen(run_print_executable(), program)` + `render_hosted_llvm` template |
+| parity | emitted `.ll` bytes, metadata, link, and execution are byte-for-byte identical to the prior template renderer; the stage2 hosted artifact bounded renderer (`cli_hosted_renderer_llvm::cli_hosted_write_stdout_ll`) is unchanged |
+| regression guard | `TestSelfhostHostedRunConsumesCodegenIR` asserts the slice renders through `render_main_print_llvm` and never regresses onto `run_print_executable` / `hosted_executable_from_codegen` / `render_hosted_llvm` |
+| gate | `KIZU_SELFHOST_RUN` stays gated; `just selfhost-native-source-gate`, `just selfhost-run-parity-gate-from-scratch`, `just selfhost-run-cli-switch-gate` |
+
+Still on the run_print template and deferred to follow-up work: the `return void`
+slice still uses `hosted_executable_from_codegen` (return-void branch), and
+`render_try_void_llvm` still reads template constants from
+`run_print_executable()`. The hosted artifact mode and the stage2 bounded
+renderer remain as artifact writers and must not grow new run/test-specific
+template branches.
+
 ## Run CLI Switch Point For #1151
 
 The first public `cmd/kizu` CLI command routed through the selfhost-owned

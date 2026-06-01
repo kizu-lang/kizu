@@ -200,14 +200,18 @@ pub fn emit_run_codegen_artifact(
         if codegen::try_void_program_supported(&program) {
             module_len = try write_try_void_module(allocator, io, source_path, ll_path_view, &program);
         } else {
-            let hosted = try hosted_executable_from_codegen(run_print_executable(), program);
-            module_len = try write_hosted_module(
-                allocator,
-                io,
-                source_path,
-                ll_path_view,
-                &hosted
-            );
+            if codegen::return_void_program_supported(&program) {
+                let hosted = try hosted_executable_from_codegen(run_print_executable(), program);
+                module_len = try write_hosted_module(
+                    allocator,
+                    io,
+                    source_path,
+                    ll_path_view,
+                    &hosted
+                );
+            } else {
+                module_len = try write_main_print_module(allocator, io, source_path, ll_path_view, &program);
+            }
         }
     }
     }
@@ -581,6 +585,58 @@ fn write_fs_read_module(
     );
     module.deinit();
     return module_len;
+}
+
+fn write_main_print_module(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8,
+    ll_path: &[]u8,
+    program: &codegen::Program
+) -> !i64 {
+    var module = try render_main_print_llvm(allocator, source_path, program);
+    let module_view = module.as_bytes();
+    let module_len = try write_backend_bytes(
+        io,
+        ll_path,
+        module_view,
+        module.len()
+    );
+    module.deinit();
+    return module_len;
+}
+
+// render_main_print_llvm emits the run artifact for a main that prints a string
+// constant directly from codegen::Program fields. It is the first run slice that
+// no longer routes through the data::HostedExecutable run_print template; the
+// backend owns the entry, global, and exit constants for this shape. The emitted
+// bytes match the prior run_print template renderer so artifact, link, and
+// execute parity holds.
+fn render_main_print_llvm(
+    allocator: Allocator,
+    source_path: []u8,
+    program: &codegen::Program
+) -> !std::string::String {
+    let payload = try codegen::stdout_payload(program);
+    let output_len = hosted_output_len(payload, true);
+    var out = std::string::String(allocator);
+    try append_hosted_header(
+        out,
+        source_path,
+        "kizu codegen run artifact ll v0",
+        data::HostedOutputStream::Stdout
+    );
+    try append_hosted_global(out, "kizu.run.stdout", payload, true, output_len);
+    try append_hosted_output_body(
+        out,
+        "kizu_run_main",
+        "kizu.run.stdout",
+        data::HostedOutputStream::Stdout,
+        output_len,
+        0
+    );
+    try append_host_main(out, "kizu_run_main");
+    return out;
 }
 
 fn render_fs_read_llvm(
