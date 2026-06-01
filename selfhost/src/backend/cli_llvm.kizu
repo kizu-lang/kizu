@@ -3776,7 +3776,12 @@ fn append_source_reachable_compiled_functions(
         let local_name = try pending.get(index);
         if !(try compiled_closure_name_seen(&emitted, local_name)) {
             try append_source_compiled_function(out, ir_bytes, local_name);
-            try collect_source_compiled_callees(ir_bytes, local_name, &var pending);
+            try collect_component_compiled_callees(
+                ir_bytes,
+                "selfhost::source::",
+                local_name,
+                &var pending
+            );
             try emitted.append(local_name);
         }
         index = index + 1;
@@ -3814,21 +3819,28 @@ fn append_source_compiled_function(
     return;
 }
 
-fn collect_source_compiled_callees(
+// collect_component_compiled_callees gathers the body callees of one compiled
+// closure member into the BFS pending queue. The qualified name is rebuilt from
+// the component prefix plus the local name, then every Call node in the body is
+// classified against the prefix so a single collector serves the source, loader,
+// std lexer, and selfhost lexer closures.
+fn collect_component_compiled_callees(
     ir_bytes: []u8,
+    prefix: []u8,
     local_name: []u8,
     pending: &var std::array::Array<[]u8>
 ) -> !void {
     var function_name = std::string::String(std::mem::page_allocator());
     defer function_name.deinit();
-    try append_component_qualified_name(&var function_name, "selfhost::source::", local_name);
+    try append_component_qualified_name(&var function_name, prefix, local_name);
     let function_name_bytes = function_name.as_bytes();
-    try collect_source_compiled_body_callees(ir_bytes, function_name_bytes, pending);
+    try collect_component_compiled_body_callees(ir_bytes, prefix, function_name_bytes, pending);
     return;
 }
 
-fn collect_source_compiled_body_callees(
+fn collect_component_compiled_body_callees(
     ir_bytes: []u8,
+    prefix: []u8,
     function_name: &[]u8,
     pending: &var std::array::Array<[]u8>
 ) -> !void {
@@ -3843,41 +3855,65 @@ fn collect_source_compiled_body_callees(
                 name,
                 sequence
             );
-            try collect_source_compiled_callee(ir_bytes, callee, pending);
+            try collect_component_compiled_callee(ir_bytes, prefix, callee, pending);
         }
         sequence = sequence + 1;
     }
     return;
 }
 
-fn collect_source_compiled_callee(
+// collect_component_compiled_callee classifies one callee relative to the
+// component prefix. std::mem callees are intrinsic and ignored. A callee inside
+// the component prefix contributes its local name once the IR facts confirm the
+// helper, while a nested sub-namespace under the prefix or any other qualified
+// callee is rejected as an explicit error. A bare local name is also resolved
+// through the IR facts so nothing is treated as supported without a signature.
+fn collect_component_compiled_callee(
     ir_bytes: []u8,
+    prefix: []u8,
     callee: []u8,
     pending: &var std::array::Array<[]u8>
 ) -> !void {
     if std::mem::starts_with(callee, "std::mem::") {
         return;
     }
-    if std::mem::starts_with(callee, "selfhost::source::loader::") {
-        return error("source compiled closure: unsupported loader callee");
-    }
-    if std::mem::starts_with(callee, "selfhost::source::") {
-        let prefix = "selfhost::source::";
+    if std::mem::starts_with(callee, prefix) {
         let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
-        if !component_compiled_local_present(ir_bytes, "selfhost::source::", local) {
-            return error("source compiled closure: unsupported local helper");
+        if compiled_callee_has_namespace(local) {
+            return error("compiled closure: unsupported nested callee");
+        }
+        if !component_compiled_local_present(ir_bytes, prefix, local) {
+            return error("compiled closure: unsupported local helper");
         }
         try pending.append(local);
         return;
     }
-    if std::mem::starts_with(callee, "selfhost::") {
-        return error("source compiled closure: unsupported selfhost callee");
+    if compiled_callee_has_namespace(callee) {
+        return error("compiled closure: unsupported qualified callee");
     }
-    if component_compiled_local_present(ir_bytes, "selfhost::source::", callee) {
+    if component_compiled_local_present(ir_bytes, prefix, callee) {
         try pending.append(callee);
         return;
     }
-    return error("source compiled closure: unsupported callee");
+    return error("compiled closure: unsupported callee");
+}
+
+// compiled_callee_has_namespace reports whether a name still carries a "::"
+// path separator, used to reject nested sub-namespace helpers and cross-component
+// qualified callees without enumerating a hand-written namespace table.
+fn compiled_callee_has_namespace(name: []u8) -> bool {
+    let length = std::mem::len(name);
+    if length < 2 {
+        return false;
+    }
+    var index = 0;
+    while index + 1 < length {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // append_compiled_closure_function emits the LLVM definition for one compiled
@@ -3952,7 +3988,12 @@ fn append_kizu_lexer_reachable_compiled_functions(
         let local_name = try pending.get(index);
         if !(try compiled_closure_name_seen(&emitted, local_name)) {
             try append_kizu_lexer_compiled_function(out, ir_bytes, local_name);
-            try collect_kizu_lexer_compiled_callees(ir_bytes, local_name, &var pending);
+            try collect_component_compiled_callees(
+                ir_bytes,
+                "std::kizu::lexer::",
+                local_name,
+                &var pending
+            );
             try emitted.append(local_name);
         }
         index = index + 1;
@@ -3975,69 +4016,6 @@ fn append_kizu_lexer_compiled_function(
     return;
 }
 
-fn collect_kizu_lexer_compiled_callees(
-    ir_bytes: []u8,
-    local_name: []u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    var function_name = std::string::String(std::mem::page_allocator());
-    defer function_name.deinit();
-    try append_component_qualified_name(&var function_name, "std::kizu::lexer::", local_name);
-    let function_name_bytes = function_name.as_bytes();
-    try collect_kizu_lexer_compiled_body_callees(ir_bytes, function_name_bytes, pending);
-    return;
-}
-
-fn collect_kizu_lexer_compiled_body_callees(
-    ir_bytes: []u8,
-    function_name: &[]u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    let name = function_name.*;
-    let count = try ir_contract::body_node_count(ir_bytes, name);
-    var sequence = 0;
-    while sequence < count {
-        let kind = try ir_contract::body_node_kind(ir_bytes, name, sequence);
-        if std::mem::equal_bytes(kind, "Call") {
-            let callee = try ir_contract::body_call_callee_or_empty(
-                ir_bytes,
-                name,
-                sequence
-            );
-            try collect_kizu_lexer_compiled_callee(ir_bytes, callee, pending);
-        }
-        sequence = sequence + 1;
-    }
-    return;
-}
-
-fn collect_kizu_lexer_compiled_callee(
-    ir_bytes: []u8,
-    callee: []u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    if std::mem::starts_with(callee, "std::mem::") {
-        return;
-    }
-    if std::mem::starts_with(callee, "std::kizu::lexer::") {
-        let prefix = "std::kizu::lexer::";
-        let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
-        if !component_compiled_local_present(ir_bytes, "std::kizu::lexer::", local) {
-            return error("std lexer compiled closure: unsupported local helper");
-        }
-        try pending.append(local);
-        return;
-    }
-    if std::mem::starts_with(callee, "std::kizu::") {
-        return error("std lexer compiled closure: unsupported std callee");
-    }
-    if component_compiled_local_present(ir_bytes, "std::kizu::lexer::", callee) {
-        try pending.append(callee);
-        return;
-    }
-    return error("std lexer compiled closure: unsupported callee");
-}
-
 fn append_lexer_reachable_compiled_functions(
     out: &var std::string::String,
     ir_bytes: []u8
@@ -4051,7 +4029,12 @@ fn append_lexer_reachable_compiled_functions(
         let local_name = try pending.get(index);
         if !(try compiled_closure_name_seen(&emitted, local_name)) {
             try append_lexer_compiled_function(out, ir_bytes, local_name);
-            try collect_lexer_compiled_callees(ir_bytes, local_name, &var pending);
+            try collect_component_compiled_callees(
+                ir_bytes,
+                "selfhost::lexer::",
+                local_name,
+                &var pending
+            );
             try emitted.append(local_name);
         }
         index = index + 1;
@@ -4102,69 +4085,6 @@ fn append_lexer_compiled_closure_member(
     return;
 }
 
-fn collect_lexer_compiled_callees(
-    ir_bytes: []u8,
-    local_name: []u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    var function_name = std::string::String(std::mem::page_allocator());
-    defer function_name.deinit();
-    try append_component_qualified_name(&var function_name, "selfhost::lexer::", local_name);
-    let function_name_bytes = function_name.as_bytes();
-    try collect_lexer_compiled_body_callees(ir_bytes, function_name_bytes, pending);
-    return;
-}
-
-fn collect_lexer_compiled_body_callees(
-    ir_bytes: []u8,
-    function_name: &[]u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    let name = function_name.*;
-    let count = try ir_contract::body_node_count(ir_bytes, name);
-    var sequence = 0;
-    while sequence < count {
-        let kind = try ir_contract::body_node_kind(ir_bytes, name, sequence);
-        if std::mem::equal_bytes(kind, "Call") {
-            let callee = try ir_contract::body_call_callee_or_empty(
-                ir_bytes,
-                name,
-                sequence
-            );
-            try collect_lexer_compiled_callee(ir_bytes, callee, pending);
-        }
-        sequence = sequence + 1;
-    }
-    return;
-}
-
-fn collect_lexer_compiled_callee(
-    ir_bytes: []u8,
-    callee: []u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    if std::mem::starts_with(callee, "std::mem::") {
-        return;
-    }
-    if std::mem::starts_with(callee, "selfhost::lexer::") {
-        let prefix = "selfhost::lexer::";
-        let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
-        if !component_compiled_local_present(ir_bytes, "selfhost::lexer::", local) {
-            return error("lexer compiled closure: unsupported local helper");
-        }
-        try pending.append(local);
-        return;
-    }
-    if std::mem::starts_with(callee, "selfhost::") {
-        return error("lexer compiled closure: unsupported selfhost callee");
-    }
-    if component_compiled_local_present(ir_bytes, "selfhost::lexer::", callee) {
-        try pending.append(callee);
-        return;
-    }
-    return error("lexer compiled closure: unsupported callee");
-}
-
 fn append_loader_reachable_compiled_functions(
     out: &var std::string::String,
     ir_bytes: []u8
@@ -4180,7 +4100,12 @@ fn append_loader_reachable_compiled_functions(
         let local_name = try pending.get(index);
         if !(try compiled_closure_name_seen(&emitted, local_name)) {
             try append_loader_compiled_function(out, ir_bytes, local_name);
-            try collect_loader_compiled_callees(ir_bytes, local_name, &var pending);
+            try collect_component_compiled_callees(
+                ir_bytes,
+                "selfhost::source::loader::",
+                local_name,
+                &var pending
+            );
             try emitted.append(local_name);
         }
         index = index + 1;
@@ -4205,76 +4130,6 @@ fn append_loader_compiled_function(
     let function_name_bytes = function_name.as_bytes();
     try append_compiled_closure_function(out, ir_bytes, function_name_bytes);
     return;
-}
-
-fn collect_loader_compiled_callees(
-    ir_bytes: []u8,
-    local_name: []u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    var function_name = std::string::String(std::mem::page_allocator());
-    defer function_name.deinit();
-    try append_component_qualified_name(
-        &var function_name,
-        "selfhost::source::loader::",
-        local_name
-    );
-    let function_name_bytes = function_name.as_bytes();
-    try collect_loader_compiled_body_callees(ir_bytes, function_name_bytes, pending);
-    return;
-}
-
-fn collect_loader_compiled_body_callees(
-    ir_bytes: []u8,
-    function_name: &[]u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    let name = function_name.*;
-    let count = try ir_contract::body_node_count(ir_bytes, name);
-    var sequence = 0;
-    while sequence < count {
-        let kind = try ir_contract::body_node_kind(ir_bytes, name, sequence);
-        if std::mem::equal_bytes(kind, "Call") {
-            let callee = try ir_contract::body_call_callee_or_empty(
-                ir_bytes,
-                name,
-                sequence
-            );
-            try collect_loader_compiled_callee(ir_bytes, callee, pending);
-        }
-        sequence = sequence + 1;
-    }
-    return;
-}
-
-fn collect_loader_compiled_callee(
-    ir_bytes: []u8,
-    callee: []u8,
-    pending: &var std::array::Array<[]u8>
-) -> !void {
-    if std::mem::starts_with(callee, "std::mem::") {
-        return;
-    }
-    if std::mem::starts_with(callee, "selfhost::source::loader::") {
-        let prefix = "selfhost::source::loader::";
-        let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
-        if !component_compiled_local_present(ir_bytes, "selfhost::source::loader::", local) {
-            return error("loader compiled closure: unsupported local helper");
-        }
-        try pending.append(local);
-        return;
-    }
-    if std::mem::starts_with(callee, "selfhost::source::") {
-        return error("loader compiled closure: unsupported source callee");
-    }
-    if std::mem::starts_with(callee, "selfhost::") {
-        return error("loader compiled closure: unsupported selfhost callee");
-    }
-    if component_compiled_local_present(ir_bytes, "selfhost::source::loader::", callee) {
-        try pending.append(callee);
-        return;
-    }
-    return error("loader compiled closure: unsupported callee");
 }
 
 fn append_slice_equal_function(out: &var std::string::String) -> !void {
