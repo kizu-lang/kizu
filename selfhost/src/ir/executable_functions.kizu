@@ -1384,6 +1384,39 @@ fn source_catalog_qualified_index(
     return error("source closure: qualified callee missing from catalog");
 }
 
+fn loader_catalog_local_index(
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    local_name: []u8
+) -> !i64 {
+    var index = 0;
+    while index < component_function_catalog::len(catalog) {
+        let catalog_name = try component_function_catalog::local_function_name(catalog, index);
+        if std::mem::equal_bytes(catalog_name, local_name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return error("loader closure: local callee missing from catalog");
+}
+
+fn loader_catalog_qualified_index(
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    qualified_name: []u8
+) -> !i64 {
+    var index = 0;
+    while index < component_function_catalog::len(catalog) {
+        if try component_function_catalog::qualified_function_name_matches(
+            catalog,
+            index,
+            qualified_name
+        ) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return error("loader closure: qualified callee missing from catalog");
+}
+
 fn source_closure_role(local_name: []u8) -> []u8 {
     if std::mem::equal_bytes(local_name, "is_source_code") or
         std::mem::equal_bytes(local_name, "is_frontend_source") {
@@ -1581,11 +1614,186 @@ fn collect_source_qualified_callee(
 fn collect_loader_direct_callees(
     text: []u8,
     ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId,
     node_id: std::kizu::ast::NodeId,
-    pending: &var std::array::Array<[]u8>
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
 ) -> !void {
-    try collect_frontend_direct_callees(text, ast, root, node_id, pending, "source-loader");
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => try collect_loader_direct_callees_in_range(text, ast, program.declarations, catalog, pending);,
+        Prefix(prefix) => try collect_loader_direct_callees(text, ast, prefix.right, catalog, pending);,
+        Binary(binary) => try collect_loader_two_node_callees(text, ast, binary.left, binary.right, catalog, pending);,
+        FieldExpr(field) => try collect_loader_direct_callees(text, ast, field.receiver, catalog, pending);,
+        DerefExpr(deref) => try collect_loader_direct_callees(text, ast, deref.receiver, catalog, pending);,
+        Call(call) => try collect_loader_call_parts(text, ast, call.callee, call.args, catalog, pending);,
+        TypeApplyExpr(type_apply) => try collect_loader_node_range_callees(
+            text, ast, type_apply.callee, type_apply.type_args, catalog, pending
+        );,
+        CastExpr(cast_expr) => try collect_loader_direct_callees(text, ast, cast_expr.value, catalog, pending);,
+        IndexExpr(index_expr) => try collect_loader_three_node_callees(
+            text, ast, index_expr.target, index_expr.start, index_expr.end, catalog, pending
+        );,
+        StructLiteralExpr(struct_literal) => try collect_loader_direct_callees_in_range(text, ast, struct_literal.fields, catalog, pending);,
+        StructFieldInit(field_init) => try collect_loader_direct_callees(text, ast, field_init.value, catalog, pending);,
+        ArenaNewExpr(arena_new) => try collect_loader_direct_callees(text, ast, arena_new.allocator, catalog, pending);,
+        TryExpr(try_expr) => try collect_loader_direct_callees(text, ast, try_expr.value, catalog, pending);,
+        ComptimeExpr(comptime_expr) => try collect_loader_direct_callees(text, ast, comptime_expr.value, catalog, pending);,
+        Block(block) => try collect_loader_direct_callees_in_range(text, ast, block.statements, catalog, pending);,
+        If(if_node) => try collect_loader_three_node_callees(
+            text, ast, if_node.condition, if_node.then_block, if_node.else_block, catalog, pending
+        );,
+        Let(let_node) => try collect_loader_direct_callees(text, ast, let_node.value, catalog, pending);,
+        Assign(assign) => try collect_loader_two_node_callees(text, ast, assign.target, assign.value, catalog, pending);,
+        Return(return_node) => try collect_loader_direct_callees(text, ast, return_node.value, catalog, pending);,
+        Defer(defer_node) => try collect_loader_direct_callees(text, ast, defer_node.expr, catalog, pending);,
+        ExprStmt(expr_stmt) => try collect_loader_direct_callees(text, ast, expr_stmt.expr, catalog, pending);,
+        While(while_node) => try collect_loader_three_node_callees(
+            text, ast, while_node.label, while_node.condition, while_node.body, catalog, pending
+        );,
+        For(for_node) => try collect_loader_five_node_callees(
+            text, ast, for_node.label, for_node.name, for_node.start, for_node.end,
+            for_node.body, catalog, pending
+        );,
+        Match(match_node) => try collect_loader_node_range_callees(text, ast, match_node.value, match_node.arms, catalog, pending);,
+        MatchArm(match_arm) => try collect_loader_direct_callees(text, ast, match_arm.body, catalog, pending);,
+        Unsafe(unsafe_node) => try collect_loader_direct_callees(text, ast, unsafe_node.body, catalog, pending);,
+        ComptimeIf(comptime_if) => try collect_loader_three_node_callees(
+            text, ast, comptime_if.condition, comptime_if.then_block,
+            comptime_if.else_block, catalog, pending
+        );,
+        FnDecl(fn_decl) => try collect_loader_direct_callees(text, ast, fn_decl.body, catalog, pending);,
+        _ => return;,
+    }
+    return;
+}
+
+fn collect_loader_direct_callees_in_range(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        try collect_loader_direct_callees(text, ast, child, catalog, pending);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_loader_two_node_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    try collect_loader_direct_callees(text, ast, first, catalog, pending);
+    try collect_loader_direct_callees(text, ast, second, catalog, pending);
+    return;
+}
+
+fn collect_loader_three_node_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    try collect_loader_direct_callees(text, ast, first, catalog, pending);
+    try collect_loader_direct_callees(text, ast, second, catalog, pending);
+    try collect_loader_direct_callees(text, ast, third, catalog, pending);
+    return;
+}
+
+fn collect_loader_five_node_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    fourth: std::kizu::ast::NodeId,
+    fifth: std::kizu::ast::NodeId,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    try collect_loader_direct_callees(text, ast, first, catalog, pending);
+    try collect_loader_direct_callees(text, ast, second, catalog, pending);
+    try collect_loader_direct_callees(text, ast, third, catalog, pending);
+    try collect_loader_direct_callees(text, ast, fourth, catalog, pending);
+    try collect_loader_direct_callees(text, ast, fifth, catalog, pending);
+    return;
+}
+
+fn collect_loader_node_range_callees(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    try collect_loader_direct_callees(text, ast, node_id, catalog, pending);
+    try collect_loader_direct_callees_in_range(text, ast, range, catalog, pending);
+    return;
+}
+
+fn collect_loader_call_parts(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    try collect_loader_call_callee(text, ast, callee, catalog, pending);
+    try collect_loader_direct_callees_in_range(text, ast, args, catalog, pending);
+    return;
+}
+
+fn collect_loader_call_callee(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let callee_text = ast_node_text(text, ast, callee);
+    if std::mem::starts_with(callee_text, "std::mem::") {
+        return;
+    }
+    let node = ast.get(callee);
+    match node.data {
+        Var(_) => return collect_loader_var_callee(callee_text, catalog, pending);,
+        FieldExpr(_) => return collect_loader_qualified_callee(callee_text, catalog, pending);,
+        _ => return error("loader closure: unsupported call form");,
+    }
+    return;
+}
+
+fn collect_loader_var_callee(
+    callee_text: []u8,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    try pending.append(try loader_catalog_local_index(catalog, callee_text));
+    return;
+}
+
+fn collect_loader_qualified_callee(
+    callee_text: []u8,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    if !std::mem::starts_with(callee_text, "selfhost::source::loader::") {
+        return error("loader closure: unsupported qualified callee");
+    }
+    try pending.append(try loader_catalog_qualified_index(catalog, callee_text));
     return;
 }
 
@@ -1809,9 +2017,6 @@ fn collect_frontend_var_callee(
 }
 
 fn frontend_closure_supported_local(component: []u8, name: []u8) -> bool {
-    if std::mem::equal_bytes(component, "source-loader") {
-        return loader_closure_supported_local(name);
-    }
     if std::mem::equal_bytes(component, "lexer") {
         return lexer_closure_supported_local(name);
     }
@@ -1822,9 +2027,6 @@ fn frontend_closure_supported_local(component: []u8, name: []u8) -> bool {
 }
 
 fn frontend_closure_qualified_prefix(component: []u8) -> ![]u8 {
-    if std::mem::equal_bytes(component, "source-loader") {
-        return "selfhost::source::loader::";
-    }
     if std::mem::equal_bytes(component, "lexer") {
         return "selfhost::lexer::";
     }
@@ -1841,12 +2043,20 @@ fn append_loader_function_facts(
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "selfhost::source::loader"
+    );
+    defer catalog.deinit();
     try append_type_llvm_fact(out, "source::SourceFile", "%kizu.selfhost.source.source_file");
     try append_loader_reachable_helper_bodies(
         out,
         file.text,
         parsed.ast,
-        parsed.root
+        &catalog
     );
     return;
 }
@@ -1855,27 +2065,27 @@ fn append_loader_reachable_helper_bodies(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId
+    catalog: &component_function_catalog::ComponentFunctionCatalog
 ) -> !void {
-    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
-    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
-    try pending.append("package_module_end");
-    try pending.append("is_manifest_root_source");
-    try pending.append("package_module_start");
-    try pending.append("source_file");
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try pending.append(try loader_catalog_local_index(catalog, "package_module_end"));
+    try pending.append(try loader_catalog_local_index(catalog, "is_manifest_root_source"));
+    try pending.append(try loader_catalog_local_index(catalog, "package_module_start"));
+    try pending.append(try loader_catalog_local_index(catalog, "source_file"));
     var index = 0;
     while index < pending.len() {
-        let local_name = try pending.get(index);
-        if !(try closure_name_seen(&emitted, local_name)) {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
             try append_loader_closure_helper_body(
                 out,
                 text,
                 ast,
-                root,
-                local_name,
+                catalog,
+                function_index,
                 &var pending
             );
-            try emitted.append(local_name);
+            try emitted.append(function_index);
         }
         index = index + 1;
     }
@@ -1888,44 +2098,24 @@ fn append_loader_closure_helper_body(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId,
-    local_name: []u8,
-    pending: &var std::array::Array<[]u8>
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
 ) -> !void {
-    let qualified_name = try loader_closure_qualified_name(local_name);
-    let function_node_id = try function_node(text, ast, root, local_name);
-    try function_signature::append(out, text, ast, function_node_id, qualified_name);
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
     let body = try function_body_from_node(ast, function_node_id);
-    try executable_body::append_helper_body_ir(out, text, ast, qualified_name, "loader-path", body);
-    try collect_loader_direct_callees(text, ast, root, body, pending);
+    try executable_body::append_catalog_helper_body_ir(
+        out,
+        text,
+        ast,
+        catalog,
+        function_index,
+        "loader-path",
+        body
+    );
+    try collect_loader_direct_callees(text, ast, body, catalog, pending);
     return;
-}
-
-fn loader_closure_supported_local(name: []u8) -> bool {
-    return std::mem::equal_bytes(name, "module_end_for") or
-        std::mem::equal_bytes(name, "package_module_end") or
-        std::mem::equal_bytes(name, "is_manifest_root_source") or
-        std::mem::equal_bytes(name, "package_module_start") or
-        std::mem::equal_bytes(name, "source_file");
-}
-
-fn loader_closure_qualified_name(local_name: []u8) -> ![]u8 {
-    if std::mem::equal_bytes(local_name, "module_end_for") {
-        return "selfhost::source::loader::module_end_for";
-    }
-    if std::mem::equal_bytes(local_name, "package_module_end") {
-        return "selfhost::source::loader::package_module_end";
-    }
-    if std::mem::equal_bytes(local_name, "is_manifest_root_source") {
-        return "selfhost::source::loader::is_manifest_root_source";
-    }
-    if std::mem::equal_bytes(local_name, "package_module_start") {
-        return "selfhost::source::loader::package_module_start";
-    }
-    if std::mem::equal_bytes(local_name, "source_file") {
-        return "selfhost::source::loader::source_file";
-    }
-    return error("loader closure: unsupported local helper");
 }
 
 fn append_lexer_function_facts(
