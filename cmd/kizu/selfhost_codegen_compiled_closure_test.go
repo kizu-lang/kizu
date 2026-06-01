@@ -141,6 +141,8 @@ func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 
 	required := []string{
+		`"selfhost::ir::codegen::program_supported"`,
+		`"kizu_selfhost__ir_codegen_program_supported"`,
 		`"selfhost::ir::codegen::i64_call_program_supported"`,
 		`"kizu_selfhost__ir_codegen_i64_call_program_supported"`,
 		`"selfhost::ir::codegen::return_void_program_supported"`,
@@ -156,6 +158,8 @@ func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
 	}
 
 	forbidden := []string{
+		"fn append_program_supported_function(",
+		"try append_program_supported_function(out, ir_bytes);",
 		"fn append_i64_call_program_supported_function(",
 		"try append_i64_call_program_supported_function(out, ir_bytes);",
 		"fn append_return_void_program_supported_function(",
