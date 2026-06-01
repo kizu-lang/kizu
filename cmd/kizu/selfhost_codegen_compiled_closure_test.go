@@ -145,6 +145,8 @@ func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
 		`"kizu_selfhost__ir_codegen_i64_call_program_supported"`,
 		`"selfhost::ir::codegen::return_void_program_supported"`,
 		`"kizu_selfhost__ir_codegen_return_void_program_supported"`,
+		`"selfhost::ir::codegen::try_void_program_supported"`,
+		`"kizu_selfhost__ir_codegen_try_void_program_supported"`,
 		`"%kizu.selfhost.codegen.program program"`,
 	}
 	for _, fragment := range required {
@@ -158,6 +160,8 @@ func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
 		"try append_i64_call_program_supported_function(out, ir_bytes);",
 		"fn append_return_void_program_supported_function(",
 		"try append_return_void_program_supported_function(out, ir_bytes);",
+		"fn append_try_void_program_supported_function(",
+		"try append_try_void_program_supported_function(out, ir_bytes);",
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(cli, fragment) {
