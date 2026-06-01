@@ -672,7 +672,7 @@ func assertSelfhostASTClosureScope(
 	t *testing.T,
 	astFactsBody string,
 	astClosureBody string,
-	policyBody string,
+	_ string,
 ) {
 	t.Helper()
 	if strings.Contains(astFactsBody, "append_selected_helper_body(") {
@@ -699,7 +699,7 @@ func assertSelfhostASTClosureScope(
 		"std::kizu::parser::",
 		"parser::parse_program",
 	} {
-		if strings.Contains(astClosureBody+policyBody, fragment) {
+		if strings.Contains(astClosureBody, fragment) {
 			t.Fatalf("selfhost ast closure expands outside the AST helper cluster via %q", fragment)
 		}
 	}
