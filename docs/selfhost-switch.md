@@ -226,12 +226,13 @@ Deliberately not switched by #1151, kept explicit in #1157:
 The second public `cmd/kizu` CLI command routed through the selfhost-owned
 compiled artifact path is `test <file>`, behind the rollback-friendly switch
 point `KIZU_SELFHOST_TEST=1`. The selfhost `test` path now lowers the test
-executable, emits LLVM, links a self-contained native artifact (the
-checked-AST/interpreter renderer `selfhost::backend::hosted` emits its own
-`@main` for the `kizu_test_main` entry, mirroring the run artifact boundary),
-and **executes** it, so the observable output (`test: ok` on stdout for a
-supported passing test, the runtime error on stderr for a failing one) matches
-the Go `testFile` path for supported shapes.
+executable, emits LLVM, links a self-contained native artifact (both the
+checked-AST/interpreter renderer `selfhost::backend::hosted` and the
+stage2/native compiled bounded renderer `selfhost::backend::cli_test_llvm` emit
+their own `@main` for the `kizu_test_main` entry, mirroring the run artifact
+boundary), and **executes** it, so the observable output (`test: ok` on stdout
+for a supported passing test, the runtime error on stderr for a failing one)
+matches the Go `testFile` path for supported shapes.
 
 | Field | Value |
 | --- | --- |
@@ -258,14 +259,14 @@ Deliberately not switched / remaining unsupported, kept explicit in #1157:
 - Broader test discovery (multiple `test` blocks, helper-driven assertions,
   non-`std::testing::expect` bodies) is not switched; those shapes are not yet
   lowerable by the selfhost test executable backend.
-- The **stage2/native compiled bounded test renderer** (`cli_test_llvm`) still
-  emits the `kizu_test_main` entry without a self-contained `@main`, so the
-  `just selfhost-test-parity-gate` and native-source gates link it with an
-  external main-providing C harness. Only the checked-AST/interpreter renderer
-  used by the public selfhost test path is self-contained today. Unifying the
-  compiled bounded renderer onto the same self-contained `@main` boundary
-  (removing the harness everywhere) remains follow-up work and is the deletion
-  condition for the harness in `linkTestParityExecutableWithHost`.
+- The **stage2/native compiled bounded test renderer** (`cli_test_llvm`) now
+  emits the same self-contained `@main` for the `kizu_test_main` entry as the
+  checked-AST/interpreter renderer (`selfhost::backend::hosted`), mirroring the
+  run artifact boundary. Both the `just selfhost-test-parity-gate` and the
+  native-source gate link the emitted test artifact harness-free against the host
+  runtime (`linkTestParityExecutableWithHost`), identical to the run path; the
+  external main-providing C harness is removed. Broader test discovery and the
+  default-on switch remain the follow-up work tracked below.
 
 ## Failure Policy
 

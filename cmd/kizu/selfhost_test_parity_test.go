@@ -251,23 +251,17 @@ func linkTestParityExecutable(clang string, llPath string, exePath string) error
 }
 
 // linkTestParityExecutableWithHost links one emitted test artifact with a host
-// runtime. The stage2/native compiled bounded test renderer (cli_test_llvm) emits
-// the `kizu_test_main` entry without a self-contained @main, so this links an
-// external main-providing C harness. (The checked-AST/interpreter renderer in
-// selfhost::backend::hosted now emits a self-contained @main, mirroring the run
-// artifact boundary, and is linked harness-free through link_run_artifact in the
-// public selfhost test path. Unifying the compiled renderer onto the same
-// self-contained boundary is tracked as remaining work in docs/selfhost-switch.md.)
+// runtime, harness-free. Both the stage2/native compiled bounded test renderer
+// (cli_test_llvm) and the checked-AST/interpreter renderer (selfhost::backend::
+// hosted) now emit a self-contained @main for the `kizu_test_main` entry, mirroring
+// the run artifact boundary, so the artifact links directly against the host
+// runtime with no external main-providing C harness (identical to the run path).
 func linkTestParityExecutableWithHost(
 	clang string,
 	llPath string,
 	hostLLPath string,
 	exePath string,
 ) error {
-	harnessPath := filepath.Join(filepath.Dir(exePath), "hosted_test_main.c")
-	if err := os.WriteFile(harnessPath, []byte(hostedTestHarnessSource), 0o644); err != nil {
-		return err
-	}
 	compile := exec.Command(
 		clang,
 		"-Wno-override-module",
@@ -275,7 +269,6 @@ func linkTestParityExecutableWithHost(
 		llPath,
 		hostLLPath,
 		"selfhost/runtime/selfhost.hosted.c",
-		harnessPath,
 		"-o",
 		exePath,
 	)
@@ -445,15 +438,3 @@ func appendTestParityFooter(out *strings.Builder, start time.Time, failures int)
 func writeTestParityReport(report string) error {
 	return os.WriteFile("target/selfhost/reports/test-parity.txt", []byte(report), 0o644)
 }
-
-const hostedTestHarnessSource = `
-#include <stdint.h>
-
-void kizu_host_init(int argc, char **argv);
-int64_t kizu_test_main(void);
-
-int main(int argc, char **argv) {
-    kizu_host_init(argc, argv);
-    return (int)kizu_test_main();
-}
-`
