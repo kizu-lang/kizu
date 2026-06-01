@@ -2726,6 +2726,7 @@ func assertHostedExecutableFactOrigins(
 		sources.body,
 		sources.llvm,
 	)
+	assertHostedHelperBodyFactsAreCatalogDriven(t, sources.selected)
 }
 
 // assertHostedExecutableRendererConsumers checks generated renderers consume
@@ -3147,6 +3148,60 @@ func assertExecutableHelperBodyFactsAreCatalogDriven(t *testing.T, selected stri
 		`"selfhost::backend::executable::"`,
 		`"executable helper closure: unsupported call form"`,
 		`"executable helper closure: unsupported qualified callee"`,
+	)
+}
+
+// assertHostedHelperBodyFactsAreCatalogDriven keeps append_hosted_helper_body_facts
+// seeded from the component catalog and expanded by the shared BFS, guarding the
+// converted hosted helpers from regressing back to the hand-written
+// append_selected_helper_body table.
+func assertHostedHelperBodyFactsAreCatalogDriven(t *testing.T, selected string) {
+	t.Helper()
+	helperFactsBody := selfhostKizuFunctionBody(
+		t,
+		selected,
+		"fn append_hosted_helper_body_facts(",
+	)
+	helperClosureBody := selfhostKizuFunctionBody(
+		t,
+		selected,
+		"fn append_hosted_helper_closure_body(",
+	)
+	findLocal := "component_function_catalog::find_local_function_index(catalog, "
+	for _, fragment := range []string{
+		"component_function_catalog::collect_from_ast(",
+		`"selfhost::backend::hosted"`,
+		findLocal + `"hosted_executable_from_codegen")`,
+		findLocal + `"hosted_output_len")`,
+		"append_hosted_helper_closure_body(",
+		"closure_index_seen(&emitted, function_index)",
+	} {
+		if !strings.Contains(helperFactsBody, fragment) {
+			t.Fatalf("hosted helper body facts no longer catalog-driven, missing %q", fragment)
+		}
+	}
+	if strings.Contains(helperFactsBody, "append_selected_helper_body(") {
+		t.Fatal("hosted helper body facts reverted to hand-written append_selected_helper_body")
+	}
+	// The hosted closure must not reintroduce per-helper selection inside its body.
+	if strings.Contains(helperClosureBody, "append_selected_helper_body(") {
+		t.Fatal("hosted helper closure body reverted to hand-written append_selected_helper_body")
+	}
+	for _, fragment := range []string{
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+	} {
+		if !strings.Contains(helperClosureBody, fragment) {
+			t.Fatalf("hosted helper closure body missing catalog emitter %q", fragment)
+		}
+	}
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		selected,
+		helperClosureBody,
+		`"selfhost::backend::hosted::"`,
+		`"hosted helper closure: unsupported call form"`,
+		`"hosted helper closure: unsupported qualified callee"`,
 	)
 }
 
