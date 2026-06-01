@@ -130,6 +130,10 @@ selfhost-run-parity-gate-from-scratch:
     just selfhost-bootstrap
     just selfhost-run-parity-gate
 
+# Run #1151 public `run` selfhost switch gate (KIZU_SELFHOST_RUN routing).
+selfhost-run-cli-switch-gate:
+    go test ./cmd/kizu -run 'TestSelfhostRunCliSwitch' -count=1 -v
+
 # Run #570 test <file> parity through the hosted selfhost artifact.
 selfhost-test-parity-gate:
     KIZU_RUN_SELFHOST_TEST_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostTestParityGate$' -count=1 -v
