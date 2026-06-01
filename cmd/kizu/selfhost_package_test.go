@@ -705,6 +705,79 @@ func assertSelfhostASTClosureScope(
 	}
 }
 
+// TestSelfhostExecutableHelperClosureUsesComponentCatalog keeps the
+// selfhost::backend::executable shared-helper body facts seeded from the
+// component catalog and expanded by the common BFS callee collector instead of
+// the hand-written append_selected_helper_body table.
+func TestSelfhostExecutableHelperClosureUsesComponentCatalog(t *testing.T) {
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	helperFactsBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_executable_helper_body_facts(",
+	)
+	helperClosureBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_executable_helper_closure_body(",
+	)
+	policyBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn collect_catalog_closure_external_callee_allowed(",
+	)
+	seedRequired := []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::backend::executable\"",
+		"component_function_catalog::find_local_function_index(catalog, \"is_empty_node\")",
+		"component_function_catalog::find_local_function_index(catalog, \"unsupported_executable\")",
+		"component_function_catalog::find_local_function_index(catalog, \"ast_node_text\")",
+		"append_executable_helper_closure_body(",
+		"closure_index_seen(&emitted, function_index)",
+	}
+	for _, fragment := range seedRequired {
+		if !strings.Contains(helperFactsBody, fragment) {
+			t.Fatalf("executable helper closure seed path missing %q", fragment)
+		}
+	}
+	if strings.Contains(helperFactsBody, "append_selected_helper_body(") {
+		t.Fatal("executable helper body facts keep hand-written helper body selection")
+	}
+	closureRequired := []string{
+		"component_function_catalog::function_node_id(",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+		"\"checked-executable-shared-helper\"",
+	}
+	for _, fragment := range closureRequired {
+		if !strings.Contains(helperClosureBody, fragment) {
+			t.Fatalf("executable helper closure body missing %q", fragment)
+		}
+	}
+	if strings.Contains(helperClosureBody, "try function_node(text, ast, root, local_name)") {
+		t.Fatal("executable helper closure keeps handwritten function_node lookup")
+	}
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		executableFunctions,
+		helperClosureBody,
+		"\"selfhost::backend::executable::\"",
+		"\"executable helper closure: unsupported call form\"",
+		"\"executable helper closure: unsupported qualified callee\"",
+	)
+	// is_empty_node / ast_node_text bind their node via the read-only ast.get
+	// accessor, so the external callee allowlist must admit it for this prefix
+	// without widening to a broad std::kizu:: / selfhost:: match.
+	for _, fragment := range []string{
+		"std::mem::equal_bytes(qualified_prefix, \"selfhost::backend::executable::\")",
+		"std::mem::equal_bytes(callee_text, \"ast.get\")",
+	} {
+		if !strings.Contains(policyBody, fragment) {
+			t.Fatalf("executable helper external accessor policy missing %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
 // compiled closure params tied to function-signature-param facts. The std lexer
 // closure seeds the shared BFS with the "std::kizu::lexer::" prefix, which builds
@@ -3003,18 +3076,20 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 	}
 	for _, fragment := range []string{
 		"append_executable_helper_body_facts(",
-		"append_selected_helper_body(",
-		"function_body_node(",
-		"executable_body::append_helper_body_ir(",
+		"component_function_catalog::collect_from_ast(",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
 		"unsupported_executable",
 		"ast_node_text",
+		"is_empty_node",
 	} {
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("selected helper body IR is not rooted in checked AST via %q", fragment)
 		}
 	}
+	assertExecutableHelperBodyFactsAreCatalogDriven(t, selected)
 	for _, fragment := range []string{
-		"pub fn append_helper_body_ir(",
+		"pub fn append_catalog_helper_body_ir(",
 		"fn append_body_ir(",
 		"body-call ",
 		"body-struct-literal ",
@@ -3031,6 +3106,48 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 			t.Fatal("executable path still depends on selected helper body count facts")
 		}
 	}
+}
+
+// assertExecutableHelperBodyFactsAreCatalogDriven keeps
+// append_executable_helper_body_facts seeded from the component catalog and
+// expanded by the shared BFS, guarding it from regressing back to the
+// hand-written append_selected_helper_body table.
+func assertExecutableHelperBodyFactsAreCatalogDriven(t *testing.T, selected string) {
+	t.Helper()
+	helperFactsBody := selfhostKizuFunctionBody(
+		t,
+		selected,
+		"fn append_executable_helper_body_facts(",
+	)
+	helperClosureBody := selfhostKizuFunctionBody(
+		t,
+		selected,
+		"fn append_executable_helper_closure_body(",
+	)
+	for _, fragment := range []string{
+		"component_function_catalog::collect_from_ast(",
+		`"selfhost::backend::executable"`,
+		`component_function_catalog::find_local_function_index(catalog, "is_empty_node")`,
+		`component_function_catalog::find_local_function_index(catalog, "unsupported_executable")`,
+		`component_function_catalog::find_local_function_index(catalog, "ast_node_text")`,
+		"append_executable_helper_closure_body(",
+		"closure_index_seen(&emitted, function_index)",
+	} {
+		if !strings.Contains(helperFactsBody, fragment) {
+			t.Fatalf("executable helper body facts no longer catalog-driven, missing %q", fragment)
+		}
+	}
+	if strings.Contains(helperFactsBody, "append_selected_helper_body(") {
+		t.Fatal("executable helper body facts reverted to hand-written append_selected_helper_body")
+	}
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		selected,
+		helperClosureBody,
+		`"selfhost::backend::executable::"`,
+		`"executable helper closure: unsupported call form"`,
+		`"executable helper closure: unsupported qualified callee"`,
+	)
 }
 
 // assertExecutableContractFactsComeFromCheckedAST keeps executable facts tied to
