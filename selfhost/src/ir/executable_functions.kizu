@@ -990,66 +990,79 @@ fn append_selfhost_ast_function_facts(
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
-    try append_selected_helper_body(
-        out,
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
         file.text,
         parsed.ast,
         parsed.root,
-        "declaration_count",
-        "selfhost::ast::declaration_count",
-        "checked-ast-match"
+        "selfhost::ast"
     );
-    // The node_count traversal cluster's signature + body facts (tracker 961). node_count and
-    // the count_* helpers form a mutually-recursive cluster lowered together: node_count is the
-    // 44-arm match-over-AstData traversal, count_range the two-phi accumulator loop, count_one
-    // / count_with_range the return-try accessors, and the rest let-try + return-arithmetic.
-    // Emitting their bodies registers them for compiled-mir lowering; the whole cluster's
-    // defines land together so selfhost.ll links.
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "node_count", "selfhost::ast::node_count", "checked-ast-traversal"
+    defer catalog.deinit();
+
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "declaration_count"));
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "node_count"));
+    var index = 0;
+    while index < pending.len() {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
+            try append_selfhost_ast_closure_helper_body(
+                out,
+                file.text,
+                parsed.ast,
+                &catalog,
+                function_index,
+                &var pending
+            );
+            try emitted.append(function_index);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_selfhost_ast_closure_helper_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_catalog_helper_body_ir(
+        out,
+        text,
+        ast,
+        catalog,
+        function_index,
+        selfhost_ast_closure_role(local_name),
+        body
     );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_range", "selfhost::ast::count_range", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_one", "selfhost::ast::count_one", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_two", "selfhost::ast::count_two", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_three", "selfhost::ast::count_three", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_five", "selfhost::ast::count_five", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_with_range", "selfhost::ast::count_with_range", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_node_with_range", "selfhost::ast::count_node_with_range", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_named_range", "selfhost::ast::count_named_range", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_named_ranges", "selfhost::ast::count_named_ranges", "checked-ast-traversal"
-    );
-    try append_selected_helper_body(
-        out, file.text, parsed.ast, parsed.root,
-        "count_fn_decl_parts", "selfhost::ast::count_fn_decl_parts", "checked-ast-traversal"
+    try collect_catalog_closure_direct_callees(
+        text,
+        ast,
+        body,
+        catalog,
+        pending,
+        "selfhost::ast::",
+        "selfhost ast closure: unsupported call form",
+        "selfhost ast closure: unsupported qualified callee"
     );
     return;
+}
+
+fn selfhost_ast_closure_role(local_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(local_name, "declaration_count") {
+        return "checked-ast-match";
+    }
+    return "checked-ast-traversal";
 }
 
 // append_selected_function_signature emits only the function-signature facts (return type
@@ -1592,6 +1605,9 @@ fn collect_catalog_closure_call_callee(
     if std::mem::starts_with(callee_text, "std::mem::") {
         return;
     }
+    if collect_catalog_closure_external_callee_allowed(callee_text, qualified_prefix) {
+        return;
+    }
     let node = ast.get(callee);
     match node.data {
         Var(_) => return collect_catalog_closure_var_callee(callee_text, catalog, pending);,
@@ -1601,6 +1617,17 @@ fn collect_catalog_closure_call_callee(
         _ => return error(unsupported_call_form_error);,
     }
     return;
+}
+
+fn collect_catalog_closure_external_callee_allowed(
+    callee_text: []u8,
+    qualified_prefix: []u8
+) -> bool {
+    if !std::mem::equal_bytes(qualified_prefix, "selfhost::ast::") {
+        return false;
+    }
+    return std::mem::equal_bytes(callee_text, "tree.get") or
+        std::mem::equal_bytes(callee_text, "tree.child_at");
 }
 
 fn collect_catalog_closure_var_callee(
