@@ -438,6 +438,57 @@ func TestSelfhostKizuLexerClosureUsesComponentCatalog(t *testing.T) {
 	}
 }
 
+// TestSelfhostLexerClosureUsesComponentCatalog keeps selfhost::lexer helper body
+// closure resolution tied to the AST-derived component function catalog.
+func TestSelfhostLexerClosureUsesComponentCatalog(t *testing.T) {
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	lexerClosureBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_lexer_closure_helper_body(",
+	)
+	required := []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::lexer\"",
+		"lexer_catalog_local_index(catalog, \"is_identifier_continue\")",
+		"lexer_catalog_local_index(catalog, \"invalid_token_display\")",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+		"component_function_catalog::function_node_id(",
+		"component_function_catalog::qualified_function_name_matches(",
+		"lexer_catalog_qualified_index(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("selfhost lexer closure catalog path missing %q", fragment)
+		}
+	}
+	forbiddenGlobal := []string{
+		"fn lexer_closure_supported_local(",
+		"fn lexer_closure_qualified_name(",
+		"lexer_closure_supported_local(name)",
+		"lexer_closure_qualified_name(local_name)",
+		"frontend_closure_supported_local",
+		"frontend_closure_qualified_prefix",
+		"collect_frontend_",
+	}
+	for _, fragment := range forbiddenGlobal {
+		if strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("selfhost lexer closure keeps handwritten lookup %q", fragment)
+		}
+	}
+	forbiddenBody := []string{
+		"try function_node(text, ast, root, local_name)",
+		"function_signature::append(out",
+		"executable_body::append_helper_body_ir(out",
+	}
+	for _, fragment := range forbiddenBody {
+		if strings.Contains(lexerClosureBody, fragment) {
+			t.Fatalf("selfhost lexer closure keeps handwritten lookup %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
 // compiled closure params tied to function-signature-param facts.
 func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
