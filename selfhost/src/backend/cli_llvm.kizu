@@ -3447,87 +3447,15 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "kizu_kizu__ast_ast_get",
         "%kizu.kizu.ast.ast self;%kizu.kizu.ast.node_id id"
     );
-    // declaration_count is the first match-over-AstData-union read-only AST accessor
-    // compiled into stage2 (tracker 961): it binds an AstNode via Ast.get, dispatches on
-    // the AstData tagged-union tag, and on the Program arm reads program.declarations.len
-    // out of the inline payload, returning 0 for every other variant.
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::declaration_count",
-        "kizu_selfhost__ast_declaration_count",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id root"
-    );
-    // The node_count recursive AST-traversal cluster compiled into stage2 (tracker 961):
-    // node_count is the 44-arm match-over-AstData traversal, count_range the two-phi
-    // accumulator loop calling Ast.child_at + node_count, and the count_* helpers the
-    // let-try / return-try arithmetic. The whole mutually-recursive cluster is registered
-    // together so selfhost.ll links with no undefined symbol.
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::node_count",
-        "kizu_selfhost__ast_node_count",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id node_id"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_range",
-        "kizu_selfhost__ast_count_range",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.child_range range"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_one",
-        "kizu_selfhost__ast_count_one",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id first"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_two",
-        "kizu_selfhost__ast_count_two",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id first;%kizu.kizu.ast.node_id second"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_three",
-        "kizu_selfhost__ast_count_three",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id first;%kizu.kizu.ast.node_id second;%kizu.kizu.ast.node_id third"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_five",
-        "kizu_selfhost__ast_count_five",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id first;%kizu.kizu.ast.node_id second;%kizu.kizu.ast.node_id third;%kizu.kizu.ast.node_id fourth;%kizu.kizu.ast.node_id fifth"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_with_range",
-        "kizu_selfhost__ast_count_with_range",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.child_range range"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_node_with_range",
-        "kizu_selfhost__ast_count_node_with_range",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id node_id;%kizu.kizu.ast.child_range range"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_named_range",
-        "kizu_selfhost__ast_count_named_range",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id name;%kizu.kizu.ast.child_range range"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_named_ranges",
-        "kizu_selfhost__ast_count_named_ranges",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id name;%kizu.kizu.ast.child_range first;%kizu.kizu.ast.child_range second"
-    );
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ast::count_fn_decl_parts",
-        "kizu_selfhost__ast_count_fn_decl_parts",
-        "%kizu.kizu.ast.ast tree;%kizu.kizu.ast.node_id extern_abi;%kizu.kizu.ast.node_id name;%kizu.kizu.ast.child_range type_params;%kizu.kizu.ast.child_range params;%kizu.kizu.ast.node_id return_type;%kizu.kizu.ast.node_id return_borrow;%kizu.kizu.ast.node_id body"
-    );
+    // The selfhost::ast node-count traversal closure compiled into stage2 (tracker
+    // 961): declaration_count is the standalone match-over-AstData read (Ast.get +
+    // Program-arm program.declarations.len), and node_count is the 44-arm
+    // match-over-AstData traversal seeding the mutually-recursive count_* cluster
+    // (count_range the two-phi Ast.child_at + node_count accumulator loop, the rest
+    // let-try / return-try arithmetic). The shared BFS walks the whole cluster from
+    // these two seeds and links selfhost.ll with no undefined symbol; each member's
+    // llvm symbol and params_spec are derived from signature facts.
+    try append_ast_reachable_compiled_functions(out, ir_bytes);
     // std::mem::is_ascii_space backs the ast_node_text span accessor's trim (tracker 961):
     // an or-chain byte classifier returning i1. It lowers through the single-statement
     // expression-return path (the binary renderer already handles or / eq).
@@ -3781,6 +3709,33 @@ fn append_source_reachable_compiled_functions(
     return;
 }
 
+// append_ast_reachable_compiled_functions emits the selfhost::ast node-count
+// traversal closure through the shared BFS. declaration_count and node_count are the
+// two entry points: declaration_count is the standalone match-over-AstData read, and
+// node_count seeds the mutually-recursive count_* cluster (count_range, count_one,
+// count_two, count_three, count_five, count_with_range, count_node_with_range,
+// count_named_range, count_named_ranges, count_fn_decl_parts). The BFS derives each
+// member's llvm symbol and params_spec from signature facts and admits the external
+// std::kizu::ast Ast.get / Ast.child_at accessors, which are compiled separately, so
+// the cluster no longer needs a handwritten append_compiled_function_auto per member.
+fn append_ast_reachable_compiled_functions(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("declaration_count");
+    try pending.append("node_count");
+    try append_component_reachable_compiled_functions(
+        out,
+        ir_bytes,
+        "selfhost::ast::",
+        &var pending,
+        false
+    );
+    pending.deinit();
+    return;
+}
+
 fn compiled_closure_name_seen(
     names: &std::array::Array<[]u8>,
     name: []u8
@@ -3931,11 +3886,14 @@ fn collect_component_compiled_body_callees(
 }
 
 // collect_component_compiled_callee classifies one callee relative to the
-// component prefix. std::mem callees are intrinsic and ignored. A callee inside
-// the component prefix contributes its local name once the IR facts confirm the
-// helper, while a nested sub-namespace under the prefix or any other qualified
-// callee is rejected as an explicit error. A bare local name is also resolved
-// through the IR facts so nothing is treated as supported without a signature.
+// component prefix. std::mem callees are intrinsic and ignored. The narrow set of
+// external accessors compiled separately into selfhost.ll (the std::kizu::ast read
+// accessors, called as tree.get / tree.child_at) is admitted without expansion
+// so the BFS neither re-emits nor walks them. A callee inside the component prefix
+// contributes its local name once the IR facts confirm the helper, while a nested
+// sub-namespace under the prefix or any other qualified callee is rejected as an
+// explicit error. A bare local name is also resolved through the IR facts so nothing
+// is treated as supported without a signature.
 fn collect_component_compiled_callee(
     ir_bytes: []u8,
     prefix: []u8,
@@ -3943,6 +3901,9 @@ fn collect_component_compiled_callee(
     pending: &var std::array::Array<[]u8>
 ) -> !void {
     if std::mem::starts_with(callee, "std::mem::") {
+        return;
+    }
+    if compiled_external_accessor_allowed(prefix, callee) {
         return;
     }
     if std::mem::starts_with(callee, prefix) {
@@ -3964,6 +3925,28 @@ fn collect_component_compiled_callee(
         return;
     }
     return error("compiled closure: unsupported callee");
+}
+
+// compiled_external_accessor_allowed reports whether a method-call callee names one
+// of the std::kizu::ast read accessors that are compiled separately and linked into
+// selfhost.ll on their own: Ast.get (kizu_kizu__ast_ast_get) and Ast.child_at
+// (kizu_kizu__ast_ast_child_at). The selfhost::ast traversal members bind their
+// tree: std::kizu::ast::Ast parameter and invoke these accessors as tree.get /
+// tree.child_at, so both spellings are admitted: the BFS must not re-emit the
+// external accessor and must not try to walk it as a component-local helper. Only
+// these two exact accessor calls are allowed; every other cross-component callee
+// stays an explicit error so nothing is admitted by fallback.
+fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
+    if !std::mem::equal_bytes(prefix, "selfhost::ast::") {
+        return false;
+    }
+    if std::mem::equal_bytes(callee, "tree.get") {
+        return true;
+    }
+    if std::mem::equal_bytes(callee, "tree.child_at") {
+        return true;
+    }
+    return false;
 }
 
 // compiled_callee_has_namespace reports whether a name still carries a "::"
