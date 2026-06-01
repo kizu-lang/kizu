@@ -111,20 +111,25 @@ func TestSelfhostCodegenLoopI64SupportedUsesCompiledAuto(t *testing.T) {
 		`"selfhost::ir::codegen::loop_i64_run_ast_supported"`,
 		`"kizu_selfhost__ir_codegen_loop_i64_run_ast_supported"`,
 		`"%kizu.selfhost.codegen.run_ast run_ast"`,
+		`"selfhost::ir::codegen::loop_i64_program_supported"`,
+		`"kizu_selfhost__ir_codegen_loop_i64_program_supported"`,
+		`"%kizu.selfhost.codegen.program program"`,
 	}
 	for _, fragment := range required {
 		if !strings.Contains(cli, fragment) {
-			t.Fatalf("loop_i64_run_ast_supported compiled-auto registration missing %q", fragment)
+			t.Fatalf("loop-i64 support compiled-auto registration missing %q", fragment)
 		}
 	}
 
 	forbidden := []string{
 		"fn append_loop_i64_run_ast_supported_function(",
 		"try append_loop_i64_run_ast_supported_function(out, ir_bytes);",
+		"fn append_loop_i64_program_supported_function(",
+		"try append_loop_i64_program_supported_function(out, ir_bytes);",
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(cli, fragment) {
-			t.Fatalf("loop_i64_run_ast_supported keeps hand-written renderer fragment %q", fragment)
+			t.Fatalf("loop-i64 support keeps hand-written renderer fragment %q", fragment)
 		}
 	}
 }
