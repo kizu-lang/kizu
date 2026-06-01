@@ -1642,11 +1642,25 @@ fn collect_catalog_closure_external_callee_allowed(
     if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::executable::") {
         return std::mem::equal_bytes(callee_text, "ast.get");
     }
+    if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::hosted::") {
+        return hosted_closure_external_callee_allowed(callee_text);
+    }
     if !std::mem::equal_bytes(qualified_prefix, "selfhost::ast::") {
         return false;
     }
     return std::mem::equal_bytes(callee_text, "tree.get") or
         std::mem::equal_bytes(callee_text, "tree.child_at");
+}
+
+// hosted_closure_external_callee_allowed enumerates the codegen module boundary
+// callees the selected hosted helper closure is allowed to cross without
+// emitting their bodies. Anything outside this explicit allowlist falls through
+// to the shared collector's qualified-callee error instead of being silently
+// dropped.
+fn hosted_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "codegen::return_void_program_supported") or
+        std::mem::equal_bytes(callee_text, "codegen::metadata_for_program") or
+        std::mem::equal_bytes(callee_text, "codegen::stdout_payload");
 }
 
 fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
@@ -2580,23 +2594,80 @@ fn append_hosted_function_facts(
         "selfhost::backend::hosted::emit_test_executable_artifact",
         "hosted-test-writer"
     );
-    try append_selected_helper_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "hosted_executable_from_codegen",
-        "selfhost::backend::hosted::hosted_executable_from_codegen",
-        "hosted-run-codegen-helper"
+    try append_hosted_helper_body_facts(allocator, out, file.text, parsed.ast, parsed.root);
+    return;
+}
+
+fn append_hosted_helper_body_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
+        text,
+        ast,
+        root,
+        "selfhost::backend::hosted"
     );
-    try append_selected_helper_body(
+    defer catalog.deinit();
+
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "hosted_executable_from_codegen"));
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "hosted_output_len"));
+    var index = 0;
+    while index < pending.len() {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
+            try append_hosted_helper_closure_body(
+                out,
+                text,
+                ast,
+                &catalog,
+                function_index,
+                &var pending
+            );
+            try emitted.append(function_index);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_hosted_helper_closure_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_catalog_helper_body_ir(
         out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "hosted_output_len",
-        "selfhost::backend::hosted::hosted_output_len",
-        "hosted-output-length"
+        text,
+        ast,
+        catalog,
+        function_index,
+        "hosted-shared-helper",
+        body
+    );
+    try collect_catalog_closure_direct_callees(
+        text,
+        ast,
+        body,
+        catalog,
+        pending,
+        "selfhost::backend::hosted::",
+        "hosted helper closure: unsupported call form",
+        "hosted helper closure: unsupported qualified callee"
     );
     return;
 }
