@@ -585,6 +585,126 @@ func TestSelfhostLexerClosureUsesComponentCatalog(t *testing.T) {
 	}
 }
 
+// TestSelfhostASTClosureUsesComponentCatalog keeps selfhost::ast helper body
+// selection on the component catalog and shared body-call closure.
+func TestSelfhostASTClosureUsesComponentCatalog(t *testing.T) {
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	astFactsBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_selfhost_ast_function_facts(",
+	)
+	astClosureBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_selfhost_ast_closure_helper_body(",
+	)
+	policyBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn collect_catalog_closure_external_callee_allowed(",
+	)
+	assertSelfhostASTClosureCatalogSeed(t, astFactsBody)
+	assertSelfhostASTClosureBody(t, astClosureBody)
+	assertSelfhostASTExternalAccessorPolicy(t, policyBody)
+	assertSelfhostASTClosureScope(t, astFactsBody, astClosureBody, policyBody)
+}
+
+// assertSelfhostASTClosureCatalogSeed pins the selfhost::ast BFS seeds.
+func assertSelfhostASTClosureCatalogSeed(t *testing.T, astFactsBody string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::ast\"",
+		"component_function_catalog::find_local_function_index(catalog, \"declaration_count\")",
+		"component_function_catalog::find_local_function_index(catalog, \"node_count\")",
+		"append_selfhost_ast_closure_helper_body(",
+		"closure_index_seen(&emitted, function_index)",
+	} {
+		if !strings.Contains(astFactsBody, fragment) {
+			t.Fatalf("selfhost ast closure seed path missing %q", fragment)
+		}
+	}
+}
+
+// assertSelfhostASTClosureBody pins the shared collector path for each member.
+func assertSelfhostASTClosureBody(t *testing.T, astClosureBody string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+		"selfhost_ast_closure_role(local_name)",
+		"collect_catalog_closure_direct_callees(",
+		"\"selfhost::ast::\"",
+		"\"selfhost ast closure: unsupported call form\"",
+		"\"selfhost ast closure: unsupported qualified callee\"",
+	} {
+		if !strings.Contains(astClosureBody, fragment) {
+			t.Fatalf("selfhost ast closure body missing %q", fragment)
+		}
+	}
+}
+
+// assertSelfhostASTExternalAccessorPolicy pins the narrow external callee allowlist.
+func assertSelfhostASTExternalAccessorPolicy(t *testing.T, policyBody string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"std::mem::equal_bytes(qualified_prefix, \"selfhost::ast::\")",
+		"std::mem::equal_bytes(callee_text, \"tree.get\")",
+		"std::mem::equal_bytes(callee_text, \"tree.child_at\")",
+	} {
+		if !strings.Contains(policyBody, fragment) {
+			t.Fatalf("selfhost ast external accessor policy missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"std::mem::starts_with(callee_text, \"std::kizu::\")",
+		"std::mem::starts_with(callee_text, \"selfhost::\")",
+	} {
+		if strings.Contains(policyBody, fragment) {
+			t.Fatalf("selfhost ast external accessor policy is too broad: %q", fragment)
+		}
+	}
+}
+
+// assertSelfhostASTClosureScope rejects the old manual list and broad closure expansion.
+func assertSelfhostASTClosureScope(
+	t *testing.T,
+	astFactsBody string,
+	astClosureBody string,
+	policyBody string,
+) {
+	t.Helper()
+	if strings.Contains(astFactsBody, "append_selected_helper_body(") {
+		t.Fatal("selfhost ast function facts keep hand-written helper body selection")
+	}
+	for _, local := range []string{
+		"count_range",
+		"count_one",
+		"count_two",
+		"count_three",
+		"count_five",
+		"count_with_range",
+		"count_node_with_range",
+		"count_named_range",
+		"count_named_ranges",
+		"count_fn_decl_parts",
+	} {
+		if strings.Contains(astFactsBody, "\"selfhost::ast::"+local+"\"") {
+			t.Fatalf("selfhost ast function facts keep hand-written selection for %s", local)
+		}
+	}
+	for _, fragment := range []string{
+		"tokenize",
+		"std::kizu::parser::",
+		"parser::parse_program",
+	} {
+		if strings.Contains(astClosureBody+policyBody, fragment) {
+			t.Fatalf("selfhost ast closure expands outside the AST helper cluster via %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
 // compiled closure params tied to function-signature-param facts. The std lexer
 // closure seeds the shared BFS with the "std::kizu::lexer::" prefix, which builds
