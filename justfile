@@ -59,6 +59,7 @@ selfhost-cli-gate:
 selfhost-switch-gate:
     just selfhost-production-from-scratch
     just selfhost-native-source-gate
+    just selfhost-run-cli-switch-gate
     go test ./cmd/kizu -run 'TestSelfhostPackageSkeletonChecks$' -v
     go test ./internal/project ./internal/types ./internal/ownership
 
@@ -132,7 +133,7 @@ selfhost-run-parity-gate-from-scratch:
 
 # Run #1151 public `run` selfhost switch gate (KIZU_SELFHOST_RUN routing).
 selfhost-run-cli-switch-gate:
-    go test ./cmd/kizu -run 'TestSelfhostRunCliSwitch' -count=1 -v
+    KIZU_RUN_SELFHOST_RUN_CLI_SWITCH=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunCliSwitch' -count=1 -v
 
 # Run #570 test <file> parity through the hosted selfhost artifact.
 selfhost-test-parity-gate:

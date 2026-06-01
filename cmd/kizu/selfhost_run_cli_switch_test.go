@@ -37,6 +37,9 @@ func TestSelfhostRunCliSwitchEnvGate(t *testing.T) {
 		t.Fatalf("read main.go: %v", err)
 	}
 	dispatch := runCliSwitchDispatchSlice(string(source))
+	if dispatch == "" {
+		t.Fatalf("could not extract the run dispatch case from main.go")
+	}
 	for _, fragment := range []string{
 		"if selfhostRunEnabled() {",
 		"return runSelfhostFrontendCommand(\"run\", args)",
@@ -54,6 +57,9 @@ func TestSelfhostRunCliSwitchEnvGate(t *testing.T) {
 // diagnostic with no Go interpreter fallback. It records production evidence that
 // names the switched path and its fallback status.
 func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
+	if os.Getenv("KIZU_RUN_SELFHOST_RUN_CLI_SWITCH") != "1" {
+		t.Skip("set KIZU_RUN_SELFHOST_RUN_CLI_SWITCH=1 to run the selfhost run cli switch gate")
+	}
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang is required for the selfhost run artifact path")
 	}
@@ -185,7 +191,7 @@ func runCliSwitchDispatchSlice(source string) string {
 	rest := source[start:]
 	end := strings.Index(rest, "case \"check\":")
 	if end < 0 {
-		return rest
+		return ""
 	}
 	return rest[:end]
 }
