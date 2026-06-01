@@ -392,6 +392,52 @@ func TestSelfhostLoaderClosureUsesComponentCatalog(t *testing.T) {
 	}
 }
 
+// TestSelfhostKizuLexerClosureUsesComponentCatalog keeps std::kizu::lexer
+// helper body closure resolution tied to the AST-derived component catalog.
+func TestSelfhostKizuLexerClosureUsesComponentCatalog(t *testing.T) {
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	kizuLexerClosureBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_kizu_lexer_closure_helper_body(",
+	)
+	required := []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"std::kizu::lexer\"",
+		"kizu_lexer_catalog_local_index(catalog, \"first_token\")",
+		"kizu_lexer_catalog_local_index(catalog, \"next_token\")",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+		"component_function_catalog::function_node_id(",
+		"component_function_catalog::qualified_function_name_matches(",
+		"kizu_lexer_catalog_qualified_index(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("std kizu lexer closure catalog path missing %q", fragment)
+		}
+	}
+	forbiddenGlobal := []string{
+		"fn kizu_lexer_closure_supported_local(",
+		"fn kizu_lexer_closure_qualified_name(",
+		"kizu_lexer_closure_supported_local(name)",
+		"kizu_lexer_closure_qualified_name(local_name)",
+	}
+	for _, fragment := range forbiddenGlobal {
+		if strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("std kizu lexer closure keeps handwritten lookup %q", fragment)
+		}
+	}
+	forbiddenBody := []string{
+		"try function_node(text, ast, root, local_name)",
+	}
+	for _, fragment := range forbiddenBody {
+		if strings.Contains(kizuLexerClosureBody, fragment) {
+			t.Fatalf("std kizu lexer closure keeps handwritten lookup %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
 // compiled closure params tied to function-signature-param facts.
 func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
