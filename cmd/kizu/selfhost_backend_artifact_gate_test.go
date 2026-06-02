@@ -1461,9 +1461,13 @@ func requiredLLVMTokenizerFragments() []string {
 // TokenKind predicates lower through the shared token-kind predicate MIR (an
 // extractvalue of the Token kind field compared against the lexer enum
 // discriminant), and token_text lowers through the generic single-statement
-// expression path to a bounds-checked source[start..end] slice. These are the first
-// formatter component members on the compiled path; their presence here pins that the
-// catalog-driven format closure keeps emitting them as real compiled functions.
+// expression path to a bounds-checked source[start..end] slice. next_token_text_equals
+// reads tokens.len()/tokens.get(...) on a value-receiver Array<Token> param, and
+// index_after_import scans the token array through the generic bounded counter loop with
+// a parameter-seeded induction variable (var index = import_index) and i64 early returns.
+// These are the first formatter component members on the compiled path; their presence
+// here pins that the catalog-driven format closure keeps emitting them as real compiled
+// functions.
 func requiredLLVMFormatHelperFragments() []string {
 	return []string{
 		"define i1 @kizu_selfhost__parser_format_is_import_token(",
@@ -1472,6 +1476,7 @@ func requiredLLVMFormatHelperFragments() []string {
 		"define i1 @kizu_selfhost__parser_format_is_semicolon_token(",
 		"define %kizu.slice.u8 @kizu_selfhost__parser_format_token_text(",
 		"define %kizu.error.bool @kizu_selfhost__parser_format_next_token_text_equals(",
+		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_import(",
 	}
 }
 

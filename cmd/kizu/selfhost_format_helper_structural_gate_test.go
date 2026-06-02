@@ -14,11 +14,13 @@ import (
 const parseFormatAllocMaxLines = 197
 
 // formatCompiledHelperSeeds is the read-only formatter closure compiled into stage2: the
-// four TokenKind predicates, token_text, and next_token_text_equals (the first token-array
+// four TokenKind predicates, token_text, next_token_text_equals (the first token-array
 // read helper, reading tokens.len()/tokens.get(...) on a value-receiver Array<Token> param
-// and calling lexer::is_eof across the module boundary). They are the first
-// selfhost::parser::format members on the compiled path and must keep being emitted from
-// both the IR fact catalog and the backend BFS.
+// and calling lexer::is_eof across the module boundary), and index_after_import (the first
+// token-array scan-while helper, a bounded counter loop with a parameter-seeded induction
+// variable and i64 early returns). They are the first selfhost::parser::format members on
+// the compiled path and must keep being emitted from both the IR fact catalog and the
+// backend BFS.
 var formatCompiledHelperSeeds = []string{
 	"is_import_token",
 	"is_ident_token",
@@ -26,6 +28,7 @@ var formatCompiledHelperSeeds = []string{
 	"is_semicolon_token",
 	"token_text",
 	"next_token_text_equals",
+	"index_after_import",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
