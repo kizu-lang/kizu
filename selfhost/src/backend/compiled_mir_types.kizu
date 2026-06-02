@@ -68,6 +68,17 @@ pub fn count_call_args(ir_bytes: []u8, function_name: []u8, call_node: i64, bs: 
     return count;
 }
 
+// cross_module_callee_qualified_name_or_empty maps an allowed cross-module callee alias
+// to its fully-qualified Kizu name (issue 1165), so its signature facts (emitted by the
+// owning component's compiled closure) resolve with an empty module prefix. lexer::is_eof
+// resolves to selfhost::lexer::is_eof. Anything outside this exact allowlist returns "".
+pub fn cross_module_callee_qualified_name_or_empty(callee_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(callee_name, "lexer::is_eof") {
+        return "selfhost::lexer::is_eof";
+    }
+    return "";
+}
+
 pub fn lower_call_return_type(
     ir_bytes: []u8,
     function_name: []u8,
@@ -78,6 +89,16 @@ pub fn lower_call_return_type(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
+    let qualified = cross_module_callee_qualified_name_or_empty(callee_name);
+    if std::mem::len(qualified) > 0 {
+        let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+            ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified
+        );
+        if std::mem::len(ret_kizu) == 0 {
+            return error("compiled mir: cross-module callee return type not found");
+        }
+        return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, ir_bytes[0..0], ret_kizu);
+    }
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         let stdlib_ret = try compiled_fact_lookup::lookup_stdlib_return(
             ir_bytes, callee_name
@@ -87,6 +108,21 @@ pub fn lower_call_return_type(
     return try compiled_signature::resolve_call_return_type(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
+}
+
+// cross_module_callee_symbol_or_empty maps the exact set of cross-module callees a
+// compiled closure is allowed to reference (through an import alias) to their LLVM
+// symbols (issue 1165). lexer::is_eof is the selfhost::lexer Token EOF predicate,
+// emitted by the selfhost lexer compiled closure; the formatter helpers call it through
+// the 'lexer' import alias (import selfhost::lexer) as 'lexer::is_eof'. The symbol
+// follows the append_function_llvm_symbol mangling of selfhost::lexer::is_eof. Anything
+// outside this exact allowlist returns "" and resolves through the normal
+// module-prefixed path, so nothing is admitted by fallback.
+pub fn cross_module_callee_symbol_or_empty(callee_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(callee_name, "lexer::is_eof") {
+        return "kizu_selfhost__lexer_is_eof";
+    }
+    return "";
 }
 
 pub fn lower_call_module_prefix(
@@ -99,6 +135,11 @@ pub fn lower_call_module_prefix(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
+    if std::mem::len(cross_module_callee_symbol_or_empty(callee_name)) > 0 {
+        // The resolved symbol is final, so the renderer must emit it verbatim with no
+        // module-prefix mangling.
+        return ir_bytes[0..0];
+    }
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         return ir_bytes[0..0];
     }
@@ -115,6 +156,10 @@ pub fn lower_call_callee_name(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
+    let cross_module_symbol = cross_module_callee_symbol_or_empty(callee_name);
+    if std::mem::len(cross_module_symbol) > 0 {
+        return cross_module_symbol;
+    }
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         return try compiled_fact_lookup::lookup_stdlib_symbol(ir_bytes, callee_name);
     }
@@ -127,6 +172,12 @@ pub fn lower_call_arg_type(
     callee_name: []u8,
     arg_index: i64
 ) -> ![]u8 {
+    let qualified = cross_module_callee_qualified_name_or_empty(callee_name);
+    if std::mem::len(qualified) > 0 {
+        return try compiled_signature::resolve_call_arg_type(
+            ir_bytes, ir_bytes[0..0], qualified, arg_index
+        );
+    }
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         // Stdlib callees resolve argument types from trailing stdlib-symbol arg-type tokens:
         // one token is uniform for all args, multiple tokens are matched by index.
@@ -288,6 +339,117 @@ fn find_spec_llvm_type_or_empty(params_spec: []u8, name: []u8) -> []u8 {
         }
     }
     return params_spec[0..0];
+}
+
+// resolve_value_array_get_element_or_empty returns the element type T of a
+// '<var>.get(<expr>)' call when <var> is a value-receiver std::array::Array<T>
+// param/local, otherwise "" (issue 1165). It backs the let-binding type resolution for
+// 'let next = try tokens.get(...)', whose callee is a field-mode method rather than a
+// signature-bearing function.
+fn resolve_value_array_get_element_or_empty(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    call_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let callee_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, callee_node, bs);
+    if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        return "";
+    }
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, bs
+    );
+    if !std::mem::equal_bytes(mode, "field") {
+        return "";
+    }
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "get") {
+        return "";
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, receiver_node, bs);
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return "";
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    let receiver_kizu = try resolve_receiver_value_kizu_type(
+        ir_bytes, function_name, module_prefix, receiver_name, bs
+    );
+    let lookup = struct_lookup_kizu_type(receiver_kizu);
+    return array_value_element_kizu_type_or_empty(lookup);
+}
+
+// array_value_element_kizu_type_or_empty strips the std::array::Array<...> wrapper and
+// returns the element type token, or "" when the type is not an Array<T> (issue 1165).
+pub fn array_value_element_kizu_type_or_empty(kizu_type: []u8) -> []u8 {
+    let prefix = "std::array::Array<";
+    if !std::mem::starts_with(kizu_type, prefix) {
+        return "";
+    }
+    let prefix_len = std::mem::len(prefix);
+    let type_len = std::mem::len(kizu_type);
+    if type_len <= prefix_len or kizu_type[type_len - 1] != cast<u8>(62) {
+        return "";
+    }
+    return kizu_type[prefix_len..type_len - 1];
+}
+
+// resolve_receiver_value_kizu_type resolves a value receiver's kizu type whether it is a
+// function parameter or a local binding (issue 1165). It is used where the call-site
+// params_spec is not threaded (let-binding type resolution).
+fn resolve_receiver_value_kizu_type(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    name: []u8,
+    bs: i64
+) -> ![]u8 {
+    let param = try find_function_param_kizu_type_or_empty(ir_bytes, function_name, name);
+    if std::mem::len(param) > 0 {
+        return param;
+    }
+    return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
+}
+
+fn find_function_param_kizu_type_or_empty(
+    ir_bytes: []u8,
+    function_name: []u8,
+    name: []u8
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "function-signature-param ";
+    let prefix_len = std::mem::len(prefix);
+    let fn_len = std::mem::len(function_name);
+    var index = 0;
+    while index + prefix_len + fn_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let fn_start = index + prefix_len;
+            let fn_end = fn_start + fn_len;
+            if fn_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[fn_start..fn_end], function_name) and
+                ir_bytes[fn_end] == cast<u8>(32) {
+                let kizu_type = extract_param_kizu_type_from_line(
+                    ir_bytes, fn_end + 1, name
+                );
+                if std::mem::len(kizu_type) > 0 {
+                    return kizu_type;
+                }
+            }
+        }
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return "";
 }
 
 fn find_function_param_kizu_type(
@@ -506,6 +668,17 @@ fn resolve_let_value_kizu_type(
         );
         let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
         if std::mem::equal_bytes(inner_kind, "Call") {
+            // 'let next = try tokens.get(<expr>)' on a value-receiver Array<T> binds the
+            // element type T (issue 1165). The callee is a field-mode method whose Var
+            // receiver resolves to std::array::Array<T>, so the bound local takes T; this is
+            // checked ahead of the free-function callee lookup since 'tokens.get' is not a
+            // signature-bearing function name.
+            let array_get_element = try resolve_value_array_get_element_or_empty(
+                ir_bytes, function_name, module_prefix, inner, bs
+            );
+            if std::mem::len(array_get_element) > 0 {
+                return array_get_element;
+            }
             let try_callee = try ir_contract::body_call_callee_or_empty_from(
                 ir_bytes, function_name, inner, bs
             );
