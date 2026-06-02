@@ -1853,6 +1853,7 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	assertExecuteRoutesRunThroughCodegenIR(t, execute)
 	assertHostedOmitsRunCodegenArtifact(t, hosted)
 	assertHostedMainPrintUsesCodegenRenderer(t, hosted)
+	assertHostedReturnVoidUsesCodegenRenderer(t, hosted)
 	assertCodegenIRShape(t, codegen)
 	assertCodegenIRForbiddenBridges(t, hosted, codegen)
 	assertHostedRunLLVMResponsibilities(t, cliRun, cliAstBoundary, cliCodegen, cliHostedRenderer)
@@ -1927,6 +1928,11 @@ func assertHostedOmitsRunCodegenArtifact(t *testing.T, hosted string) {
 	for _, forbidden := range []string{
 		"codegen::main_print_program(executable.payload)",
 		"hosted_executable_from_codegen(run_print_executable(), executable",
+		// The run_print template converter is fully removed now that both the
+		// main-print and return_void run slices render straight from
+		// codegen::Program (#1161).
+		"fn hosted_executable_from_codegen(",
+		"hosted_executable_from_codegen(",
 		"run_ll_prefix",
 		"run_ll_middle",
 		"target/selfhost/run/run_hello.ll",
@@ -1978,6 +1984,54 @@ func assertHostedMainPrintUsesCodegenRenderer(t *testing.T, hosted string) {
 	} {
 		if strings.Contains(renderBody, forbidden) {
 			t.Fatalf("render_main_print_llvm regressed onto the run_print hosted template via %q", forbidden)
+		}
+	}
+}
+
+// assertHostedReturnVoidUsesCodegenRenderer keeps the return_void run slice
+// (fn main() { return; }) on a backend-owned renderer that emits the bare-return
+// host main from codegen::Program, instead of routing back through the
+// data::HostedExecutable run_print template converter
+// (hosted_executable_from_codegen(run_print_executable(), program) +
+// render_hosted_llvm) that #1161 removed.
+func assertHostedReturnVoidUsesCodegenRenderer(t *testing.T, hosted string) {
+	t.Helper()
+	emitBody := selfhostKizuFunctionBody(t, hosted, "pub fn emit_run_codegen_artifact(")
+	if !strings.Contains(
+		emitBody,
+		"write_return_void_module(allocator, io, source_path, ll_path_view, &program)",
+	) {
+		t.Fatal("emit_run_codegen_artifact return_void slice skips write_return_void_module")
+	}
+	for _, fragment := range []string{
+		"fn write_return_void_module(",
+		"fn render_return_void_llvm(",
+	} {
+		if !strings.Contains(hosted, fragment) {
+			t.Fatalf("hosted backend missing codegen-direct return_void renderer %q", fragment)
+		}
+	}
+	renderBody := selfhostKizuFunctionBody(t, hosted, "fn render_return_void_llvm(")
+	for _, fragment := range []string{
+		"data::HostedOutputStream::None",
+		"append_hosted_return_body(out, \"kizu_run_main\", 0)",
+		"append_host_main(out, \"kizu_run_main\")",
+	} {
+		if !strings.Contains(renderBody, fragment) {
+			t.Fatalf("render_return_void_llvm does not emit the bare-return host main with %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"run_print_executable",
+		"run_return_void_executable",
+		"hosted_executable_from_codegen",
+		"render_hosted_llvm",
+		"write_hosted_module",
+		"append_hosted_output_body",
+		"stdout_payload",
+	} {
+		if strings.Contains(renderBody, forbidden) {
+			t.Fatalf("render_return_void_llvm regressed onto the run_print template via %q", forbidden)
 		}
 	}
 }
@@ -3424,7 +3478,10 @@ func assertHostedHelperBodyFactsAreCatalogDriven(t *testing.T, selected string) 
 	for _, fragment := range []string{
 		"component_function_catalog::collect_from_ast(",
 		`"selfhost::backend::hosted"`,
-		findLocal + `"hosted_executable_from_codegen")`,
+		// #1161 removed hosted_executable_from_codegen; the hosted helper closure
+		// now seeds from the metadata converter (its codegen::metadata_for_program
+		// crossing) plus the shared hosted_output_len helper.
+		findLocal + `"hosted_executable_metadata_from_codegen")`,
 		findLocal + `"hosted_output_len")`,
 		"append_hosted_helper_closure_body(",
 		"closure_index_seen(&emitted, function_index)",
@@ -3973,6 +4030,14 @@ func hostedExecutableBodyContractFragments() []string {
 		`"selfhost::ir::codegen::stdout_payload"`,
 		`"main_print_payload"`,
 		`"codegen::stdout_payload"`,
+		// Relocated run_print template converter contract (#1161).
+		`"write_return_void_module"`,
+		`"write_main_print_module"`,
+		`"hosted_executable_metadata_from_codegen"`,
+		`"selfhost::backend::hosted::render_main_print_llvm"`,
+		`"selfhost::backend::hosted::render_return_void_llvm"`,
+		`"append_hosted_return_body"`,
+		`"codegen::metadata_for_program"`,
 		`"selfhost::cli::execute::test_file_cli"`,
 		`"backend::lower_test_executable"`,
 		`"selfhost::backend::executable::lower_test_executable"`,

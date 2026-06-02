@@ -186,6 +186,11 @@ pub fn emit_run_codegen_artifact(
     );
     let ll_path_view = ll_path.as_bytes();
     let metadata_path_view = metadata_path.as_bytes();
+    // run_print_executable() is the shared run-metadata template base for every
+    // run shape (i64, loop, fs-read, try-void, main-print, return_void): the
+    // emitted metadata only consumes its entry symbol (kizu_run_main, identical
+    // across run shapes) plus the codegen_ir derived from the program, so this is
+    // not a per-shape branch and stays byte-identical regardless of the slice.
     let metadata_hosted = try hosted_executable_metadata_from_codegen(run_print_executable(), &program);
     var module_len = 0;
     if codegen::fs_read_program_supported(&program) {
@@ -200,20 +205,12 @@ pub fn emit_run_codegen_artifact(
         if codegen::try_void_program_supported(&program) {
             module_len = try write_try_void_module(allocator, io, source_path, ll_path_view, &program);
         } else {
-            // The main string-print slice renders straight from codegen::Program.
-            // The return_void slice still uses the run_print template converter
-            // (its stdout-payload branch is now only kept as the run-codegen-IR
-            // contract surface in backend::llvm); moving return_void onto its own
-            // codegen renderer and removing that converter is tracked by issue 1161.
+            // The return_void and main string-print slices both render straight
+            // from codegen::Program through backend-owned renderers; neither
+            // routes back through the data::HostedExecutable run_print template
+            // converter anymore.
             if codegen::return_void_program_supported(&program) {
-                let hosted = try hosted_executable_from_codegen(run_print_executable(), program);
-                module_len = try write_hosted_module(
-                    allocator,
-                    io,
-                    source_path,
-                    ll_path_view,
-                    &hosted
-                );
+                module_len = try write_return_void_module(allocator, io, source_path, ll_path_view, &program);
             } else {
                 module_len = try write_main_print_module(allocator, io, source_path, ll_path_view, &program);
             }
@@ -347,38 +344,6 @@ pub fn emit_test_executable_artifact(
     ll_path.deinit();
     metadata_path.deinit();
     return artifact;
-}
-
-fn hosted_executable_from_codegen(
-    template: data::HostedExecutable,
-    program: codegen::Program
-) -> !data::HostedExecutable {
-    if codegen::return_void_program_supported(&program) {
-        let codegen_ir = codegen::metadata_for_program(&program);
-        let executable = run_return_void_executable();
-        return data::HostedExecutable {
-            comment: executable.comment,
-            entry: executable.entry,
-            global: executable.global,
-            codegen_ir: codegen_ir,
-            output_stream: executable.output_stream,
-            output_payload: executable.output_payload,
-            append_newline: executable.append_newline,
-            exit_code: executable.exit_code
-        };
-    }
-    let payload = try codegen::stdout_payload(&program);
-    let codegen_ir = codegen::metadata_for_program(&program);
-    return data::HostedExecutable {
-        comment: template.comment,
-        entry: template.entry,
-        global: template.global,
-        codegen_ir: codegen_ir,
-        output_stream: template.output_stream,
-        output_payload: payload,
-        append_newline: template.append_newline,
-        exit_code: template.exit_code
-    };
 }
 
 fn hosted_executable_metadata_from_codegen(
@@ -611,6 +576,25 @@ fn write_main_print_module(
     return module_len;
 }
 
+fn write_return_void_module(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8,
+    ll_path: &[]u8,
+    program: &codegen::Program
+) -> !i64 {
+    var module = try render_return_void_llvm(allocator, source_path, program);
+    let module_view = module.as_bytes();
+    let module_len = try write_backend_bytes(
+        io,
+        ll_path,
+        module_view,
+        module.len()
+    );
+    module.deinit();
+    return module_len;
+}
+
 // render_main_print_llvm emits the run artifact for a main that prints a string
 // constant directly from codegen::Program fields. It is the first run slice that
 // no longer routes through the data::HostedExecutable run_print template; the
@@ -644,6 +628,30 @@ fn render_main_print_llvm(
     return out;
 }
 
+// render_return_void_llvm emits the run artifact for a main that only returns
+// (fn main with a bare return and no print) directly from codegen::Program, with
+// no stdout payload. Like render_main_print_llvm it is backend-owned and no
+// longer routes through the data::HostedExecutable run_print template converter;
+// the backend owns the entry, comment, and exit constants. The emitted bytes
+// match the prior hosted return-void renderer so artifact, link, and execute
+// parity holds.
+fn render_return_void_llvm(
+    allocator: Allocator,
+    source_path: []u8,
+    program: &codegen::Program
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_hosted_header(
+        out,
+        source_path,
+        "kizu codegen run artifact ll v0",
+        data::HostedOutputStream::None
+    );
+    try append_hosted_return_body(out, "kizu_run_main", 0);
+    try append_host_main(out, "kizu_run_main");
+    return out;
+}
+
 fn render_fs_read_llvm(
     allocator: Allocator,
     source_path: []u8,
@@ -661,13 +669,17 @@ fn render_try_void_llvm(
     source_path: []u8,
     program: &codegen::Program
 ) -> !std::string::String {
-    let template = run_print_executable();
     let payload = try codegen::stdout_payload(program);
     let output_len = hosted_output_len(payload, true);
     var out = std::string::String(allocator);
-    try append_hosted_header(out, source_path, template.comment, template.output_stream);
-    try append_hosted_global(out, template.global, payload, true, output_len);
-    try append_try_void_body(out, template.global, output_len, program.i64_call_arg0);
+    try append_hosted_header(
+        out,
+        source_path,
+        "kizu codegen run artifact ll v0",
+        data::HostedOutputStream::Stdout
+    );
+    try append_hosted_global(out, "kizu.run.stdout", payload, true, output_len);
+    try append_try_void_body(out, "kizu.run.stdout", output_len, program.i64_call_arg0);
     try append_host_main(out, "kizu_run_main");
     return out;
 }
