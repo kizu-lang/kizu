@@ -217,12 +217,37 @@ straight from `codegen::Program`.
 | regression guard | `TestSelfhostHostedRunConsumesCodegenIR` asserts the slice renders through `render_main_print_llvm` and never regresses onto `run_print_executable` / `hosted_executable_from_codegen` / `render_hosted_llvm` |
 | gate | `KIZU_SELFHOST_RUN` stays gated; `just selfhost-native-source-gate`, `just selfhost-run-parity-gate-from-scratch`, `just selfhost-run-cli-switch-gate` |
 
-Still on the run_print template and deferred to follow-up work: the `return void`
-slice still uses `hosted_executable_from_codegen` (return-void branch), and
-`render_try_void_llvm` still reads template constants from
-`run_print_executable()`. The hosted artifact mode and the stage2 bounded
-renderer remain as artifact writers and must not grow new run/test-specific
-template branches.
+### Return-Void Codegen Renderer (#1161)
+
+The `return void` run slice (`fn main() { return; }`, e.g.
+`selfhost/tests/cli/run_return.kizu`) is the next run shape moved off the
+`data::HostedExecutable` run_print template. The checked-AST/interpreter path
+(`selfhost::backend::hosted::emit_run_codegen_artifact`) now renders it through
+the backend-owned `render_return_void_llvm` / `write_return_void_module`, which
+emit the bare-return host main directly from `codegen::Program` (no stdout
+payload) instead of building a `data::HostedExecutable` through
+`hosted_executable_from_codegen(run_print_executable(), program)`. With both the
+main-print and return-void slices moved, the run_print template converter
+`hosted_executable_from_codegen` is deleted; `render_try_void_llvm` also now owns
+its `kizu.run.stdout` constants directly instead of reading them from
+`run_print_executable()`. The `hosted_executable_from_codegen -> codegen::stdout_payload`
+/ `codegen::metadata_for_program` IR body-call contract in
+`selfhost::backend::llvm` moved onto the `render_main_print_llvm` and
+`hosted_executable_metadata_from_codegen` bodies, and the
+`selfhost::ir::executable_functions` hosted-helper closure now seeds from
+`hosted_executable_metadata_from_codegen` instead of the deleted converter.
+
+| Field | Value |
+| --- | --- |
+| switched renderer | `selfhost::backend::hosted::render_return_void_llvm` (emits the bare-return host main from `codegen::Program`) |
+| prior path | `hosted_executable_from_codegen(run_print_executable(), program)` + `render_hosted_llvm` template (return-void branch) |
+| converter removed | `hosted_executable_from_codegen` deleted once both run slices render straight from `codegen::Program` |
+| parity | emitted `.ll` bytes, metadata, link, and execution are byte-for-byte identical to the prior template renderer; the stage2 hosted artifact bounded renderer (`cli_hosted_renderer_llvm`) and its `run_return_void_executable` row are unchanged |
+| regression guard | `TestSelfhostHostedRunConsumesCodegenIR` asserts the slice renders through `render_return_void_llvm` and never regresses onto `run_print_executable` / `run_return_void_executable` / `hosted_executable_from_codegen` / `render_hosted_llvm` |
+| gate | `KIZU_SELFHOST_RUN` stays gated; `just selfhost-native-source-gate`, `just selfhost-run-parity-gate-from-scratch`, `just selfhost-run-cli-switch-gate` |
+
+The hosted artifact mode and the stage2 bounded renderer remain as artifact
+writers and must not grow new run/test-specific template branches.
 
 ## Run CLI Switch Point For #1151
 
