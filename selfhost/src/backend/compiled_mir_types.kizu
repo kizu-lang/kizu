@@ -436,6 +436,18 @@ fn resolve_let_value_kizu_type(
         return try resolve_struct_literal_kizu_type(ir_bytes, function_name, value, bs);
     }
     if std::mem::equal_bytes(value_kind, "Call") {
+        // A stdlib-namespaced constructor / helper bound to a let resolves its kizu
+        // return type from the stdlib-symbol fact: 'var out = std::string::String(...)'
+        // binds a std::string::String, i.e. the runtime-owned handle (issue 1165 slice
+        // 1). This is checked ahead of the field-mode method shape below because a
+        // namespaced callee (std::string::String) is itself a FieldExpr node and would
+        // otherwise be mistaken for the Arena<T>.add method.
+        let callee_name = try ir_contract::body_call_callee_or_empty_from(
+            ir_bytes, function_name, value, bs
+        );
+        if compiled_fact_lookup::is_stdlib_callee(callee_name) {
+            return try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, callee_name);
+        }
         // A Call whose callee is a field-mode method is the Arena<T>.add lowering
         // (self.<field>.add(...)); it binds the appended slot index, an i64 (tracker
         // 961). Ast.add_node's 'let raw = self.nodes.add(...)' is its first consumer.
@@ -447,12 +459,6 @@ fn resolve_let_value_kizu_type(
         );
         if std::mem::equal_bytes(callee_kind, "FieldExpr") {
             return "i64";
-        }
-        let callee_name = try ir_contract::body_call_callee_or_empty_from(
-            ir_bytes, function_name, value, bs
-        );
-        if compiled_fact_lookup::is_stdlib_callee(callee_name) {
-            return try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, callee_name);
         }
         let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
             ir_bytes, "function-signature-return ", module_prefix, callee_name

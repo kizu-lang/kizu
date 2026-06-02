@@ -1551,6 +1551,13 @@ fn render_llvm_module(
     // (tracker 961).
     try append_line(out,
         "%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }");
+    // kizu.rt.string mirrors the runtime storage std::string::String record layout
+    // { allocator, data, len, capacity }; the compiled artifact_path String builder
+    // reads and grows it through the @kizu_rt_string_* helpers below (issue 1165 slice
+    // 1). The hosted compiler module carries its own self-contained copy (it never
+    // links the storage module), the same split used for %kizu.rt.array.
+    try append_line(out,
+        "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
     // std::kizu::diagnostic value types back the first checked Array<T>.get accessor
     // compiled into stage2: Diagnostic.related_get reads the related Array<RelatedSpan>
     // field (index 2) and returns a single RelatedSpan by value as !RelatedSpan
@@ -1850,6 +1857,7 @@ fn render_llvm_module(
     try append_line(out, "  ret %kizu.error.slice.u8 %invalid_result");
     try append_line(out, "}");
     try append_line(out, "");
+    try append_string_runtime(out);
     try cli_llvm::append_functions(out, ir_bytes);
     try append_line(out, "");
     try append_line(out, "define i64 @kizu_selfhost__smoke() {");
@@ -1857,6 +1865,168 @@ fn render_llvm_module(
     try append_line(out, "  ret i64 0");
     try append_line(out, "}");
     return out;
+}
+
+// append_string_runtime emits the self-contained std::string::String runtime helpers
+// the compiled artifact_path builder calls (issue 1165 slice 1). The hosted compiler
+// module never links the runtime storage module, so it carries its own copy of the
+// @kizu_rt_string_* helpers and their two diagnostic message globals, the same
+// declare-here-define-locally split used for @kizu_rt_array_at / @kizu_rt_arena_get.
+// The String value is the %kizu.owned-wrapped %kizu.rt.string record
+// { allocator, data, len, capacity }; append grows the buffer through @kizu_rt_alloc
+// and copies the existing bytes, mirroring the storage module definitions exactly.
+fn append_string_runtime(out: &var std::string::String) -> !void {
+    try out.append_bytes(
+        "@.kizu.rt.allocation_failed = private unnamed_addr constant [17 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("allocation failed");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(
+        "@.kizu.rt.invalid_slice = private unnamed_addr constant [13 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("invalid slice");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "");
+    try append_line(out, "define %kizu.owned @kizu_rt_string_new(%kizu.owned %allocator) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %allocator_ptr = extractvalue %kizu.owned %allocator, 0");
+    try append_line(out, "  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 32)");
+    try append_line(out,
+        "  %allocator_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 0");
+    try append_line(out, "  store ptr %allocator_ptr, ptr %allocator_field");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  store ptr null, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  store i64 0, ptr %len_field");
+    try append_line(out,
+        "  %cap_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 3");
+    try append_line(out, "  store i64 0, ptr %cap_field");
+    try append_line(out, "  %handle = insertvalue %kizu.owned poison, ptr %raw, 0");
+    try append_line(out, "  ret %kizu.owned %handle");
+    try append_line(out, "}");
+    try append_line(out, "");
+    try append_line(out,
+        "define %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %string, %kizu.slice.u8 %bytes) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %byte_ptr = extractvalue %kizu.slice.u8 %bytes, 0");
+    try append_line(out, "  %byte_len = extractvalue %kizu.slice.u8 %bytes, 1");
+    try append_line(out, "  %len_negative = icmp slt i64 %byte_len, 0");
+    try append_line(out, "  br i1 %len_negative, label %invalid_slice, label %valid_length");
+    try append_line(out, "valid_length:");
+    try append_line(out, "  %has_bytes = icmp sgt i64 %byte_len, 0");
+    try append_line(out, "  br i1 %has_bytes, label %validate_ptr, label %empty");
+    try append_line(out, "empty:");
+    try append_line(out, "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    try append_line(out, "validate_ptr:");
+    try append_line(out, "  %ptr_ok = icmp ne ptr %byte_ptr, null");
+    try append_line(out, "  br i1 %ptr_ok, label %append, label %invalid_slice");
+    try append_line(out, "append:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %string, 0");
+    try append_line(out,
+        "  %allocator_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 0");
+    try append_line(out, "  %allocator_ptr = load ptr, ptr %allocator_field");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  %current_data = load ptr, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %current = load i64, ptr %len_field");
+    try append_line(out, "  %current_valid = icmp sge i64 %current, 0");
+    try append_line(out, "  br i1 %current_valid, label %length_check, label %invalid_slice");
+    try append_line(out, "length_check:");
+    try append_line(out, "  %max_delta = sub i64 9223372036854775807, %current");
+    try append_line(out, "  %fits = icmp sle i64 %byte_len, %max_delta");
+    try append_line(out, "  br i1 %fits, label %allocate, label %invalid_slice");
+    try append_line(out, "allocate:");
+    try append_line(out, "  %next = add i64 %current, %byte_len");
+    try append_line(out, "  %new_data = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %next)");
+    try append_line(out, "  %allocated = icmp ne ptr %new_data, null");
+    try append_line(out, "  br i1 %allocated, label %copy_old_check, label %allocation_failed");
+    try append_line(out, "copy_old_check:");
+    try append_line(out, "  %has_old = icmp sgt i64 %current, 0");
+    try append_line(out, "  br i1 %has_old, label %copy_old, label %copy_new");
+    try append_line(out, "copy_old:");
+    try append_line(out,
+        "  call void @llvm.memcpy.p0.p0.i64(ptr %new_data, ptr %current_data, i64 %current, i1 false)");
+    try append_line(out, "  br label %copy_new");
+    try append_line(out, "copy_new:");
+    try append_line(out, "  %dest = getelementptr i8, ptr %new_data, i64 %current");
+    try append_line(out,
+        "  call void @llvm.memcpy.p0.p0.i64(ptr %dest, ptr %byte_ptr, i64 %byte_len, i1 false)");
+    try append_line(out, "  %has_old_data = icmp ne ptr %current_data, null");
+    try append_line(out, "  br i1 %has_old_data, label %free_old, label %store");
+    try append_line(out, "free_old:");
+    try append_line(out, "  call void @kizu_rt_free(ptr %allocator_ptr, ptr %current_data)");
+    try append_line(out, "  br label %store");
+    try append_line(out, "store:");
+    try append_line(out, "  store ptr %new_data, ptr %data_field");
+    try append_line(out, "  store i64 %next, ptr %len_field");
+    try append_line(out,
+        "  %cap_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 3");
+    try append_line(out, "  store i64 %next, ptr %cap_field");
+    try append_line(out, "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    try append_line(out, "allocation_failed:");
+    try append_line(out,
+        "  %message_ptr = getelementptr inbounds [17 x i8], ptr @.kizu.rt.allocation_failed, i64 0, i64 0");
+    try append_line(out, "  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0");
+    try append_line(out, "  %message = insertvalue %kizu.slice.u8 %message_base, i64 17, 1");
+    try append_line(out, "  %failed_base = insertvalue %kizu.error.void poison, i1 false, 0");
+    try append_line(out,
+        "  %failed = insertvalue %kizu.error.void %failed_base, %kizu.slice.u8 %message, 1");
+    try append_line(out, "  ret %kizu.error.void %failed");
+    try append_line(out, "invalid_slice:");
+    try append_line(out,
+        "  %invalid_message_ptr = getelementptr inbounds [13 x i8], ptr @.kizu.rt.invalid_slice, i64 0, i64 0");
+    try append_line(out,
+        "  %invalid_message_base = insertvalue %kizu.slice.u8 poison, ptr %invalid_message_ptr, 0");
+    try append_line(out,
+        "  %invalid_message = insertvalue %kizu.slice.u8 %invalid_message_base, i64 13, 1");
+    try append_line(out, "  %invalid_base = insertvalue %kizu.error.void poison, i1 false, 0");
+    try append_line(out,
+        "  %invalid_result = insertvalue %kizu.error.void %invalid_base, %kizu.slice.u8 %invalid_message, 1");
+    try append_line(out, "  ret %kizu.error.void %invalid_result");
+    try append_line(out, "}");
+    try append_line(out, "");
+    try append_line(out,
+        "define %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %string, i8 %byte) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %slot = alloca i8");
+    try append_line(out, "  store i8 %byte, ptr %slot");
+    try append_line(out, "  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %slot, 0");
+    try append_line(out, "  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 1, 1");
+    try append_line(out,
+        "  %result = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %string, %kizu.slice.u8 %slice)");
+    try append_line(out, "  ret %kizu.error.void %result");
+    try append_line(out, "}");
+    try append_line(out, "");
+    try append_line(out, "define i64 @kizu_rt_string_len(%kizu.owned %string) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %string, 0");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %len = load i64, ptr %len_field");
+    try append_line(out, "  ret i64 %len");
+    try append_line(out, "}");
+    try append_line(out, "");
+    try append_line(out, "define %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %string) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %string, 0");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  %data = load ptr, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %len = load i64, ptr %len_field");
+    try append_line(out, "  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %data, 0");
+    try append_line(out, "  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %len, 1");
+    try append_line(out, "  ret %kizu.slice.u8 %slice");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
 }
 
 fn render_llvm_metadata(

@@ -3,7 +3,7 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_write_concat9_function(out);
     try append_write_concat11_function(out);
     try append_i64_decimal_function(out);
-    try append_artifact_path_function(out);
+    try append_artifact_stem_function(out);
     return;
 }
 
@@ -66,24 +66,29 @@ fn append_write_concat5_function(out: &var std::string::String) -> !void {
     return;
 }
 
-fn append_artifact_path_function(out: &var std::string::String) -> !void {
-    try append_line(out, "define %kizu.error.slice.u8 @kizu_selfhost__artifact_path(");
-    try append_line(out, "  %kizu.slice.u8 %target,");
-    try append_line(out, "  %kizu.slice.u8 %prefix,");
-    try append_line(out, "  %kizu.slice.u8 %suffix");
+// append_artifact_stem_function emits the handwritten subslice scan that backs
+// selfhost::backend::hosted::artifact_stem (issue 1165 slice 1). The full path-builder
+// (directory + stem + suffix concatenation, allocation, and error-union wrapping) now
+// lowers from the compiled artifact_path String builder, so only the borrowed stem scan
+// remains handwritten: it walks the path tracking the last segment start (after the final
+// slash) and the last dot in that segment, then returns the basename-without-extension as a
+// two-bound slice into the input. No allocation -- the result borrows the input bytes.
+fn append_artifact_stem_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define %kizu.slice.u8 @kizu_selfhost__backend_hosted_artifact_stem(");
+    try append_line(out, "  %kizu.slice.u8 %path");
     try append_line(out, ") {");
     try append_line(out, "entry:");
-    try append_line(out, "  %target_ptr = extractvalue %kizu.slice.u8 %target, 0");
-    try append_line(out, "  %target_len = extractvalue %kizu.slice.u8 %target, 1");
+    try append_line(out, "  %path_ptr = extractvalue %kizu.slice.u8 %path, 0");
+    try append_line(out, "  %path_len = extractvalue %kizu.slice.u8 %path, 1");
     try append_line(out, "  br label %scan");
     try append_line(out, "scan:");
     try append_line(out, "  %index = phi i64 [ 0, %entry ], [ %next, %advance ]");
     try append_line(out, "  %base_start = phi i64 [ 0, %entry ], [ %next_base_start, %advance ]");
     try append_line(out, "  %dot_index = phi i64 [ -1, %entry ], [ %next_dot_index, %advance ]");
-    try append_line(out, "  %done = icmp eq i64 %index, %target_len");
+    try append_line(out, "  %done = icmp eq i64 %index, %path_len");
     try append_line(out, "  br i1 %done, label %build, label %scan_body");
     try append_line(out, "scan_body:");
-    try append_line(out, "  %byte_ptr = getelementptr i8, ptr %target_ptr, i64 %index");
+    try append_line(out, "  %byte_ptr = getelementptr i8, ptr %path_ptr, i64 %index");
     try append_line(out, "  %byte = load i8, ptr %byte_ptr");
     try append_line(out, "  %is_slash = icmp eq i8 %byte, 47");
     try append_line(out, "  %is_dot = icmp eq i8 %byte, 46");
@@ -97,37 +102,12 @@ fn append_artifact_path_function(out: &var std::string::String) -> !void {
     try append_line(out, "  br label %scan");
     try append_line(out, "build:");
     try append_line(out, "  %has_dot = icmp sge i64 %dot_index, %base_start");
-    try append_line(out, "  %stem_end = select i1 %has_dot, i64 %dot_index, i64 %target_len");
+    try append_line(out, "  %stem_end = select i1 %has_dot, i64 %dot_index, i64 %path_len");
     try append_line(out, "  %stem_len = sub i64 %stem_end, %base_start");
-    try append_line(out, "  %prefix_ptr = extractvalue %kizu.slice.u8 %prefix, 0");
-    try append_line(out, "  %prefix_len = extractvalue %kizu.slice.u8 %prefix, 1");
-    try append_line(out, "  %suffix_ptr = extractvalue %kizu.slice.u8 %suffix, 0");
-    try append_line(out, "  %suffix_len = extractvalue %kizu.slice.u8 %suffix, 1");
-    try append_line(out, "  %prefix_stem_len = add i64 %prefix_len, %stem_len");
-    try append_line(out, "  %total_len = add i64 %prefix_stem_len, %suffix_len");
-    try append_line(out, "  %allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
-    try append_line(out, "  %allocator_ptr = extractvalue %kizu.owned %allocator, 0");
-    try append_line(out, "  %buffer = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %total_len)");
-    try append_line(out, "  %allocated = icmp ne ptr %buffer, null");
-    try append_line(out, "  br i1 %allocated, label %copy_prefix, label %alloc_failed");
-    try append_line(out, "copy_prefix:");
-    try append_line(out,
-        "  call void @llvm.memcpy.p0.p0.i64(ptr %buffer, ptr %prefix_ptr, i64 %prefix_len, i1 false)");
-    try append_line(out, "  %stem_dest = getelementptr i8, ptr %buffer, i64 %prefix_len");
-    try append_line(out, "  %stem_ptr = getelementptr i8, ptr %target_ptr, i64 %base_start");
-    try append_line(out,
-        "  call void @llvm.memcpy.p0.p0.i64(ptr %stem_dest, ptr %stem_ptr, i64 %stem_len, i1 false)");
-    try append_line(out, "  %suffix_dest = getelementptr i8, ptr %buffer, i64 %prefix_stem_len");
-    try append_line(out,
-        "  call void @llvm.memcpy.p0.p0.i64(ptr %suffix_dest, ptr %suffix_ptr, i64 %suffix_len, i1 false)");
-    try append_line(out, "  %path_base = insertvalue %kizu.slice.u8 poison, ptr %buffer, 0");
-    try append_line(out, "  %path = insertvalue %kizu.slice.u8 %path_base, i64 %total_len, 1");
-    try append_line(out,
-        "  %ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
-    try append_line(out, "  %result = insertvalue %kizu.error.slice.u8 %ok, %kizu.slice.u8 %path, 1");
-    try append_line(out, "  ret %kizu.error.slice.u8 %result");
-    try append_line(out, "alloc_failed:");
-    try append_line(out, "  ret %kizu.error.slice.u8 zeroinitializer");
+    try append_line(out, "  %stem_ptr = getelementptr i8, ptr %path_ptr, i64 %base_start");
+    try append_line(out, "  %stem_base = insertvalue %kizu.slice.u8 poison, ptr %stem_ptr, 0");
+    try append_line(out, "  %stem = insertvalue %kizu.slice.u8 %stem_base, i64 %stem_len, 1");
+    try append_line(out, "  ret %kizu.slice.u8 %stem");
     try append_line(out, "}");
     try append_line(out, "");
     return;

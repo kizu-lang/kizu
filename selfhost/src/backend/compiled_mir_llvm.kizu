@@ -408,6 +408,7 @@ fn append_multi_stmt(
         LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
         LetTryCall(payload) => try append_multi_let_try_call(out, function, payload, local_prefix);,
         ReturnTryBinary(payload) => try append_multi_return_try_binary(out, function, payload, local_prefix);,
+        StringTryAppend(payload) => try append_multi_string_try_append(out, function, payload, local_prefix);,
         CountRange(payload) => try append_multi_count_range(out, payload);,
         TrimAscii(payload) => try append_multi_trim_ascii(out, payload);,
         AdvancePosition(payload) => try append_multi_advance_position(out, payload);,
@@ -545,6 +546,94 @@ fn append_multi_let_try_call(
     try append_ll_line(out, "_call, 1");
     return;
 }
+// append_multi_string_try_append renders a mutating 'try <receiver>.append_bytes(<arg>);' or
+// 'try <receiver>.append_byte(<arg>);' on a std::string::String value (issue 1165 slice 1). It
+// sets up the single appended argument, calls the @kizu_rt_string_append_* runtime helper
+// (which returns %kizu.error.void), extracts the ok flag (field 0), and branches on a
+// try_index-suffixed label pair: try<N>_fail re-wraps the runtime message (error.void field 1)
+// into this function's own error union and returns it (propagation, never 'unreachable');
+// try<N>_cont continues with no bound value because the statement is a void method call.
+fn append_multi_string_try_append(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirStringTryAppendStmt,
+    local_prefix: i64
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function.name, &stmt.call_args, local_prefix
+    );
+    try out.append_bytes("  %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_call = call %kizu.error.void @");
+    try out.append_bytes(stmt.runtime_symbol);
+    try out.append_bytes("(%kizu.owned %");
+    try out.append_bytes(stmt.receiver_name);
+    try out.append_bytes(", ");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_ok = extractvalue %kizu.error.void %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_call, 0");
+    try out.append_bytes("  br i1 %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_ok, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_cont, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail");
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail:");
+    try out.append_bytes("  %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_msg = extractvalue %kizu.error.void %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_call, 1");
+    try append_string_try_fail_return(out, stmt);
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_cont:");
+    return;
+}
+
+// append_string_try_fail_return emits the failure-propagation tail of a StringTryAppend: it
+// wraps the extracted runtime message into this function's own error union and returns it.
+// The message field index depends on the own error-union shape -- %kizu.error.void carries it
+// at field 1, while the 3-field unions (%kizu.error.owned / %kizu.error.slice.u8) carry it at
+// field 2 with the success value left zero-initialized (issue 1165 slice 1).
+fn append_string_try_fail_return(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirStringTryAppendStmt
+) -> !void {
+    try out.append_bytes("  %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_fail_flag = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_fail_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_fail_flag, %kizu.slice.u8 %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_msg, ");
+    if std::mem::equal_bytes(stmt.own_error_union, "%kizu.error.void") {
+        try append_ll_line(out, "1");
+    } else {
+        try append_ll_line(out, "2");
+    }
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %append");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail_val");
+    return;
+}
+
 // append_multi_return_try_binary renders 'return <literal> + try <callee>(<args>);'
 // (count_one / count_with_range, tracker 961): it emits the call, branches on its ok flag,
 // propagates the failure as this function's own error union, and on success adds the literal
@@ -3868,6 +3957,7 @@ fn append_stmt_globals(
         LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        StringTryAppend(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         CountRange(payload) => try append_count_range_globals(payload);,
         TrimAscii(payload) => try append_trim_ascii_globals(payload);,
         AdvancePosition(payload) => try append_advance_position_globals(payload);,

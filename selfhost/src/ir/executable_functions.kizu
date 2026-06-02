@@ -2086,6 +2086,20 @@ fn append_codegen_function_facts(
     try append_type_llvm_fact(out, "selfhost::ir::codegen::IntEnv", "%kizu.selfhost.codegen.int_env");
     try append_stdlib_symbol_fact(out, "std::mem::equal_bytes", "kizu_selfhost__slice_equal", "bool");
     try append_stdlib_symbol_fact(out, "std::mem::len", "kizu_selfhost__slice_len", "i64");
+    // The std::string::String value constructor lowers to the runtime-owned
+    // byte-buffer handle: std::string::String(allocator) calls @kizu_rt_string_new,
+    // taking the Allocator capability (%kizu.owned) and returning a String, which
+    // the compiled type lowering maps to %kizu.owned (issue 1165 slice 1). Routing
+    // the constructor through the stdlib-symbol fact lets the existing call lowering
+    // bind 'var out = std::string::String(allocator)' as a %kizu.owned local without
+    // a dedicated constructor node.
+    try append_stdlib_symbol_fact_arg(
+        out,
+        "std::string::String",
+        "kizu_rt_string_new",
+        "std::string::String",
+        "%kizu.owned"
+    );
     try append_codegen_reachable_helper_bodies(
         out,
         file.text,
@@ -2713,6 +2727,30 @@ fn append_hosted_function_facts(
         "render_return_void_llvm",
         "selfhost::backend::hosted::render_return_void_llvm",
         "hosted-run-codegen-writer"
+    );
+    // artifact_path is the first selfhost String builder compiled into stage2
+    // (issue 1165 slice 1): it concatenates the directory, the source-path stem,
+    // and the suffix into a std::string::String via the runtime string intrinsics.
+    // Its body + signature facts back the generic multi-statement lowering. The stem
+    // it forwards comes from artifact_stem, whose subslice scan stays a handwritten
+    // helper this slice, so only artifact_stem's signature facts are emitted (its
+    // return type lets the artifact_path let-call resolve the slice).
+    try append_selected_function_with_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "artifact_path",
+        "selfhost::backend::hosted::artifact_path",
+        "hosted-shared-helper"
+    );
+    try append_selected_function_signature(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "artifact_stem",
+        "selfhost::backend::hosted::artifact_stem"
     );
     try append_hosted_helper_body_facts(allocator, out, file.text, parsed.ast, parsed.root);
     return;
