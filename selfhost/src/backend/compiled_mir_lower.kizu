@@ -2813,7 +2813,23 @@ pub fn lower_multi_statement_function(
                     temp_counter = if_result.temp_counter;
                     string_counter = if_result.string_counter;
                 } else {
-                    return error("compiled mir: unsupported statement kind");
+                    if std::mem::equal_bytes(stmt_kind, "ExprStmt") {
+                        let expr_result = try lower_multi_expr_statement(
+                            ir_bytes,
+                            function_name,
+                            llvm_return_type,
+                            locals_spec,
+                            statement,
+                            string_counter,
+                            try_counter,
+                            &var stmts,
+                            bs
+                        );
+                        string_counter = expr_result.string_counter;
+                        try_counter = expr_result.try_counter;
+                    } else {
+                        return error("compiled mir: unsupported statement kind");
+                    }
                 }
             }
             }
@@ -2836,6 +2852,132 @@ pub struct MultiLowerResult {
 pub struct MultiIfLowerResult {
     pub temp_counter: i64,
     pub string_counter: i64,
+}
+pub struct MultiExprLowerResult {
+    pub string_counter: i64,
+    pub try_counter: i64,
+}
+
+// lower_multi_expr_statement lowers a bare 'try <receiver>.<method>(<arg>);' expression
+// statement that mutates a std::string::String value (issue 1165 slice 1). String lowers to
+// the runtime-owned handle %kizu.owned, so out.append_bytes(bytes) / out.append_byte(byte)
+// forward to the @kizu_rt_string_append_bytes / @kizu_rt_string_append_byte runtime helpers
+// (each returning %kizu.error.void). The method is recognized by name -- append_bytes and
+// append_byte are String-only in the selfhost source -- and lowers to a StringTryAppend
+// statement that propagates a runtime failure as this function's own error union and binds no
+// success value. The argument is a local ([]u8 or u8) or a string literal; a nested call
+// argument is not yet supported.
+fn lower_multi_expr_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    try_counter: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiExprLowerResult {
+    let expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "expr", 0, bs
+    );
+    let expr_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr, bs);
+    if !std::mem::equal_bytes(expr_kind, "TryExpr") {
+        return error("compiled mir: unsupported expression statement");
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr, "value", 0, bs
+    );
+    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+    if !std::mem::equal_bytes(inner_kind, "Call") {
+        return error("compiled mir: try expression statement must wrap a call");
+    }
+    if !try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+        return error("compiled mir: try call statement must be a method call");
+    }
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, inner, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: string method receiver must be a local");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    let arg_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, inner, "arg", 0, bs
+    );
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    var consumed_string = 0;
+    if std::mem::equal_bytes(method_name, "append_bytes") {
+        consumed_string = try lower_string_method_arg(
+            ir_bytes, function_name, "%kizu.slice.u8", arg_node, string_counter, &var args, bs
+        );
+        try stmts.append(compiled_mir::string_try_append_stmt(
+            receiver_name, "kizu_rt_string_append_bytes", llvm_return_type,
+            string_counter, try_counter, args
+        ));
+    } else {
+        if std::mem::equal_bytes(method_name, "append_byte") {
+            consumed_string = try lower_string_method_arg(
+                ir_bytes, function_name, "i8", arg_node, string_counter, &var args, bs
+            );
+            try stmts.append(compiled_mir::string_try_append_stmt(
+                receiver_name, "kizu_rt_string_append_byte", llvm_return_type,
+                string_counter, try_counter, args
+            ));
+        } else {
+            return error("compiled mir: unsupported string method");
+        }
+    }
+    return MultiExprLowerResult {
+        string_counter: string_counter + consumed_string,
+        try_counter: try_counter + 1
+    };
+}
+
+// lower_string_method_arg lowers the single argument of a String append method into the call
+// argument array, returning the number of string-literal global slots it consumed (issue 1165
+// slice 1). A local argument resolves to a Var call arg of the method's fixed LLVM type; a
+// string literal resolves to a String call arg seeded at string_index.
+fn lower_string_method_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    string_index: i64,
+    args: &var std::array::Array<compiled_mir::MirCallArg>,
+    bs: i64
+) -> !i64 {
+    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+    if std::mem::equal_bytes(arg_kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, arg_node, bs
+        );
+        try args.append(compiled_mir::var_call_arg(arg_type, var_name));
+        return 0;
+    }
+    if std::mem::equal_bytes(arg_kind, "String") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, arg_node, bs
+        );
+        let _payload_len = try compiled_util::string_token_decoded_len(
+            token,
+            "compiled mir: invalid call string token"
+        );
+        try args.append(compiled_mir::string_call_arg(arg_type, token, string_index));
+        return 1;
+    }
+    return error("compiled mir: unsupported string method argument");
 }
 fn lower_multi_let_statement(
     ir_bytes: []u8,
