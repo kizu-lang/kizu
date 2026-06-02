@@ -109,7 +109,7 @@ any additional production behavior by itself.
 | `run <file>` | mixed: Go general CLI by default, hosted artifact for bounded run rows, public CLI selfhost path behind `KIZU_SELFHOST_RUN` (#1151) | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows; no Go fallback in the gated public CLI path | `just selfhost-run-parity-gate`, `just selfhost-run-cli-switch-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader execution and default-on switch deferred to #1157 (parent #1070) |
 | `test <file>` | mixed: Go general CLI by default, hosted artifact for bounded test rows, public CLI selfhost path behind `KIZU_SELFHOST_TEST` (#1157) | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows; no Go fallback in the gated public CLI path | `just selfhost-test-parity-gate`, `just selfhost-test-cli-switch-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader discovery and default-on switch deferred to #1157 (parent #1070) |
 | `stage selfhost` | hosted stage2 artifact | `selfhost::backend`, hosted runtime ABI | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
-| `fmt <file>` / `fmt --write <file>` | mixed: Go general CLI, hosted artifact for #1073 formatter parity rows | selfhost formatter writer | no fallback in hosted rows | `just selfhost-fmt-parity-gate` | broader formatter syntax surfaces outside the parity manifest are deferred |
+| `fmt <file>` / `fmt --write <file>` | mixed: Go general CLI, hosted artifact for #1073 formatter parity rows (currently the hand-written `parse_format_alloc` token re-spacer, **not** the real `format_source`) | selfhost formatter writer | no fallback in hosted rows | `just selfhost-fmt-parity-gate` (**red** pending #1162; remaining capability work tracked by #1165) | indentation/import-sort/comment parity blocked until `fmt` routes through compiled `format_source`; see the Formatter (`fmt`) Boundary section |
 | `build`, `ir`, `wasm`, `native` | Go general CLI | no production selfhost owner yet | no hidden fallback because no selfhost switch is claimed | Go tests and backend-specific gates | explicit deferral until package/codegen IR replaces the Go backend boundary |
 | `cache`, `why-rebuild` | Go build cache | none | no hidden fallback because no selfhost switch is claimed | cache smoke/perf commands when cache behavior changes | explicit deferral until a selfhost build-cache design issue exists |
 
@@ -248,6 +248,47 @@ its `kizu.run.stdout` constants directly instead of reading them from
 
 The hosted artifact mode and the stage2 bounded renderer remain as artifact
 writers and must not grow new run/test-specific template branches.
+
+### Formatter (`fmt`) Boundary And `format_source` Connection Plan (#1162, #1165)
+
+The stage2 `fmt` / `fmt --write` commands do **not** run the real selfhost
+formatter `selfhost::parser::format::format_source` (`selfhost/src/parser/format.kizu`,
+which matches the Go formatter and the `selfhost/tests/cli/golden/fmt_*.stdout`
+goldens). They render through the hand-written bounded LLVM
+`@kizu_selfhost__parse_format_alloc` (`selfhost/src/backend/cli_parse_llvm.kizu`),
+a whitespace-collapsing token re-spacer that never indents, emits block newlines,
+sorts imports, or indents comments. Every `fmt` parity fixture therefore
+mismatches its golden, so `just selfhost-fmt-parity-gate-from-scratch` (and
+`just selfhost-production-from-scratch`) is red on `main` (#1162); `parse_format_alloc`
+has never had depth-based indentation. The right fix is to route `fmt` through
+compiled `format_source`, **not** to pile indentation/import-sort/comment logic
+into `parse_format_alloc`.
+
+Connecting `format_source` is tracked by the formatter capability issue (#1165).
+The original blocker was that `format_source` returns `!std::string::String`,
+consumes a `std::array::Array<Token>` from `lexer::tokenize`, and builds output
+through `String`, while the compiled MIR path initially had no String value type,
+no Array value type, and no `format.kizu` body emission. The first slices have now
+landed: String value lowering is exercised by the compiled `artifact_path`, Array
+value lowering is used by `lexer::tokenize`, `tokenize` no longer uses a
+name-special `MirTokenizeStmt`, selected `selfhost::parser::format` read-only
+helpers are emitted through the component catalog, and
+`next_token_text_equals` exercises local/param `Array<Token>.len()` and
+`Array<Token>.get(...)` on the compiled path. The stage2 `fmt` dispatch still
+calls `parse_format_alloc`, and the full `format_source` closure is not compiled
+or wired yet.
+
+| Field | Value |
+| --- | --- |
+| target | stage2 `fmt` / `fmt --write` call compiled `selfhost::parser::format::format_source` |
+| current bounded path | hand-written `@kizu_selfhost__parse_format_alloc` (token re-spacer, no indent/sort) |
+| remaining capabilities (#1165) | compile the rest of the `format_source` helper closure, including loop helpers such as `index_after_import` / `import_path_less` / `is_match_arm_trailing_comma`, mutable `Array<i64>.append` / `Array<i64>.set` for import sorting, short-circuit `while`, local reassignment, and the final `fmt` dispatch rewire; then delete `parse_format_alloc` |
+| rules | no golden edits, no growing `parse_format_alloc`, no source-literal/fixture dispatch, no Go/hidden fallback |
+| done | `just selfhost-fmt-parity-gate-from-scratch` + `just selfhost-production-from-scratch` green via the real `format_source` path; `parse_format_alloc` removed |
+
+The completed slices are real-path prerequisites, not the final switch:
+`parse_format_alloc` remains the bounded formatter until compiled `format_source`
+is wired into `fmt` / `fmt --write` and the from-scratch parity gates are green.
 
 ## Run CLI Switch Point For #1151
 
