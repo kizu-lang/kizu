@@ -583,26 +583,43 @@ pub struct MirParserPostfixStartStmt {
     pub span_symbol: []u8,
 }
 
-// MirTokenizeStmt backs tokenize(allocator, source): it builds a dynamic Array<Token> via the
-// runtime array helpers, seeds it with first_token, then appends next_token results until Eof,
-// returning the array as the !Array success (tracker 961, scope 4 prerequisite). The renderer
-// emits kizu_rt_array_new + a Token-phi loop whose body stores the current Token into a stack slot,
-// wraps it as a {ptr, elem_size} slice, and try-appends it (propagating the append error as the
-// error-union failure). elem_size is the Token byte width (7 i64 fields = 56); eof_tag is the
-// TokenKind::Eof discriminant; the *_symbol fields are the already-compiled / runtime callees.
-pub struct MirTokenizeStmt {
+// MirArrayNewStmt backs 'var <result> = std::array::Array<T>(<allocator>)': it binds a fresh
+// runtime-owned array handle by calling @kizu_rt_array_new with the allocator and the element
+// byte width. The width is derived from element_type via 'ptrtoint (ptr getelementptr (T, ptr
+// null, i32 1) to i64)' rather than a per-call constant, so the same statement serves Array<Token>
+// and Array<i64> without a hardcoded size (issue 1165: generic Array constructor lowering).
+pub struct MirArrayNewStmt {
+    pub result_name: []u8,
+    pub owned_type: []u8,
     pub allocator_name: []u8,
+    pub element_type: []u8,
+}
+
+// MirValueWhileStmt backs a value-carried bounded loop that appends struct values into a runtime
+// array until a sentinel tag is reached -- the std::kizu::lexer::tokenize shape lowered generically
+// (issue 1165). Unlike the i64-induction While, the loop carries a struct value (loop_var, type
+// element_type) through a phi: the preheader seeds it with init_symbol(source), each body iteration
+// recomputes it via update_symbol(source, loop_var), and the loop exits when field_index of the
+// value equals eof_tag. Every carried value (seed + each iteration) is try-appended into array_name
+// via array_append_symbol; an append failure returns this function's %kizu.error.owned failure
+// early. The renderer keeps init/seed/loop/early-return/done in one basic-block group (label_base
+// namespaces the blocks) so the cross-statement block wiring stays internal; only array_name is read
+// from a preceding MirArrayNewStmt as an SSA value. The loop's done block returns the array as the
+// !Array success, so it subsumes the trailing 'return <array>'.
+pub struct MirValueWhileStmt {
+    pub array_name: []u8,
+    pub loop_var: []u8,
     pub source_name: []u8,
-    pub token_type: []u8,
+    pub element_type: []u8,
     pub owned_type: []u8,
     pub error_owned_type: []u8,
     pub error_void_type: []u8,
-    pub array_new_symbol: []u8,
+    pub init_callee_qualified: []u8,
+    pub update_callee_qualified: []u8,
     pub array_append_symbol: []u8,
-    pub first_token_symbol: []u8,
-    pub next_token_symbol: []u8,
+    pub field_index: i64,
     pub eof_tag: i64,
-    pub elem_size: i64,
+    pub label_base: []u8,
 }
 
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
@@ -946,7 +963,8 @@ pub union MirStmt {
     TokenAt(MirTokenAtStmt),
     FirstToken(MirFirstTokenStmt),
     NextToken(MirNextTokenStmt),
-    Tokenize(MirTokenizeStmt),
+    ArrayNew(MirArrayNewStmt),
+    ValueWhile(MirValueWhileStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
     ParserPostfixStart(MirParserPostfixStartStmt),
@@ -1278,8 +1296,14 @@ impl MirNextTokenStmt {
     }
 }
 
-impl MirTokenizeStmt {
-    fn deinit(self: MirTokenizeStmt) -> void {
+impl MirArrayNewStmt {
+    fn deinit(self: MirArrayNewStmt) -> void {
+        return;
+    }
+}
+
+impl MirValueWhileStmt {
+    fn deinit(self: MirValueWhileStmt) -> void {
         return;
     }
 }
@@ -1436,7 +1460,8 @@ impl MirStmt {
             TokenAt(payload) => payload.deinit(),
             FirstToken(payload) => payload.deinit(),
             NextToken(payload) => payload.deinit(),
-            Tokenize(payload) => payload.deinit(),
+            ArrayNew(payload) => payload.deinit(),
+            ValueWhile(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
             ParserPostfixStart(payload) => payload.deinit(),
@@ -2522,33 +2547,49 @@ pub fn parser_postfix_start_stmt(
     });
 }
 
-pub fn tokenize_stmt(
+pub fn array_new_stmt(
+    result_name: []u8,
+    owned_type: []u8,
     allocator_name: []u8,
+    element_type: []u8
+) -> MirStmt {
+    return MirStmt::ArrayNew(MirArrayNewStmt {
+        result_name: result_name,
+        owned_type: owned_type,
+        allocator_name: allocator_name,
+        element_type: element_type
+    });
+}
+
+pub fn value_while_stmt(
+    array_name: []u8,
+    loop_var: []u8,
     source_name: []u8,
-    token_type: []u8,
+    element_type: []u8,
     owned_type: []u8,
     error_owned_type: []u8,
     error_void_type: []u8,
-    array_new_symbol: []u8,
+    init_callee_qualified: []u8,
+    update_callee_qualified: []u8,
     array_append_symbol: []u8,
-    first_token_symbol: []u8,
-    next_token_symbol: []u8,
+    field_index: i64,
     eof_tag: i64,
-    elem_size: i64
+    label_base: []u8
 ) -> MirStmt {
-    return MirStmt::Tokenize(MirTokenizeStmt {
-        allocator_name: allocator_name,
+    return MirStmt::ValueWhile(MirValueWhileStmt {
+        array_name: array_name,
+        loop_var: loop_var,
         source_name: source_name,
-        token_type: token_type,
+        element_type: element_type,
         owned_type: owned_type,
         error_owned_type: error_owned_type,
         error_void_type: error_void_type,
-        array_new_symbol: array_new_symbol,
+        init_callee_qualified: init_callee_qualified,
+        update_callee_qualified: update_callee_qualified,
         array_append_symbol: array_append_symbol,
-        first_token_symbol: first_token_symbol,
-        next_token_symbol: next_token_symbol,
+        field_index: field_index,
         eof_tag: eof_tag,
-        elem_size: elem_size
+        label_base: label_base
     });
 }
 

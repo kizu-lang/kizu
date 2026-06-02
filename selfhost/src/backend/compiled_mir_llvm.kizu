@@ -421,7 +421,8 @@ fn append_multi_stmt(
         TokenAt(payload) => try append_multi_token_at(out, payload);,
         FirstToken(payload) => try append_multi_first_token(out, payload);,
         NextToken(payload) => try append_multi_next_token(out, payload);,
-        Tokenize(payload) => try append_multi_tokenize(out, payload);,
+        ArrayNew(payload) => try append_array_new(out, payload);,
+        ValueWhile(payload) => try append_value_while(out, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
         ParserSpanPredicate(payload) => try append_multi_parser_span_predicate(out, payload);,
         ParserPostfixStart(payload) => try append_multi_parser_postfix_start(out, payload);,
@@ -1904,171 +1905,270 @@ fn append_multi_next_token(
     return;
 }
 
-// append_tokenize_globals: tokenize forwards only value arguments, so it emits no string-constant
-// globals (tracker 961).
-fn append_tokenize_globals(stmt: &compiled_mir::MirTokenizeStmt) -> !void {
+// append_array_element_size emits the element byte width as a constant expression derived from the
+// element type -- 'ptrtoint (ptr getelementptr (T, ptr null, i32 1) to i64)' -- so Array<T> lowering
+// never hardcodes a per-type size (issue 1165: generic Array constructor / append lowering).
+fn append_array_element_size(out: &var std::string::String, element_type: []u8) -> !void {
+    try out.append_bytes("ptrtoint (ptr getelementptr (");
+    try out.append_bytes(element_type);
+    try out.append_bytes(", ptr null, i32 1) to i64)");
     return;
 }
 
-// append_tokenize_append emits one 'try tokens.append(<value>);': store the Token into the shared
-// stack slot, wrap it as a {ptr, elem_size} slice, call the runtime append, and on failure return
-// the propagated error as the error-union-owned failure (tracker 961, scope 4 prerequisite). prefix
-// uniquifies the SSA names; value is the Token SSA; ok_label is the success continuation.
-fn append_tokenize_append(
+// append_array_new_globals / append_value_while_globals: these statements forward only runtime calls
+// and SSA values, so they emit no string-constant globals (issue 1165).
+fn append_array_new_globals(stmt: &compiled_mir::MirArrayNewStmt) -> !void {
+    return;
+}
+
+fn append_value_while_globals(stmt: &compiled_mir::MirValueWhileStmt) -> !void {
+    return;
+}
+
+// append_array_new renders 'var <result> = std::array::Array<T>(<allocator>)' as a kizu_rt_array_new
+// call whose element width comes from the element type rather than a hardcoded constant (issue 1165).
+fn append_array_new(out: &var std::string::String, stmt: &compiled_mir::MirArrayNewStmt) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.result_name);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(stmt.owned_type);
+    try out.append_bytes(" @kizu_rt_array_new(");
+    try out.append_bytes(stmt.owned_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.allocator_name);
+    try out.append_bytes(", i64 ");
+    try append_array_element_size(out, stmt.element_type);
+    try append_ll_line(out, ")");
+    return;
+}
+
+// append_value_while_append stores the carried value into the loop var's stack slot, wraps it as a
+// {ptr, element_size} slice, and try-appends it into the array. On success it branches to
+// <label_base><ok_suffix>; on failure it returns this function's %kizu.error.owned failure early.
+// slot_suffix / value_suffix / ok_suffix are appended to label_base / loop_var inline, so no string
+// allocation is needed; the prefixes are generalized over the loop var and array names.
+fn append_value_while_append(
     out: &var std::string::String,
-    stmt: &compiled_mir::MirTokenizeStmt,
-    prefix: []u8,
-    value: []u8,
-    ok_label: []u8
+    stmt: &compiled_mir::MirValueWhileStmt,
+    slot_suffix: []u8,
+    value_suffix: []u8,
+    ok_suffix: []u8
 ) -> !void {
     try out.append_bytes("  store ");
-    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(stmt.element_type);
     try out.append_bytes(" %");
-    try out.append_bytes(value);
-    try append_ll_line(out, ", ptr %tk_slot");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes(value_suffix);
+    try out.append_bytes(", ptr %");
+    try out.append_bytes(stmt.loop_var);
+    try append_ll_line(out, "_slot");
     try out.append_bytes("  %");
-    try out.append_bytes(prefix);
-    try append_ll_line(out, "_es0 = insertvalue %kizu.slice.u8 poison, ptr %tk_slot, 0");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
+    try out.append_bytes("_es0 = insertvalue %kizu.slice.u8 poison, ptr %");
+    try out.append_bytes(stmt.loop_var);
+    try append_ll_line(out, "_slot, 0");
     try out.append_bytes("  %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_eslice = insertvalue %kizu.slice.u8 %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_es0, i64 ");
-    try std::fmt::append_i64(out, stmt.elem_size);
+    try append_array_element_size(out, stmt.element_type);
     try append_ll_line(out, ", 1");
     try out.append_bytes("  %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_app = call ");
     try out.append_bytes(stmt.error_void_type);
     try out.append_bytes(" @");
     try out.append_bytes(stmt.array_append_symbol);
     try out.append_bytes("(");
     try out.append_bytes(stmt.owned_type);
-    try out.append_bytes(" %tk_array, %kizu.slice.u8 %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.array_name);
+    try out.append_bytes(", %kizu.slice.u8 %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try append_ll_line(out, "_eslice)");
     try out.append_bytes("  %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_ok = extractvalue ");
     try out.append_bytes(stmt.error_void_type);
     try out.append_bytes(" %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try append_ll_line(out, "_app, 0");
     try out.append_bytes("  br i1 %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_ok, label %");
-    try out.append_bytes(ok_label);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(ok_suffix);
     try out.append_bytes(", label %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try append_ll_line(out, "_fail");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try append_ll_line(out, "_fail:");
     try out.append_bytes("  %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_err = extractvalue ");
     try out.append_bytes(stmt.error_void_type);
     try out.append_bytes(" %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try append_ll_line(out, "_app, 1");
     try out.append_bytes("  %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_f0 = insertvalue ");
     try out.append_bytes(stmt.error_owned_type);
     try append_ll_line(out, " poison, i1 false, 0");
     try out.append_bytes("  %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_f1 = insertvalue ");
     try out.append_bytes(stmt.error_owned_type);
     try out.append_bytes(" %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_f0, ");
     try out.append_bytes(stmt.owned_type);
     try append_ll_line(out, " zeroinitializer, 1");
     try out.append_bytes("  %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_f2 = insertvalue ");
     try out.append_bytes(stmt.error_owned_type);
     try out.append_bytes(" %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try out.append_bytes("_f1, %kizu.slice.u8 %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try append_ll_line(out, "_err, 2");
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.error_owned_type);
     try out.append_bytes(" %");
-    try out.append_bytes(prefix);
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes(slot_suffix);
     try append_ll_line(out, "_f2");
     return;
 }
 
-// append_multi_tokenize renders tokenize(allocator, source): allocate a Token array, seed it with
-// first_token, then loop appending next_token results until Eof, returning the array as the
-// !Array success (tracker 961, scope 4 prerequisite).
-fn append_multi_tokenize(
-    out: &var std::string::String,
-    stmt: &compiled_mir::MirTokenizeStmt
-) -> !void {
-    try out.append_bytes("  %tk_slot = alloca ");
-    try append_ll_line(out, stmt.token_type);
-    try out.append_bytes("  %tk_array = call ");
-    try out.append_bytes(stmt.owned_type);
+// append_value_while renders the value-carried bounded loop: seed the array with init_symbol(source),
+// then carry the struct value through a phi, exit when field_index of the value equals eof_tag,
+// otherwise recompute it via update_symbol(source, value), try-append, and loop. The done block
+// returns the array as the !Array success, subsuming the source's trailing 'return <array>' (issue
+// 1165: generic value-carried array loop lowering).
+fn append_value_while(out: &var std::string::String, stmt: &compiled_mir::MirValueWhileStmt) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_slot = alloca ");
+    try append_ll_line(out, stmt.element_type);
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_init = call ");
+    try out.append_bytes(stmt.element_type);
     try out.append_bytes(" @");
-    try out.append_bytes(stmt.array_new_symbol);
-    try out.append_bytes("(");
-    try out.append_bytes(stmt.owned_type);
-    try out.append_bytes(" %");
-    try out.append_bytes(stmt.allocator_name);
-    try out.append_bytes(", i64 ");
-    try std::fmt::append_i64(out, stmt.elem_size);
-    try append_ll_line(out, ")");
-    try out.append_bytes("  %tk_first = call ");
-    try out.append_bytes(stmt.token_type);
-    try out.append_bytes(" @");
-    try out.append_bytes(stmt.first_token_symbol);
+    try compiled_signature::append_function_llvm_symbol(out, stmt.init_callee_qualified);
     try out.append_bytes("(%kizu.slice.u8 %");
     try out.append_bytes(stmt.source_name);
     try append_ll_line(out, ")");
-    // Seed the array with the first token, then enter the loop.
-    try append_tokenize_append(out, stmt, "tk_a0", "tk_first", "tk_loop_head");
-    try append_ll_line(out, "tk_loop_head:");
-    try out.append_bytes("  %tk_current = phi ");
-    try out.append_bytes(stmt.token_type);
-    try append_ll_line(out, " [ %tk_first, %entry ], [ %tk_next, %tk_after_append ]");
-    try out.append_bytes("  %tk_kind = extractvalue ");
-    try out.append_bytes(stmt.token_type);
-    try append_ll_line(out, " %tk_current, 0");
-    try out.append_bytes("  %tk_is_eof = icmp eq i64 %tk_kind, ");
+    // Seed the array with the initial value, then enter the loop head.
+    try append_value_while_append(out, stmt, "_seed", "_init", "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.element_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_init, %entry ], [ %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_next, %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_after ]");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_field = extractvalue ");
+    try out.append_bytes(stmt.element_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, stmt.field_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_is_eof = icmp eq i64 %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_field, ");
     try std::fmt::append_i64(out, stmt.eof_tag);
     try out.append_byte(cast<u8>(10));
-    try append_ll_line(out, "  br i1 %tk_is_eof, label %tk_done, label %tk_body");
-    try append_ll_line(out, "tk_body:");
-    try out.append_bytes("  %tk_next = call ");
-    try out.append_bytes(stmt.token_type);
+    try out.append_bytes("  br i1 %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_is_eof, label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_done, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.loop_var);
+    try out.append_bytes("_next = call ");
+    try out.append_bytes(stmt.element_type);
     try out.append_bytes(" @");
-    try out.append_bytes(stmt.next_token_symbol);
+    try compiled_signature::append_function_llvm_symbol(out, stmt.update_callee_qualified);
     try out.append_bytes("(%kizu.slice.u8 %");
     try out.append_bytes(stmt.source_name);
     try out.append_bytes(", ");
-    try out.append_bytes(stmt.token_type);
-    try append_ll_line(out, " %tk_current)");
-    try append_tokenize_append(out, stmt, "tk_ab", "tk_next", "tk_after_append");
-    try append_ll_line(out, "tk_after_append:");
-    try append_ll_line(out, "  br label %tk_loop_head");
-    try append_ll_line(out, "tk_done:");
-    try out.append_bytes("  %tk_ok0 = insertvalue ");
+    try out.append_bytes(stmt.element_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.loop_var);
+    try append_ll_line(out, ")");
+    try append_value_while_append(out, stmt, "_iter", "_next", "_after");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_after:");
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_done:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_ok0 = insertvalue ");
     try out.append_bytes(stmt.error_owned_type);
     try append_ll_line(out, " poison, i1 true, 0");
-    try out.append_bytes("  %tk_ok1 = insertvalue ");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_ok1 = insertvalue ");
     try out.append_bytes(stmt.error_owned_type);
-    try out.append_bytes(" %tk_ok0, ");
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_ok0, ");
     try out.append_bytes(stmt.owned_type);
-    try append_ll_line(out, " %tk_array, 1");
-    try out.append_bytes("  %tk_ok2 = insertvalue ");
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.array_name);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_ok2 = insertvalue ");
     try out.append_bytes(stmt.error_owned_type);
-    try append_ll_line(out, " %tk_ok1, %kizu.slice.u8 zeroinitializer, 2");
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_ok1, %kizu.slice.u8 zeroinitializer, 2");
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.error_owned_type);
-    try append_ll_line(out, " %tk_ok2");
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_ok2");
     return;
 }
 
@@ -3970,7 +4070,8 @@ fn append_stmt_globals(
         TokenAt(payload) => try append_token_at_globals(payload);,
         FirstToken(payload) => try append_first_token_globals(payload);,
         NextToken(payload) => try append_next_token_globals(payload);,
-        Tokenize(payload) => try append_tokenize_globals(payload);,
+        ArrayNew(payload) => try append_array_new_globals(payload);,
+        ValueWhile(payload) => try append_value_while_globals(payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,
         ParserSpanPredicate(payload) => try append_parser_span_predicate_globals(payload);,
         ParserPostfixStart(payload) => try append_parser_postfix_start_globals(payload);,

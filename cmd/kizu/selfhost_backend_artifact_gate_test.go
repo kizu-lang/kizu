@@ -1439,13 +1439,17 @@ func requiredLLVMTokenizerFragments() []string {
 		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_next_token(",
 		"%nt_next = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_position(",
 		// tokenize: build a dynamic Token array via the runtime helpers and fold first/next_token
-		// into it, returning the array as the error-union-owned success.
+		// into it, returning the array as the error-union-owned success. It lowers through the
+		// generic ArrayNew + ValueWhile path (issue 1165): the element width comes from the element
+		// type (ptrtoint), the carried Token threads through a value phi, and the seed/iteration
+		// appends propagate failure as the error-union-owned failure.
 		"define %kizu.error.owned @kizu_kizu__lexer_tokenize(",
-		"%tk_array = call %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, i64 56)",
-		"%tk_current = phi %kizu.kizu.lexer.token [ %tk_first, %entry ], " +
-			"[ %tk_next, %tk_after_append ]",
-		"%tk_a0_app = call %kizu.error.void @kizu_rt_array_append(",
-		"%tk_ok1 = insertvalue %kizu.error.owned %tk_ok0, %kizu.owned %tk_array, 1",
+		"%tokens = call %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, " +
+			"i64 ptrtoint (ptr getelementptr (%kizu.kizu.lexer.token, ptr null, i32 1) to i64))",
+		"%current = phi %kizu.kizu.lexer.token [ %current_init, %entry ], " +
+			"[ %current_next, %vw0_after ]",
+		"%vw0_seed_app = call %kizu.error.void @kizu_rt_array_append(",
+		"%vw0_ok1 = insertvalue %kizu.error.owned %vw0_ok0, %kizu.owned %tokens, 1",
 	}
 }
 
