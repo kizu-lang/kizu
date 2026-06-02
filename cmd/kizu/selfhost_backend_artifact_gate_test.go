@@ -1477,6 +1477,14 @@ func requiredLLVMFormatHelperFragments() []string {
 		"define %kizu.slice.u8 @kizu_selfhost__parser_format_token_text(",
 		"define %kizu.error.bool @kizu_selfhost__parser_format_next_token_text_equals(",
 		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_import(",
+		// Pin the parameter-seeded induction phi: the loop counter seeds from the
+		// %import_index parameter SSA value on the preheader edge, not a literal, so a
+		// regression back to a literal seed is caught here (issue 1165).
+		"%index = phi i64 [ %import_index, %loop1_preheader ]",
+		// Pin the i64 error-union early-return wrap: 'return index + 1;' inside the loop
+		// wraps the i64 into %kizu.error.i64 with an if-index-suffixed SSA name rather than
+		// returning a raw i64 as the error union (issue 1165).
+		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %t7, 1",
 	}
 }
 

@@ -3282,7 +3282,6 @@ pub fn lower_multi_statement_function(
                     string_counter,
                     temp_counter,
                     stmt_index,
-                    statement_count,
                     &var stmts,
                     bs
                 );
@@ -4314,19 +4313,24 @@ pub struct InductionInit {
     pub literal: i64,
     pub var_name: []u8,
 }
-// find_induction_init finds the 'var counter = <init>' initializer for an induction
-// variable and returns its loop-head phi seed. Only an integer literal or a plain
-// parameter/local name init is accepted; any other initializer shape is an explicit
-// error so the restricted loop support never silently lowers a computed seed.
+// find_induction_init finds the 'var counter = <init>' initializer for the while at
+// while_stmt_index and returns its loop-head phi seed. Only top-level Let statements that
+// precede the while are considered, and the nearest preceding match wins, so two whiles
+// reusing the same counter name each resolve their own initializer rather than aliasing
+// the first one. Only an integer literal or a plain parameter/local name init is accepted;
+// any other initializer shape is an explicit error so the restricted loop support never
+// silently lowers a computed seed.
 fn find_induction_init(
     ir_bytes: []u8,
     function_name: []u8,
     induction_var: []u8,
-    statement_count: i64,
+    while_stmt_index: i64,
     bs: i64
 ) -> !InductionInit {
+    var found = false;
+    var init_value = -1;
     var index = 0;
-    while index < statement_count {
+    while index < while_stmt_index {
         let statement = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, 0, "statement", index, bs
         );
@@ -4339,30 +4343,33 @@ fn find_induction_init(
                 ir_bytes, function_name, name_node, bs
             );
             if std::mem::equal_bytes(name, induction_var) {
-                let value = try ir_contract::body_child_sequence_from(
+                found = true;
+                init_value = try ir_contract::body_child_sequence_from(
                     ir_bytes, function_name, statement, "value", 0, bs
                 );
-                let value_kind = try ir_contract::body_node_kind_from(
-                    ir_bytes, function_name, value, bs
-                );
-                if std::mem::equal_bytes(value_kind, "Int") {
-                    let literal = try ir_contract::body_int_value_from(
-                        ir_bytes, function_name, value, bs
-                    );
-                    return InductionInit { literal: literal, var_name: "" };
-                }
-                if std::mem::equal_bytes(value_kind, "Var") {
-                    let var_name = try ir_contract::body_token_or_empty_from(
-                        ir_bytes, function_name, value, bs
-                    );
-                    return InductionInit { literal: 0, var_name: var_name };
-                }
-                return error("compiled mir: induction variable must be initialized to an integer or a parameter");
             }
         }
         index = index + 1;
     }
-    return error("compiled mir: induction variable initializer not found");
+    if !found {
+        return error("compiled mir: induction variable initializer not found");
+    }
+    let value_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, init_value, bs
+    );
+    if std::mem::equal_bytes(value_kind, "Int") {
+        let literal = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, init_value, bs
+        );
+        return InductionInit { literal: literal, var_name: "" };
+    }
+    if std::mem::equal_bytes(value_kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, init_value, bs
+        );
+        return InductionInit { literal: 0, var_name: var_name };
+    }
+    return error("compiled mir: induction variable must be initialized to an integer or a parameter");
 }
 // parse_induction_step validates the trailing 'name = name + <int>' increment for
 // the induction variable and returns the integer step. Only this simple counter
@@ -4421,7 +4428,6 @@ fn lower_multi_while_statement(
     string_counter: i64,
     temp_counter: i64,
     loop_index: i64,
-    statement_count: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiIfLowerResult {
@@ -4435,8 +4441,10 @@ fn lower_multi_while_statement(
         ir_bytes, function_name, statement, "body", 0, bs
     );
     let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
+    // loop_index is this while's top-level statement index, so the induction initializer
+    // is the nearest preceding 'var <induction_var> = <init>'.
     let induction_init = try find_induction_init(
-        ir_bytes, function_name, induction_var, statement_count, bs
+        ir_bytes, function_name, induction_var, loop_index, bs
     );
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let cond_result = try lower_expr_into(
@@ -4453,12 +4461,6 @@ fn lower_multi_while_statement(
     var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
     var body_temp_counter = temp_counter + cond_insts.len();
     var body_try_counter = loop_index * 1000;
-    // A body 'let token = try tokens.get(index);' binds a local that later body
-    // statements read (e.g. is_semicolon_token(token)), so the extended locals_spec must
-    // thread forward across the body just like the top-level statement loop does. Without
-    // this, a body call argument that names a body-bound local fails type resolution
-    // (issue 1165).
-    var body_locals_spec = locals_spec;
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var body_index = 0;
@@ -4473,7 +4475,7 @@ fn lower_multi_while_statement(
                 function_name,
                 module_prefix,
                 llvm_return_type,
-                body_locals_spec,
+                locals_spec,
                 body_stmt,
                 body_string_counter,
                 body_temp_counter,
@@ -4481,7 +4483,6 @@ fn lower_multi_while_statement(
                 &var body_stmts,
                 bs
             );
-            body_locals_spec = let_result.locals_spec;
             body_string_counter = let_result.string_counter;
             body_temp_counter = let_result.temp_counter;
             body_try_counter = let_result.try_counter;
@@ -4493,7 +4494,7 @@ fn lower_multi_while_statement(
                     function_name,
                     module_prefix,
                     llvm_return_type,
-                    body_locals_spec,
+                    locals_spec,
                     body_stmt,
                     body_string_counter,
                     body_temp_counter,
