@@ -3520,6 +3520,16 @@ fn lower_multi_let_statement(
         if !std::mem::equal_bytes(inner_kind, "Call") {
             return error("compiled mir: try let value must wrap a call");
         }
+        // 'let next = try tokens.get(<expr>);' on a value-receiver Array<T> binds the
+        // element by value off the checked array_at builtin and propagates a failure as
+        // this function's own error union (issue 1165). The callee is a field-mode method,
+        // so it is routed ahead of the free-function try-call path.
+        if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+            return try lower_multi_let_array_get(
+                ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+                let_name, inner, string_counter, temp_counter, try_counter, stmts, bs
+            );
+        }
         return try lower_multi_let_try_call(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
             let_name, inner, string_counter, temp_counter, try_counter, stmts, bs
@@ -3659,6 +3669,103 @@ fn lower_multi_let_try_call(
     };
 }
 
+// lower_multi_let_array_get lowers 'let <name> = try <receiver>.get(<expr>);' where the
+// receiver is a value std::array::Array<T> param/local (issue 1165). The receiver lowers
+// to %kizu.owned, so the index expression lowers into expr_insts and the LetArrayGet
+// renderer reads the handle straight off the named value, calls the checked
+// @kizu_rt_array_at builtin, binds the element (element type T derived from Array<T>) to
+// <name> on success, and propagates a failure as this function's own error union. An
+// unsupported method/receiver/element type fails explicitly.
+fn lower_multi_let_array_get(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    let_name: []u8,
+    call_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiLowerResult {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "get") {
+        return error("compiled mir: only Array.get is supported in let-try position on a value receiver");
+    }
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 1 {
+        return error("compiled mir: Array.get accessor takes one index argument");
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: Array.get value receiver must be a local or parameter");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
+        ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs
+    );
+    let lookup = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
+    if !is_array_field_type(lookup) {
+        return error("compiled mir: Array.get receiver is not a std::array::Array");
+    }
+    let element_kizu_type = try array_element_kizu_type(lookup);
+    let element_llvm_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
+        ir_bytes, "", element_kizu_type
+    );
+    let index_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "arg", 0, bs
+    );
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let index_result_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        index_node,
+        string_counter,
+        temp_counter,
+        &var insts,
+        bs
+    );
+    let expr_strings = try count_strings_in_insts(&insts);
+    let next_temp = temp_counter + insts.len();
+    try stmts.append(compiled_mir::let_array_get_stmt(
+        let_name,
+        receiver_name,
+        element_llvm_type,
+        llvm_return_type,
+        index_result_id,
+        string_counter,
+        try_counter,
+        insts
+    ));
+    let new_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, locals_spec, let_name, element_llvm_type
+    );
+    return MultiLowerResult {
+        locals_spec: new_locals,
+        string_counter: string_counter + expr_strings,
+        temp_counter: next_temp,
+        try_counter: try_counter + 1
+    };
+}
+
 // try_call_success_type resolves the unwrapped success type a 'try <callee>(...)' binds:
 // it reads the callee's '!T' signature-return token, strips the leading '!', and lowers T.
 fn try_call_success_type(
@@ -3727,6 +3834,25 @@ fn lower_multi_return_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type,
                 locals_spec, value, string_counter, temp_counter, bs
             );
+        }
+        // 'return equal_bytes(token_text(...), expected);' carries a nested call argument
+        // the inline call-arg descriptors cannot model, so it lowers through the generic
+        // expression path (which materializes each nested call into a preceding temp) as a
+        // return-expr statement instead of an inline return-call (issue 1165).
+        if try call_has_call_arg(ir_bytes, function_name, value, bs) {
+            var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+            let nested_result_id = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                value,
+                string_counter,
+                temp_counter,
+                &var nested_insts,
+                bs
+            );
+            return compiled_mir::return_expr_stmt(string_counter, nested_result_id, nested_insts);
         }
         let call_type = try compiled_mir_types::lower_call_return_type(
             ir_bytes, function_name, module_prefix, value, bs
@@ -4411,6 +4537,156 @@ fn count_strings_in_inst(
     }
 }
 
+// call_has_call_arg reports whether any argument of a Call node is itself a Call.
+// Inline call-arg descriptors cannot carry a computed call result, so such calls take
+// the nested-argument expression path instead (issue 1165).
+fn call_has_call_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64
+) -> !bool {
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var index = 0;
+    while index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", index, bs
+        );
+        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        if std::mem::equal_bytes(arg_kind, "Call") {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// lower_expr_array_len lowers a value-receiver 'tokens.len()' into an ArrayLen expr
+// inst (issue 1165). The receiver is a std::array::Array<T> (or &Array<T>) param/local
+// that lowers to the runtime-owned %kizu.owned handle, so the element type T does not
+// affect the call. Only len() is supported in expression position; get() returns !T and
+// is handled in let-try position. An unsupported method/receiver fails explicitly.
+fn lower_expr_array_len(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    bs: i64
+) -> !i64 {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "len") {
+        return error("compiled mir: only Array.len is supported on a value receiver in expression position");
+    }
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 0 {
+        return error("compiled mir: Array.len accessor takes no arguments");
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: Array.len value receiver must be a local or parameter");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
+        ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
+    );
+    let lookup = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
+    if !is_array_field_type(lookup) {
+        return error("compiled mir: Array.len receiver is not a std::array::Array");
+    }
+    let id = id_base + insts.len();
+    try insts.append(compiled_mir::array_len_expr_inst(id, receiver_name));
+    return id;
+}
+
+// lower_expr_call_with_nested_args lowers a Call whose argument list contains nested
+// calls (equal_bytes(token_text(...), expected)) (issue 1165). Each nested-call argument
+// is lowered into a preceding expr temp and referenced through a Temp call arg; scalar
+// arguments use the shared single-arg descriptor. The outer call inst is appended once
+// every argument temp is materialized so the temps dominate the call.
+fn lower_expr_call_with_nested_args(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    bs: i64
+) -> !i64 {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
+    );
+    let call_type = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    var arg_index = 0;
+    var string_idx = string_index;
+    while arg_index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", arg_index, bs
+        );
+        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        let arg_type = try compiled_mir_types::lower_call_arg_type(
+            ir_bytes, module_prefix, callee_name, arg_index
+        );
+        if std::mem::equal_bytes(arg_kind, "Call") {
+            let before = insts.len();
+            let temp_id = try lower_expr_into(
+                ir_bytes, function_name, module_prefix, params_spec, arg_node,
+                string_idx, id_base, insts, bs
+            );
+            string_idx = string_idx + try count_strings_in_insts_from(insts, before);
+            try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+        } else {
+            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg(
+                ir_bytes, function_name, module_prefix, params_spec, arg_type,
+                arg_node, string_idx, bs
+            );
+            let is_string_arg = scalar_arg.kind == compiled_mir::MirCallArgKind::String;
+            try args.append(scalar_arg);
+            if is_string_arg {
+                string_idx = string_idx + 1;
+            }
+        }
+        arg_index = arg_index + 1;
+    }
+    let id = id_base + insts.len();
+    try insts.append(compiled_mir::call_expr_inst(
+        id, call_type, callee_module_prefix, lowered_callee_name, args
+    ));
+    return id;
+}
+
 fn lower_expr_into(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4657,9 +4933,25 @@ fn lower_expr_into(
         return result_id;
     }
     if std::mem::equal_bytes(kind, "Call") {
-        let callee_name = try ir_contract::body_call_callee_or_empty_from(
-            ir_bytes, function_name, expr_node, bs
-        );
+        // A field-mode method call on a value receiver (tokens.len()) reads a
+        // std::array::Array<T> param/local; len() lowers to the array_len builtin
+        // directly off the %kizu.owned handle (issue 1165). get() returns !T and only
+        // appears in let-try position, so it is rejected here.
+        if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
+            return try lower_expr_array_len(
+                ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+            );
+        }
+        // A call whose argument list contains a nested call (equal_bytes(token_text(...),
+        // expected)) lowers each nested-call argument into a preceding expr temp and
+        // references it through a Temp call arg, since inline call-arg descriptors cannot
+        // carry a computed call result (issue 1165).
+        if try call_has_call_arg(ir_bytes, function_name, expr_node, bs) {
+            return try lower_expr_call_with_nested_args(
+                ir_bytes, function_name, module_prefix, params_spec, expr_node,
+                string_index, id_base, insts, bs
+            );
+        }
         let call_type = try compiled_mir_types::lower_call_return_type(
             ir_bytes, function_name, module_prefix, expr_node, bs
         );

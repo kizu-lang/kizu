@@ -35,6 +35,7 @@ pub enum MirCallArgKind {
     Slice,
     IntLiteral,
     Arith,
+    Temp,
 }
 
 // A FieldAccess call arg mirrors MirStructField's nested layout: source_type /
@@ -193,6 +194,19 @@ pub struct MirCallExpr {
     pub call_args: std::array::Array<MirCallArg>,
 }
 
+// MirArrayLenExpr backs a local/param 'tokens.len()' read in expression context
+// (issue 1165): the receiver is a std::array::Array<T> (or &Array<T>) param/local,
+// which lowers to the runtime-owned %kizu.owned handle, so the renderer reads the
+// handle straight off the named value (no struct extractvalue) and calls
+// @kizu_rt_array_len(%kizu.owned) -> i64. It generalizes the struct-field Array.len
+// accessor to direct value receivers; the element type T does not affect the call,
+// so it carries only the receiver name. It owns nothing, so it is copy-only.
+pub struct MirArrayLenExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub receiver_name: []u8,
+}
+
 pub union MirExprInst {
     Var(MirVarExpr),
     ConstString(MirConstStringExpr),
@@ -205,6 +219,7 @@ pub union MirExprInst {
     IndexLoad(MirIndexLoadExpr),
     Slice(MirSliceExpr),
     Call(MirCallExpr),
+    ArrayLen(MirArrayLenExpr),
 }
 
 pub enum MirIfThenKind {
@@ -327,6 +342,28 @@ pub struct MirReturnArrayGetStmt {
     pub element_type: []u8,
     pub index_result_id: i64,
     pub string_index: i64,
+    pub expr_insts: std::array::Array<MirExprInst>,
+}
+
+// MirLetArrayGetStmt backs a multi-statement 'let <name> = try <receiver>.get(<expr>);'
+// where the receiver is a std::array::Array<T> (or &Array<T>) param/local (issue 1165).
+// The receiver lowers to the runtime-owned %kizu.owned handle, so the renderer reads
+// it straight off the named value (no struct extractvalue), lowers the index
+// expression into %t<index_result_id>, calls the checked @kizu_rt_array_at runtime
+// helper, and branches on the ok flag on a try_index-suffixed label pair: the fail
+// block re-wraps the runtime message into this function's own_error_union failure
+// value and returns it (propagation, never 'unreachable'); the cont block loads the
+// element value out of the borrowed view and binds it to %<name>, which the following
+// statements continue in. It generalizes the struct-field Array.get accessor to direct
+// value receivers in let-binding position. It owns the index expr_insts Array.
+pub struct MirLetArrayGetStmt {
+    pub name: []u8,
+    pub receiver_name: []u8,
+    pub element_type: []u8,
+    pub own_error_union: []u8,
+    pub index_result_id: i64,
+    pub string_index: i64,
+    pub try_index: i64,
     pub expr_insts: std::array::Array<MirExprInst>,
 }
 
@@ -983,6 +1020,7 @@ pub union MirStmt {
     ReturnExpr(MirReturnExprStmt),
     ReturnError(MirReturnErrorStmt),
     ReturnArrayGet(MirReturnArrayGetStmt),
+    LetArrayGet(MirLetArrayGetStmt),
     If(MirIfStmt),
     While(MirWhileStmt),
     MatchTraversal(MirMatchTraversalStmt),
@@ -1136,6 +1174,7 @@ impl MirExprInst {
             IndexLoad(payload) => return;,
             Slice(payload) => return;,
             Call(payload) => payload.deinit(),
+            ArrayLen(payload) => return;,
         }
     }
 }
@@ -1177,6 +1216,13 @@ impl MirReturnStructStmt {
 
 impl MirReturnExprStmt {
     fn deinit(self: MirReturnExprStmt) -> void {
+        self.expr_insts.deinit();
+        return;
+    }
+}
+
+impl MirLetArrayGetStmt {
+    fn deinit(self: MirLetArrayGetStmt) -> void {
         self.expr_insts.deinit();
         return;
     }
@@ -1480,6 +1526,7 @@ impl MirStmt {
             ReturnExpr(payload) => payload.deinit(),
             ReturnError(payload) => payload.deinit(),
             ReturnArrayGet(payload) => payload.deinit(),
+            LetArrayGet(payload) => payload.deinit(),
             If(payload) => payload.deinit(),
             While(payload) => payload.deinit(),
             MatchTraversal(payload) => payload.deinit(),
@@ -1750,6 +1797,31 @@ pub fn int_literal_call_arg(ty: []u8, value: i64) -> MirCallArg {
         bool_value: false,
         string_index: -1,
         int_value: value,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: "",
+        slice_start_offset: 0,
+        slice_end_base: "",
+        slice_end_offset: 0
+    };
+}
+
+// temp_call_arg passes an already-computed expression temp (%t<temp_id>) directly as
+// a call operand (issue 1165). It backs nested-call arguments such as the
+// token_text(source, next) inside equal_bytes(token_text(...), expected): the inner
+// call is lowered into a preceding call expr-inst whose %t<temp_id> result this arg
+// references, so the renderer emits no setup and writes %t<temp_id> inline. temp_id
+// is stored in int_value.
+pub fn temp_call_arg(ty: []u8, temp_id: i64) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::Temp,
+        value: "",
+        bool_value: false,
+        string_index: -1,
+        int_value: temp_id,
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
@@ -2179,6 +2251,18 @@ pub fn call_expr_inst(
     });
 }
 
+// array_len_expr_inst builds a local/param Array<T>.len() expression instruction
+// (issue 1165). The receiver is a std::array::Array<T> (or &Array<T>) param/local
+// that lowers to %kizu.owned, so the renderer reads the handle straight off the
+// named value and calls @kizu_rt_array_len -> i64.
+pub fn array_len_expr_inst(id: i64, receiver_name: []u8) -> MirExprInst {
+    return MirExprInst::ArrayLen(MirArrayLenExpr {
+        id: id,
+        llvm_type: "i64",
+        receiver_name: receiver_name
+    });
+}
+
 // expr_inst_id and expr_inst_llvm_type read the result id and LLVM type that
 // every expr-inst variant carries, so result wiring (type-by-id lookups) does
 // not depend on the active variant.
@@ -2195,6 +2279,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         IndexLoad(payload) => payload.id,
         Slice(payload) => payload.id,
         Call(payload) => payload.id,
+        ArrayLen(payload) => payload.id,
     };
 }
 
@@ -2211,6 +2296,7 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         IndexLoad(payload) => payload.llvm_type,
         Slice(payload) => payload.llvm_type,
         Call(payload) => payload.llvm_type,
+        ArrayLen(payload) => payload.llvm_type,
     };
 }
 
@@ -3104,6 +3190,28 @@ pub fn return_array_get_stmt(
         element_type: element_type,
         index_result_id: index_result_id,
         string_index: string_index,
+        expr_insts: insts
+    });
+}
+
+pub fn let_array_get_stmt(
+    name: []u8,
+    receiver_name: []u8,
+    element_type: []u8,
+    own_error_union: []u8,
+    index_result_id: i64,
+    string_index: i64,
+    try_index: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt::LetArrayGet(MirLetArrayGetStmt {
+        name: name,
+        receiver_name: receiver_name,
+        element_type: element_type,
+        own_error_union: own_error_union,
+        index_result_id: index_result_id,
+        string_index: string_index,
+        try_index: try_index,
         expr_insts: insts
     });
 }

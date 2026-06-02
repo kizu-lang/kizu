@@ -8,6 +8,71 @@ import selfhost::backend::ir_contract;
 // Extracting it here lets call-valued struct field initializers reuse the same
 // arg lowering without an import cycle between the two lowering modules
 // (tracker 961).
+// lower_single_call_arg lowers one non-nested call argument into a MirCallArg
+// descriptor. It is shared between lower_call_args (the inline statement/struct call
+// path) and the nested-call expression path, which lowers Call-valued arguments into
+// preceding expr temps and uses this helper for the remaining scalar arguments
+// (issue 1165). A nested Call argument is rejected here because it has no inline
+// descriptor; the expression path handles it instead. A String argument seeds itself
+// at string_index, so callers advance the shared string counter when the returned
+// arg.kind is String.
+pub fn lower_single_call_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    string_index: i64,
+    bs: i64
+) -> !compiled_mir::MirCallArg {
+    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+    if std::mem::equal_bytes(arg_kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, arg_node, bs
+        );
+        return compiled_mir::var_call_arg(arg_type, var_name);
+    }
+    if std::mem::equal_bytes(arg_kind, "FieldExpr") {
+        return try lower_call_field_arg(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, bs
+        );
+    }
+    if std::mem::equal_bytes(arg_kind, "IndexExpr") {
+        return try lower_call_index_arg(
+            ir_bytes, function_name, arg_type, arg_node, bs
+        );
+    }
+    if std::mem::equal_bytes(arg_kind, "String") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, arg_node, bs
+        );
+        let _payload_len = try compiled_util::string_token_decoded_len(
+            token,
+            "compiled mir: invalid call string token"
+        );
+        return compiled_mir::string_call_arg(arg_type, token, string_index);
+    }
+    if std::mem::equal_bytes(arg_kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, arg_node, bs
+        );
+        return compiled_mir::bool_call_arg(arg_type, std::mem::equal_bytes(token, "true"));
+    }
+    if std::mem::equal_bytes(arg_kind, "Int") {
+        let literal = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, arg_node, bs
+        );
+        return compiled_mir::int_literal_call_arg(arg_type, literal);
+    }
+    if std::mem::equal_bytes(arg_kind, "Binary") {
+        return try lower_call_arith_arg(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, bs
+        );
+    }
+    return error("compiled mir: unsupported call arg kind");
+}
+
 pub fn lower_call_args(
     ir_bytes: []u8,
     function_name: []u8,
@@ -30,71 +95,16 @@ pub fn lower_call_args(
         let arg_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, call_node, "arg", arg_index, bs
         );
-        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
         let arg_type = try compiled_mir_types::lower_call_arg_type(
             ir_bytes, module_prefix, callee_name, arg_index
         );
-        if std::mem::equal_bytes(arg_kind, "Var") {
-            let var_name = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, arg_node, bs
-            );
-            try args.append(compiled_mir::var_call_arg(arg_type, var_name));
-        } else {
-            if std::mem::equal_bytes(arg_kind, "FieldExpr") {
-                try args.append(try lower_call_field_arg(
-                    ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, bs
-                ));
-            } else {
-                if std::mem::equal_bytes(arg_kind, "IndexExpr") {
-                    try args.append(try lower_call_index_arg(
-                        ir_bytes, function_name, arg_type, arg_node, bs
-                    ));
-                } else {
-                    if std::mem::equal_bytes(arg_kind, "String") {
-                let token = try ir_contract::body_token_or_empty_from(
-                    ir_bytes, function_name, arg_node, bs
-                );
-                let _payload_len = try compiled_util::string_token_decoded_len(
-                    token,
-                    "compiled mir: invalid call string token"
-                );
-                try args.append(compiled_mir::string_call_arg(
-                    arg_type,
-                    token,
-                    string_index
-                ));
-                string_index = string_index + 1;
-                    } else {
-                        if std::mem::equal_bytes(arg_kind, "Bool") {
-                            let token = try ir_contract::body_token_or_empty_from(
-                                ir_bytes, function_name, arg_node, bs
-                            );
-                            try args.append(compiled_mir::bool_call_arg(
-                                arg_type,
-                                std::mem::equal_bytes(token, "true")
-                            ));
-                        } else {
-                            if std::mem::equal_bytes(arg_kind, "Int") {
-                                let literal = try ir_contract::body_int_value_from(
-                                    ir_bytes, function_name, arg_node, bs
-                                );
-                                try args.append(compiled_mir::int_literal_call_arg(
-                                    arg_type, literal
-                                ));
-                            } else {
-                                if std::mem::equal_bytes(arg_kind, "Binary") {
-                                    try args.append(try lower_call_arith_arg(
-                                        ir_bytes, function_name, module_prefix,
-                                        params_spec, arg_type, arg_node, bs
-                                    ));
-                                } else {
-                                    return error("compiled mir: unsupported call arg kind");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        let arg = try lower_single_call_arg(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, string_index, bs
+        );
+        let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
+        try args.append(arg);
+        if is_string_arg {
+            string_index = string_index + 1;
         }
         arg_index = arg_index + 1;
     }

@@ -3206,6 +3206,12 @@ fn collect_component_compiled_callee(
     if compiled_external_accessor_allowed(prefix, callee) {
         return;
     }
+    // A value-receiver Array<T> read method (tokens.len() / tokens.get(...)) is a runtime
+    // builtin lowered inline, not a component function, so the BFS neither emits nor walks
+    // it (issue 1165).
+    if compiled_callee_is_array_read_method(callee) {
+        return;
+    }
     if std::mem::starts_with(callee, prefix) {
         let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
         if compiled_callee_has_namespace(local) {
@@ -3238,6 +3244,13 @@ fn collect_component_compiled_callee(
 // the external accessor and must not try to walk it as a component-local helper, and
 // every other cross-component callee under either prefix stays an explicit error.
 fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
+    if std::mem::equal_bytes(prefix, "selfhost::parser::format::") {
+        // The formatter token-array predicates call lexer::is_eof (std::kizu::lexer Token
+        // EOF predicate) through the 'lexer' import alias. It is emitted by the std lexer
+        // compiled closure, so the format closure references it without re-emitting or
+        // walking it (issue 1165).
+        return std::mem::equal_bytes(callee, "lexer::is_eof");
+    }
     if std::mem::equal_bytes(prefix, "std::kizu::parser::") {
         if std::mem::equal_bytes(callee, "ast.get") {
             return true;
@@ -3272,6 +3285,26 @@ fn compiled_callee_has_namespace(name: []u8) -> bool {
         index = index + 1;
     }
     return false;
+}
+
+// compiled_callee_is_array_read_method reports whether a callee names a value-receiver
+// Array<T> read method (<receiver>.len / <receiver>.get), i.e. a runtime builtin lowered
+// inline rather than a component function (issue 1165). Namespaced callees (carrying
+// '::') are excluded so a cross-module free function is never mistaken for a method.
+fn compiled_callee_is_array_read_method(name: []u8) -> bool {
+    if compiled_callee_has_namespace(name) {
+        return false;
+    }
+    return compiled_name_ends_with(name, ".len") or compiled_name_ends_with(name, ".get");
+}
+
+fn compiled_name_ends_with(name: []u8, suffix: []u8) -> bool {
+    let name_len = std::mem::len(name);
+    let suffix_len = std::mem::len(suffix);
+    if name_len < suffix_len {
+        return false;
+    }
+    return std::mem::equal_bytes(name[name_len - suffix_len..name_len], suffix);
 }
 
 fn append_component_qualified_name(
@@ -3408,6 +3441,10 @@ fn append_lexer_reachable_compiled_functions(
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
     try pending.append("is_identifier_continue");
     try pending.append("invalid_token_display");
+    // is_eof is the Token EOF predicate the formatter's token-array helpers call across
+    // the module boundary; seed it so @kizu_selfhost__lexer_is_eof is emitted for the
+    // format closure to reference (issue 1165).
+    try pending.append("is_eof");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,
@@ -3462,6 +3499,11 @@ fn append_format_reachable_compiled_functions(
     try pending.append("is_double_colon_token");
     try pending.append("is_semicolon_token");
     try pending.append("token_text");
+    // next_token_text_equals is the first token-array read helper on the compiled path
+    // (issue 1165): it reads tokens.len() / tokens.get(index + 1) on a value-receiver
+    // Array<Token> param, calls lexer::is_eof across the module boundary, and compares the
+    // next token text via token_text (already seeded).
+    try pending.append("next_token_text_equals");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,

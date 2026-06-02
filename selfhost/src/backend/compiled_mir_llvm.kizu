@@ -441,6 +441,7 @@ fn append_multi_stmt(
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
         ReturnError(payload) => try append_multi_return_error(out, function, payload);,
         ReturnArrayGet(payload) => try append_multi_return_array_get(out, function, payload);,
+        LetArrayGet(payload) => try append_multi_let_array_get(out, function, payload);,
         If(payload) => try append_multi_if(out, function, payload, local_prefix);,
         While(payload) => try append_multi_while(out, function, payload);,
         MatchTraversal(payload) => try append_multi_match_traversal(out, payload);,
@@ -3973,6 +3974,99 @@ fn append_multi_return_array_get(
     );
     return;
 }
+// append_multi_let_array_get renders a 'let <name> = try <receiver>.get(<expr>);' where
+// the receiver is a std::array::Array<T> (or &Array<T>) param/local (issue 1165). The
+// receiver lowers to %kizu.owned, so the handle is read straight off the named value
+// (no struct extractvalue). It lowers the index expression, calls the checked
+// @kizu_rt_array_at runtime helper, extracts the ok flag, and branches on a
+// try_index-suffixed label pair: try<N>_fail re-wraps the runtime message into this
+// function's own error-union failure value and returns it (propagation, never
+// 'unreachable'); try<N>_cont loads the element value out of the borrowed view and binds
+// it to %<name>, mirroring append_multi_let_try_call's bind-and-continue shape.
+fn append_multi_let_array_get(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirLetArrayGetStmt
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    let index_value_name = try expr_inst_var_name_by_id(&stmt.expr_insts, stmt.index_result_id);
+    let index_is_int_literal = try expr_inst_is_int_literal_by_id(
+        &stmt.expr_insts, stmt.index_result_id
+    );
+    let index_int_value = try expr_inst_int_value_by_id(&stmt.expr_insts, stmt.index_result_id);
+    // Call the checked array element accessor on the %kizu.owned receiver handle.
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %");
+    try out.append_bytes(stmt.receiver_name);
+    try out.append_bytes(", i64 ");
+    try append_ssa_or_int_or_temp_ref(
+        out, index_value_name, index_is_int_literal, index_int_value, stmt.index_result_id
+    );
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_ok = extractvalue %kizu.error.slice.u8 %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_view, 0");
+    try out.append_bytes("  br i1 %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_ok, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_cont, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail");
+    // Failure: forward the runtime message as this function's error-union failure value.
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_msg = extractvalue %kizu.error.slice.u8 %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_view, 2");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_fail_flag = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_fail_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_fail_flag, %kizu.slice.u8 %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_msg, 2");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_fail_val");
+    // Success: load the element value out of the borrowed view and bind it to %<name>.
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_cont:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_slice = extractvalue %kizu.error.slice.u8 %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_view, 1");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_ptr = extractvalue %kizu.slice.u8 %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_slice, 0");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes(" = load ");
+    try out.append_bytes(stmt.element_type);
+    try out.append_bytes(", ptr %");
+    try out.append_bytes(stmt.name);
+    try append_ll_line(out, "_ptr");
+    return;
+}
 // append_error_union_failure_value renders a return error("...") failure value
 // for the %kizu.error.<success> ABI: field 0 is the i1 false ok flag, field 1 the
 // success value (left as zeroinitializer), and the error message %kizu.slice.u8 at
@@ -4090,6 +4184,7 @@ fn append_stmt_globals(
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnError(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnArrayGet(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
+        LetArrayGet(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         If(payload) => try append_if_globals(out, llvm_symbol, payload);,
         While(payload) => try append_while_globals(out, llvm_symbol, payload);,
         MatchTraversal(payload) => try append_match_traversal_globals(payload);,
@@ -4512,15 +4607,7 @@ fn append_multi_if(
     try out.append_bytes("_then:");
     try out.append_byte(cast<u8>(10));
     if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnBool {
-        try out.append_bytes("  ret ");
-        try out.append_bytes(function.return_type.llvm_name);
-        try out.append_bytes(" ");
-        if stmt.bool_value {
-            try out.append_bytes("true");
-        } else {
-            try out.append_bytes("false");
-        }
-        try out.append_byte(cast<u8>(10));
+        try append_multi_if_return_bool(out, function.return_type.llvm_name, stmt);
     } else {
         if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnCall {
             try append_multi_then_call(out, function.name, stmt, local_prefix);
@@ -4559,6 +4646,48 @@ fn append_multi_if(
     try out.append_bytes("if");
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_cont:");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+// append_multi_if_return_bool renders the then-block of a 'return <bool>;' early exit. A
+// plain bool function returns the i1 directly; an error-union function (next_token_text_equals
+// returns !bool, issue 1165) wraps the bool into the %kizu.error.<bool> success value (ok flag
+// true at field 0, the bool at field 1). The wrap SSA names are suffixed by the if index so
+// multiple early-return ifs in one function never collide.
+fn append_multi_if_return_bool(
+    out: &var std::string::String,
+    return_type: []u8,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    if !is_error_union_type(return_type) {
+        try out.append_bytes("  ret ");
+        try out.append_bytes(return_type);
+        try out.append_bytes(" ");
+        try append_bool_literal(out, stmt.bool_value);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    try out.append_bytes("  %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_retbool_ok = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" zeroinitializer, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_retbool_val = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_retbool_ok, i1 ");
+    try append_bool_literal(out, stmt.bool_value);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_retbool_val");
     try out.append_byte(cast<u8>(10));
     return;
 }
@@ -4811,7 +4940,24 @@ fn append_expr_inst(
         IndexLoad(payload) => try append_index_load_expr(out, payload, insts);,
         Slice(payload) => try append_slice_expr(out, payload, insts);,
         Call(payload) => try append_call_expr(out, llvm_symbol, payload);,
+        ArrayLen(payload) => try append_array_len_expr(out, payload);,
     }
+    return;
+}
+// append_array_len_expr renders a local/param 'tokens.len()' read: the receiver is a
+// std::array::Array<T> (or &Array<T>) param/local that lowers to %kizu.owned, so the
+// handle is read straight off the named value and fed to the @kizu_rt_array_len
+// runtime helper (the same one struct-field Array.len uses) returning i64 (issue 1165).
+fn append_array_len_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirArrayLenExpr
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes(" = call i64 @kizu_rt_array_len(%kizu.owned %");
+    try out.append_bytes(inst.receiver_name);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
     return;
 }
 // append_index_load_expr lowers expr-context path[i] as a checked i8 load.
