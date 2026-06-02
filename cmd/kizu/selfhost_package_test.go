@@ -2647,7 +2647,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_write_concat5_function(",
 		"fn append_write_concat9_function(",
 		"fn append_i64_decimal_function(",
-		"fn append_artifact_path_function(",
+		"fn append_artifact_stem_function(",
 	},
 	"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu": {
 		"import selfhost::backend::hosted;",
