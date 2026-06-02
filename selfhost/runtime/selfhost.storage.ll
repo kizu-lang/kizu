@@ -176,6 +176,38 @@ invalid:
   ret %kizu.error.slice.u8 %invalid_result
 }
 
+define %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 %index, %kizu.slice.u8 %element) {
+entry:
+  %element_ptr = extractvalue %kizu.slice.u8 %element, 0
+  %raw = extractvalue %kizu.owned %array, 0
+  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %data = load ptr, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2
+  %len = load i64, ptr %len_field
+  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4
+  %element_size = load i64, ptr %element_size_field
+  %index_nonnegative = icmp sge i64 %index, 0
+  %index_in_bounds = icmp slt i64 %index, %len
+  %data_ok = icmp ne ptr %data, null
+  %size_ok = icmp sgt i64 %element_size, 0
+  %bounds_ok = and i1 %index_nonnegative, %index_in_bounds
+  %storage_ok = and i1 %data_ok, %size_ok
+  %ok = and i1 %bounds_ok, %storage_ok
+  br i1 %ok, label %valid, label %invalid
+valid:
+  %offset = mul i64 %index, %element_size
+  %dest = getelementptr i8, ptr %data, i64 %offset
+  call void @llvm.memcpy.p0.p0.i64(ptr %dest, ptr %element_ptr, i64 %element_size, i1 false)
+  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+invalid:
+  %message_ptr = getelementptr inbounds [25 x i8], ptr @.kizu.rt.array_index_out_of_bounds, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 25, 1
+  %invalid_ok = insertvalue %kizu.error.void poison, i1 false, 0
+  %invalid_result = insertvalue %kizu.error.void %invalid_ok, %kizu.slice.u8 %message, 1
+  ret %kizu.error.void %invalid_result
+}
+
 define void @kizu_rt_array_deinit(%kizu.owned %array) {
 entry:
   %raw = extractvalue %kizu.owned %array, 0

@@ -66,6 +66,16 @@ pub fn kizu_type_to_llvm(
         if std::mem::equal_bytes(inner, "String") {
             return "%kizu.error.owned";
         }
+        // !std::array::Array<T> backs the dynamic Array<T> builder cluster
+        // (issue 1165). Array<T>, like std::string::String, lowers to the
+        // runtime-owned handle %kizu.owned, so its error union is the shared
+        // %kizu.error.owned shape { i1, %kizu.owned, %kizu.slice.u8 } (the same
+        // shape lexer::tokenize already returns for !Array<Token>). The element
+        // type only affects the runtime element_size, not the LLVM handle type,
+        // so every Array<T> instantiation shares one prefix rule.
+        if std::mem::starts_with(inner, "std::array::Array<") {
+            return "%kizu.error.owned";
+        }
         return error("compiled function: unsupported error type");
     }
     if std::mem::equal_bytes(kizu_type, "i64") {
@@ -90,6 +100,14 @@ pub fn kizu_type_to_llvm(
         return "%kizu.owned";
     }
     if std::mem::equal_bytes(kizu_type, "String") {
+        return "%kizu.owned";
+    }
+    // std::array::Array<T> is the runtime-owned dynamic-array handle %kizu.owned
+    // (issue 1165), produced by @kizu_rt_array_new and mutated through the
+    // @kizu_rt_array_* ABI. Like std::string::String the LLVM handle is the same
+    // %kizu.owned regardless of the element type T, so a single prefix rule covers
+    // every Array<T> instantiation (Array<Token>, Array<i64>, ...).
+    if std::mem::starts_with(kizu_type, "std::array::Array<") {
         return "%kizu.owned";
     }
     if compiled_fact_lookup::is_enum_type(ir_bytes, module_prefix, kizu_type) {
