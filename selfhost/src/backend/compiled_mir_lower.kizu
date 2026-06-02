@@ -2720,6 +2720,20 @@ fn signature_return_kizu(
     return error("compiled mir: value-loop seed return type not found");
 }
 
+// node_kind_is reports whether a body node's kind equals the expected string. It wraps
+// body_node_kind_from so callers avoid nesting a try-expression inside a call argument, which keeps
+// the value-loop helpers within the std parser subset the selfhost compiler accepts (issue 1165).
+fn node_kind_is(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    expected: []u8,
+    bs: i64
+) -> !bool {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
+    return std::mem::equal_bytes(kind, expected);
+}
+
 // find_while_statement returns the sequence id of the first top-level While statement, or -1 when
 // the function has none (issue 1165). Used to detect the value-carried array-append loop shape.
 fn find_while_statement(
@@ -2740,6 +2754,47 @@ fn find_while_statement(
         index = index + 1;
     }
     return -1;
+}
+
+// find_while_index returns the statement index of the first top-level While, or -1 when the function
+// has none. The index lets lower_value_array_loop bracket the loop with the seed append (index - 1)
+// and the array return (index + 1) (issue 1165).
+fn find_while_index(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !i64 {
+    var index = 0;
+    while index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", index, bs
+        );
+        if try node_kind_is(ir_bytes, function_name, statement, "While", bs) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// value_loop_call_arg_var returns the local name of a call's nth argument, requiring it to be a Var.
+// The value loop's seed / update calls take only local arguments, so a non-local is rejected rather
+// than mis-lowered (issue 1165).
+fn value_loop_call_arg_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    arg_index: i64,
+    bs: i64
+) -> ![]u8 {
+    let arg = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "arg", arg_index, bs
+    );
+    if !try node_kind_is(ir_bytes, function_name, arg, "Var", bs) {
+        return error("compiled mir: value-loop call argument must be a local");
+    }
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, arg, bs);
 }
 
 // is_value_array_loop_shape reports whether this multi-statement function is the value-carried
@@ -2806,6 +2861,7 @@ fn find_value_loop_init(
     function_name: []u8,
     module_prefix: []u8,
     loop_var: []u8,
+    source_name: []u8,
     statement_count: i64,
     bs: i64
 ) -> !ValueLoopInit {
@@ -2832,6 +2888,13 @@ fn find_value_loop_init(
                 if !std::mem::equal_bytes(value_kind, "Call") {
                     return error("compiled mir: value-loop seed must be a call");
                 }
+                if (try compiled_mir_types::count_call_args(ir_bytes, function_name, value, bs)) != 1 {
+                    return error("compiled mir: value-loop seed takes exactly the source argument");
+                }
+                let seed_arg = try value_loop_call_arg_var(ir_bytes, function_name, value, 0, bs);
+                if !std::mem::equal_bytes(seed_arg, source_name) {
+                    return error("compiled mir: value-loop seed argument must be the source");
+                }
                 let init_callee_qualified = try ir_contract::body_call_callee_or_empty_from(
                     ir_bytes, function_name, value, bs
                 );
@@ -2849,28 +2912,32 @@ fn find_value_loop_init(
     return error("compiled mir: value-loop seed let not found");
 }
 
-// value_loop_append_receiver reads a 'try <array>.append(<value>);' body statement and returns the
-// array receiver local name, validating the method is 'append' on a local (issue 1165).
-fn value_loop_append_receiver(
+// value_loop_assert_append validates that <statement> is exactly 'try <array_name>.append(<value_name>);'
+// -- an ExprStmt wrapping a try-call of the 'append' method on the array local, taking the carried
+// value as its sole argument. Both the seed append (before the loop) and the body append are checked
+// this way so a near-miss shape (wrong receiver, wrong/extra argument, different method) is an explicit
+// error rather than a silent mis-lowering (issue 1165).
+fn value_loop_assert_append(
     ir_bytes: []u8,
     function_name: []u8,
-    append_statement: i64,
+    statement: i64,
+    array_name: []u8,
+    value_name: []u8,
     bs: i64
-) -> ![]u8 {
+) -> !void {
+    if !try node_kind_is(ir_bytes, function_name, statement, "ExprStmt", bs) {
+        return error("compiled mir: value-loop append must be an expression statement");
+    }
     let expr = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, append_statement, "expr", 0, bs
+        ir_bytes, function_name, statement, "expr", 0, bs
     );
-    if !std::mem::equal_bytes(
-        try ir_contract::body_node_kind_from(ir_bytes, function_name, expr, bs), "TryExpr"
-    ) {
+    if !try node_kind_is(ir_bytes, function_name, expr, "TryExpr", bs) {
         return error("compiled mir: value-loop append must be a try expression");
     }
     let inner = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, expr, "value", 0, bs
     );
-    if !std::mem::equal_bytes(
-        try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs), "Call"
-    ) {
+    if !try node_kind_is(ir_bytes, function_name, inner, "Call", bs) {
         return error("compiled mir: value-loop append must wrap a call");
     }
     if !try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
@@ -2888,14 +2955,64 @@ fn value_loop_append_receiver(
     let receiver_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, callee_node, "receiver", 0, bs
     );
-    if !std::mem::equal_bytes(
-        try ir_contract::body_node_kind_from(ir_bytes, function_name, receiver_node, bs), "Var"
-    ) {
+    if !try node_kind_is(ir_bytes, function_name, receiver_node, "Var", bs) {
         return error("compiled mir: value-loop array receiver must be a local");
     }
-    return try ir_contract::body_token_or_empty_from(
+    let receiver_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, receiver_node, bs
     );
+    if !std::mem::equal_bytes(receiver_name, array_name) {
+        return error("compiled mir: value-loop append receiver must be the array");
+    }
+    if (try compiled_mir_types::count_call_args(ir_bytes, function_name, inner, bs)) != 1 {
+        return error("compiled mir: value-loop append takes exactly one argument");
+    }
+    let arg_name = try value_loop_call_arg_var(ir_bytes, function_name, inner, 0, bs);
+    if !std::mem::equal_bytes(arg_name, value_name) {
+        return error("compiled mir: value-loop append argument must be the carried value");
+    }
+    return;
+}
+
+// value_loop_array_let_name finds the 'var <name> = std::array::Array<T>(<allocator>)' constructor
+// let preceding the loop (statement index < before_index) and returns <name>, validating the callee
+// is std::array::Array. The array the loop appends into must be built this way; absence is an explicit
+// error (issue 1165).
+fn value_loop_array_let_name(
+    ir_bytes: []u8,
+    function_name: []u8,
+    before_index: i64,
+    bs: i64
+) -> ![]u8 {
+    var index = 0;
+    while index < before_index {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", index, bs
+        );
+        if try node_kind_is(ir_bytes, function_name, statement, "Let", bs) {
+            let value = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "value", 0, bs
+            );
+            if std::mem::equal_bytes(
+                try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs),
+                "Call"
+            ) {
+                let callee = try ir_contract::body_call_callee_or_empty_from(
+                    ir_bytes, function_name, value, bs
+                );
+                if std::mem::starts_with(callee, "std::array::Array") {
+                    let name_node = try ir_contract::body_child_sequence_from(
+                        ir_bytes, function_name, statement, "name", 0, bs
+                    );
+                    return try ir_contract::body_token_or_empty_from(
+                        ir_bytes, function_name, name_node, bs
+                    );
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled mir: value-loop array constructor let not found");
 }
 
 // lower_value_array_loop lowers the value-carried array-append loop (the std::kizu::lexer::tokenize
@@ -2918,10 +3035,21 @@ pub fn lower_value_array_loop(
     let module_prefix = compiled_util::module_prefix_of(function_name);
     let allocator_name = try nth_param_field(params_spec, 0, true);
     let source_name = try nth_param_field(params_spec, 1, true);
-    let while_statement = try find_while_statement(ir_bytes, function_name, statement_count, bs);
-    if while_statement < 0 {
+    let while_index = try find_while_index(ir_bytes, function_name, statement_count, bs);
+    if while_index < 0 {
         return error("compiled mir: value-loop while statement not found");
     }
+    // The loop must be directly preceded by the seed append and be the penultimate statement, with
+    // the array return trailing it: [array-let, seed-let, seed-append, while, return] (issue 1165).
+    if while_index < 1 {
+        return error("compiled mir: value-loop while must follow the seed append");
+    }
+    if while_index + 1 != statement_count - 1 {
+        return error("compiled mir: value-loop while must be the penultimate statement");
+    }
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", while_index, bs
+    );
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, while_statement, "condition", 0, bs
     );
@@ -2937,12 +3065,16 @@ pub fn lower_value_array_loop(
     let loop_var = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, loop_var_receiver, bs
     );
+    // The filled array must be a std::array::Array<T> constructor let preceding the loop; its name
+    // anchors the seed append, the body append, and the return.
+    let array_name = try value_loop_array_let_name(ir_bytes, function_name, while_index, bs);
     // The seed call's return type is the carried struct -- the array element type. Deriving it from
-    // the seed call avoids re-resolving 'current's type through its field access, whose namespaced
+    // the seed call avoids re-resolving the loop var's type through its field access, whose namespaced
     // same-module callee the local-type resolver mis-reads as an Arena.add (issue 1165). The element
-    // kizu type then yields the LLVM element type and the compared field's struct index.
+    // kizu type then yields the LLVM element type and the compared field's struct index. The seed let
+    // also pins 'var <loop_var> = <init>(<source>)'.
     let init = try find_value_loop_init(
-        ir_bytes, function_name, module_prefix, loop_var, statement_count, bs
+        ir_bytes, function_name, module_prefix, loop_var, source_name, statement_count, bs
     );
     let element_kizu = init.element_kizu;
     let element_type = try compiled_type_lower::kizu_type_to_llvm(
@@ -2972,6 +3104,13 @@ pub fn lower_value_array_loop(
     let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
         ir_bytes, module_prefix, enum_name, variant_name
     );
+    // The statement directly before the loop must seed the array: 'try <array>.append(<loop_var>);'.
+    let seed_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", while_index - 1, bs
+    );
+    try value_loop_assert_append(
+        ir_bytes, function_name, seed_statement, array_name, loop_var, bs
+    );
     // The loop body must be exactly the reassignment then the try-append.
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, while_statement, "body", 0, bs
@@ -2983,18 +3122,36 @@ pub fn lower_value_array_loop(
     let assign_statement = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, body_node, "statement", 0, bs
     );
-    if !std::mem::equal_bytes(
-        try ir_contract::body_node_kind_from(ir_bytes, function_name, assign_statement, bs), "Assign"
-    ) {
+    if !try node_kind_is(ir_bytes, function_name, assign_statement, "Assign", bs) {
         return error("compiled mir: value-loop body must begin with a reassignment");
+    }
+    let assign_target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_statement, "target", 0, bs
+    );
+    if !try node_kind_is(ir_bytes, function_name, assign_target, "Var", bs) {
+        return error("compiled mir: value-loop reassignment target must be a local");
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, assign_target, bs), loop_var
+    ) {
+        return error("compiled mir: value-loop reassignment must target the carried value");
     }
     let update_value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, assign_statement, "value", 0, bs
     );
-    if !std::mem::equal_bytes(
-        try ir_contract::body_node_kind_from(ir_bytes, function_name, update_value, bs), "Call"
-    ) {
+    if !try node_kind_is(ir_bytes, function_name, update_value, "Call", bs) {
         return error("compiled mir: value-loop reassignment must be a call");
+    }
+    if (try compiled_mir_types::count_call_args(ir_bytes, function_name, update_value, bs)) != 2 {
+        return error("compiled mir: value-loop update takes the source and carried value");
+    }
+    let update_arg0 = try value_loop_call_arg_var(ir_bytes, function_name, update_value, 0, bs);
+    if !std::mem::equal_bytes(update_arg0, source_name) {
+        return error("compiled mir: value-loop update first argument must be the source");
+    }
+    let update_arg1 = try value_loop_call_arg_var(ir_bytes, function_name, update_value, 1, bs);
+    if !std::mem::equal_bytes(update_arg1, loop_var) {
+        return error("compiled mir: value-loop update second argument must be the carried value");
     }
     let update_callee_qualified = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, update_value, bs
@@ -3002,9 +3159,27 @@ pub fn lower_value_array_loop(
     let append_statement = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, body_node, "statement", 1, bs
     );
-    let array_name = try value_loop_append_receiver(
-        ir_bytes, function_name, append_statement, bs
+    try value_loop_assert_append(
+        ir_bytes, function_name, append_statement, array_name, loop_var, bs
     );
+    // The statement directly after the loop must return the filled array: 'return <array>;'.
+    let return_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", while_index + 1, bs
+    );
+    if !try node_kind_is(ir_bytes, function_name, return_statement, "Return", bs) {
+        return error("compiled mir: value-loop must end with the array return");
+    }
+    let return_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_statement, "value", 0, bs
+    );
+    if !try node_kind_is(ir_bytes, function_name, return_value, "Var", bs) {
+        return error("compiled mir: value-loop return value must be the array local");
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, return_value, bs), array_name
+    ) {
+        return error("compiled mir: value-loop must return the filled array");
+    }
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::array_new_stmt(
         array_name, "%kizu.owned", allocator_name, element_type
