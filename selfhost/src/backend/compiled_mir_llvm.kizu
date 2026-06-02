@@ -479,11 +479,41 @@ fn append_multi_let_try_call(
     stmt: &compiled_mir::MirLetTryCallStmt,
     local_prefix: i64
 ) -> !void {
+    try append_try_call_body(out, function.name, stmt, "", local_prefix);
+    return;
+}
+// append_try_call_bind_name emits the SSA base '%<name><bind_suffix>' a try-call's helper
+// temps and bound value are namespaced under. The let-position try-call passes an empty
+// bind_suffix (binding %<name>); the loop latch passes "_next" so the success value binds to
+// %<induction_var>_next that the loop-head phi reads on the latch edge (issue 1165).
+fn append_try_call_bind_name(
+    out: &var std::string::String,
+    name: []u8,
+    bind_suffix: []u8
+) -> !void {
+    try out.append_bytes("%");
+    try out.append_bytes(name);
+    try out.append_bytes(bind_suffix);
+    return;
+}
+// append_try_call_body renders a try-call over an error-union-returning free function. It
+// emits the call into %<name><bind_suffix>_call, extracts the ok flag (field 0), and branches
+// on a try_index-suffixed label pair: try<N>_fail re-wraps the callee message (field 2) into
+// own_error_union and returns it (propagation, never 'unreachable'); try<N>_cont extracts the
+// success value (field 1) into %<name><bind_suffix>. The bind_suffix namespaces every SSA name
+// so the let-position bind (suffix "") and the loop latch bind (suffix "_next") never collide.
+fn append_try_call_body(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirLetTryCallStmt,
+    bind_suffix: []u8,
+    local_prefix: i64
+) -> !void {
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
-        out, function.name, &stmt.call_args, local_prefix
+        out, llvm_symbol, &stmt.call_args, local_prefix
     );
-    try out.append_bytes("  %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes("  ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes("_call = call ");
     try out.append_bytes(stmt.called_error_union);
     try out.append_bytes(" @");
@@ -493,15 +523,15 @@ fn append_multi_let_try_call(
     try out.append_bytes("(");
     try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
     try append_ll_line(out, ")");
-    try out.append_bytes("  %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes("  ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes("_ok = extractvalue ");
     try out.append_bytes(stmt.called_error_union);
-    try out.append_bytes(" %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes(" ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try append_ll_line(out, "_call, 0");
-    try out.append_bytes("  br i1 %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes("  br i1 ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes("_ok, label %try");
     try std::fmt::append_i64(out, stmt.try_index);
     try out.append_bytes("_cont, label %try");
@@ -510,41 +540,41 @@ fn append_multi_let_try_call(
     try out.append_bytes("try");
     try std::fmt::append_i64(out, stmt.try_index);
     try append_ll_line(out, "_fail:");
-    try out.append_bytes("  %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes("  ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes("_msg = extractvalue ");
     try out.append_bytes(stmt.called_error_union);
-    try out.append_bytes(" %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes(" ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try append_ll_line(out, "_call, 2");
-    try out.append_bytes("  %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes("  ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes("_fail_flag = insertvalue ");
     try out.append_bytes(stmt.own_error_union);
     try append_ll_line(out, " zeroinitializer, i1 false, 0");
-    try out.append_bytes("  %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes("  ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes("_fail_val = insertvalue ");
     try out.append_bytes(stmt.own_error_union);
-    try out.append_bytes(" %");
-    try out.append_bytes(stmt.name);
-    try out.append_bytes("_fail_flag, %kizu.slice.u8 %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes(" ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
+    try out.append_bytes("_fail_flag, %kizu.slice.u8 ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try append_ll_line(out, "_msg, 2");
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.own_error_union);
-    try out.append_bytes(" %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes(" ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try append_ll_line(out, "_fail_val");
     try out.append_bytes("try");
     try std::fmt::append_i64(out, stmt.try_index);
     try append_ll_line(out, "_cont:");
-    try out.append_bytes("  %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes("  ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes(" = extractvalue ");
     try out.append_bytes(stmt.called_error_union);
-    try out.append_bytes(" %");
-    try out.append_bytes(stmt.name);
+    try out.append_bytes(" ");
+    try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try append_ll_line(out, "_call, 1");
     return;
 }
@@ -4796,9 +4826,12 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_preheader ], [ %");
     try out.append_bytes(stmt.induction_var);
-    try out.append_bytes("_next, %loop");
-    try std::fmt::append_i64(out, stmt.loop_index);
-    try out.append_bytes("_latch ]");
+    try out.append_bytes("_next, ");
+    // The phi's latch operand comes from the block that actually branches back to the head.
+    // A constant-step latch branches from loopN_latch; a try-call latch branches from the
+    // try-call's continuation block (tryK_cont), the real predecessor (issue 1165).
+    try append_while_latch_pred_label(out, stmt);
+    try out.append_bytes(" ]");
     try out.append_byte(cast<u8>(10));
     try append_expr_insts(out, function.name, &stmt.cond_insts);
     try out.append_bytes("  br i1 ");
@@ -4830,13 +4863,29 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_latch:");
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %");
-    try out.append_bytes(stmt.induction_var);
-    try out.append_bytes("_next = add i64 %");
-    try out.append_bytes(stmt.induction_var);
-    try out.append_bytes(", ");
-    try std::fmt::append_i64(out, stmt.induction_step);
-    try out.append_byte(cast<u8>(10));
+    let latch_stmts = &stmt.latch_stmts;
+    if latch_stmts.len() > 0 {
+        // A 'index = try <callee>(.., index);' loop-carried latch update: the success value
+        // binds to %<induction_var>_next (consumed by the loop-head phi) and a failure
+        // propagates as this function's own error union. The call-arg setup prefix is past the
+        // body statement prefixes so its SSA names never collide with the body (issue 1165).
+        let latch_stmt = try latch_stmts.at(0);
+        try append_while_latch_try_call(
+            out,
+            function,
+            latch_stmt,
+            stmt.induction_var,
+            stmt.loop_index * 1000 + body_stmts.len() + 1
+        );
+    } else {
+        try out.append_bytes("  %");
+        try out.append_bytes(stmt.induction_var);
+        try out.append_bytes("_next = add i64 %");
+        try out.append_bytes(stmt.induction_var);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, stmt.induction_step);
+        try out.append_byte(cast<u8>(10));
+    }
     try out.append_bytes("  br label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_head");
@@ -4845,6 +4894,56 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_exit:");
     try out.append_byte(cast<u8>(10));
+    return;
+}
+// append_while_latch_pred_label emits the basic-block label that branches back to the loop
+// head, i.e. the loop-head phi's latch-edge predecessor. A constant-step latch falls through
+// from loopN_latch, so loopN_latch is the predecessor; a try-call latch ends in the try-call's
+// continuation block tryK_cont (after the fail block has returned), so that is the predecessor
+// (issue 1165). Using loopN_latch for a try-call latch would name a non-predecessor block.
+fn append_while_latch_pred_label(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt
+) -> !void {
+    let latch_stmts = &stmt.latch_stmts;
+    if latch_stmts.len() > 0 {
+        let latch_stmt = try latch_stmts.at(0);
+        let try_index = try while_latch_try_index(latch_stmt);
+        try out.append_bytes("%try");
+        try std::fmt::append_i64(out, try_index);
+        try out.append_bytes("_cont");
+        return;
+    }
+    try out.append_bytes("%loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_latch");
+    return;
+}
+// while_latch_try_index returns the try index of a try-call latch statement, used both for
+// the continuation block label and the loop-head phi's latch-edge predecessor (issue 1165).
+// A non-LetTryCall latch statement is a lowering bug.
+fn while_latch_try_index(latch_stmt: &compiled_mir::MirStmt) -> !i64 {
+    match latch_stmt {
+        LetTryCall(payload) => return payload.try_index;,
+        _ => return error("compiled mir: while latch statement must be a try-call");,
+    }
+}
+// append_while_latch_try_call renders a loop-carried 'index = try <callee>(.., index);' latch
+// update. The latch statement is a LetTryCall bound to the induction variable; the shared
+// try-call body is emitted with the "_next" bind suffix so the success value binds to
+// %<induction_var>_next (the loop-head phi's latch operand) and a failure propagates as this
+// function's own error union (issue 1165). A non-LetTryCall latch statement is a lowering bug.
+fn append_while_latch_try_call(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    latch_stmt: &compiled_mir::MirStmt,
+    induction_var: []u8,
+    local_prefix: i64
+) -> !void {
+    match latch_stmt {
+        LetTryCall(payload) => try append_try_call_body(out, function.name, payload, "_next", local_prefix);,
+        _ => return error("compiled mir: while latch statement must be a try-call");,
+    }
     return;
 }
 // append_short_circuit_branches renders the guard branches for lhs and rhs

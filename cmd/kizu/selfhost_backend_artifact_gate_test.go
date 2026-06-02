@@ -1485,6 +1485,31 @@ func requiredLLVMFormatHelperFragments() []string {
 		// wraps the i64 into %kizu.error.i64 with an if-index-suffixed SSA name rather than
 		// returning a raw i64 as the error union (issue 1165).
 		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %t7, 1",
+		// index_after_leading_imports is the first scan-while whose loop latch is a
+		// loop-carried try-call: 'var index = 0; while index < tokens.len() { let token =
+		// try tokens.get(index); if !is_import_token(token) { return index; } index = try
+		// index_after_import(tokens, index); } return index;' (issue 1165).
+		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_leading_imports(",
+		// Pin the generic loop-carried latch: the phi seeds from the literal 0 on the
+		// preheader edge and takes its latch operand %index_next from the try-call
+		// continuation block %try1001_cont (the real predecessor), not %loop1_latch, so a
+		// regression to a constant-step latch or a wrong phi predecessor is caught.
+		"%index = phi i64 [ 0, %loop1_preheader ], [ %index_next, %try1001_cont ]",
+		// Pin that the latch update is the index_after_import try-call (resolved through the
+		// catalog/BFS, not a literal step) producing the loop-carried %kizu.error.i64.
+		"%index_next_call = call %kizu.error.i64 " +
+			"@kizu_selfhost__parser_format_index_after_import(%kizu.owned %tokens, i64 %index)",
+		// Pin that the phi's latch operand is the try-call success value (field 1), so the
+		// loop-carried counter advances by the callee result rather than a raw step.
+		"%index_next = extractvalue %kizu.error.i64 %index_next_call, 1",
+		// Pin the latch failure propagation: a try-call failure rewraps the callee message
+		// into this function's own %kizu.error.i64 and returns it, never a raw i64 or an
+		// 'unreachable', so a broken error-union propagation is caught (issue 1165).
+		"%index_next_fail_val = insertvalue %kizu.error.i64 %index_next_fail_flag, " +
+			"%kizu.slice.u8 %index_next_msg, 2",
+		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64
+		// wraps into %kizu.error.i64 rather than returning a raw i64 as the error union.
+		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
 	}
 }
 

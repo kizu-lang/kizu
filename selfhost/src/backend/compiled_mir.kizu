@@ -410,6 +410,13 @@ pub struct MirIfStmt {
 // 'var index = <param-or-local>' initializer, e.g. index_after_import's import_index),
 // otherwise from the induction_init integer literal ('var index = <int>'); only those
 // two init shapes are accepted (issue 1165).
+// The latch advances the induction variable. When latch_stmts is empty the latch is the
+// constant-step 'add i64 %<var>, induction_step' (the 'index = index + <int>' increment).
+// When latch_stmts holds one statement the latch is a generic loop-carried update: a
+// 'index = try <callee>(.., index);' try-call whose success value (field 1) feeds the
+// phi as %<var>_next and whose failure propagates as this function's own error union
+// (index_after_leading_imports is its first consumer, issue 1165). It is a 0-or-1 element
+// Array<MirStmt> exactly like body_stmts so the union stays fixed-size.
 pub struct MirWhileStmt {
     pub loop_index: i64,
     pub induction_var: []u8,
@@ -419,6 +426,7 @@ pub struct MirWhileStmt {
     pub cond_result_id: i64,
     pub cond_insts: std::array::Array<MirExprInst>,
     pub body_stmts: std::array::Array<MirStmt>,
+    pub latch_stmts: std::array::Array<MirStmt>,
 }
 
 // MirTraversalArg is one payload-field argument forwarded to a node_count traversal arm's
@@ -1485,6 +1493,7 @@ impl MirWhileStmt {
     fn deinit(self: MirWhileStmt) -> void {
         self.cond_insts.deinit();
         self.body_stmts.deinit();
+        self.latch_stmts.deinit();
         return;
     }
 }
@@ -3241,7 +3250,8 @@ pub fn while_stmt(
     induction_step: i64,
     cond_result_id: i64,
     cond_insts: std::array::Array<MirExprInst>,
-    body_stmts: std::array::Array<MirStmt>
+    body_stmts: std::array::Array<MirStmt>,
+    latch_stmts: std::array::Array<MirStmt>
 ) -> MirStmt {
     return MirStmt::While(MirWhileStmt {
         loop_index: loop_index,
@@ -3251,7 +3261,8 @@ pub fn while_stmt(
         induction_step: induction_step,
         cond_result_id: cond_result_id,
         cond_insts: cond_insts,
-        body_stmts: body_stmts
+        body_stmts: body_stmts,
+        latch_stmts: latch_stmts
     });
 }
 
