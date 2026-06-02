@@ -2974,6 +2974,15 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     );
     try append_source_reachable_compiled_functions(out, ir_bytes);
     try append_loader_reachable_compiled_functions(out, ir_bytes);
+    // The selfhost::parser::format read-only helper closure compiled into stage2
+    // (issue 1165 / issue 1162): the TokenKind predicates that classify a single
+    // token and token_text, the span-slice accessor. They lower through the shared
+    // token-kind predicate MIR and the generic single-statement expression path; the
+    // BFS derives each member's llvm symbol and params_spec from signature facts. This
+    // is the first formatter component on the compiled path, exercising the read-only
+    // helpers ahead of the token-array loop / import-sort helpers that still wait on
+    // local/param Array<T> read lowering.
+    try append_format_reachable_compiled_functions(out, ir_bytes);
     try append_cli_main_function(out, ir_bytes);
     return;
 }
@@ -3421,6 +3430,40 @@ fn append_loader_reachable_compiled_functions(
         out,
         ir_bytes,
         "selfhost::source::loader::",
+        &var pending,
+        false
+    );
+    pending.deinit();
+    return;
+}
+
+// append_format_reachable_compiled_functions emits the selfhost::parser::format
+// read-only helper closure through the shared BFS (issue 1165 / issue 1162). The
+// seeds are the in-degree-zero read-only roots: the four TokenKind predicates that
+// classify a single token (is_import_token / is_ident_token / is_double_colon_token /
+// is_semicolon_token, each a 'return match token.kind { Variant => true, _ => false }'
+// over the std::kizu::lexer::Token value lowered through the shared token-kind
+// predicate MIR) and token_text, the span-slice accessor 'return
+// source[token.start..token.end]' that the formatter reads every token's text
+// through. All five are leaves, so the closure is exactly the seed set and the BFS
+// derives each member's llvm symbol and params_spec from signature facts -- this is
+// the first formatter component compiled into stage2, ahead of the token-array
+// loop / import-sort helpers that still wait on local/param Array<T> read lowering,
+// short-circuit while, and Array<i64> append/set.
+fn append_format_reachable_compiled_functions(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("is_import_token");
+    try pending.append("is_ident_token");
+    try pending.append("is_double_colon_token");
+    try pending.append("is_semicolon_token");
+    try pending.append("token_text");
+    try append_component_reachable_compiled_functions(
+        out,
+        ir_bytes,
+        "selfhost::parser::format::",
         &var pending,
         false
     );

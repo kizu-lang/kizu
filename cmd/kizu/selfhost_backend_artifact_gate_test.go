@@ -1456,8 +1456,29 @@ func requiredLLVMTokenizerFragments() []string {
 // requiredLLVMParserPredicateFragments pins std::kizu::parser TokenKind leaves: predicates that
 // extract the TokenKind field off the Token param and compare it to one or more matched variant
 // discriminants, returning i1 (tracker 961, scope 4 prerequisite).
-func requiredLLVMParserPredicateFragments() []string {
+// requiredLLVMFormatHelperFragments locks the first selfhost::parser::format
+// read-only helpers compiled into stage2 (issue 1165 / issue 1162). The four
+// TokenKind predicates lower through the shared token-kind predicate MIR (an
+// extractvalue of the Token kind field compared against the lexer enum
+// discriminant), and token_text lowers through the generic single-statement
+// expression path to a bounds-checked source[start..end] slice. These are the first
+// formatter component members on the compiled path; their presence here pins that the
+// catalog-driven format closure keeps emitting them as real compiled functions.
+func requiredLLVMFormatHelperFragments() []string {
 	return []string{
+		"define i1 @kizu_selfhost__parser_format_is_import_token(",
+		"define i1 @kizu_selfhost__parser_format_is_ident_token(",
+		"define i1 @kizu_selfhost__parser_format_is_double_colon_token(",
+		"define i1 @kizu_selfhost__parser_format_is_semicolon_token(",
+		"define %kizu.slice.u8 @kizu_selfhost__parser_format_token_text(",
+	}
+}
+
+// requiredLLVMParserPredicateFragments locks the std::kizu::parser TokenKind / byte / span
+// predicate closure compiled into stage2, and chains the selfhost::parser::format read-only
+// helper closure that lowers through the same token-kind predicate / generic expression paths.
+func requiredLLVMParserPredicateFragments() []string {
+	parser := []string{
 		"define i1 @kizu_kizu__parser_is_double_colon(",
 		"define i1 @kizu_kizu__parser_is_eof_token(",
 		"define i1 @kizu_kizu__parser_is_left_brace_token(",
@@ -1497,6 +1518,7 @@ func requiredLLVMParserPredicateFragments() []string {
 		"%pps_result = call i1 @kizu_kizu__parser_is_struct_literal_type_span(",
 		"_idx_oob:",
 	}
+	return append(parser, requiredLLVMFormatHelperFragments()...)
 }
 
 // forbiddenLLVMFragments returns source-shape gates removed from the hosted CLI.
