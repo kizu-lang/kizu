@@ -176,6 +176,40 @@ invalid:
   ret %kizu.error.slice.u8 %invalid_result
 }
 
+define %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 %index, %kizu.slice.u8 %element) {
+entry:
+  %element_ptr = extractvalue %kizu.slice.u8 %element, 0
+  %raw = extractvalue %kizu.owned %array, 0
+  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %data = load ptr, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2
+  %len = load i64, ptr %len_field
+  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4
+  %element_size = load i64, ptr %element_size_field
+  %index_nonnegative = icmp sge i64 %index, 0
+  %index_in_bounds = icmp slt i64 %index, %len
+  %data_ok = icmp ne ptr %data, null
+  %size_ok = icmp sgt i64 %element_size, 0
+  %element_ptr_ok = icmp ne ptr %element_ptr, null
+  %bounds_ok = and i1 %index_nonnegative, %index_in_bounds
+  %storage_ok = and i1 %data_ok, %size_ok
+  %input_ok = and i1 %storage_ok, %element_ptr_ok
+  %ok = and i1 %bounds_ok, %input_ok
+  br i1 %ok, label %valid, label %invalid
+valid:
+  %offset = mul i64 %index, %element_size
+  %dest = getelementptr i8, ptr %data, i64 %offset
+  call void @llvm.memcpy.p0.p0.i64(ptr %dest, ptr %element_ptr, i64 %element_size, i1 false)
+  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+invalid:
+  %message_ptr = getelementptr inbounds [25 x i8], ptr @.kizu.rt.array_index_out_of_bounds, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 25, 1
+  %invalid_ok = insertvalue %kizu.error.void poison, i1 false, 0
+  %invalid_result = insertvalue %kizu.error.void %invalid_ok, %kizu.slice.u8 %message, 1
+  ret %kizu.error.void %invalid_result
+}
+
 define void @kizu_rt_array_deinit(%kizu.owned %array) {
 entry:
   %raw = extractvalue %kizu.owned %array, 0
@@ -1227,6 +1261,24 @@ entry:
   %array_invalid_message_ok = call i1 @kizu_selfhost__runtime_invalid_array_element_message_ok(
     %kizu.slice.u8 %array_invalid_message
   )
+  %array_set_result = call %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 0, %kizu.slice.u8 %array_second)
+  %array_set_ok = extractvalue %kizu.error.void %array_set_result, 0
+  %array_set_view_result = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 0)
+  %array_set_view_ok = extractvalue %kizu.error.slice.u8 %array_set_view_result, 0
+  %array_set_view = extractvalue %kizu.error.slice.u8 %array_set_view_result, 1
+  %array_set_payload_ok = call i1 @kizu_selfhost__runtime_array_second_payload_ok(
+    %kizu.slice.u8 %array_set_view
+  )
+  %array_set_oob = call %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 2, %kizu.slice.u8 %array_second)
+  %array_set_oob_ok = extractvalue %kizu.error.void %array_set_oob, 0
+  %array_set_oob_rejected = icmp eq i1 %array_set_oob_ok, false
+  %array_set_null = call %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 0, %kizu.slice.u8 zeroinitializer)
+  %array_set_null_ok = extractvalue %kizu.error.void %array_set_null, 0
+  %array_set_null_rejected = icmp eq i1 %array_set_null_ok, false
+  %array_set_ok_a = and i1 %array_set_ok, %array_set_view_ok
+  %array_set_ok_b = and i1 %array_set_payload_ok, %array_set_oob_rejected
+  %array_set_ok_c = and i1 %array_set_ok_a, %array_set_ok_b
+  %array_set_all_ok = and i1 %array_set_ok_c, %array_set_null_rejected
   %array_append_all_ok = and i1 %array_append_ok, %array_append_second_ok
   %array_first_all_ok = and i1 %array_view_ok, %array_first_ok
   %array_second_all_ok = and i1 %array_second_ok, %array_second_payload_ok
@@ -1236,7 +1288,8 @@ entry:
   %array_ok_b = and i1 %array_first_all_ok, %array_second_all_ok
   %array_ok_c = and i1 %array_oob_all_ok, %array_invalid_all_ok
   %array_ok_d = and i1 %array_ok_a, %array_ok_b
-  %array_base_ok = and i1 %array_ok_c, %array_ok_d
+  %array_ok_e = and i1 %array_ok_c, %array_ok_d
+  %array_base_ok = and i1 %array_ok_e, %array_set_all_ok
   br i1 %array_base_ok, label %array_pass, label %array_fail
 array_fail:
   call void @kizu_rt_array_deinit(%kizu.owned %array)

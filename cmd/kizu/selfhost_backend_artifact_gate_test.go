@@ -82,6 +82,7 @@ func countRuntimeStorageTemplateMetadataFailures(t *testing.T, metaContent strin
 	required := []string{
 		"array-storage copy-element-byte-buffer\n",
 		"array-at returns-stored-element\n",
+		"array-set in-place-element-overwrite\n",
 		"array-deinit releases-element-buffer\n",
 		"array-invalid-element-diagnostic invalid array element\n",
 		"array-oob-diagnostic array index out of bounds\n",
@@ -1839,6 +1840,9 @@ func runtimeStorageFunctionLLFragments() []string {
 		"define %kizu.owned @kizu_rt_array_new",
 		"define %kizu.error.void @kizu_rt_array_append",
 		"define %kizu.error.slice.u8 @kizu_rt_array_at",
+		// array_set is the checked in-place element overwrite backing the formatter
+		// import-sort Array<i64>.set (issue 1165 slice 2).
+		"define %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 %index,",
 		"define %kizu.owned @kizu_rt_string_new",
 		"define %kizu.error.void @kizu_rt_string_append_bytes",
 		"define %kizu.error.void @kizu_rt_string_append_byte",
@@ -1874,6 +1878,7 @@ func runtimeStorageSmokeLLFragments() []string {
 	return []string{
 		"call %kizu.error.void @kizu_rt_array_append",
 		"call %kizu.error.slice.u8 @kizu_rt_array_at",
+		"call %kizu.error.void @kizu_rt_array_set",
 		"call %kizu.error.void @kizu_rt_string_append_bytes",
 		"call %kizu.error.void @kizu_rt_string_append_byte",
 		"call %kizu.slice.u8 @kizu_rt_string_as_bytes",
@@ -1910,6 +1915,7 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 		"reachable array ast-child-list\n",
 		"array-storage copy-element-byte-buffer\n",
 		"array-at returns-stored-element\n",
+		"array-set in-place-element-overwrite\n",
 		"array-deinit releases-element-buffer\n",
 		"array-invalid-element-diagnostic invalid array element\n",
 		"array-oob-diagnostic array index out of bounds\n",
