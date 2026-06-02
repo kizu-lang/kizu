@@ -60,6 +60,8 @@ func TestSelfhostValueLoopStructuralGate(t *testing.T) {
 		"value-loop while must follow the seed append",
 		"value-loop while must be the penultimate statement",
 		"value-loop array constructor let not found",
+		"value-loop array constructor takes exactly the allocator argument",
+		"value-loop array constructor argument must be the allocator",
 		"value-loop seed takes exactly the source argument",
 		"value-loop seed argument must be the source",
 		"value-loop reassignment target must be a local",

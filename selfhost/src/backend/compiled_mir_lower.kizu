@@ -2975,12 +2975,14 @@ fn value_loop_assert_append(
 }
 
 // value_loop_array_let_name finds the 'var <name> = std::array::Array<T>(<allocator>)' constructor
-// let preceding the loop (statement index < before_index) and returns <name>, validating the callee
-// is std::array::Array. The array the loop appends into must be built this way; absence is an explicit
-// error (issue 1165).
+// let preceding the loop (statement index < before_index) and returns <name>. It validates the
+// callee is std::array::Array and that the constructor takes exactly the function's allocator, since
+// the renderer always passes params_spec[0] as the allocator -- a different argument would otherwise
+// be silently mis-lowered. Absence or a mismatched argument is an explicit error (issue 1165).
 fn value_loop_array_let_name(
     ir_bytes: []u8,
     function_name: []u8,
+    allocator_name: []u8,
     before_index: i64,
     bs: i64
 ) -> ![]u8 {
@@ -2993,14 +2995,23 @@ fn value_loop_array_let_name(
             let value = try ir_contract::body_child_sequence_from(
                 ir_bytes, function_name, statement, "value", 0, bs
             );
-            if std::mem::equal_bytes(
-                try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs),
-                "Call"
-            ) {
+            if try node_kind_is(ir_bytes, function_name, value, "Call", bs) {
                 let callee = try ir_contract::body_call_callee_or_empty_from(
                     ir_bytes, function_name, value, bs
                 );
                 if std::mem::starts_with(callee, "std::array::Array") {
+                    let ctor_args = try compiled_mir_types::count_call_args(
+                        ir_bytes, function_name, value, bs
+                    );
+                    if ctor_args != 1 {
+                        return error("compiled mir: value-loop array constructor takes exactly the allocator argument");
+                    }
+                    let ctor_arg = try value_loop_call_arg_var(
+                        ir_bytes, function_name, value, 0, bs
+                    );
+                    if !std::mem::equal_bytes(ctor_arg, allocator_name) {
+                        return error("compiled mir: value-loop array constructor argument must be the allocator");
+                    }
                     let name_node = try ir_contract::body_child_sequence_from(
                         ir_bytes, function_name, statement, "name", 0, bs
                     );
@@ -3067,7 +3078,9 @@ pub fn lower_value_array_loop(
     );
     // The filled array must be a std::array::Array<T> constructor let preceding the loop; its name
     // anchors the seed append, the body append, and the return.
-    let array_name = try value_loop_array_let_name(ir_bytes, function_name, while_index, bs);
+    let array_name = try value_loop_array_let_name(
+        ir_bytes, function_name, allocator_name, while_index, bs
+    );
     // The seed call's return type is the carried struct -- the array element type. Deriving it from
     // the seed call avoids re-resolving the loop var's type through its field access, whose namespaced
     // same-module callee the local-type resolver mis-reads as an Arena.add (issue 1165). The element
