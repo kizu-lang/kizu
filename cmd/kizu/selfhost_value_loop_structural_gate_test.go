@@ -13,22 +13,30 @@ import (
 // so a near-miss function is an explicit error rather than a silent mis-lowering. It is a
 // source-structural gate, not a textual LLVM gate, so it runs without the bootstrap.
 func TestSelfhostValueLoopStructuralGate(t *testing.T) {
-	readKizu := func(rel string) string {
-		path := filepath.Join("..", "..", "selfhost", "src", "backend", rel)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		return string(data)
+	mir := readBackendKizu(t, "compiled_mir.kizu")
+	lower := readBackendKizu(t, "compiled_mir_lower.kizu")
+	llvm := readBackendKizu(t, "compiled_mir_llvm.kizu")
+	cliLLVM := readBackendKizu(t, "compiled_llvm.kizu")
+
+	assertValueLoopNoTokenizeDispatch(t, mir, lower, llvm, cliLLVM)
+	assertValueLoopExactShapeChecks(t, lower)
+	assertValueLoopExactArrayConstructorCallee(t, lower)
+}
+
+// readBackendKizu reads a selfhost backend source file for source-structural gates.
+func readBackendKizu(t *testing.T, rel string) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "selfhost", "src", "backend", rel)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
 	}
+	return string(data)
+}
 
-	mir := readKizu("compiled_mir.kizu")
-	lower := readKizu("compiled_mir_lower.kizu")
-	llvm := readKizu("compiled_mir_llvm.kizu")
-	cliLLVM := readKizu("compiled_llvm.kizu")
-
-	// The name-based tokenize lowering must not come back: no MirTokenizeStmt, no per-name
-	// lower_tokenize_function, no handwritten tokenize renderers.
+// assertValueLoopNoTokenizeDispatch keeps the removed tokenize-specific lowering from returning.
+func assertValueLoopNoTokenizeDispatch(t *testing.T, mir, lower, llvm, cliLLVM string) {
+	t.Helper()
 	forbidden := []struct {
 		file    string
 		content string
@@ -53,9 +61,11 @@ func TestSelfhostValueLoopStructuralGate(t *testing.T) {
 	if strings.Contains(cliLLVM, `"std::kizu::lexer::tokenize"`) {
 		t.Errorf("compiled_llvm.kizu still name-dispatches std::kizu::lexer::tokenize")
 	}
+}
 
-	// lower_value_array_loop must keep validating the exact source shape. Each error string pins one
-	// structural requirement; dropping a check would let a near-miss shape be silently mis-lowered.
+// assertValueLoopExactShapeChecks pins exact source-shape validation errors.
+func assertValueLoopExactShapeChecks(t *testing.T, lower string) {
+	t.Helper()
 	requiredChecks := []string{
 		"value-loop while must follow the seed append",
 		"value-loop while must be the penultimate statement",
@@ -78,5 +88,23 @@ func TestSelfhostValueLoopStructuralGate(t *testing.T) {
 		if !strings.Contains(lower, check) {
 			t.Errorf("lower_value_array_loop missing exact-shape validation: %q", check)
 		}
+	}
+}
+
+// assertValueLoopExactArrayConstructorCallee pins exact Array constructor callee matching.
+func assertValueLoopExactArrayConstructorCallee(t *testing.T, lower string) {
+	t.Helper()
+	exactCalleeChecks := []string{
+		`std::mem::equal_bytes(callee, "std::array::Array")`,
+		`std::mem::starts_with(callee, "std::array::Array<")`,
+	}
+	for _, check := range exactCalleeChecks {
+		if !strings.Contains(lower, check) {
+			t.Errorf("value_loop_array_let_name missing exact callee match: %q", check)
+		}
+	}
+	if strings.Contains(lower, `std::mem::starts_with(callee, "std::array::Array")`) {
+		t.Errorf("value_loop_array_let_name uses a loose std::array::Array prefix test -- " +
+			"a near-miss like std::array::ArrayFoo would be mis-accepted as the array constructor")
 	}
 }
