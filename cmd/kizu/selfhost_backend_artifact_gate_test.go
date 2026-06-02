@@ -1839,6 +1839,9 @@ func runtimeStorageFunctionLLFragments() []string {
 		"define %kizu.owned @kizu_rt_array_new",
 		"define %kizu.error.void @kizu_rt_array_append",
 		"define %kizu.error.slice.u8 @kizu_rt_array_at",
+		// array_set is the checked in-place element overwrite backing the formatter
+		// import-sort Array<i64>.set (issue 1165 slice 2).
+		"define %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 %index,",
 		"define %kizu.owned @kizu_rt_string_new",
 		"define %kizu.error.void @kizu_rt_string_append_bytes",
 		"define %kizu.error.void @kizu_rt_string_append_byte",
