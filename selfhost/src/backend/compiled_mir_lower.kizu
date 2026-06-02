@@ -1568,35 +1568,6 @@ pub fn lower_parser_postfix_start_function(
     );
 }
 
-// lower_tokenize_function lowers std::kizu::lexer::tokenize into a single Tokenize statement: it
-// builds a dynamic Array<Token> and fills it from first_token / next_token until Eof, returning the
-// array as the !Array success (tracker 961, scope 4 prerequisite). Its dynamic array construction,
-// try-append loop, and error-union-owned return the generic path does not model, so it is
-// dispatched by name. Token is seven i64 fields (56 bytes); the Eof tag comes from the enum facts.
-pub fn lower_tokenize_function(
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    llvm_return_type: []u8,
-    params_spec: []u8,
-    bs: i64
-) -> !compiled_mir::MirFunction {
-    let allocator_name = try nth_param_field(params_spec, 0, true);
-    let source_name = try nth_param_field(params_spec, 1, true);
-    let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
-        ir_bytes, "std::kizu::lexer::", "TokenKind", "Eof"
-    );
-    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-    try stmts.append(compiled_mir::tokenize_stmt(
-        allocator_name, source_name, "%kizu.kizu.lexer.token", "%kizu.owned",
-        llvm_return_type, "%kizu.error.void", "kizu_rt_array_new", "kizu_rt_array_append",
-        "kizu_kizu__lexer_first_token", "kizu_kizu__lexer_next_token", eof_tag, 56
-    ));
-    return compiled_mir_function::multi_statement_function(
-        llvm_symbol, llvm_return_type, params_spec, stmts
-    );
-}
-
 // lower_first_token_function lowers std::kizu::lexer::first_token into a single FirstToken
 // statement: 'return token_at(source, 0, position(1, 1));' (tracker 961, scope 4 prerequisite).
 // Its nested call argument the generic path does not model, so it is dispatched by name.
@@ -2712,6 +2683,343 @@ fn append_short_circuit_or_operand_ifs(
     };
 }
 
+// ValueLoopInit carries the value-carried loop seed call's (module_prefix, callee_name) so the
+// renderer can emit '@<module_prefix><callee>' for the first iteration value, plus the seed call's
+// return kizu type -- the loop's element type, used for the array element width and the struct
+// field layout (issue 1165).
+struct ValueLoopInit {
+    callee_qualified: []u8,
+    element_kizu: []u8,
+}
+
+// signature_return_kizu resolves a callee's declared return kizu type from the
+// 'function-signature-return <name> <type>' facts. A same-module call written fully qualified
+// (e.g. std::kizu::lexer::first_token from within std::kizu::lexer) records its name with the
+// module prefix already included, so the direct module_prefix+callee key would double it; this
+// retries with the module prefix stripped off the callee. (issue 1165)
+fn signature_return_kizu(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    callee: []u8
+) -> ![]u8 {
+    let direct = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+        ir_bytes, "function-signature-return ", module_prefix, callee
+    );
+    if std::mem::len(direct) > 0 {
+        return direct;
+    }
+    if std::mem::starts_with(callee, module_prefix) {
+        let short = callee[std::mem::len(module_prefix)..std::mem::len(callee)];
+        let stripped = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+            ir_bytes, "function-signature-return ", module_prefix, short
+        );
+        if std::mem::len(stripped) > 0 {
+            return stripped;
+        }
+    }
+    return error("compiled mir: value-loop seed return type not found");
+}
+
+// find_while_statement returns the sequence id of the first top-level While statement, or -1 when
+// the function has none (issue 1165). Used to detect the value-carried array-append loop shape.
+fn find_while_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !i64 {
+    var index = 0;
+    while index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(kind, "While") {
+            return statement;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// is_value_array_loop_shape reports whether this multi-statement function is the value-carried
+// array-append loop that generic lowering targets (issue 1165): a While whose condition is a
+// single '<struct-value>.<field> != <Enum>::<Variant>' comparison -- a field-mode FieldExpr on
+// the left and a namespace-mode FieldExpr (an enum constant) on the right. This is structurally
+// distinct from the i64-induction While (whose condition compares an i64 Var), so detecting it
+// here never diverts an induction loop. The body shape (reassign + try-append) and the array /
+// seed lets are validated by lower_value_array_loop; a true result commits to that path.
+fn is_value_array_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    let while_statement = try find_while_statement(ir_bytes, function_name, statement_count, bs);
+    if while_statement < 0 {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    let cond_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, cond_node, bs);
+    if !std::mem::equal_bytes(cond_kind, "Binary") {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, cond_node, bs
+    );
+    if !std::mem::equal_bytes(op, "not-eq") {
+        return false;
+    }
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "left", 0, bs
+    );
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
+    if !std::mem::equal_bytes(left_kind, "FieldExpr") {
+        return false;
+    }
+    let left_mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, left_node, bs
+    );
+    if !std::mem::equal_bytes(left_mode, "field") {
+        return false;
+    }
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "right", 0, bs
+    );
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right_node, bs);
+    if !std::mem::equal_bytes(right_kind, "FieldExpr") {
+        return false;
+    }
+    let right_mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, right_node, bs
+    );
+    return std::mem::equal_bytes(right_mode, "namespace");
+}
+
+// find_value_loop_init locates the 'var <loop_var> = <callee>(<source>)' seed let and returns the
+// callee's (module_prefix, callee_name). The seed supplies both the loop's preheader value and the
+// element type that array_new / the append slices use (issue 1165).
+fn find_value_loop_init(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    loop_var: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !ValueLoopInit {
+    var index = 0;
+    while index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(kind, "Let") {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
+            );
+            let name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, name_node, bs
+            );
+            if std::mem::equal_bytes(name, loop_var) {
+                let value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "value", 0, bs
+                );
+                let value_kind = try ir_contract::body_node_kind_from(
+                    ir_bytes, function_name, value, bs
+                );
+                if !std::mem::equal_bytes(value_kind, "Call") {
+                    return error("compiled mir: value-loop seed must be a call");
+                }
+                let init_callee_qualified = try ir_contract::body_call_callee_or_empty_from(
+                    ir_bytes, function_name, value, bs
+                );
+                let element_kizu = try signature_return_kizu(
+                    ir_bytes, module_prefix, init_callee_qualified
+                );
+                return ValueLoopInit {
+                    callee_qualified: init_callee_qualified,
+                    element_kizu: element_kizu
+                };
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled mir: value-loop seed let not found");
+}
+
+// value_loop_append_receiver reads a 'try <array>.append(<value>);' body statement and returns the
+// array receiver local name, validating the method is 'append' on a local (issue 1165).
+fn value_loop_append_receiver(
+    ir_bytes: []u8,
+    function_name: []u8,
+    append_statement: i64,
+    bs: i64
+) -> ![]u8 {
+    let expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, append_statement, "expr", 0, bs
+    );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(ir_bytes, function_name, expr, bs), "TryExpr"
+    ) {
+        return error("compiled mir: value-loop append must be a try expression");
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr, "value", 0, bs
+    );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs), "Call"
+    ) {
+        return error("compiled mir: value-loop append must wrap a call");
+    }
+    if !try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+        return error("compiled mir: value-loop append must be a method call");
+    }
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, inner, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "append") {
+        return error("compiled mir: value-loop method must be append");
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(ir_bytes, function_name, receiver_node, bs), "Var"
+    ) {
+        return error("compiled mir: value-loop array receiver must be a local");
+    }
+    return try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+}
+
+// lower_value_array_loop lowers the value-carried array-append loop (the std::kizu::lexer::tokenize
+// shape) into a generic ArrayNew + ValueWhile pair (issue 1165). It derives every loop parameter
+// from the IR rather than the function name: the loop var and array name from the condition / body,
+// the element type and field index from resolving the condition's field access, the Eof sentinel
+// tag from the condition's enum constant, and the seed / update callees from the seed let and the
+// body reassignment. The element width and struct layout flow from the element type, so no size or
+// symbol is hardcoded per function. ABI types (%kizu.owned / %kizu.error.void) and the runtime
+// append symbol are fixed array-runtime constants, not tokenize specifics.
+pub fn lower_value_array_loop(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let allocator_name = try nth_param_field(params_spec, 0, true);
+    let source_name = try nth_param_field(params_spec, 1, true);
+    let while_statement = try find_while_statement(ir_bytes, function_name, statement_count, bs);
+    if while_statement < 0 {
+        return error("compiled mir: value-loop while statement not found");
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "left", 0, bs
+    );
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "right", 0, bs
+    );
+    let loop_var_receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, left_node, "receiver", 0, bs
+    );
+    let loop_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, loop_var_receiver, bs
+    );
+    // The seed call's return type is the carried struct -- the array element type. Deriving it from
+    // the seed call avoids re-resolving 'current's type through its field access, whose namespaced
+    // same-module callee the local-type resolver mis-reads as an Arena.add (issue 1165). The element
+    // kizu type then yields the LLVM element type and the compared field's struct index.
+    let init = try find_value_loop_init(
+        ir_bytes, function_name, module_prefix, loop_var, statement_count, bs
+    );
+    let element_kizu = init.element_kizu;
+    let element_type = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, module_prefix, element_kizu
+    );
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, left_node, "field", bs
+    );
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+        ir_bytes, module_prefix,
+        compiled_mir_types::struct_lookup_kizu_type(element_kizu), field_name
+    );
+    if !field.found {
+        return error("compiled mir: value-loop compared field not found");
+    }
+    let field_index = field.index;
+    // The condition's right-hand enum constant supplies the loop's exit (Eof) discriminant tag.
+    let enum_receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, right_node, "receiver", 0, bs
+    );
+    let enum_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, enum_receiver, bs
+    );
+    let variant_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, right_node, "namespace", bs
+    );
+    let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes, module_prefix, enum_name, variant_name
+    );
+    // The loop body must be exactly the reassignment then the try-append.
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count != 2 {
+        return error("compiled mir: value-loop body must be reassignment then append");
+    }
+    let assign_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(ir_bytes, function_name, assign_statement, bs), "Assign"
+    ) {
+        return error("compiled mir: value-loop body must begin with a reassignment");
+    }
+    let update_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_statement, "value", 0, bs
+    );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(ir_bytes, function_name, update_value, bs), "Call"
+    ) {
+        return error("compiled mir: value-loop reassignment must be a call");
+    }
+    let update_callee_qualified = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, update_value, bs
+    );
+    let append_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 1, bs
+    );
+    let array_name = try value_loop_append_receiver(
+        ir_bytes, function_name, append_statement, bs
+    );
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::array_new_stmt(
+        array_name, "%kizu.owned", allocator_name, element_type
+    ));
+    try stmts.append(compiled_mir::value_while_stmt(
+        array_name, loop_var, source_name, element_type,
+        "%kizu.owned", llvm_return_type, "%kizu.error.void",
+        init.callee_qualified, update_callee_qualified,
+        "kizu_rt_array_append", field_index, eof_tag, "vw0"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 pub fn lower_multi_statement_function(
     ir_bytes: []u8,
     function_name: []u8,
@@ -2723,6 +3031,14 @@ pub fn lower_multi_statement_function(
 ) -> !compiled_mir::MirFunction {
     if statement_count < 2 {
         return error("compiled mir: multi-statement function requires multiple statements");
+    }
+    // A value-carried array-append loop (struct value threaded through a phi, appended into a
+    // runtime array until a sentinel tag) lowers through the generic ArrayNew + ValueWhile path
+    // rather than the i64-induction While machinery (issue 1165).
+    if try is_value_array_loop_shape(ir_bytes, function_name, statement_count, bs) {
+        return try lower_value_array_loop(
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, statement_count, bs
+        );
     }
     let module_prefix = compiled_util::module_prefix_of(function_name);
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
