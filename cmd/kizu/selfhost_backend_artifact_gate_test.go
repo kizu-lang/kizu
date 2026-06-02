@@ -1461,9 +1461,13 @@ func requiredLLVMTokenizerFragments() []string {
 // TokenKind predicates lower through the shared token-kind predicate MIR (an
 // extractvalue of the Token kind field compared against the lexer enum
 // discriminant), and token_text lowers through the generic single-statement
-// expression path to a bounds-checked source[start..end] slice. These are the first
-// formatter component members on the compiled path; their presence here pins that the
-// catalog-driven format closure keeps emitting them as real compiled functions.
+// expression path to a bounds-checked source[start..end] slice. next_token_text_equals
+// reads tokens.len()/tokens.get(...) on a value-receiver Array<Token> param, and
+// index_after_import scans the token array through the generic bounded counter loop with
+// a parameter-seeded induction variable (var index = import_index) and i64 early returns.
+// These are the first formatter component members on the compiled path; their presence
+// here pins that the catalog-driven format closure keeps emitting them as real compiled
+// functions.
 func requiredLLVMFormatHelperFragments() []string {
 	return []string{
 		"define i1 @kizu_selfhost__parser_format_is_import_token(",
@@ -1472,6 +1476,15 @@ func requiredLLVMFormatHelperFragments() []string {
 		"define i1 @kizu_selfhost__parser_format_is_semicolon_token(",
 		"define %kizu.slice.u8 @kizu_selfhost__parser_format_token_text(",
 		"define %kizu.error.bool @kizu_selfhost__parser_format_next_token_text_equals(",
+		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_import(",
+		// Pin the parameter-seeded induction phi: the loop counter seeds from the
+		// %import_index parameter SSA value on the preheader edge, not a literal, so a
+		// regression back to a literal seed is caught here (issue 1165).
+		"%index = phi i64 [ %import_index, %loop1_preheader ]",
+		// Pin the i64 error-union early-return wrap: 'return index + 1;' inside the loop
+		// wraps the i64 into %kizu.error.i64 with an if-index-suffixed SSA name rather than
+		// returning a raw i64 as the error union (issue 1165).
+		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %t7, 1",
 	}
 }
 

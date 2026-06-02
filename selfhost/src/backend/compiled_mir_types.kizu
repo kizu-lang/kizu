@@ -633,6 +633,27 @@ fn resolve_let_value_kizu_type(
     if std::mem::equal_bytes(value_kind, "Binary") {
         return try resolve_binary_kizu_type(ir_bytes, function_name, value, bs);
     }
+    // 'var index = import_index;' seeds a loop counter from a parameter (or an outer
+    // local), so the bound local takes that referenced value's kizu type (issue 1165).
+    // index_after_import's parameter-seeded induction variable is the first consumer.
+    if std::mem::equal_bytes(value_kind, "Var") {
+        let ref_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, value, bs
+        );
+        let param_type = try find_function_param_kizu_type_or_empty(
+            ir_bytes, function_name, ref_name
+        );
+        if std::mem::len(param_type) > 0 {
+            return param_type;
+        }
+        let local_type = try resolve_local_in_block_or_empty(
+            ir_bytes, function_name, module_prefix, ref_name, 0, bs
+        );
+        if std::mem::len(local_type) > 0 {
+            return local_type;
+        }
+        return error("compiled mir: var initializer name not found");
+    }
     // A bare integer initializer (the 'var index = 0' loop counter) is an
     // i64; a cast carries its target type token directly; a single-element
     // index of a byte slice yields u8, matching the always-i8 IndexLoad the

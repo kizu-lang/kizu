@@ -4618,12 +4618,7 @@ fn append_multi_if(
             try out.append_byte(cast<u8>(10));
         } else {
             if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
-                try append_expr_insts(out, function.name, &stmt.then_expr_insts);
-                try out.append_bytes("  ret ");
-                try out.append_bytes(function.return_type.llvm_name);
-                try out.append_bytes(" ");
-                try append_expr_value_ref(out, &stmt.then_expr_insts, stmt.then_expr_result_id);
-                try out.append_byte(cast<u8>(10));
+                try append_multi_if_return_expr(out, function, stmt);
             } else {
                 if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnStruct {
                     try append_multi_then_struct(out, function, stmt);
@@ -4691,6 +4686,58 @@ fn append_multi_if_return_bool(
     try out.append_byte(cast<u8>(10));
     return;
 }
+// append_multi_if_return_expr renders the then-block of a 'return <expr>;' early exit. A
+// non-error-union function returns the value directly; an error-union function
+// (index_after_import returns !i64 and early-returns 'index + 1' / 'index', issue 1165)
+// wraps the value into the %kizu.error.<T> success value (ok flag true at field 0, the
+// value at field 1), mirroring append_expr_return_value's trailing-return wrap. The wrap
+// SSA names are suffixed by the if index so multiple early-return ifs in one function never
+// collide with each other or with the trailing %retwrap return.
+fn append_multi_if_return_expr(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.then_expr_insts);
+    let return_type = function.return_type.llvm_name;
+    let value_type = try expr_inst_type_by_id(&stmt.then_expr_insts, stmt.then_expr_result_id);
+    let needs_wrap = is_error_union_type(return_type) and
+        std::mem::len(value_type) > 0 and
+        !std::mem::equal_bytes(value_type, return_type);
+    if !needs_wrap {
+        try out.append_bytes("  ret ");
+        try out.append_bytes(return_type);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, &stmt.then_expr_insts, stmt.then_expr_result_id);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    try out.append_bytes("  %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_retexpr_ok = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" zeroinitializer, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_retexpr_val = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_retexpr_ok, ");
+    try out.append_bytes(value_type);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, &stmt.then_expr_insts, stmt.then_expr_result_id);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_retexpr_val");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
 // append_multi_while renders a restricted bounded counter loop (tracker 961):
 //   <current block>            ; min/max/etc. lets already emitted here
 //     br label %loopL_preheader
@@ -4698,6 +4745,8 @@ fn append_multi_if_return_bool(
 //     br label %loopL_head
 //   loopL_head:
 //     %v = phi i64 [ init, %loopL_preheader ], [ %v_next, %loopL_latch ]
+//        ; init is the induction_init literal, or %<param> when the loop counter is
+//        ; seeded from a parameter/local (var index = import_index)
 //     <condition insts>        ; re-evaluated every iteration
 //     br i1 %tCOND, label %loopL_body, label %loopL_exit
 //   loopL_body:
@@ -4735,7 +4784,14 @@ fn append_multi_while(
     try out.append_bytes("  %");
     try out.append_bytes(stmt.induction_var);
     try out.append_bytes(" = phi i64 [ ");
-    try std::fmt::append_i64(out, stmt.induction_init);
+    if std::mem::len(stmt.induction_init_var) > 0 {
+        // 'var index = import_index;' seeds the phi from the parameter/local SSA value
+        // (a copy-propagated %<name>) on the preheader edge instead of a literal.
+        try out.append_bytes("%");
+        try out.append_bytes(stmt.induction_init_var);
+    } else {
+        try std::fmt::append_i64(out, stmt.induction_init);
+    }
     try out.append_bytes(", %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_preheader ], [ %");
