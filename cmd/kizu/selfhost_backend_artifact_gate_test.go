@@ -1471,6 +1471,7 @@ func requiredLLVMFormatHelperFragments() []string {
 		"define i1 @kizu_selfhost__parser_format_is_double_colon_token(",
 		"define i1 @kizu_selfhost__parser_format_is_semicolon_token(",
 		"define %kizu.slice.u8 @kizu_selfhost__parser_format_token_text(",
+		"define %kizu.error.bool @kizu_selfhost__parser_format_next_token_text_equals(",
 	}
 }
 

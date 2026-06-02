@@ -532,6 +532,12 @@ fn append_format_function_facts(
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "is_double_colon_token"));
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "is_semicolon_token"));
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "token_text"));
+    // next_token_text_equals is the first token-array read helper on the compiled path
+    // (issue 1165): it reads tokens.len() / tokens.get(index + 1) on a value-receiver
+    // Array<Token> param, calls lexer::is_eof across the module boundary, and compares the
+    // next token text. Its body BFS pulls in token_text (already a seed) and references
+    // lexer::is_eof as an allowed external callee.
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "next_token_text_equals"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);
@@ -1727,18 +1733,55 @@ fn collect_catalog_closure_call_callee(
     let node = ast.get(callee);
     match node.data {
         Var(_) => return collect_catalog_closure_var_callee(callee_text, catalog, pending);,
-        FieldExpr(_) => return collect_catalog_closure_qualified_callee(
-            callee_text, catalog, pending, qualified_prefix, unsupported_qualified_callee_error
+        FieldExpr(field) => return collect_catalog_closure_field_callee(
+            text, ast, field.namespace, field.name, callee_text, catalog, pending,
+            qualified_prefix, unsupported_call_form_error, unsupported_qualified_callee_error
         );,
         _ => return error(unsupported_call_form_error);,
     }
     return;
 }
 
+// collect_catalog_closure_field_callee classifies a FieldExpr callee. A field-mode
+// method on a value receiver (tokens.len() / tokens.get(...)) is an Array<T> read
+// builtin lowered inline, not a component function, so the closure does not walk it
+// (issue 1165); any other value-method callee is an explicit error. A namespace-mode
+// FieldExpr is a qualified callee resolved against the component prefix.
+fn collect_catalog_closure_field_callee(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    namespace: bool,
+    name_node: std::kizu::ast::NodeId,
+    callee_text: []u8,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    pending: &var std::array::Array<i64>,
+    qualified_prefix: []u8,
+    unsupported_call_form_error: []u8,
+    unsupported_qualified_callee_error: []u8
+) -> !void {
+    if !namespace {
+        let method = ast_node_text(text, ast, name_node);
+        if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "get") {
+            return;
+        }
+        return error(unsupported_call_form_error);
+    }
+    return collect_catalog_closure_qualified_callee(
+        callee_text, catalog, pending, qualified_prefix, unsupported_qualified_callee_error
+    );
+}
+
 fn collect_catalog_closure_external_callee_allowed(
     callee_text: []u8,
     qualified_prefix: []u8
 ) -> bool {
+    if std::mem::equal_bytes(qualified_prefix, "selfhost::parser::format::") {
+        // The formatter's token-array predicates call lexer::is_eof (the std::kizu::lexer
+        // Token EOF predicate) through the 'lexer' import alias. It is emitted by the std
+        // lexer compiled closure, so the format closure references it as an external
+        // callee instead of walking it (issue 1165).
+        return std::mem::equal_bytes(callee_text, "lexer::is_eof");
+    }
     if std::mem::equal_bytes(qualified_prefix, "std::kizu::parser::") {
         return std::mem::equal_bytes(callee_text, "ast.get");
     }
@@ -1975,6 +2018,11 @@ fn append_lexer_reachable_helper_bodies(
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
     try pending.append(try component_function_catalog::find_local_function_index(catalog, "is_identifier_continue"));
     try pending.append(try component_function_catalog::find_local_function_index(catalog, "invalid_token_display"));
+    // is_eof is the Token EOF predicate the formatter's token-array helpers call across
+    // the module boundary; seed it so its signature + body facts are emitted and the
+    // format closure can reference @kizu_selfhost__lexer_is_eof as an external callee
+    // (issue 1165).
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "is_eof"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);
