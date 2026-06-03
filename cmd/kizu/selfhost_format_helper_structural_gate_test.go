@@ -38,7 +38,15 @@ const parseFormatAllocMaxLines = 197
 // loop-terminating 'index = tokens.len()' on one arm, an append-then-try-advance on the other
 // re-merging at a loop-latch phi -- then sorts the collected indices in place and returns the
 // filled array as the '!std::array::Array<i64>' success (a %kizu.error.owned wrap), lowered
-// through compiled_struct_cf). They are the first selfhost::parser::format members on the
+// through compiled_struct_cf), and append_indent (the indentation emitter: 'var index = 0; while
+// index < depth { try out.append_bytes("    "); index = index + 1; }', a String-append counter
+// loop that mutates a '&var std::string::String' accumulator through the
+// @kizu_rt_string_append_bytes ABI, sharing the (Let(Int), While, Return(Empty)) top-level shape
+// with the import-cluster emitter and so dispatched ahead of it, lowered through
+// compiled_struct_cf), and the two leaf byte classifiers of the comment-preservation cluster
+// is_horizontal_space / is_line_break ('return byte == cast<u8>(<a>) or byte == cast<u8>(<b>);',
+// single-return short-circuit 'or' predicates over a u8 that lower through the generic
+// short-circuit-or-return path). They are the first selfhost::parser::format members on the
 // compiled path and must keep being emitted from both the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
 	"is_import_token",
@@ -55,6 +63,9 @@ var formatCompiledHelperSeeds = []string{
 	"leading_import_indices",
 	"append_import_decl",
 	"append_sorted_imports",
+	"append_indent",
+	"is_horizontal_space",
+	"is_line_break",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
@@ -63,7 +74,6 @@ var formatCompiledHelperSeeds = []string{
 // logic into the compiled closure instead of lowering it as a real component.
 var formatHandPathOnlyHelpers = []string{
 	"format_source",
-	"append_indent",
 	"append_preserved_line_comments",
 }
 
@@ -84,6 +94,41 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertLeadingImportShapeValidated(t)
 	assertImportDeclShapeValidated(t)
 	assertSortedImportsShapeValidated(t)
+	assertAppendIndentShapeValidated(t)
+}
+
+// appendIndentShapeValidationErrors pins the explicit shape-validation diagnostics that the
+// structured-control-flow lowering raises when a near-miss helper drifts from the indentation
+// emitter skeleton. compiled_struct_cf reads only some identifiers off the AST and then emits a
+// fixed counter-loop / String-append shape, so it must reject any helper whose accumulator, depth
+// parameter, counter seed, loop condition, indent literal append or increment differ -- never
+// silently mis-lower a near-miss. Pinning the strings keeps the per-operand validation from being
+// quietly weakened back to name-only checks.
+var appendIndentShapeValidationErrors = []string{
+	"compiled struct-cf: indent emitter out accumulator must be a String handle",
+	"compiled struct-cf: indent emitter depth must be an i64 parameter",
+	"compiled struct-cf: indent counter must be initialized to 0",
+	"compiled struct-cf: indent loop condition must be '<index> < <depth>'",
+	"compiled struct-cf: indent loop must compare the counter on the left",
+	"compiled struct-cf: indent loop must compare against the depth parameter",
+	"compiled struct-cf: indent body must append, then increment",
+	"compiled struct-cf: indent body must append the indent literal",
+	"compiled struct-cf: indent append must be a string literal",
+	"compiled struct-cf: indent counter increment must be '<index> + 1'",
+}
+
+// assertAppendIndentShapeValidated pins that the structured-control-flow lowering keeps its
+// explicit per-operand shape diagnostics for the indentation emitter, so a near-miss helper is
+// rejected with an error rather than silently lowered to the hard-coded counter-loop /
+// String-append skeleton.
+func assertAppendIndentShapeValidated(t *testing.T) {
+	t.Helper()
+	structCF := readSelfhostSrc(t, filepath.Join("backend", "compiled_struct_cf.kizu"))
+	for _, diagnostic := range appendIndentShapeValidationErrors {
+		if !strings.Contains(structCF, diagnostic) {
+			t.Errorf("compiled_struct_cf.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
 }
 
 // sortedImportsShapeValidationErrors pins the explicit shape-validation diagnostics that the
