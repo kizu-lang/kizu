@@ -3622,6 +3622,19 @@ fn append_format_reachable_compiled_functions(
     // is a BFS leaf: its only callees are std::mem::len and the cast intrinsic, so it pulls
     // in no new members.
     try pending.append("after_line_break");
+    // line_end_excluding_break and line_end_including_break scan forward to the end of a line on
+    // the compiled path (issue 1165 / 1162): 'var index = start; let length =
+    // std::mem::len(source); while index < length and !is_line_break(source[index]) { index =
+    // index + 1; } return index;', with line_end_including_break adding a trailing 'if index <
+    // length { return after_line_break(source, index); } return index;'. The while header is a
+    // genuine short-circuit 'and' whose '!is_line_break(source[index])' operand loads
+    // source[index] only when 'index < length' holds, so it lowers through the multi-statement
+    // path's short-circuit while header (the guarded load runs in a loopN_head_rhs block) rather
+    // than an eager 'and i1'. line_end_including_break's tail is a single-comparison if whose
+    // then-block is a 'return after_line_break(..)' ReturnCall the generic if path already lowers.
+    // Their body BFS pulls in is_line_break and after_line_break (both already seeded members).
+    try pending.append("line_end_excluding_break");
+    try pending.append("line_end_including_break");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,

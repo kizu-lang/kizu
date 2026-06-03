@@ -4227,6 +4227,17 @@ fn append_while_globals(
     stmt: &compiled_mir::MirWhileStmt
 ) -> !void {
     try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    // A genuine short-circuit 'and' header lowers its later operands into cond_rhs_insts and
+    // cond_extra_operands; any string literal among them needs its global emitted too. Both
+    // are empty for a single comparison or an eager-folded 'and' (issue 1165 / 1162).
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_rhs_insts);
+    let extra_operands = &stmt.cond_extra_operands;
+    var extra_index = 0;
+    while extra_index < extra_operands.len() {
+        let operand = try extra_operands.at(extra_index);
+        try append_expr_globals(out, llvm_symbol, &operand.insts);
+        extra_index = extra_index + 1;
+    }
     let body_stmts = &stmt.body_stmts;
     var index = 0;
     while index < body_stmts.len() {
@@ -4857,14 +4868,18 @@ fn append_multi_while(
         phi_index = phi_index + 1;
     }
     try append_expr_insts(out, function.name, &stmt.cond_insts);
-    try out.append_bytes("  br i1 ");
-    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
-    try out.append_bytes(", label %loop");
-    try std::fmt::append_i64(out, stmt.loop_index);
-    try out.append_bytes("_body, label %loop");
-    try std::fmt::append_i64(out, stmt.loop_index);
-    try out.append_bytes("_exit");
-    try out.append_byte(cast<u8>(10));
+    if stmt.cond_short_circuit == 0 {
+        try out.append_bytes("  br i1 ");
+        try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+        try out.append_bytes(", label %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_body, label %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_exit");
+        try out.append_byte(cast<u8>(10));
+    } else {
+        try append_while_short_circuit_branches(out, function.name, stmt);
+    }
     try out.append_bytes("loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_body:");
@@ -4931,6 +4946,94 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_exit:");
     try out.append_byte(cast<u8>(10));
+    return;
+}
+// append_while_short_circuit_branches renders the guarded operand blocks of a genuine
+// short-circuit 'and' while header (issue 1165 / 1162). The first operand is already in the
+// loop head (cond_insts), so this emits its branch and one guarded block per remaining
+// operand:
+//   loopN_head:
+//     <op0 insts>
+//     br i1 %op0, label %loopN_head_rhs, label %loopN_exit
+//   loopN_head_rhs:
+//     <op1 insts>                          ; e.g. the guarded source[index] load then
+//     br i1 %op1, ...                       ; !is_line_break, only reached when op0 held
+//   loopN_head_rhs2: ...                   ; one block per extra operand, in chain order
+// Each operand's true edge flows to the next operand's block, or to loopN_body for the
+// last operand; every false edge short-circuits to loopN_exit, so a later operand's guarded
+// load never runs unless every earlier operand held. The loop-head phi stays in loopN_head
+// (these blocks add no phi predecessors), and an 'or' header never reaches here. This is the
+// while twin of append_short_circuit_branches, sharing its block-chain layout.
+fn append_while_short_circuit_branches(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirWhileStmt
+) -> !void {
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_head_rhs, label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_exit");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_head_rhs:");
+    try out.append_byte(cast<u8>(10));
+    try append_expr_insts(out, llvm_symbol, &stmt.cond_rhs_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_rhs_insts, stmt.cond_rhs_result_id);
+    // The first guarded block flows to the first extra operand block when the 'and' chain
+    // carries more than two operands, otherwise straight to the loop body.
+    let extra_operands = &stmt.cond_extra_operands;
+    if extra_operands.len() > 0 {
+        try out.append_bytes(", label %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_head_rhs2, label %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_exit");
+    } else {
+        try out.append_bytes(", label %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_body, label %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_exit");
+    }
+    try out.append_byte(cast<u8>(10));
+    // Each extra operand j (0-based) lives in loopN_head_rhs{j+2}; its true edge flows to the
+    // next operand's block loopN_head_rhs{j+3}, or to loopN_body for the last operand. A
+    // false edge always short-circuits to loopN_exit.
+    var extra_index = 0;
+    while extra_index < extra_operands.len() {
+        let operand = try extra_operands.at(extra_index);
+        try out.append_bytes("loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_head_rhs");
+        try std::fmt::append_i64(out, extra_index + 2);
+        try out.append_bytes(":");
+        try out.append_byte(cast<u8>(10));
+        try append_expr_insts(out, llvm_symbol, &operand.insts);
+        try out.append_bytes("  br i1 ");
+        try append_expr_value_ref(out, &operand.insts, operand.result_id);
+        if extra_index + 1 < extra_operands.len() {
+            try out.append_bytes(", label %loop");
+            try std::fmt::append_i64(out, stmt.loop_index);
+            try out.append_bytes("_head_rhs");
+            try std::fmt::append_i64(out, extra_index + 3);
+            try out.append_bytes(", label %loop");
+            try std::fmt::append_i64(out, stmt.loop_index);
+            try out.append_bytes("_exit");
+        } else {
+            try out.append_bytes(", label %loop");
+            try std::fmt::append_i64(out, stmt.loop_index);
+            try out.append_bytes("_body, label %loop");
+            try std::fmt::append_i64(out, stmt.loop_index);
+            try out.append_bytes("_exit");
+        }
+        try out.append_byte(cast<u8>(10));
+        extra_index = extra_index + 1;
+    }
     return;
 }
 // append_while_counter_preheader_init emits the preheader 'add' that materializes a

@@ -46,8 +46,15 @@ const parseFormatAllocMaxLines = 197
 // compiled_struct_cf), and the two leaf byte classifiers of the comment-preservation cluster
 // is_horizontal_space / is_line_break ('return byte == cast<u8>(<a>) or byte == cast<u8>(<b>);',
 // single-return short-circuit 'or' predicates over a u8 that lower through the generic
-// short-circuit-or-return path). They are the first selfhost::parser::format members on the
-// compiled path and must keep being emitted from both the IR fact catalog and the backend BFS.
+// short-circuit-or-return path), and after_line_break (the first comment-preservation scalar
+// helper, a three-operand short-circuit 'and' if whose trailing byte load is guarded by a bounds
+// check), and line_end_excluding_break / line_end_including_break (the first compiled helpers with
+// a genuine short-circuit 'and' while header: 'while index < length and
+// !is_line_break(source[index])' loads source[index] only when 'index < length' holds, so the
+// guarded byte load lowers into a loopN_head_rhs block rather than an eager 'and i1';
+// line_end_including_break adds a trailing 'if index < length { return after_line_break(source,
+// index); }' ReturnCall tail). They are the first selfhost::parser::format members on the compiled
+// path and must keep being emitted from both the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
 	"is_import_token",
 	"is_ident_token",
@@ -67,6 +74,8 @@ var formatCompiledHelperSeeds = []string{
 	"is_horizontal_space",
 	"is_line_break",
 	"after_line_break",
+	"line_end_excluding_break",
+	"line_end_including_break",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the

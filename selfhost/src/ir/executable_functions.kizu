@@ -662,13 +662,24 @@ fn append_format_function_facts(
     // so it lowers through the generic multi-statement path's short-circuit if-chain (the first
     // operand fills the unguarded entry block, the rest each evaluate in their own guarded block)
     // instead of an eager 'and i1' that would load past the slice. It is a BFS leaf: its only
-    // callees are std::mem::len and the cast intrinsic, so it pulls in no new members. The
-    // remaining comment-preservation scalar helpers (line_end_excluding_break,
-    // line_end_including_break, line_comment_is_full_line, line_comment_has_blank_before,
-    // line_comment_has_blank_after) stay on the hand-written parse_format_alloc path: each needs a
-    // lowering capability not yet present (a call / prefix-not call in a while header, a
-    // loop-carried 'index = previous' copy latch, or nested while + 'continue').
+    // callees are std::mem::len and the cast intrinsic, so it pulls in no new members.
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "after_line_break"));
+    // line_end_excluding_break scans forward to the end of a line on the compiled path (issue
+    // 1165 / 1162): 'var index = start; let length = std::mem::len(source); while index < length
+    // and !is_line_break(source[index]) { index = index + 1; } return index;'. Its while header is
+    // a genuine short-circuit 'and' whose second operand '!is_line_break(source[index])' loads
+    // source[index] only when 'index < length' holds, so it lowers through the multi-statement
+    // path's new short-circuit while header (the first operand drives the loop head, the guarded
+    // load runs in a loopN_head_rhs block) rather than an eager 'and i1' that would read past the
+    // slice. Its body BFS pulls in is_line_break (an already seeded member).
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "line_end_excluding_break"));
+    // line_end_including_break is the same forward scan plus a trailing 'if index < length {
+    // return after_line_break(source, index); } return index;' that folds a trailing CRLF/LF into
+    // the line (issue 1165 / 1162). The while header reuses the short-circuit-while capability; the
+    // tail is a single-comparison if whose then-block is a 'return <callee>(..)' ReturnCall the
+    // generic multi-statement if path already lowers. Its body BFS pulls in is_line_break and
+    // after_line_break (both already seeded members).
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "line_end_including_break"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);
