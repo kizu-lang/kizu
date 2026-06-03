@@ -3212,6 +3212,12 @@ fn collect_component_compiled_callee(
     if compiled_callee_is_array_element_method(callee) {
         return;
     }
+    // A std::string::String mutator (out.append_bytes(...) / out.append_byte(...)) is a runtime
+    // builtin lowered inline through the @kizu_rt_string_append_* ABI, not a component function,
+    // so the BFS neither emits nor walks it (issue 1165).
+    if compiled_callee_is_string_mutator_method(callee) {
+        return;
+    }
     // The std::array::Array<T>(<allocator>) constructor is the element-size-generic
     // @kizu_rt_array_new runtime builtin lowered inline, not a component function, so the BFS
     // neither emits nor walks it (issue 1165).
@@ -3304,6 +3310,18 @@ fn compiled_callee_is_array_element_method(name: []u8) -> bool {
     }
     return compiled_name_ends_with(name, ".len") or compiled_name_ends_with(name, ".get") or
         compiled_name_ends_with(name, ".set") or compiled_name_ends_with(name, ".append");
+}
+
+// compiled_callee_is_string_mutator_method reports whether a method-call callee names a
+// std::string::String mutator (<out>.append_bytes / <out>.append_byte). Those lower inline
+// through the @kizu_rt_string_append_* runtime ABI, so the BFS treats them as builtins rather
+// than component functions (issue 1165).
+fn compiled_callee_is_string_mutator_method(name: []u8) -> bool {
+    if compiled_callee_has_namespace(name) {
+        return false;
+    }
+    return compiled_name_ends_with(name, ".append_bytes") or
+        compiled_name_ends_with(name, ".append_byte");
 }
 
 fn compiled_name_ends_with(name: []u8, suffix: []u8) -> bool {
@@ -3564,6 +3582,21 @@ fn append_format_reachable_compiled_functions(
     // compiled_struct_cf. Its BFS pulls in is_import_token, index_after_import, and
     // sort_import_indices (all already seeded members).
     try pending.append("leading_import_indices");
+    // append_import_decl is the first selfhost::parser::format member that mutates a '&var
+    // std::string::String' accumulator on the compiled path (issue 1165 / 1162): it appends the
+    // 'import ' prefix and the ';' terminator as string literals through the
+    // @kizu_rt_string_append_bytes runtime ABI, reads each token's text via token_text, and emits
+    // the import path identifiers, scanning the import's tokens through a loop carrying an
+    // early-return semicolon branch and a fall-through 'ident or double-colon' text append, so it
+    // lowers through compiled_struct_cf. Its BFS pulls in token_text, is_semicolon_token,
+    // is_ident_token, and is_double_colon_token (all already seeded members).
+    try pending.append("append_import_decl");
+    // append_sorted_imports is the import-cluster emitter on the compiled path (issue 1165 /
+    // 1162): it scans the sorted indices array and, for each, appends a single import declaration
+    // via append_import_decl followed by a newline byte through the @kizu_rt_string_append_byte
+    // ABI, so it lowers through compiled_struct_cf. Its BFS pulls in append_import_decl (an already
+    // seeded member).
+    try pending.append("append_sorted_imports");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,

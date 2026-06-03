@@ -53,6 +53,8 @@ var formatCompiledHelperSeeds = []string{
 	"import_path_less",
 	"sort_import_indices",
 	"leading_import_indices",
+	"append_import_decl",
+	"append_sorted_imports",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
@@ -61,7 +63,6 @@ var formatCompiledHelperSeeds = []string{
 // logic into the compiled closure instead of lowering it as a real component.
 var formatHandPathOnlyHelpers = []string{
 	"format_source",
-	"append_sorted_imports",
 	"append_indent",
 	"append_preserved_line_comments",
 }
@@ -81,6 +82,81 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertParseFormatAllocNotExtended(t, parseLLVM)
 	assertImportSortShapeValidated(t)
 	assertLeadingImportShapeValidated(t)
+	assertImportDeclShapeValidated(t)
+	assertSortedImportsShapeValidated(t)
+}
+
+// sortedImportsShapeValidationErrors pins the explicit shape-validation diagnostics that the
+// structured-control-flow lowering raises when a near-miss helper drifts from the import-cluster
+// emitter skeleton. compiled_struct_cf reads only some identifiers off the AST and then emits a
+// fixed scan-loop / get / try-call / newline-append shape, so it must reject any helper whose
+// accumulator, scan condition, index read, single-import call operands, newline append or
+// increment differ -- never silently mis-lower a near-miss.
+var sortedImportsShapeValidationErrors = []string{
+	"compiled struct-cf: import cluster out accumulator must be a String handle",
+	"compiled struct-cf: scan loop condition must be '<index> < <indices>.len()'",
+	"compiled struct-cf: index read must target the indices array",
+	"compiled struct-cf: scan body must call the single-import emitter",
+	"compiled struct-cf: single-import call must pass the out accumulator first",
+	"compiled struct-cf: single-import call must pass the source second",
+	"compiled struct-cf: single-import call must pass the tokens third",
+	"compiled struct-cf: single-import call must pass the import index last",
+	"compiled struct-cf: scan body must append the newline byte",
+	"compiled struct-cf: newline append must be a 'cast<u8>(<int>)'",
+	"compiled struct-cf: newline append must cast to u8",
+	"compiled struct-cf: counter increment must be '<index> + 1'",
+}
+
+// assertSortedImportsShapeValidated pins that the structured-control-flow lowering keeps its
+// explicit per-operand shape diagnostics for the import-cluster emitter, so a near-miss helper is
+// rejected with an error rather than silently lowered to the hard-coded scan-loop skeleton.
+func assertSortedImportsShapeValidated(t *testing.T) {
+	t.Helper()
+	structCF := readSelfhostSrc(t, filepath.Join("backend", "compiled_struct_cf.kizu"))
+	for _, diagnostic := range sortedImportsShapeValidationErrors {
+		if !strings.Contains(structCF, diagnostic) {
+			t.Errorf("compiled_struct_cf.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
+}
+
+// importDeclShapeValidationErrors pins the explicit shape-validation diagnostics that the
+// structured-control-flow lowering raises when a near-miss helper drifts from the single-import
+// emitter skeleton. compiled_struct_cf reads only some identifiers off the AST and then emits a
+// fixed String-append / scan-loop / early-return / boolean-or shape, so it must reject any helper
+// whose accumulator, prefix append, counter seed, scan condition, token read, token_text call,
+// semicolon branch, text guard, text append or increment differ -- never silently mis-lower a
+// near-miss. Pinning the strings keeps the per-operand validation from being quietly weakened back
+// to name-only checks.
+var importDeclShapeValidationErrors = []string{
+	"compiled struct-cf: import emitter out accumulator must be a String handle",
+	"compiled struct-cf: import emitter must open with the 'import ' literal append",
+	"compiled struct-cf: import emitter prefix append must be a string literal",
+	"compiled struct-cf: scan counter must be seeded as '<import_index> + 1'",
+	"compiled struct-cf: scan counter seed must add to an i64 import index parameter",
+	"compiled struct-cf: scan loop condition must be '<index> < <tokens>.len()'",
+	"compiled struct-cf: token read must index the scan counter",
+	"compiled struct-cf: token_text must pass the source first",
+	"compiled struct-cf: token_text must pass the current token second",
+	"compiled struct-cf: semicolon guard must test the current token",
+	"compiled struct-cf: semicolon branch must append the ';' literal",
+	"compiled struct-cf: semicolon branch return must be a bare 'return;'",
+	"compiled struct-cf: text guard must be 'ident or double-colon'",
+	"compiled struct-cf: text branch must append the token text local",
+	"compiled struct-cf: counter increment must be '<index> + 1'",
+}
+
+// assertImportDeclShapeValidated pins that the structured-control-flow lowering keeps its explicit
+// per-operand shape diagnostics for the single-import emitter, so a near-miss helper is rejected
+// with an error rather than silently lowered to the hard-coded String-append / scan-loop skeleton.
+func assertImportDeclShapeValidated(t *testing.T) {
+	t.Helper()
+	structCF := readSelfhostSrc(t, filepath.Join("backend", "compiled_struct_cf.kizu"))
+	for _, diagnostic := range importDeclShapeValidationErrors {
+		if !strings.Contains(structCF, diagnostic) {
+			t.Errorf("compiled_struct_cf.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
 }
 
 // leadingImportShapeValidationErrors pins the explicit shape-validation diagnostics that the
