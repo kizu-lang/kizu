@@ -53,8 +53,12 @@ const parseFormatAllocMaxLines = 197
 // !is_line_break(source[index])' loads source[index] only when 'index < length' holds, so the
 // guarded byte load lowers into a loopN_head_rhs block rather than an eager 'and i1';
 // line_end_including_break adds a trailing 'if index < length { return after_line_break(source,
-// index); }' ReturnCall tail). They are the first selfhost::parser::format members on the compiled
-// path and must keep being emitted from both the IR fact catalog and the backend BFS.
+// index); }' ReturnCall tail), and line_comment_is_full_line (the first compiled helper with a
+// downward 'while index > 0' header over a literal bound: its loop body opens with a 'let
+// previous = index - 1' decrement local feeding both a checked 'source[previous]' byte-load call
+// argument and the 'index = previous' latch, and carries two boolean early returns). They are the
+// first selfhost::parser::format members on the compiled path and must keep being emitted from
+// both the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
 	"is_import_token",
 	"is_ident_token",
@@ -76,6 +80,7 @@ var formatCompiledHelperSeeds = []string{
 	"after_line_break",
 	"line_end_excluding_break",
 	"line_end_including_break",
+	"line_comment_is_full_line",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the

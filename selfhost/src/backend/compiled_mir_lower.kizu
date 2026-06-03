@@ -4807,6 +4807,13 @@ fn while_trailing_increment_count(
     if std::mem::equal_bytes(last_value_kind, "TryExpr") {
         return 1;
     }
+    // A copy-decrement latch 'index = previous' (the value is a plain Var read of a body-local
+    // bound to 'index - <int>' earlier in the loop) is a single-statement latch like the try-call
+    // update; the referenced let stays in the body so source[previous] still loads it (issue 1165
+    // / 1162).
+    if std::mem::equal_bytes(last_value_kind, "Var") {
+        return 1;
+    }
     var count = 0;
     var index = body_count - 1;
     while index >= 0 {
@@ -4829,6 +4836,72 @@ fn while_trailing_increment_count(
         return error("compiled mir: while body must end with the induction increment");
     }
     return count;
+}
+// validate_copy_latch_source checks that a copy-decrement latch's source local ('previous' in
+// 'index = previous') is bound earlier in the same loop body, before the latch suffix, by a
+// 'let previous = <induction_var> - <positive int>' decrement. Anything else -- a missing
+// binding, a non-Binary value, a non-subtraction, a base that is not the induction variable, or
+// a non-integer / non-positive offset -- is an explicit error so the copy latch never silently
+// lowers a value that would not count the loop down (issue 1165 / 1162).
+fn validate_copy_latch_source(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    body_boundary: i64,
+    induction_var: []u8,
+    copy_source: []u8,
+    bs: i64
+) -> !void {
+    var index = 0;
+    while index < body_boundary {
+        let stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, stmt, bs);
+        if std::mem::equal_bytes(kind, "Let") {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, stmt, "name", 0, bs
+            );
+            let name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+            if std::mem::equal_bytes(name, copy_source) {
+                let value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, stmt, "value", 0, bs
+                );
+                let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+                if !std::mem::equal_bytes(value_kind, "Binary") {
+                    return error("compiled mir: copy latch source must be '<induction> - <int>'");
+                }
+                let op = try ir_contract::sequence_fact_value_from(
+                    ir_bytes, "body-binary ", function_name, value, bs
+                );
+                if !std::mem::equal_bytes(op, "sub") {
+                    return error("compiled mir: copy latch source must subtract from the induction variable");
+                }
+                let base_node = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, value, "left", 0, bs
+                );
+                let offset_node = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, value, "right", 0, bs
+                );
+                let base_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, base_node, bs);
+                let offset_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, offset_node, bs);
+                if !std::mem::equal_bytes(base_kind, "Var") or !std::mem::equal_bytes(offset_kind, "Int") {
+                    return error("compiled mir: copy latch source must be '<induction> - <int>'");
+                }
+                let base_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, base_node, bs);
+                if !std::mem::equal_bytes(base_name, induction_var) {
+                    return error("compiled mir: copy latch source must subtract from the induction variable");
+                }
+                let offset = try ir_contract::body_int_value_from(ir_bytes, function_name, offset_node, bs);
+                if offset < 1 {
+                    return error("compiled mir: copy latch source decrement must be positive");
+                }
+                return;
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled mir: copy latch source local not found in the loop body");
 }
 // lower_multi_while_statement lowers a restricted bounded counter loop: a single i64
 // induction variable, a non-short-circuit comparison condition that reads it, a body
@@ -5060,6 +5133,7 @@ fn lower_multi_while_statement(
         ir_bytes, function_name, increment_value, bs
     );
     var step = 0;
+    var latch_copy_var = "";
     var latch_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     if std::mem::equal_bytes(increment_value_kind, "TryExpr") {
         // 'index = try index_after_import(tokens, index);' advances the counter by a try-call
@@ -5082,9 +5156,24 @@ fn lower_multi_while_statement(
         );
         try latch_stmts.append(latch_stmt);
     } else {
-        step = try parse_induction_step(
-            ir_bytes, function_name, increment_stmt, induction_var, bs
-        );
+        if std::mem::equal_bytes(increment_value_kind, "Var") {
+            // 'index = previous' copies a body-local back into the induction variable. The local
+            // must be bound earlier in this loop body by 'let previous = index - <int>', a
+            // decrement of the induction variable, so the loop counts down and terminates against
+            // its 'index > 0' header. The local is kept in the body (it also feeds source[previous]),
+            // so the latch carries no add: the loop-head phi reads %previous directly on the latch
+            // edge (issue 1165 / 1162).
+            latch_copy_var = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, increment_value, bs
+            );
+            try validate_copy_latch_source(
+                ir_bytes, function_name, body_node, body_boundary, induction_var, latch_copy_var, bs
+            );
+        } else {
+            step = try parse_induction_step(
+                ir_bytes, function_name, increment_stmt, induction_var, bs
+            );
+        }
     }
     // The increments before the primary latch (body_boundary .. body_count - 2) are the
     // secondary lockstep counters. Each is a constant-step 'name = name + <int>' increment
@@ -5133,6 +5222,7 @@ fn lower_multi_while_statement(
         cond_extra_operands,
         body_stmts,
         latch_stmts,
+        latch_copy_var,
         secondary_inductions
     ));
     return MultiIfLowerResult {
