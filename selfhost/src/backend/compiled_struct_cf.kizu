@@ -620,11 +620,15 @@ pub fn append_import_sort_function(
 ) -> !void {
     let module_prefix = compiled_util::module_prefix_of(function_name);
 
-    // Outer induction initializer: 'var <outer_var> = <outer_init>;'.
+    // Outer induction initializer: 'var <outer_var> = 1;'. The insertion sort treats
+    // element 0 as trivially sorted, so the counter must start at 1; a different seed
+    // (e.g. 0) would skip the first comparison, so it is an explicit error.
     let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
     let s0_name = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0, "name", 0, bs);
     let outer_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, s0_name, bs);
     let s0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0, "value", 0, bs);
+    try cf_require_int(ir_bytes, function_name, s0_value, 1,
+        "compiled struct-cf: outer counter must be initialized to 1", bs);
     let outer_init = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, s0_value, bs);
 
     // Outer loop and its body: 'while <outer_var> < <arr>.len() { ... }'.
@@ -756,6 +760,23 @@ pub fn append_import_sort_function(
         "compiled struct-cf: scan body must end with the comparator if", bs);
     let if_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ib2, "condition", 0, bs);
     let cmp_call = try cf_call_under_try(ir_bytes, function_name, if_cond, bs);
+
+    // The comparator decides the swap, so the two scanned elements must reach it in the
+    // order the hard-coded swap assumes: '<cmp>(..., <right>, <left>)' compares the high
+    // slot against the low slot. The callee itself stays AST-driven (no name dispatch),
+    // but the trailing two operands are pinned to the read locals so a reordered call is
+    // an explicit error rather than a silently reversed sort.
+    let cmp_argc = try compiled_mir_types::count_call_args(ir_bytes, function_name, cmp_call, bs);
+    if cmp_argc < 2 {
+        return error("compiled struct-cf: comparator must receive the two scanned elements");
+    }
+    let cmp_high = try ir_contract::body_child_sequence_from(ir_bytes, function_name, cmp_call, "arg", cmp_argc - 2, bs);
+    try cf_require_var(ir_bytes, function_name, cmp_high, right_name,
+        "compiled struct-cf: comparator must take the high slot ('<right>') first", bs);
+    let cmp_low = try ir_contract::body_child_sequence_from(ir_bytes, function_name, cmp_call, "arg", cmp_argc - 1, bs);
+    try cf_require_var(ir_bytes, function_name, cmp_low, left_name,
+        "compiled struct-cf: comparator must take the low slot ('<left>') second", bs);
+
     let if_then = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ib2, "then", 0, bs);
     let if_else = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ib2, "else", 0, bs);
     if (try cf_block_statement_count(ir_bytes, function_name, if_then, bs)) != 3 {
