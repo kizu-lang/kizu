@@ -66,6 +66,32 @@ fn cf_param_type_or_empty(params_spec: []u8, name: []u8) -> []u8 {
     return params_spec[0..0];
 }
 
+// cf_nth_param_name returns the name of the params_spec parameter at position 'target' (0-based),
+// or "" when there is no such parameter. The params_spec preserves signature order, so the
+// position identifies a specific parameter (e.g. the source parameter the sort helper receives)
+// without threading its name through the caller.
+fn cf_nth_param_name(params_spec: []u8, target: i64) -> []u8 {
+    let spec_len = std::mem::len(params_spec);
+    let semicolon = cast<u8>(59);
+    let space = cast<u8>(32);
+    var pos = 0;
+    var index = 0;
+    while pos < spec_len {
+        let entry_end = compiled_util::find_byte(params_spec, semicolon, pos);
+        let space_pos = compiled_util::find_byte(params_spec, space, pos);
+        if space_pos < entry_end and index == target {
+            return params_spec[space_pos + 1..entry_end];
+        }
+        if entry_end < spec_len {
+            pos = entry_end + 1;
+        } else {
+            pos = spec_len;
+        }
+        index = index + 1;
+    }
+    return params_spec[0..0];
+}
+
 // cf_strip_ref_var normalises a recorded parameter type token to its underlying value
 // type by stripping the leading error-union '!', reference '&', and mutable-reference
 // 'var_' markers. The IR records '&var std::array::Array<i64>' with its source spaces
@@ -1464,10 +1490,42 @@ pub fn append_leading_import_function(
     try cf_require_var(ir_bytes, function_name, advance_arg1, index_var,
         "compiled struct-cf: scan advance must pass the scan counter second", bs);
 
-    // Statement 3: 'try <sort>(...);' sorts the collected indices in place.
+    // Statement 3: 'try sort_import_indices(source, tokens, &var indices);' sorts the collected
+    // indices in place. Every operand is pinned here: the in-place sort takes the source slice,
+    // the token array, and the mutable indices handle, but %kizu.owned cannot distinguish the
+    // Array<Token> tokens handle from the Array<i64> indices handle at the LLVM level, so a
+    // near-miss like '&var tokens' (or a reordered / wrongly-borrowed operand) would emit a
+    // type-valid call that silently mis-lowers. The callee symbol stays AST-driven (no name
+    // dispatch); the arity, the source/tokens parameters, and the '&var <indices>' borrow are
+    // pinned so any deviation is an explicit error rather than a silent mis-lowering.
     let s3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 3, bs);
     let s3_expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s3, "expr", 0, bs);
     let sort_call = try cf_call_under_try(ir_bytes, function_name, s3_expr, bs);
+    try cf_require_call_argc(ir_bytes, function_name, sort_call, 3,
+        "compiled struct-cf: sort call takes the source, the token array, and the indices handle", bs);
+    let source_name = cf_nth_param_name(params_spec, 1);
+    if std::mem::len(source_name) == 0 {
+        return error("compiled struct-cf: sort call requires the source parameter");
+    }
+    let sort_arg0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, sort_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, sort_arg0, source_name,
+        "compiled struct-cf: sort call must pass the source first", bs);
+    let sort_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, sort_call, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, sort_arg1, arr_name,
+        "compiled struct-cf: sort call must pass the token array second", bs);
+    let sort_arg2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, sort_call, "arg", 2, bs);
+    try cf_expect(ir_bytes, function_name, sort_arg2, "Prefix",
+        "compiled struct-cf: sort call must pass the indices array by mutable borrow", bs);
+    let sort_arg2_op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-prefix ", function_name, sort_arg2, bs
+    );
+    if !std::mem::equal_bytes(sort_arg2_op, "mut-borrow") and
+        !std::mem::equal_bytes(sort_arg2_op, "borrow") {
+        return error("compiled struct-cf: sort call indices argument must be a borrow, not another prefix");
+    }
+    let sort_arg2_inner = try ir_contract::body_child_sequence_from(ir_bytes, function_name, sort_arg2, "right", 0, bs);
+    try cf_require_var(ir_bytes, function_name, sort_arg2_inner, indices_var,
+        "compiled struct-cf: sort call must borrow the constructed indices array", bs);
 
     // Statement 4: 'return <indices>;' hands back the filled array as the !Array success.
     let s4 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 4, bs);

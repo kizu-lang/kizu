@@ -105,6 +105,12 @@ var leadingImportShapeValidationErrors = []string{
 	"compiled struct-cf: append must store the scan counter",
 	"compiled struct-cf: scan advance must pass the token array first",
 	"compiled struct-cf: scan advance must pass the scan counter second",
+	"compiled struct-cf: sort call takes the source, the token array, and the indices handle",
+	"compiled struct-cf: sort call must pass the source first",
+	"compiled struct-cf: sort call must pass the token array second",
+	"compiled struct-cf: sort call must pass the indices array by mutable borrow",
+	"compiled struct-cf: sort call indices argument must be a borrow, not another prefix",
+	"compiled struct-cf: sort call must borrow the constructed indices array",
 	"compiled struct-cf: collector must return the filled indices array",
 }
 
