@@ -4519,9 +4519,51 @@ fn lower_multi_while_statement(
     if !std::mem::equal_bytes(increment_kind, "Assign") {
         return error("compiled mir: while body must end with the induction increment");
     }
-    let step = try parse_induction_step(
-        ir_bytes, function_name, increment_stmt, induction_var, bs
+    // The induction latch is either a constant-step 'index = index + <int>' increment or a
+    // loop-carried 'index = try <callee>(.., index);' try-call update. The increment target
+    // must name the induction variable in both shapes (issue 1165).
+    let increment_target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, increment_stmt, "target", 0, bs
     );
+    let increment_target_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, increment_target, bs
+    );
+    if !std::mem::equal_bytes(increment_target_name, induction_var) {
+        return error("compiled mir: induction increment must assign to the induction variable");
+    }
+    let increment_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, increment_stmt, "value", 0, bs
+    );
+    let increment_value_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, increment_value, bs
+    );
+    var step = 0;
+    var latch_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    if std::mem::equal_bytes(increment_value_kind, "TryExpr") {
+        // 'index = try index_after_import(tokens, index);' advances the counter by a try-call
+        // whose i64 success value feeds the loop-head phi (%<var>_next) and whose failure
+        // propagates as this function's own error union. The latch try-call is given a try
+        // index past the body try-calls (body_try_counter) and a call-arg setup prefix past
+        // the body statement prefixes (loop_index * 1000 + body_count) so its SSA names never
+        // collide with the body (issue 1165).
+        let latch_stmt = try lower_while_latch_try_call(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            induction_var,
+            increment_value,
+            body_string_counter,
+            body_try_counter,
+            bs
+        );
+        try latch_stmts.append(latch_stmt);
+    } else {
+        step = try parse_induction_step(
+            ir_bytes, function_name, increment_stmt, induction_var, bs
+        );
+    }
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
         induction_var,
@@ -4530,12 +4572,70 @@ fn lower_multi_while_statement(
         step,
         cond_result,
         cond_insts,
-        body_stmts
+        body_stmts,
+        latch_stmts
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
         string_counter: body_string_counter
     };
+}
+
+// lower_while_latch_try_call lowers a loop-carried 'index = try <callee>(.., index);' latch
+// update into a LetTryCall statement bound to <induction_var>_next (issue 1165). The bound
+// name feeds the loop-head phi on the latch edge, so the success value (field 1) becomes
+// %<var>_next and a failure propagates as this function's own error union, exactly like a
+// let-position try-call. The callee must be a free function (a field-mode method, e.g.
+// tokens.get(..), is rejected here); index_after_leading_imports calling index_after_import
+// is its first consumer. try_index is seeded past the body try-calls so the fail/cont block
+// labels never collide with a body try-call's.
+fn lower_while_latch_try_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    induction_var: []u8,
+    try_node: i64,
+    string_counter: i64,
+    try_index: i64,
+    bs: i64
+) -> !compiled_mir::MirStmt {
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, try_node, "value", 0, bs
+    );
+    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+    if !std::mem::equal_bytes(inner_kind, "Call") {
+        return error("compiled mir: induction latch try value must wrap a call");
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+        return error("compiled mir: induction latch try-call must be a free function");
+    }
+    let called_error_union = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, inner, bs
+    );
+    let success_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, inner, bs
+    );
+    if !std::mem::equal_bytes(success_type, "i64") {
+        return error("compiled mir: induction latch try-call must return an i64");
+    }
+    let callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, inner, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, inner, bs
+    );
+    let args = try compiled_mir_lower_call::lower_call_args(
+        ir_bytes, function_name, module_prefix, locals_spec, inner, string_counter, bs
+    );
+    // The bound name is the induction variable itself; the latch renderer suffixes every SSA
+    // name with "_next", so the success value binds to %<induction_var>_next which the
+    // loop-head phi consumes on the latch edge (issue 1165).
+    return compiled_mir::let_try_call_stmt(
+        induction_var, called_error_union, success_type, llvm_return_type,
+        callee_module_prefix, callee_name, string_counter, try_index, args
+    );
 }
 
 fn count_strings_in_insts(
