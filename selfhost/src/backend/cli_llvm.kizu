@@ -3206,10 +3206,10 @@ fn collect_component_compiled_callee(
     if compiled_external_accessor_allowed(prefix, callee) {
         return;
     }
-    // A value-receiver Array<T> read method (tokens.len() / tokens.get(...)) is a runtime
-    // builtin lowered inline, not a component function, so the BFS neither emits nor walks
-    // it (issue 1165).
-    if compiled_callee_is_array_read_method(callee) {
+    // An Array<T> element method (indices.len() / indices.get(...) / indices.set(...)) is a
+    // runtime builtin lowered inline through the element-size-generic array ABI, not a
+    // component function, so the BFS neither emits nor walks it (issue 1165).
+    if compiled_callee_is_array_element_method(callee) {
         return;
     }
     if std::mem::starts_with(callee, prefix) {
@@ -3291,11 +3291,12 @@ fn compiled_callee_has_namespace(name: []u8) -> bool {
 // Array<T> read method (<receiver>.len / <receiver>.get), i.e. a runtime builtin lowered
 // inline rather than a component function (issue 1165). Namespaced callees (carrying
 // '::') are excluded so a cross-module free function is never mistaken for a method.
-fn compiled_callee_is_array_read_method(name: []u8) -> bool {
+fn compiled_callee_is_array_element_method(name: []u8) -> bool {
     if compiled_callee_has_namespace(name) {
         return false;
     }
-    return compiled_name_ends_with(name, ".len") or compiled_name_ends_with(name, ".get");
+    return compiled_name_ends_with(name, ".len") or compiled_name_ends_with(name, ".get") or
+        compiled_name_ends_with(name, ".set");
 }
 
 fn compiled_name_ends_with(name: []u8, suffix: []u8) -> bool {
@@ -3486,9 +3487,12 @@ fn append_loader_reachable_compiled_functions(
 // source[token.start..token.end]' that the formatter reads every token's text
 // through. All five are leaves, so the closure is exactly the seed set and the BFS
 // derives each member's llvm symbol and params_spec from signature facts -- this is
-// the first formatter component compiled into stage2, ahead of the token-array
-// loop / import-sort helpers that still wait on local/param Array<T> read lowering,
-// short-circuit while, and Array<i64> append/set.
+// the first formatter component compiled into stage2. The seed set has since grown
+// along the BFS frontier to the token-array read / scan-while helpers, the import-sort
+// comparator cluster (compare_bytes, import_path_less), and the scan-shift insertion
+// sort sort_import_indices (lowered through compiled_struct_cf with the Array<i64>.set
+// mutation ABI). leading_import_indices is the remaining import-sort helper still on the
+// hand-written path, waiting on the Array<i64>.append ABI.
 fn append_format_reachable_compiled_functions(
     out: &var std::string::String,
     ir_bytes: []u8
@@ -3530,6 +3534,17 @@ fn append_format_reachable_compiled_functions(
     // to a nested-call-argument compare_bytes call and a prefix-not call return. Its BFS pulls
     // in is_semicolon_token, token_text, and compare_bytes (all already seeded members).
     try pending.append("import_path_less");
+    // sort_import_indices is the first structured-control-flow import-sort helper on the
+    // compiled path (issue 1165 / 1162): the scan-shift insertion sort 'var index = 1; while
+    // index < indices.len() { var cursor = index; var scanning = true; while scanning and
+    // cursor > 0 { let left = try indices.get(cursor - 1); let right = try indices.get(cursor);
+    // if try import_path_less(source, tokens, right, left) { ...swaps...; cursor = cursor - 1;
+    // } else { scanning = false; } } index = index + 1; } return;'. It needs genuine
+    // basic-block + phi control flow (an outer counter loop, a nested cursor/flag scan loop, an
+    // if/else that re-merges, a try-call comparator condition, and Array<i64>.get/set element
+    // ABI on a '&var std::array::Array<i64>' param), so it lowers through compiled_struct_cf.
+    // Its BFS pulls in import_path_less (already a seeded member).
+    try pending.append("sort_import_indices");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,
