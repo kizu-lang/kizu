@@ -299,6 +299,92 @@ fn cf_emit_set(
     return;
 }
 
+// cf_emit_append lowers 'try <arr>.append(<value>);' against the element-size-generic
+// @kizu_rt_array_append runtime helper. The element is marshalled through a pre-allocated
+// entry-block slot ('%<prefix>_slot'), wrapped into a %kizu.slice.u8 (pointer + element size
+// derived from the element LLVM type), and a failure propagates as this function's own error
+// union. The current block on return is '<prefix>_cont'. It mirrors cf_emit_set without the
+// index argument, so the same checked-ABI / own-error wrapping serves both element writes.
+fn cf_emit_append(
+    out: &var std::string::String,
+    prefix: []u8,
+    arr_name: []u8,
+    recv_type: []u8,
+    element_llvm: []u8,
+    ret_type: []u8,
+    value_base: []u8,
+    value_tail: []u8
+) -> !void {
+    try cf_w(out, "  store ");
+    try cf_w(out, element_llvm);
+    try cf_w(out, " %");
+    try cf_w(out, value_base);
+    try cf_w(out, value_tail);
+    try cf_w(out, ", ptr %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_slot");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_es0 = insertvalue %kizu.slice.u8 poison, ptr %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_slot, 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_eslice = insertvalue %kizu.slice.u8 %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_es0, i64 ptrtoint (ptr getelementptr (");
+    try cf_w(out, element_llvm);
+    try cf_l(out, ", ptr null, i32 1) to i64), 1");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_call = call %kizu.error.void @kizu_rt_array_append(");
+    try cf_w(out, recv_type);
+    try cf_w(out, " %");
+    try cf_w(out, arr_name);
+    try cf_w(out, ", %kizu.slice.u8 %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_eslice)");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok = extractvalue %kizu.error.void %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_call, 0");
+    try cf_w(out, "  br i1 %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok, label %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_cont, label %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_fail");
+    try cf_w(out, prefix);
+    try cf_l(out, "_fail:");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_msg = extractvalue %kizu.error.void %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_call, 1");
+    try cf_emit_own_fail(out, ret_type, prefix, prefix, "_msg");
+    try cf_w(out, prefix);
+    try cf_l(out, "_cont:");
+    return;
+}
+
+// cf_ctor_element_llvm derives the element LLVM type of a 'std::array::Array<T>(<allocator>)'
+// constructor from the constructor callee token, so a local array's element size flows from
+// its declared <T> rather than a hidden i64 special case. The callee is the constructor type
+// (e.g. 'std::array::Array<i64>'); a callee that is not an Array<T> is an explicit error.
+fn cf_ctor_element_llvm(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    ctor_callee: []u8
+) -> ![]u8 {
+    let element_kizu = compiled_mir_types::array_value_element_kizu_type_or_empty(ctor_callee);
+    if std::mem::len(element_kizu) == 0 {
+        return error("compiled struct-cf: array constructor is not a std::array::Array<T>");
+    }
+    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, element_kizu);
+}
+
 // cf_block_statement_count counts the "statement" children of a Block node.
 fn cf_block_statement_count(
     ir_bytes: []u8,
@@ -376,6 +462,83 @@ pub fn is_import_sort_shape(
     }
     let s1_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "body", 0, bs);
     return try cf_block_has_nested_while(ir_bytes, function_name, s1_body, bs);
+}
+
+// cf_block_has_nested_if reports whether a Block node contains a directly nested If
+// statement, distinguishing the leading-import collector's branch-merge scan loop from the
+// flat scan-while helpers (index_after_leading_imports) whose loop body is a guarded early
+// return rather than an if/else that re-merges into the loop.
+fn cf_block_has_nested_if(
+    ir_bytes: []u8,
+    function_name: []u8,
+    block_node: i64,
+    bs: i64
+) -> !bool {
+    var count = 0;
+    while true {
+        let child = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, block_node, "statement", count, bs
+        );
+        if child < 0 {
+            return false;
+        }
+        if try cf_kind_is(ir_bytes, function_name, child, "If", bs) {
+            return true;
+        }
+        count = count + 1;
+    }
+    return false;
+}
+
+// is_leading_import_shape detects the leading-import collector skeleton: a function whose body
+// is exactly 'var <indices> = std::array::Array<T>(<allocator>); var <index> = <int>; while
+// <index> < <tokens>.len() { let <token> = try <tokens>.get(<index>); if !<pred>(<token>) {
+// <index> = <tokens>.len(); } else { try <indices>.append(<index>); <index> = try
+// <helper>(<tokens>, <index>); } } try <sort>(...); return <indices>;'. It is structurally
+// distinct from the scan-shift sort: a 5-statement body whose first statement constructs an
+// array (a Call, not an Int seed), an outer scan loop whose body re-merges through an if/else
+// rather than a nested while, and a value-returning tail. The full per-node validation lives
+// in append_leading_import_function, which errors on any deviation. leading_import_indices is
+// its first consumer.
+pub fn is_leading_import_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 5 {
+        return false;
+    }
+    let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s0, "Let", bs)) {
+        return false;
+    }
+    let s0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0, "value", 0, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s0_value, "Call", bs)) {
+        return false;
+    }
+    let ctor_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, s0_value, bs);
+    if std::mem::len(compiled_mir_types::array_value_element_kizu_type_or_empty(ctor_callee)) == 0 {
+        return false;
+    }
+    let s1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 1, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s1, "Let", bs)) {
+        return false;
+    }
+    let s2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 2, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s2, "While", bs)) {
+        return false;
+    }
+    let s3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 3, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s3, "ExprStmt", bs)) {
+        return false;
+    }
+    let s4 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 4, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s4, "Return", bs)) {
+        return false;
+    }
+    let s2_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s2, "body", 0, bs);
+    return try cf_block_has_nested_if(ir_bytes, function_name, s2_body, bs);
 }
 
 // cf_expect requires a node to have a given kind, raising an explicit error otherwise.
@@ -982,5 +1145,463 @@ pub fn append_import_sort_function(
     try cf_l(out, " %ret_ok");
     try cf_l(out, "}");
     try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// cf_require_len_call validates that a node is a zero-argument '<arr_name>.len()' call and
+// raises 'message' on any deviation. Both the loop-header bound and the loop-terminating
+// '<index> = <arr_name>.len()' assignment share this shape.
+fn cf_require_len_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    arr_name: []u8,
+    message: []u8,
+    bs: i64
+) -> !void {
+    let receiver = try cf_method_receiver_name(ir_bytes, function_name, call_node, "len", bs);
+    if !std::mem::equal_bytes(receiver, arr_name) {
+        return error(message);
+    }
+    try cf_require_call_argc(ir_bytes, function_name, call_node, 0, message, bs);
+    return;
+}
+
+// cf_var_arg_type resolves the LLVM type of a referenced call-argument local. A parameter
+// keeps its recorded signature type; the runtime-owned indices array carries '%kizu.owned';
+// the loop counter carries 'i64'. Every other name is an explicit error so the emitter never
+// marshals an unclassified local.
+fn cf_var_arg_type(
+    params_spec: []u8,
+    index_var: []u8,
+    indices_var: []u8,
+    name: []u8
+) -> ![]u8 {
+    let ptype = cf_param_type_or_empty(params_spec, name);
+    if std::mem::len(ptype) > 0 {
+        return ptype;
+    }
+    if std::mem::equal_bytes(name, indices_var) {
+        return "%kizu.owned";
+    }
+    if std::mem::equal_bytes(name, index_var) {
+        return "i64";
+    }
+    return error("compiled struct-cf: unresolved call-argument local");
+}
+
+// cf_emit_call_args emits a comma-separated '<type> %<name>' argument list off the AST. Each
+// argument is a Var, or a '&var'/'&' borrow Prefix whose operand is a Var (the mutable array
+// handle passed to the sort helper); the operand name is resolved to its LLVM type through
+// cf_var_arg_type, so an owned array handle and an i64 counter marshal without a per-callee
+// table.
+fn cf_emit_call_args(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    params_spec: []u8,
+    index_var: []u8,
+    indices_var: []u8,
+    call_node: i64,
+    bs: i64
+) -> !void {
+    let argc = try compiled_mir_types::count_call_args(ir_bytes, function_name, call_node, bs);
+    var ai = 0;
+    while ai < argc {
+        let arg = try ir_contract::body_child_sequence_from(ir_bytes, function_name, call_node, "arg", ai, bs);
+        var name_node = arg;
+        if try cf_kind_is(ir_bytes, function_name, arg, "Prefix", bs) {
+            name_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, arg, "right", 0, bs);
+        }
+        try cf_expect(ir_bytes, function_name, name_node, "Var",
+            "compiled struct-cf: call argument must be a variable or a borrow of one", bs);
+        let name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+        let atype = try cf_var_arg_type(params_spec, index_var, indices_var, name);
+        if ai > 0 {
+            try cf_w(out, ", ");
+        }
+        try cf_w(out, atype);
+        try cf_w(out, " %");
+        try cf_w(out, name);
+        ai = ai + 1;
+    }
+    return;
+}
+
+// cf_emit_owned_try_call lowers 'try <callee>(<args>);' for a helper whose error union carries
+// no payload value (a '!void' helper) or whose payload is discarded: it calls the helper,
+// branches on the ok flag, propagates a failure as this function's own error union, and leaves
+// the '<prefix>_cont' block current. The callee symbol, error-union type and argument types are
+// all derived from the AST, so no callee name is special-cased.
+fn cf_emit_void_try_call(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    ret_type: []u8,
+    index_var: []u8,
+    indices_var: []u8,
+    prefix: []u8,
+    call_node: i64,
+    bs: i64
+) -> !void {
+    let callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, call_node, bs);
+    let call_eu = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_call = call ");
+    try cf_w(out, call_eu);
+    try cf_w(out, " @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, callee);
+    try cf_w(out, "(");
+    try cf_emit_call_args(out, ir_bytes, function_name, params_spec, index_var, indices_var, call_node, bs);
+    try cf_l(out, ")");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok = extractvalue ");
+    try cf_w(out, call_eu);
+    try cf_w(out, " %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_call, 0");
+    try cf_w(out, "  br i1 %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok, label %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_cont, label %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_fail");
+    try cf_w(out, prefix);
+    try cf_l(out, "_fail:");
+    // The borrowed message lives in the trailing field of the callee error union: field 1 for
+    // the payload-free %kizu.error.void, field 2 for a value-carrying union (e.g. the
+    // %kizu.error.i64 of the index-advance helper, whose i64 payload occupies field 1).
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_msg = extractvalue ");
+    try cf_w(out, call_eu);
+    try cf_w(out, " %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_call, ");
+    try std::fmt::append_i64(out, cf_own_fail_msg_field(call_eu));
+    try cf_l(out, "");
+    try cf_emit_own_fail(out, ret_type, prefix, prefix, "_msg");
+    try cf_w(out, prefix);
+    try cf_l(out, "_cont:");
+    return;
+}
+
+// append_leading_import_function emits the full define for the leading-import collector. It
+// re-reads and validates the whole skeleton off the AST, then renders the basic-block / phi
+// control flow: a runtime-owned Array<T> constructor, an outer scan loop carrying an i64
+// counter through a loop-head phi, a checked Array<Token>.get element read, a boolean
+// predicate that selects between a loop-terminating 'index = tokens.len()' and an
+// append-then-advance branch, an if/else that re-merges at '%scan_latch' via a phi, a try-call
+// to the index-advance helper, a try-call to the in-place sort helper, and a '%kizu.error.owned'
+// success wrap returning the filled array. Any unsupported deviation is an explicit error.
+pub fn append_leading_import_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !void {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+
+    // Statement 0: 'var <indices> = std::array::Array<T>(<allocator>);'. The constructor's
+    // element <T> sets the runtime element width and the array local carries '%kizu.owned';
+    // the constructor takes exactly the allocator, which the runtime call forwards.
+    let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
+    let s0_name = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0, "name", 0, bs);
+    let indices_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, s0_name, bs);
+    let s0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, s0_value, "Call",
+        "compiled struct-cf: leading-import collector must open with the array constructor", bs);
+    let ctor_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, s0_value, bs);
+    let indices_element_llvm = try cf_ctor_element_llvm(ir_bytes, module_prefix, ctor_callee);
+    try cf_require_call_argc(ir_bytes, function_name, s0_value, 1,
+        "compiled struct-cf: array constructor takes exactly the allocator argument", bs);
+    let ctor_arg = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0_value, "arg", 0, bs);
+    try cf_expect(ir_bytes, function_name, ctor_arg, "Var",
+        "compiled struct-cf: array constructor argument must be the allocator local", bs);
+    let allocator_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, ctor_arg, bs);
+    let allocator_type = cf_param_type_or_empty(params_spec, allocator_name);
+    if std::mem::len(allocator_type) == 0 {
+        return error("compiled struct-cf: array constructor allocator must be a parameter");
+    }
+
+    // Statement 1: 'var <index> = <int>;' seeds the scan counter; its literal feeds the
+    // loop-head phi's entry edge.
+    let s1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 1, bs);
+    let s1_name = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "name", 0, bs);
+    let index_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, s1_name, bs);
+    let s1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, s1_value, "Int",
+        "compiled struct-cf: scan counter must be initialized to an integer literal", bs);
+    let index_init = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, s1_value, bs);
+
+    // Statement 2: 'while <index> < <tokens>.len() { ... }'.
+    let s2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 2, bs);
+    let scan_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s2, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, scan_cond, "lt",
+        "compiled struct-cf: scan loop condition must be '<index> < <tokens>.len()'", bs);
+    let scan_cond_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_cond, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, scan_cond_left, index_var,
+        "compiled struct-cf: scan loop must compare the counter on the left", bs);
+    let scan_cond_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_cond, "right", 0, bs);
+    let arr_name = try cf_method_receiver_name(ir_bytes, function_name, scan_cond_right, "len", bs);
+    try cf_require_call_argc(ir_bytes, function_name, scan_cond_right, 0,
+        "compiled struct-cf: token length call takes no arguments", bs);
+    let recv_type = cf_param_type_or_empty(params_spec, arr_name);
+    if std::mem::len(recv_type) == 0 {
+        return error("compiled struct-cf: token array receiver must be a parameter");
+    }
+    let token_element_llvm = try cf_array_element_llvm(
+        ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
+    );
+
+    // Scan body: a checked element read then the predicate if/else.
+    let scan_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s2, "body", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, scan_body, bs)) != 2 {
+        return error("compiled struct-cf: scan body must be the token read and the predicate if");
+    }
+    let wb0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 0, bs);
+    let wb1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 1, bs);
+
+    // 'let <token> = try <tokens>.get(<index>);'.
+    try cf_expect(ir_bytes, function_name, wb0, "Let",
+        "compiled struct-cf: scan body must bind the current token", bs);
+    let token_name_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb0, "name", 0, bs);
+    let token_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, token_name_node, bs);
+    let wb0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb0, "value", 0, bs);
+    let wb0_call = try cf_call_under_try(ir_bytes, function_name, wb0_value, bs);
+    let wb0_recv = try cf_method_receiver_name(ir_bytes, function_name, wb0_call, "get", bs);
+    if !std::mem::equal_bytes(wb0_recv, arr_name) {
+        return error("compiled struct-cf: token read must target the token array");
+    }
+    try cf_require_call_argc(ir_bytes, function_name, wb0_call, 1,
+        "compiled struct-cf: token read must take a single index", bs);
+    let wb0_index = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb0_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, wb0_index, index_var,
+        "compiled struct-cf: token read must index the scan counter", bs);
+
+    // 'if !<pred>(<token>) { ... } else { ... }'.
+    try cf_expect(ir_bytes, function_name, wb1, "If",
+        "compiled struct-cf: scan body must end with the import predicate if", bs);
+    let if_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb1, "condition", 0, bs);
+    try cf_expect(ir_bytes, function_name, if_cond, "Prefix",
+        "compiled struct-cf: predicate must be negated with '!'", bs);
+    let if_cond_op = try ir_contract::sequence_fact_value_from(ir_bytes, "body-prefix ", function_name, if_cond, bs);
+    if !std::mem::equal_bytes(if_cond_op, "not") {
+        return error("compiled struct-cf: predicate must be negated with '!'");
+    }
+    let pred_call = try ir_contract::body_child_sequence_from(ir_bytes, function_name, if_cond, "right", 0, bs);
+    try cf_expect(ir_bytes, function_name, pred_call, "Call",
+        "compiled struct-cf: predicate must be a call", bs);
+    let pred_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, pred_call, bs);
+    let pred_ret = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, pred_call, bs
+    );
+    try cf_require_call_argc(ir_bytes, function_name, pred_call, 1,
+        "compiled struct-cf: predicate takes the current token", bs);
+    let pred_arg = try ir_contract::body_child_sequence_from(ir_bytes, function_name, pred_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, pred_arg, token_var,
+        "compiled struct-cf: predicate must test the current token", bs);
+
+    // Then-block (predicate false): 'index = tokens.len();' terminates the scan.
+    let if_then = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb1, "then", 0, bs);
+    let if_else = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb1, "else", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, if_then, bs)) != 1 {
+        return error("compiled struct-cf: predicate then-block must stop the scan via the token length");
+    }
+    if (try cf_block_statement_count(ir_bytes, function_name, if_else, bs)) != 2 {
+        return error("compiled struct-cf: predicate else-block must append the index then advance it");
+    }
+    let then0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, if_then, "statement", 0, bs);
+    try cf_expect(ir_bytes, function_name, then0, "Assign",
+        "compiled struct-cf: predicate then-block must assign the scan counter", bs);
+    let then0_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then0, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, then0_target, index_var,
+        "compiled struct-cf: scan terminator must assign the counter", bs);
+    let then0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then0, "value", 0, bs);
+    try cf_require_len_call(ir_bytes, function_name, then0_value, arr_name,
+        "compiled struct-cf: scan terminator must be '<index> = <tokens>.len()'", bs);
+
+    // Else-block: 'try <indices>.append(<index>);' then 'index = try <helper>(<tokens>, <index>);'.
+    let else0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, if_else, "statement", 0, bs);
+    try cf_expect(ir_bytes, function_name, else0, "ExprStmt",
+        "compiled struct-cf: else-block must begin with the index append", bs);
+    let else0_expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0, "expr", 0, bs);
+    let append_call = try cf_call_under_try(ir_bytes, function_name, else0_expr, bs);
+    let append_recv = try cf_method_receiver_name(ir_bytes, function_name, append_call, "append", bs);
+    if !std::mem::equal_bytes(append_recv, indices_var) {
+        return error("compiled struct-cf: append must target the indices array");
+    }
+    try cf_require_call_argc(ir_bytes, function_name, append_call, 1,
+        "compiled struct-cf: append must take the scan counter", bs);
+    let append_arg = try ir_contract::body_child_sequence_from(ir_bytes, function_name, append_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, append_arg, index_var,
+        "compiled struct-cf: append must store the scan counter", bs);
+
+    let else1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, if_else, "statement", 1, bs);
+    try cf_expect(ir_bytes, function_name, else1, "Assign",
+        "compiled struct-cf: else-block must advance the scan counter", bs);
+    let else1_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else1, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, else1_target, index_var,
+        "compiled struct-cf: scan advance must assign the counter", bs);
+    let else1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else1, "value", 0, bs);
+    let advance_call = try cf_call_under_try(ir_bytes, function_name, else1_value, bs);
+    try cf_require_call_argc(ir_bytes, function_name, advance_call, 2,
+        "compiled struct-cf: scan advance helper takes the tokens and the counter", bs);
+    let advance_arg0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, advance_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, advance_arg0, arr_name,
+        "compiled struct-cf: scan advance must pass the token array first", bs);
+    let advance_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, advance_call, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, advance_arg1, index_var,
+        "compiled struct-cf: scan advance must pass the scan counter second", bs);
+
+    // Statement 3: 'try <sort>(...);' sorts the collected indices in place.
+    let s3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 3, bs);
+    let s3_expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s3, "expr", 0, bs);
+    let sort_call = try cf_call_under_try(ir_bytes, function_name, s3_expr, bs);
+
+    // Statement 4: 'return <indices>;' hands back the filled array as the !Array success.
+    let s4 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 4, bs);
+    let s4_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s4, "value", 0, bs);
+    try cf_require_var(ir_bytes, function_name, s4_value, indices_var,
+        "compiled struct-cf: collector must return the filled indices array", bs);
+
+    // ---- Emit the define ----
+    try cf_w(out, "define ");
+    try cf_w(out, llvm_return_type);
+    try cf_w(out, " @");
+    try cf_w(out, llvm_symbol);
+    try cf_w(out, "(");
+    try compiled_signature::append_params_signature(out, params_spec);
+    try cf_l(out, ") {");
+
+    // Entry: pre-allocate the append marshalling slot, build the runtime array, enter the loop.
+    try cf_l(out, "entry:");
+    try cf_w(out, "  %app_slot = alloca ");
+    try cf_l(out, indices_element_llvm);
+    try cf_w(out, "  %");
+    try cf_w(out, indices_var);
+    try cf_w(out, " = call %kizu.owned @kizu_rt_array_new(");
+    try cf_w(out, allocator_type);
+    try cf_w(out, " %");
+    try cf_w(out, allocator_name);
+    try cf_w(out, ", i64 ptrtoint (ptr getelementptr (");
+    try cf_w(out, indices_element_llvm);
+    try cf_l(out, ", ptr null, i32 1) to i64))");
+    try cf_l(out, "  br label %scan_head");
+
+    // Scan head: phi the counter, test it against the token length.
+    try cf_l(out, "scan_head:");
+    try cf_w(out, "  %");
+    try cf_w(out, index_var);
+    try cf_w(out, " = phi i64 [ ");
+    try cf_w(out, index_init);
+    try cf_w(out, ", %entry ], [ %");
+    try cf_w(out, index_var);
+    try cf_l(out, "_next, %scan_latch ]");
+    try cf_w(out, "  %scan_len = call i64 @kizu_rt_array_len(");
+    try cf_w(out, recv_type);
+    try cf_w(out, " %");
+    try cf_w(out, arr_name);
+    try cf_l(out, ")");
+    try cf_w(out, "  %scan_cond = icmp slt i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", %scan_len");
+    try cf_l(out, "  br i1 %scan_cond, label %scan_body, label %scan_exit");
+
+    // Scan body: read the current token, then run the import predicate branch.
+    try cf_l(out, "scan_body:");
+    try cf_emit_get(out, token_var, arr_name, recv_type, token_element_llvm, llvm_return_type, index_var, "");
+    try cf_w(out, "  %pred = call ");
+    try cf_w(out, pred_ret);
+    try cf_w(out, " @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, pred_callee);
+    try cf_w(out, "(");
+    try cf_w(out, token_element_llvm);
+    try cf_w(out, " %");
+    try cf_w(out, token_var);
+    try cf_l(out, ")");
+    // The source guard is '!<pred>', so a true predicate (an import) takes the else branch and a
+    // false predicate terminates the scan in the then branch.
+    try cf_l(out, "  br i1 %pred, label %lii_else, label %lii_then");
+
+    // Then-block (not an import): terminate the scan by stepping the counter to the token length.
+    try cf_l(out, "lii_then:");
+    try cf_w(out, "  %then_len = call i64 @kizu_rt_array_len(");
+    try cf_w(out, recv_type);
+    try cf_w(out, " %");
+    try cf_w(out, arr_name);
+    try cf_l(out, ")");
+    try cf_l(out, "  br label %scan_latch");
+
+    // Else-block (an import): append the index, then advance past the import via the try-call.
+    try cf_l(out, "lii_else:");
+    try cf_emit_append(out, "app", indices_var, "%kizu.owned", indices_element_llvm,
+        llvm_return_type, index_var, "");
+    try cf_emit_void_try_call(
+        out, ir_bytes, function_name, module_prefix, params_spec, llvm_return_type,
+        index_var, indices_var, "iai", advance_call, bs
+    );
+    try cf_w(out, "  %iai_val = extractvalue ");
+    try cf_append_call_eu_type(out, ir_bytes, function_name, module_prefix, advance_call, bs);
+    try cf_l(out, " %iai_call, 1");
+    try cf_l(out, "  br label %scan_latch");
+
+    // Scan latch: merge the next counter from the two branches and loop back to the head.
+    try cf_l(out, "scan_latch:");
+    try cf_w(out, "  %");
+    try cf_w(out, index_var);
+    try cf_l(out, "_next = phi i64 [ %then_len, %lii_then ], [ %iai_val, %iai_cont ]");
+    try cf_l(out, "  br label %scan_head");
+
+    // Scan exit: sort the collected indices in place, then return the filled array.
+    try cf_l(out, "scan_exit:");
+    try cf_emit_void_try_call(
+        out, ir_bytes, function_name, module_prefix, params_spec, llvm_return_type,
+        index_var, indices_var, "sort", sort_call, bs
+    );
+    try cf_w(out, "  %ret_ok0 = insertvalue ");
+    try cf_w(out, llvm_return_type);
+    try cf_l(out, " poison, i1 true, 0");
+    try cf_w(out, "  %ret_ok1 = insertvalue ");
+    try cf_w(out, llvm_return_type);
+    try cf_w(out, " %ret_ok0, %kizu.owned %");
+    try cf_w(out, indices_var);
+    try cf_l(out, ", 1");
+    try cf_w(out, "  %ret_ok2 = insertvalue ");
+    try cf_w(out, llvm_return_type);
+    try cf_l(out, " %ret_ok1, %kizu.slice.u8 zeroinitializer, 2");
+    try cf_w(out, "  ret ");
+    try cf_w(out, llvm_return_type);
+    try cf_l(out, " %ret_ok2");
+    try cf_l(out, "}");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// cf_append_call_eu_type writes the lowered error-union return type of a call to 'out', so the
+// i64-payload extractvalue after the index-advance try-call reads the same union type the call
+// emitted (the value lives in field 1, the message in field 2).
+fn cf_append_call_eu_type(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    call_node: i64,
+    bs: i64
+) -> !void {
+    let call_eu = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    try cf_w(out, call_eu);
     return;
 }
