@@ -1,6 +1,7 @@
 import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_mir_lower;
 import selfhost::backend::compiled_mir_llvm;
+import selfhost::backend::compiled_struct_cf;
 import selfhost::backend::ir_contract;
 
 pub fn append_compiled_function(
@@ -498,6 +499,18 @@ pub fn append_compiled_function_params(
         );
         defer call_mir.deinit();
         try compiled_mir_llvm::append_function(out, &call_mir);
+        return;
+    }
+    // A scan-shift sort over a '&var std::array::Array<T>' parameter (an outer counter
+    // loop, a nested cursor/flag scan loop, an if/else that re-merges into the loop, a
+    // try-call comparator condition, and Array<T>.get/set element ABI) needs genuine
+    // basic-block + phi control flow rather than the template-shaped i64-induction While
+    // machinery, so it lowers through the structured-control-flow emitter
+    // (issue 1165 / 1162). sort_import_indices is its first consumer.
+    if try compiled_struct_cf::is_import_sort_shape(ir_bytes, function_name, statement_count, bs) {
+        try compiled_struct_cf::append_import_sort_function(
+            out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
         return;
     }
     let mir = try compiled_mir_lower::lower_multi_statement_function(
