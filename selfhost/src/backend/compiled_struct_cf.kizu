@@ -393,6 +393,117 @@ fn cf_expect(
     return;
 }
 
+// cf_require_binary_op requires a node to be a Binary expression whose recorded operator
+// token equals 'op'. The emitted control flow hard-codes each comparison / arithmetic
+// operator, so a deviating operator must be an explicit error rather than a silent
+// mis-lowering.
+fn cf_require_binary_op(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    op: []u8,
+    message: []u8,
+    bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, node, "Binary", message, bs);
+    let actual = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, node, bs
+    );
+    if !std::mem::equal_bytes(actual, op) {
+        return error(message);
+    }
+    return;
+}
+
+// cf_require_var requires a node to be a Var reference whose token equals 'name'. The
+// emitter binds each operand SSA value to a fixed source identifier, so a different
+// referenced variable must be rejected.
+fn cf_require_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    name: []u8,
+    message: []u8,
+    bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, node, "Var", message, bs);
+    let token = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, node, bs);
+    if !std::mem::equal_bytes(token, name) {
+        return error(message);
+    }
+    return;
+}
+
+// cf_require_int requires a node to be an Int literal whose value equals 'value'.
+fn cf_require_int(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    value: i64,
+    message: []u8,
+    bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, node, "Int", message, bs);
+    let actual = try ir_contract::body_int_value_from(ir_bytes, function_name, node, bs);
+    if actual != value {
+        return error(message);
+    }
+    return;
+}
+
+// cf_require_bool requires a node to be a Bool literal whose token equals 'token'.
+fn cf_require_bool(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    token: []u8,
+    message: []u8,
+    bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, node, "Bool", message, bs);
+    let actual = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, node, bs);
+    if !std::mem::equal_bytes(actual, token) {
+        return error(message);
+    }
+    return;
+}
+
+// cf_require_cursor_decrement requires a node to be the '<cursor> - 1' expression that
+// the emitter renders as a fixed 'sub i64 %<cursor>, 1'. Both the index of the lower
+// swap slot and the cursor decrement share this shape.
+fn cf_require_cursor_decrement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    cursor_var: []u8,
+    message: []u8,
+    bs: i64
+) -> !void {
+    try cf_require_binary_op(ir_bytes, function_name, node, "sub", message, bs);
+    let left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, left, cursor_var, message, bs);
+    let right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, right, 1, message, bs);
+    return;
+}
+
+// cf_require_call_argc requires a Call node to carry exactly 'expected' positional args,
+// so the emitter never reads past or short of the operands it marshals.
+fn cf_require_call_argc(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    expected: i64,
+    message: []u8,
+    bs: i64
+) -> !void {
+    let argc = try compiled_mir_types::count_call_args(ir_bytes, function_name, call_node, bs);
+    if argc != expected {
+        return error(message);
+    }
+    return;
+}
+
 // cf_call_under_try unwraps a 'try <call>' expression node to its inner Call node.
 fn cf_call_under_try(
     ir_bytes: []u8,
@@ -519,10 +630,15 @@ pub fn append_import_sort_function(
     // Outer loop and its body: 'while <outer_var> < <arr>.len() { ... }'.
     let s1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 1, bs);
     let outer_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "condition", 0, bs);
-    try cf_expect(ir_bytes, function_name, outer_cond, "Binary",
-        "compiled struct-cf: outer loop condition must be a comparison", bs);
+    try cf_require_binary_op(ir_bytes, function_name, outer_cond, "lt",
+        "compiled struct-cf: outer loop condition must be '<counter> < <array>.len()'", bs);
+    let outer_cond_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, outer_cond, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, outer_cond_left, outer_var,
+        "compiled struct-cf: outer loop must compare the counter on the left", bs);
     let outer_cond_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, outer_cond, "right", 0, bs);
     let arr_name = try cf_method_receiver_name(ir_bytes, function_name, outer_cond_right, "len", bs);
+    try cf_require_call_argc(ir_bytes, function_name, outer_cond_right, 0,
+        "compiled struct-cf: array length call takes no arguments", bs);
 
     let recv_type = cf_param_type_or_empty(params_spec, arr_name);
     if std::mem::len(recv_type) == 0 {
@@ -541,19 +657,59 @@ pub fn append_import_sort_function(
     let ob2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, outer_body, "statement", 2, bs);
     let ob3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, outer_body, "statement", 3, bs);
 
-    // 'var <cursor> = <outer_var>;' and 'var <scanning> = true;'.
+    // 'var <cursor> = <outer_var>;' seeds the scan cursor from the outer counter.
     try cf_expect(ir_bytes, function_name, ob0, "Let",
         "compiled struct-cf: scan loop must start with the cursor initializer", bs);
     let cursor_name_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob0, "name", 0, bs);
     let cursor_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, cursor_name_node, bs);
+    let ob0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob0, "value", 0, bs);
+    try cf_require_var(ir_bytes, function_name, ob0_value, outer_var,
+        "compiled struct-cf: cursor must be seeded from the outer counter", bs);
+
+    // 'var <scanning> = true;' seeds the loop-carried scanning flag.
     try cf_expect(ir_bytes, function_name, ob1, "Let",
         "compiled struct-cf: scan loop must seed the scanning flag", bs);
     let scanning_name_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob1, "name", 0, bs);
     let scanning_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, scanning_name_node, bs);
+    let ob1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob1, "value", 0, bs);
+    try cf_require_bool(ir_bytes, function_name, ob1_value, "true",
+        "compiled struct-cf: scanning flag must be seeded to true", bs);
+
     try cf_expect(ir_bytes, function_name, ob2, "While",
         "compiled struct-cf: scan loop must be a nested while", bs);
+
+    // 'while <scanning> and <cursor> > 0' is the nested scan-loop header.
+    let inner_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob2, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, inner_cond, "and",
+        "compiled struct-cf: scan loop header must be '<scanning> and <cursor> > 0'", bs);
+    let inner_cond_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, inner_cond, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, inner_cond_left, scanning_var,
+        "compiled struct-cf: scan loop header must test the scanning flag first", bs);
+    let inner_cond_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, inner_cond, "right", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, inner_cond_right, "gt",
+        "compiled struct-cf: scan loop header must guard '<cursor> > 0'", bs);
+    let inner_gt_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, inner_cond_right, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, inner_gt_left, cursor_var,
+        "compiled struct-cf: scan loop header must compare the cursor", bs);
+    let inner_gt_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, inner_cond_right, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, inner_gt_right, 0,
+        "compiled struct-cf: scan loop header must guard the cursor against 0", bs);
+
+    // 'index = index + 1' is the outer counter increment.
     try cf_expect(ir_bytes, function_name, ob3, "Assign",
         "compiled struct-cf: outer loop must end with the counter increment", bs);
+    let ob3_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob3, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, ob3_target, outer_var,
+        "compiled struct-cf: outer increment must assign the counter", bs);
+    let ob3_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob3, "value", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, ob3_value, "add",
+        "compiled struct-cf: outer increment must be '<counter> + 1'", bs);
+    let ob3_add_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob3_value, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, ob3_add_left, outer_var,
+        "compiled struct-cf: outer increment must add to the counter", bs);
+    let ob3_add_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob3_value, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, ob3_add_right, 1,
+        "compiled struct-cf: outer increment must add exactly 1", bs);
 
     // Inner scan loop body: two Array.get reads, then the comparator if/else.
     let inner_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ob2, "body", 0, bs);
@@ -574,6 +730,11 @@ pub fn append_import_sort_function(
     if !std::mem::equal_bytes(ib0_recv, arr_name) {
         return error("compiled struct-cf: left read must target the sorted array");
     }
+    try cf_require_call_argc(ir_bytes, function_name, ib0_call, 1,
+        "compiled struct-cf: left read must take a single index", bs);
+    let ib0_index = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ib0_call, "arg", 0, bs);
+    try cf_require_cursor_decrement(ir_bytes, function_name, ib0_index, cursor_var,
+        "compiled struct-cf: left read must index '<cursor> - 1'", bs);
 
     try cf_expect(ir_bytes, function_name, ib1, "Let",
         "compiled struct-cf: scan body must bind the right element", bs);
@@ -585,6 +746,11 @@ pub fn append_import_sort_function(
     if !std::mem::equal_bytes(ib1_recv, arr_name) {
         return error("compiled struct-cf: right read must target the sorted array");
     }
+    try cf_require_call_argc(ir_bytes, function_name, ib1_call, 1,
+        "compiled struct-cf: right read must take a single index", bs);
+    let ib1_index = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ib1_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, ib1_index, cursor_var,
+        "compiled struct-cf: right read must index the cursor", bs);
 
     try cf_expect(ir_bytes, function_name, ib2, "If",
         "compiled struct-cf: scan body must end with the comparator if", bs);
@@ -609,18 +775,63 @@ pub fn append_import_sort_function(
         "compiled struct-cf: swap statement must be a set call", bs);
     try cf_expect(ir_bytes, function_name, then2, "Assign",
         "compiled struct-cf: then-block must end with the cursor decrement", bs);
+
+    // 'try <arr>.set(<cursor> - 1, <right>);' writes the smaller element low.
     let then0_expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then0, "expr", 0, bs);
     let set0_call = try cf_call_under_try(ir_bytes, function_name, then0_expr, bs);
     let set0_recv = try cf_method_receiver_name(ir_bytes, function_name, set0_call, "set", bs);
     if !std::mem::equal_bytes(set0_recv, arr_name) {
         return error("compiled struct-cf: swap must target the sorted array");
     }
+    try cf_require_call_argc(ir_bytes, function_name, set0_call, 2,
+        "compiled struct-cf: low swap must take an index and a value", bs);
+    let set0_index = try ir_contract::body_child_sequence_from(ir_bytes, function_name, set0_call, "arg", 0, bs);
+    try cf_require_cursor_decrement(ir_bytes, function_name, set0_index, cursor_var,
+        "compiled struct-cf: low swap must write index '<cursor> - 1'", bs);
+    let set0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, set0_call, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, set0_value, right_name,
+        "compiled struct-cf: low swap must store the right element", bs);
+
+    // 'try <arr>.set(<cursor>, <left>);' writes the larger element high.
     let then1_expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then1, "expr", 0, bs);
     let set1_call = try cf_call_under_try(ir_bytes, function_name, then1_expr, bs);
     let set1_recv = try cf_method_receiver_name(ir_bytes, function_name, set1_call, "set", bs);
     if !std::mem::equal_bytes(set1_recv, arr_name) {
         return error("compiled struct-cf: swap must target the sorted array");
     }
+    try cf_require_call_argc(ir_bytes, function_name, set1_call, 2,
+        "compiled struct-cf: high swap must take an index and a value", bs);
+    let set1_index = try ir_contract::body_child_sequence_from(ir_bytes, function_name, set1_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, set1_index, cursor_var,
+        "compiled struct-cf: high swap must write the cursor index", bs);
+    let set1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, set1_call, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, set1_value, left_name,
+        "compiled struct-cf: high swap must store the left element", bs);
+
+    // 'cursor = cursor - 1' steps the scan toward the front.
+    let then2_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then2, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, then2_target, cursor_var,
+        "compiled struct-cf: then-block must decrement the cursor", bs);
+    let then2_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then2, "value", 0, bs);
+    try cf_require_cursor_decrement(ir_bytes, function_name, then2_value, cursor_var,
+        "compiled struct-cf: cursor decrement must be '<cursor> - 1'", bs);
+
+    // Else-block: 'scanning = false' stops the scan and re-merges into the loop.
+    let else0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, if_else, "statement", 0, bs);
+    try cf_expect(ir_bytes, function_name, else0, "Assign",
+        "compiled struct-cf: else-block must stop the scan", bs);
+    let else0_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, else0_target, scanning_var,
+        "compiled struct-cf: else-block must assign the scanning flag", bs);
+    let else0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0, "value", 0, bs);
+    try cf_require_bool(ir_bytes, function_name, else0_value, "false",
+        "compiled struct-cf: else-block must set scanning to false", bs);
+
+    // Final 'return;' must be a void return (its value child is the Empty node).
+    let s2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 2, bs);
+    let s2_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s2, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, s2_value, "Empty",
+        "compiled struct-cf: helper must end with a bare 'return;'", bs);
 
     // ---- Emit the define ----
     try cf_w(out, "define ");

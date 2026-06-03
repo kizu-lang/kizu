@@ -73,6 +73,46 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertFormatClosureSeeds(t, irEmission, backendEmission)
 	assertFormatClosureExcludesHandPath(t, irEmission, backendEmission)
 	assertParseFormatAllocNotExtended(t, parseLLVM)
+	assertImportSortShapeValidated(t)
+}
+
+// importSortShapeValidationErrors pins the explicit shape-validation diagnostics that the
+// structured-control-flow lowering raises when a near-miss helper drifts from the
+// scan-shift insertion sort skeleton. compiled_struct_cf reads only some identifiers off
+// the AST and then emits a fixed basic-block / phi shape, so it must reject any helper
+// whose operators, operands, swap indices, branch assignments, increment or return shape
+// differ -- never silently mis-lower a near-miss. Pinning the strings keeps the
+// per-operand validation from being quietly weakened back to name-only checks.
+var importSortShapeValidationErrors = []string{
+	"compiled struct-cf: outer loop condition must be '<counter> < <array>.len()'",
+	"compiled struct-cf: outer loop must compare the counter on the left",
+	"compiled struct-cf: cursor must be seeded from the outer counter",
+	"compiled struct-cf: scanning flag must be seeded to true",
+	"compiled struct-cf: scan loop header must be '<scanning> and <cursor> > 0'",
+	"compiled struct-cf: scan loop header must guard '<cursor> > 0'",
+	"compiled struct-cf: left read must index '<cursor> - 1'",
+	"compiled struct-cf: right read must index the cursor",
+	"compiled struct-cf: low swap must write index '<cursor> - 1'",
+	"compiled struct-cf: low swap must store the right element",
+	"compiled struct-cf: high swap must write the cursor index",
+	"compiled struct-cf: high swap must store the left element",
+	"compiled struct-cf: cursor decrement must be '<cursor> - 1'",
+	"compiled struct-cf: else-block must set scanning to false",
+	"compiled struct-cf: outer increment must be '<counter> + 1'",
+	"compiled struct-cf: helper must end with a bare 'return;'",
+}
+
+// assertImportSortShapeValidated pins that the structured-control-flow lowering keeps its
+// explicit per-operand shape diagnostics, so a near-miss helper is rejected with an error
+// rather than silently lowered to the hard-coded insertion-sort skeleton.
+func assertImportSortShapeValidated(t *testing.T) {
+	t.Helper()
+	structCF := readSelfhostSrc(t, filepath.Join("backend", "compiled_struct_cf.kizu"))
+	for _, diagnostic := range importSortShapeValidationErrors {
+		if !strings.Contains(structCF, diagnostic) {
+			t.Errorf("compiled_struct_cf.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
 }
 
 // readSelfhostSrc reads a selfhost source file (relative to selfhost/src) for the gate.
