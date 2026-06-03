@@ -513,8 +513,13 @@ fn append_kizu_parser_closure_helper_body(
 // with general loop-carried-variable SSA + the Array<i64>.get/set/append mutation ABI), and the
 // sorted import output cluster append_import_decl / append_sorted_imports (the first members that
 // mutate a '&var std::string::String' accumulator, lowered through compiled_struct_cf with the
-// @kizu_rt_string_append_* ABI). The whole-formatter format_source and the indentation / comment
-// helpers stay on the hand-written parse_format_alloc path.
+// @kizu_rt_string_append_* ABI), the indentation emitter append_indent (the String-append counter
+// loop, also lowered through compiled_struct_cf with the @kizu_rt_string_append_bytes ABI), and the
+// two leaf byte classifiers of the comment-preservation cluster is_horizontal_space / is_line_break
+// (single-return short-circuit 'or' predicates over a u8, lowered through the generic
+// short-circuit-or-return path). The whole-formatter format_source, the comment-preservation driver
+// append_preserved_line_comments, and its remaining scalar helpers stay on the hand-written
+// parse_format_alloc path.
 fn append_format_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
@@ -634,6 +639,26 @@ fn append_format_function_facts(
     // compiled_struct_cf rather than the i64-induction While machinery. Its body BFS pulls in
     // append_import_decl (an already seeded member).
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "append_sorted_imports"));
+    // append_indent is the indentation emitter on the compiled path (issue 1165 / 1162): 'var
+    // index = 0; while index < depth { try out.append_bytes("    "); index = index + 1; } return;'.
+    // It mutates a '&var std::string::String' accumulator inside an i64 counter loop, appending the
+    // four-space indentation string literal through the @kizu_rt_string_append_bytes runtime ABI on
+    // each iteration. It lowers through compiled_struct_cf rather than the i64-induction While
+    // machinery. It is a BFS leaf: its only callee is the out.append_bytes runtime builtin, so it
+    // pulls in no new members.
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "append_indent"));
+    // is_horizontal_space and is_line_break are the two leaf byte classifiers of the comment-
+    // preservation cluster on the compiled path (issue 1165 / 1162): 'return byte == cast<u8>(<a>)
+    // or byte == cast<u8>(<b>);', a single-return short-circuit 'or' of two u8 equality tests over
+    // a u8 parameter. They lower through the generic short-circuit-or-return path. They are BFS
+    // leaves (their only callee is the cast intrinsic), so they pull in no new members. The
+    // remaining comment-preservation scalar helpers (after_line_break, line_end_excluding_break,
+    // line_end_including_break, line_comment_is_full_line, line_comment_has_blank_before,
+    // line_comment_has_blank_after) stay on the hand-written parse_format_alloc path: each needs a
+    // lowering capability not yet present (a 3-operand short-circuit 'and' if-condition, a call /
+    // prefix-not call in a while header, or nested while + 'continue').
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "is_horizontal_space"));
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "is_line_break"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);

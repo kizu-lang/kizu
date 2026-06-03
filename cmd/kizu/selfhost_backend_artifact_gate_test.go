@@ -1515,7 +1515,67 @@ func requiredLLVMFormatHelperFragments() []string {
 	fragments = append(fragments, requiredLLVMFormatSortFragments()...)
 	fragments = append(fragments, requiredLLVMFormatLeadingImportFragments()...)
 	fragments = append(fragments, requiredLLVMFormatImportDeclFragments()...)
-	return append(fragments, requiredLLVMFormatSortedImportsFragments()...)
+	fragments = append(fragments, requiredLLVMFormatSortedImportsFragments()...)
+	fragments = append(fragments, requiredLLVMFormatAppendIndentFragments()...)
+	return append(fragments, requiredLLVMFormatLineByteClassifierFragments()...)
+}
+
+// requiredLLVMFormatLineByteClassifierFragments locks the two leaf byte classifiers of the
+// selfhost::parser::format comment-preservation cluster compiled into stage2 (issue 1165 / 1162):
+// is_horizontal_space and is_line_break, each a 'return byte == cast<u8>(<a>) or byte ==
+// cast<u8>(<b>);' single-return short-circuit `or` predicate over a u8 parameter, lowered through
+// the generic short-circuit-or-return path (a u8 icmp, an early 'ret i1 true' on the left operand,
+// and the right operand's icmp returned directly). Their presence here pins that the catalog-driven
+// format closure keeps emitting them as real compiled functions over the i8 ABI.
+func requiredLLVMFormatLineByteClassifierFragments() []string {
+	return []string{
+		// is_horizontal_space: 'byte == 32 (space) or byte == 9 (tab)'. Pin the bool-returning
+		// define over the i8 byte parameter and the short-circuit-or lowering (left icmp, early
+		// 'ret i1 true', right icmp returned directly), so a regression in the u8 predicate ABI or
+		// the short-circuit-or shape is caught.
+		"define i1 @kizu_selfhost__parser_format_is_horizontal_space(",
+		"  i8 %byte",
+		"%t2 = icmp eq i8 %byte, 32",
+		"br i1 %t2, label %if0_then, label %if0_cont",
+		"%t5 = icmp eq i8 %byte, 9",
+		// is_line_break: 'byte == 10 (LF) or byte == 13 (CR)'. The '%t2 = icmp eq i8 %byte, 10'
+		// fragment is unique to this classifier (is_horizontal_space tests 32), so it pins the
+		// distinct byte immediates.
+		"define i1 @kizu_selfhost__parser_format_is_line_break(",
+		"%t2 = icmp eq i8 %byte, 10",
+		"%t5 = icmp eq i8 %byte, 13",
+	}
+}
+
+// requiredLLVMFormatAppendIndentFragments locks the selfhost::parser::format append_indent
+// structured-control-flow emitter compiled into stage2 through compiled_struct_cf (issue 1165 /
+// 1162): the indentation emitter that appends the four-space indentation string literal through
+// the @kizu_rt_string_append_bytes ABI on each iteration of an i64 depth counter loop. It shares
+// the (Let(Int), While, Return(Empty)) top-level shape with the import-cluster emitter, so it is
+// dispatched ahead of it and disambiguated by its two-statement append/increment scan body.
+func requiredLLVMFormatAppendIndentFragments() []string {
+	return []string{
+		// The void-returning define over the String accumulator (%kizu.owned) and the i64 depth
+		// counter, so a regression in the &var String param ABI is caught.
+		"define %kizu.error.void @kizu_selfhost__parser_format_append_indent(",
+		"  i64 %depth",
+		// Pin the four-space indentation literal emitted as a private module constant and
+		// materialized into a %kizu.slice.u8 operand for the @kizu_rt_string_append_bytes ABI, so a
+		// regression to a source-literal or fixed-slice form is caught.
+		"@.kizu.compiled.kizu_selfhost__parser_format_append_indent.s0 = " +
+			"private unnamed_addr constant [4 x i8] c\"    \"",
+		"%ind_slice = insertvalue %kizu.slice.u8 %ind_base, i64 4, 1",
+		"%ind_call = call %kizu.error.void @kizu_rt_string_append_bytes(" +
+			"%kizu.owned %out, %kizu.slice.u8 %ind_slice)",
+		// Pin the i64 counter loop-head phi seeded from the literal 0 on the entry edge and the
+		// scan condition comparing the counter against the i64 depth parameter directly (no length
+		// call), so a regression to a literal bound or a length-call header is caught.
+		"%index = phi i64 [ 0, %entry ], [ %index_next, %scan_latch ]",
+		"%scan_cond = icmp slt i64 %index, %depth",
+		// Pin the constant-step latch advance and the loop-exit void success wrap.
+		"%index_next = add i64 %index, 1",
+		"%ret_ok = insertvalue %kizu.error.void zeroinitializer, i1 true, 0",
+	}
 }
 
 // requiredLLVMFormatSortedImportsFragments locks the selfhost::parser::format
