@@ -1517,7 +1517,53 @@ func requiredLLVMFormatHelperFragments() []string {
 	fragments = append(fragments, requiredLLVMFormatImportDeclFragments()...)
 	fragments = append(fragments, requiredLLVMFormatSortedImportsFragments()...)
 	fragments = append(fragments, requiredLLVMFormatAppendIndentFragments()...)
-	return append(fragments, requiredLLVMFormatLineByteClassifierFragments()...)
+	fragments = append(fragments, requiredLLVMFormatLineByteClassifierFragments()...)
+	return append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
+}
+
+// requiredLLVMFormatAfterLineBreakFragments locks the selfhost::parser::format after_line_break
+// scalar helper compiled into stage2 (issue 1165 / 1162): 'let length = std::mem::len(source); if
+// source[index] == cast<u8>(13) and index + 1 < length and source[index + 1] == cast<u8>(10) {
+// return index + 2; } return index + 1;'. It is the first comment-preservation helper whose
+// if-condition is a three-operand short-circuit 'and' chain, lowered through the generic
+// multi-statement path's short-circuit if-chain (cond_insts + cond_rhs_insts + cond_extra_operands)
+// rather than an eager 'and i1'. The fragments pin that each operand evaluates in its own guarded
+// block so the trailing 'source[index + 1]' byte load only runs once both guards hold, never an
+// out-of-bounds load past the slice.
+func requiredLLVMFormatAfterLineBreakFragments() []string {
+	return []string{
+		// The i64-returning define over the source slice and the i64 index, so a regression in the
+		// []u8 / i64 scalar ABI is caught.
+		"define i64 @kizu_selfhost__parser_format_after_line_break(",
+		"  %kizu.slice.u8 %source",
+		"  i64 %index",
+		// The length local read through the slice-len helper (std::mem::len(source)).
+		"%length = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %source)",
+		// Operand 0 in the unguarded entry block: the 'source[index]' byte load compared against
+		// the CR immediate 13, branching into the first guarded block ifN_rhs on success.
+		"%t3 = icmp eq i8 %t1, 13",
+		"br i1 %t3, label %if1_rhs, label %if1_cont",
+		// Operand 1 in the first guarded block ifN_rhs: the 'index + 1 < length' bounds guard,
+		// branching into the second guarded block ifN_rhs2 rather than straight to ifN_then, which
+		// pins that the chain carries a third operand.
+		"if1_rhs:",
+		"%t8 = icmp slt i64 %t6, %length",
+		"br i1 %t8, label %if1_rhs2, label %if1_cont",
+		// Operand 2 in the second guarded block ifN_rhs2: the guarded 'source[index + 1]' byte load
+		// compared against the LF immediate 10. It only executes once both earlier operands hold, so
+		// the trailing byte load never runs past the slice.
+		"if1_rhs2:",
+		"%t14 = icmp eq i8 %t12, 10",
+		"br i1 %t14, label %if1_then, label %if1_cont",
+		// The then block returns 'index + 2' and the fall-through cont block returns 'index + 1', as
+		// plain i64 returns (no error-union wrap on this scalar helper).
+		"if1_then:",
+		"%t17 = add i64 %index, 2",
+		"ret i64 %t17",
+		"if1_cont:",
+		"%t20 = add i64 %index, 1",
+		"ret i64 %t20",
+	}
 }
 
 // requiredLLVMFormatLineByteClassifierFragments locks the two leaf byte classifiers of the

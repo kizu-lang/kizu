@@ -651,14 +651,24 @@ fn append_format_function_facts(
     // preservation cluster on the compiled path (issue 1165 / 1162): 'return byte == cast<u8>(<a>)
     // or byte == cast<u8>(<b>);', a single-return short-circuit 'or' of two u8 equality tests over
     // a u8 parameter. They lower through the generic short-circuit-or-return path. They are BFS
-    // leaves (their only callee is the cast intrinsic), so they pull in no new members. The
-    // remaining comment-preservation scalar helpers (after_line_break, line_end_excluding_break,
-    // line_end_including_break, line_comment_is_full_line, line_comment_has_blank_before,
-    // line_comment_has_blank_after) stay on the hand-written parse_format_alloc path: each needs a
-    // lowering capability not yet present (a 3-operand short-circuit 'and' if-condition, a call /
-    // prefix-not call in a while header, or nested while + 'continue').
+    // leaves (their only callee is the cast intrinsic), so they pull in no new members.
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "is_horizontal_space"));
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "is_line_break"));
+    // after_line_break is the first comment-preservation scalar helper to move onto the compiled
+    // path (issue 1165 / 1162): 'let length = std::mem::len(source); if source[index] ==
+    // cast<u8>(13) and index + 1 < length and source[index + 1] == cast<u8>(10) { return index +
+    // 2; } return index + 1;'. Its if-condition is a three-operand short-circuit 'and' chain whose
+    // trailing 'source[index + 1]' byte load is guarded by the 'index + 1 < length' bounds check,
+    // so it lowers through the generic multi-statement path's short-circuit if-chain (the first
+    // operand fills the unguarded entry block, the rest each evaluate in their own guarded block)
+    // instead of an eager 'and i1' that would load past the slice. It is a BFS leaf: its only
+    // callees are std::mem::len and the cast intrinsic, so it pulls in no new members. The
+    // remaining comment-preservation scalar helpers (line_end_excluding_break,
+    // line_end_including_break, line_comment_is_full_line, line_comment_has_blank_before,
+    // line_comment_has_blank_after) stay on the hand-written parse_format_alloc path: each needs a
+    // lowering capability not yet present (a call / prefix-not call in a while header, a
+    // loop-carried 'index = previous' copy latch, or nested while + 'continue').
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "after_line_break"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);

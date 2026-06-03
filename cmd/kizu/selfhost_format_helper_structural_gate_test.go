@@ -66,6 +66,7 @@ var formatCompiledHelperSeeds = []string{
 	"append_indent",
 	"is_horizontal_space",
 	"is_line_break",
+	"after_line_break",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the

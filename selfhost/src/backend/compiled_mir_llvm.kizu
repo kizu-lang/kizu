@@ -4243,6 +4243,13 @@ fn append_if_globals(
 ) -> !void {
     try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
     try append_expr_globals(out, llvm_symbol, &stmt.cond_rhs_insts);
+    let extra_operands = &stmt.cond_extra_operands;
+    var extra_index = 0;
+    while extra_index < extra_operands.len() {
+        let operand = try extra_operands.at(extra_index);
+        try append_expr_globals(out, llvm_symbol, &operand.insts);
+        extra_index = extra_index + 1;
+    }
     try compiled_mir_llvm_call::append_call_string_globals(
         out, llvm_symbol, &stmt.then_call_args
     );
@@ -4606,9 +4613,18 @@ fn append_multi_let_struct(
 }
 // then_temp_base returns the first temp id available to the then-block, i.e.
 // one past the last condition temp. For a short-circuit if the rhs temps follow
-// the lhs temps, so the base is past the rhs result.
-fn then_temp_base(stmt: &compiled_mir::MirIfStmt) -> i64 {
+// the lhs temps, so the base is past the rhs result; for an 'and' chain carrying
+// extra operands the base is past the last extra operand's result, matching the
+// lowering's then_base (last_cond_result + 1) so a ReturnCall then-block never
+// reuses an operand temp id.
+fn then_temp_base(stmt: &compiled_mir::MirIfStmt) -> !i64 {
     if stmt.cond_short_circuit != 0 {
+        let extra_operands = &stmt.cond_extra_operands;
+        let extra_len = extra_operands.len();
+        if extra_len > 0 {
+            let last = try extra_operands.at(extra_len - 1);
+            return last.result_id + 1;
+        }
         return stmt.cond_rhs_result_id + 1;
     }
     return stmt.cond_result_id + 1;
@@ -4644,7 +4660,7 @@ fn append_multi_if(
             try out.append_bytes("  ret ");
             try out.append_bytes(stmt.llvm_type);
             try out.append_bytes(" %t");
-            try std::fmt::append_i64(out, then_temp_base(stmt));
+            try std::fmt::append_i64(out, try then_temp_base(stmt));
             try out.append_byte(cast<u8>(10));
         } else {
             if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
@@ -5026,9 +5042,12 @@ fn append_while_latch_try_call(
     }
     return;
 }
-// append_short_circuit_branches renders the guard branches for lhs and rhs
-// and lhs or rhs so the rhs is only evaluated when the lhs does not already
-// decide the result. The caller has already emitted the lhs (cond_insts).
+// append_short_circuit_branches renders the guard branches for a short-circuit
+// condition so each operand is only evaluated when every earlier operand has not
+// already decided the result. The caller has already emitted the first operand
+// (cond_insts). A two-operand 'and' / 'or' keeps the original ifN_rhs -> ifN_then /
+// ifN_cont layout; an 'and' chain with further operands threads each through its own
+// ifN_rhs{k} guarded block before reaching ifN_then (issue 1165 / 1162).
 fn append_short_circuit_branches(
     out: &var std::string::String,
     llvm_symbol: []u8,
@@ -5057,12 +5076,57 @@ fn append_short_circuit_branches(
     try append_expr_insts(out, llvm_symbol, &stmt.cond_rhs_insts);
     try out.append_bytes("  br i1 ");
     try append_expr_value_ref(out, &stmt.cond_rhs_insts, stmt.cond_rhs_result_id);
-    try out.append_bytes(", label %if");
-    try std::fmt::append_i64(out, stmt.if_index);
-    try out.append_bytes("_then, label %if");
-    try std::fmt::append_i64(out, stmt.if_index);
-    try out.append_bytes("_cont");
+    // The first guarded block flows to the first extra operand block when the 'and'
+    // chain carries more than two operands, otherwise straight to the then block. An
+    // 'or' header never carries extra operands.
+    if stmt.cond_short_circuit == 1 and stmt.cond_extra_operands.len() > 0 {
+        try out.append_bytes(", label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_rhs2, label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_cont");
+    } else {
+        try out.append_bytes(", label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_then, label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_cont");
+    }
     try out.append_byte(cast<u8>(10));
+    // Each extra operand j (0-based) lives in ifN_rhs{j+2}; its true edge flows to the
+    // next operand's block ifN_rhs{j+3}, or to ifN_then for the last operand. A false
+    // edge always short-circuits to ifN_cont.
+    let extra_operands = &stmt.cond_extra_operands;
+    var extra_index = 0;
+    while extra_index < extra_operands.len() {
+        let operand = try extra_operands.at(extra_index);
+        try out.append_bytes("if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_rhs");
+        try std::fmt::append_i64(out, extra_index + 2);
+        try out.append_bytes(":");
+        try out.append_byte(cast<u8>(10));
+        try append_expr_insts(out, llvm_symbol, &operand.insts);
+        try out.append_bytes("  br i1 ");
+        try append_expr_value_ref(out, &operand.insts, operand.result_id);
+        if extra_index + 1 < extra_operands.len() {
+            try out.append_bytes(", label %if");
+            try std::fmt::append_i64(out, stmt.if_index);
+            try out.append_bytes("_rhs");
+            try std::fmt::append_i64(out, extra_index + 3);
+            try out.append_bytes(", label %if");
+            try std::fmt::append_i64(out, stmt.if_index);
+            try out.append_bytes("_cont");
+        } else {
+            try out.append_bytes(", label %if");
+            try std::fmt::append_i64(out, stmt.if_index);
+            try out.append_bytes("_then, label %if");
+            try std::fmt::append_i64(out, stmt.if_index);
+            try out.append_bytes("_cont");
+        }
+        try out.append_byte(cast<u8>(10));
+        extra_index = extra_index + 1;
+    }
     return;
 }
 fn append_multi_then_call(
@@ -5075,7 +5139,7 @@ fn append_multi_then_call(
         out, llvm_symbol, &stmt.then_call_args, local_prefix
     );
     try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, then_temp_base(stmt));
+    try std::fmt::append_i64(out, try then_temp_base(stmt));
     try out.append_bytes(" = call ");
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
