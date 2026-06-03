@@ -4015,6 +4015,99 @@ fn short_circuit_kind(
     }
     return 0;
 }
+// while_and_condition_eager_safe reports whether every operand of a short-circuit 'and'
+// while header is side-effect-free, so an eager 'and i1' over the comparison results is
+// observably identical to short-circuit evaluation. The condition may nest 'and' operands,
+// each of which is a bool local/literal, a field read, a comparison Binary over
+// side-effect-free values, or a pure '<receiver>.len()' call. An 'or' operand or any
+// operand that could trap when the left side is false is rejected (issue 1165 / 1162).
+fn while_and_condition_eager_safe(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    bs: i64
+) -> !bool {
+    let kind = try short_circuit_kind(ir_bytes, function_name, node, bs);
+    if kind == 2 {
+        return false;
+    }
+    if kind == 1 {
+        let left = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "left", 0, bs
+        );
+        let right = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "right", 0, bs
+        );
+        if !(try while_and_condition_eager_safe(ir_bytes, function_name, left, bs)) {
+            return false;
+        }
+        return try while_and_condition_eager_safe(ir_bytes, function_name, right, bs);
+    }
+    return try while_condition_operand_eager_safe(ir_bytes, function_name, node, bs);
+}
+// while_condition_operand_eager_safe reports whether one leaf operand of an 'and' while
+// header is side-effect-free: a bool local/literal or field read used directly, or a
+// comparison Binary whose own operands are each a side-effect-free value.
+fn while_condition_operand_eager_safe(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    bs: i64
+) -> !bool {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
+    if std::mem::equal_bytes(kind, "Binary") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-binary ", function_name, node, bs
+        );
+        if !condition_op_is_comparison(op) {
+            return false;
+        }
+        let left = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "left", 0, bs
+        );
+        let right = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "right", 0, bs
+        );
+        if !(try while_condition_value_eager_safe(ir_bytes, function_name, left, bs)) {
+            return false;
+        }
+        return try while_condition_value_eager_safe(ir_bytes, function_name, right, bs);
+    }
+    return try while_condition_value_eager_safe(ir_bytes, function_name, node, bs);
+}
+// while_condition_value_eager_safe reports whether a comparison operand value is
+// side-effect-free: a local/literal/field read, or a pure '<receiver>.len()' call. A
+// guarded array index load, a try-call, or any other call could trap and is rejected.
+fn while_condition_value_eager_safe(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    bs: i64
+) -> !bool {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
+    if std::mem::equal_bytes(kind, "Var") or std::mem::equal_bytes(kind, "Int") or
+        std::mem::equal_bytes(kind, "Bool") or std::mem::equal_bytes(kind, "FieldExpr") {
+        return true;
+    }
+    if std::mem::equal_bytes(kind, "Call") {
+        if !(try callee_is_field_expr(ir_bytes, function_name, node, bs)) {
+            return false;
+        }
+        let callee_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "callee", 0, bs
+        );
+        let method_name = try ir_contract::body_field_expr_name_from(
+            ir_bytes, function_name, callee_node, "field", bs
+        );
+        return std::mem::equal_bytes(method_name, "len");
+    }
+    return false;
+}
+fn condition_op_is_comparison(op: []u8) -> bool {
+    return std::mem::equal_bytes(op, "eq") or std::mem::equal_bytes(op, "not-eq") or
+        std::mem::equal_bytes(op, "lt") or std::mem::equal_bytes(op, "lte") or
+        std::mem::equal_bytes(op, "gt") or std::mem::equal_bytes(op, "gte");
+}
 fn lower_multi_if_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4434,8 +4527,21 @@ fn lower_multi_while_statement(
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
     );
-    if (try short_circuit_kind(ir_bytes, function_name, cond_node, bs)) != 0 {
-        return error("compiled mir: while condition must be a single comparison");
+    // A while header is either a single comparison or a short-circuit 'and' chain of
+    // comparisons whose operands are side-effect-free (bool/int locals and literals, field
+    // reads, and pure '<receiver>.len()' calls). With pure operands an eager 'and i1' over
+    // the comparison results is observably identical to short-circuit evaluation, so such a
+    // header lowers through the same lower_expr_into path the single comparison uses. An 'or'
+    // header, or an 'and' whose operand could trap when the left side is false (a guarded
+    // array index load or a try-call), is rejected so the restricted loop support never
+    // silently reorders a guarded read (issue 1165 / 1162).
+    let cond_short_circuit = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_short_circuit == 2 {
+        return error("compiled mir: while condition or is not supported");
+    }
+    if cond_short_circuit == 1 and
+        !(try while_and_condition_eager_safe(ir_bytes, function_name, cond_node, bs)) {
+        return error("compiled mir: while and condition operands must be side-effect-free");
     }
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "body", 0, bs
