@@ -103,6 +103,7 @@ var sortedImportsShapeValidationErrors = []string{
 	"compiled struct-cf: single-import call must pass the import index last",
 	"compiled struct-cf: scan body must append the newline byte",
 	"compiled struct-cf: newline append must be a 'cast<u8>(<int>)'",
+	"compiled struct-cf: newline append must cast to u8",
 	"compiled struct-cf: counter increment must be '<index> + 1'",
 }
 
