@@ -4803,6 +4803,21 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_preheader:");
     try out.append_byte(cast<u8>(10));
+    // A base-plus-offset counter ('var left_index = left + 1') computes its preheader seed
+    // here so the loop-head phi can reference %<var>_init on the preheader edge (issue 1165
+    // / 1162). A literal or plain-copy seed needs no preheader instruction.
+    try append_while_counter_preheader_init(
+        out, stmt.induction_var, stmt.induction_init_var, stmt.induction_init_offset
+    );
+    let secondary = &stmt.secondary_inductions;
+    var secondary_index = 0;
+    while secondary_index < secondary.len() {
+        let entry = try secondary.at(secondary_index);
+        try append_while_counter_preheader_init(
+            out, entry.var_name, entry.init_var, entry.init_offset
+        );
+        secondary_index = secondary_index + 1;
+    }
     try out.append_bytes("  br label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_head");
@@ -4811,28 +4826,20 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_head:");
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %");
-    try out.append_bytes(stmt.induction_var);
-    try out.append_bytes(" = phi i64 [ ");
-    if std::mem::len(stmt.induction_init_var) > 0 {
-        // 'var index = import_index;' seeds the phi from the parameter/local SSA value
-        // (a copy-propagated %<name>) on the preheader edge instead of a literal.
-        try out.append_bytes("%");
-        try out.append_bytes(stmt.induction_init_var);
-    } else {
-        try std::fmt::append_i64(out, stmt.induction_init);
+    // The primary loop-head phi, then one phi per secondary lockstep counter. Each phi is
+    // named after its variable so plain Var reads in the condition and body resolve to it.
+    try append_while_counter_phi(
+        out, stmt, stmt.induction_var, stmt.induction_init_var,
+        stmt.induction_init_offset, stmt.induction_init
+    );
+    var phi_index = 0;
+    while phi_index < secondary.len() {
+        let entry = try secondary.at(phi_index);
+        try append_while_counter_phi(
+            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal
+        );
+        phi_index = phi_index + 1;
     }
-    try out.append_bytes(", %loop");
-    try std::fmt::append_i64(out, stmt.loop_index);
-    try out.append_bytes("_preheader ], [ %");
-    try out.append_bytes(stmt.induction_var);
-    try out.append_bytes("_next, ");
-    // The phi's latch operand comes from the block that actually branches back to the head.
-    // A constant-step latch branches from loopN_latch; a try-call latch branches from the
-    // try-call's continuation block (tryK_cont), the real predecessor (issue 1165).
-    try append_while_latch_pred_label(out, stmt);
-    try out.append_bytes(" ]");
-    try out.append_byte(cast<u8>(10));
     try append_expr_insts(out, function.name, &stmt.cond_insts);
     try out.append_bytes("  br i1 ");
     try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
@@ -4885,6 +4892,21 @@ fn append_multi_while(
         try std::fmt::append_i64(out, stmt.induction_step);
         try out.append_byte(cast<u8>(10));
     }
+    // Each secondary lockstep counter advances by its own constant step in the same latch
+    // block; a try-call latch never carries secondaries, so these always follow the primary
+    // constant-step add (issue 1165 / 1162).
+    var latch_index = 0;
+    while latch_index < secondary.len() {
+        let entry = try secondary.at(latch_index);
+        try out.append_bytes("  %");
+        try out.append_bytes(entry.var_name);
+        try out.append_bytes("_next = add i64 %");
+        try out.append_bytes(entry.var_name);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, entry.step);
+        try out.append_byte(cast<u8>(10));
+        latch_index = latch_index + 1;
+    }
     try out.append_bytes("  br label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_head");
@@ -4892,6 +4914,66 @@ fn append_multi_while(
     try out.append_bytes("loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_exit:");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+// append_while_counter_preheader_init emits the preheader 'add' that materializes a
+// base-plus-offset counter seed (%<var>_init = add i64 %<init_var>, offset). A literal seed
+// or a plain parameter/local copy (offset 0) needs no instruction (issue 1165 / 1162).
+fn append_while_counter_preheader_init(
+    out: &var std::string::String,
+    counter_var: []u8,
+    init_var: []u8,
+    init_offset: i64
+) -> !void {
+    if std::mem::len(init_var) == 0 {
+        return;
+    }
+    if init_offset == 0 {
+        return;
+    }
+    try out.append_bytes("  %");
+    try out.append_bytes(counter_var);
+    try out.append_bytes("_init = add i64 %");
+    try out.append_bytes(init_var);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, init_offset);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+// append_while_counter_phi emits one loop-head phi for an i64 counter: '%<var> = phi i64
+// [ <seed>, %loopN_preheader ], [ %<var>_next, <latch-pred> ]'. The seed is %<var>_init for a
+// base-plus-offset init, %<init_var> for a plain copy, or the integer literal otherwise. The
+// latch-edge predecessor is shared with the primary counter (issue 1165 / 1162).
+fn append_while_counter_phi(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt,
+    counter_var: []u8,
+    init_var: []u8,
+    init_offset: i64,
+    init_literal: i64
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(counter_var);
+    try out.append_bytes(" = phi i64 [ ");
+    if std::mem::len(init_var) > 0 {
+        try out.append_bytes("%");
+        if init_offset == 0 {
+            try out.append_bytes(init_var);
+        } else {
+            try out.append_bytes(counter_var);
+            try out.append_bytes("_init");
+        }
+    } else {
+        try std::fmt::append_i64(out, init_literal);
+    }
+    try out.append_bytes(", %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_preheader ], [ %");
+    try out.append_bytes(counter_var);
+    try out.append_bytes("_next, ");
+    try append_while_latch_pred_label(out, stmt);
+    try out.append_bytes(" ]");
     try out.append_byte(cast<u8>(10));
     return;
 }

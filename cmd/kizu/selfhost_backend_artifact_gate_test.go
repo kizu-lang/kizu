@@ -1469,7 +1469,7 @@ func requiredLLVMTokenizerFragments() []string {
 // here pins that the catalog-driven format closure keeps emitting them as real compiled
 // functions.
 func requiredLLVMFormatHelperFragments() []string {
-	return []string{
+	fragments := []string{
 		"define i1 @kizu_selfhost__parser_format_is_import_token(",
 		"define i1 @kizu_selfhost__parser_format_is_ident_token(",
 		"define i1 @kizu_selfhost__parser_format_is_double_colon_token(",
@@ -1510,6 +1510,54 @@ func requiredLLVMFormatHelperFragments() []string {
 		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64
 		// wraps into %kizu.error.i64 rather than returning a raw i64 as the error union.
 		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
+	}
+	return append(fragments, requiredLLVMFormatImportSortFragments()...)
+}
+
+// requiredLLVMFormatImportSortFragments locks the selfhost::parser::format import-sort
+// comparator cluster compiled into stage2 (issue 1165 / 1162): compare_bytes (the i64 byte
+// comparison whose loop header is a short-circuit `and` of two comparisons over pure length
+// locals) and import_path_less (the first multi-counter helper: two lockstep token cursors
+// with base-plus-offset inits advanced under a short-circuit `and` header, with a nested-call
+// compare_bytes let and a prefix-not call return).
+func requiredLLVMFormatImportSortFragments() []string {
+	return []string{
+		// compare_bytes is the first import-sort helper on the compiled path: a non-error
+		// i64 byte comparison whose loop header is a short-circuit `and` of two comparisons
+		// over pure length locals, with []u8 index loads in the body guards (issue 1165 /
+		// 1162).
+		"define i64 @kizu_selfhost__parser_format_compare_bytes(",
+		// Pin that std::mem::len(left) / std::mem::len(right) lower to the slice_len builtin
+		// bound to the named length locals the loop header reads.
+		"%left_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %left)",
+		"%right_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %right)",
+		// Pin the short-circuit `and` while header: the two `index < *_len` comparisons lower
+		// to an eager `and i1` over the comparison results (their operands are side-effect
+		// free), so a regression that rejects an `and` header or mis-lowers it is caught.
+		"%t6 = and i1 %t2, %t5",
+		// import_path_less is the first multi-counter import-sort helper on the compiled path:
+		// two lockstep token cursors with base-plus-offset inits advanced under a short-circuit
+		// `and` header, with a nested-call compare_bytes let and a prefix-not call return
+		// (issue 1165 / 1162).
+		"define %kizu.error.bool @kizu_selfhost__parser_format_import_path_less(",
+		// Pin the base-plus-offset preheader seeds ('var left_index = left + 1; var right_index
+		// = right + 1;'): each lockstep counter materializes %<var>_init in the preheader so the
+		// loop-head phi seeds from it instead of a literal or a plain copy.
+		"%right_index_init = add i64 %right, 1",
+		"%left_index_init = add i64 %left, 1",
+		// Pin the two lockstep loop-head phis seeded from the preheader inits and advanced from
+		// the shared latch, so a regression to a single induction counter is caught.
+		"%right_index = phi i64 [ %right_index_init, %loop2_preheader ], " +
+			"[ %right_index_next, %loop2_latch ]",
+		"%left_index = phi i64 [ %left_index_init, %loop2_preheader ], " +
+			"[ %left_index_next, %loop2_latch ]",
+		// Pin the two-counter constant-step latch: both cursors advance by one in the same
+		// latch block.
+		"%right_index_next = add i64 %right_index, 1",
+		"%left_index_next = add i64 %left_index, 1",
+		// Pin the prefix-not call return ('return !is_semicolon_token(right_token);'): the bool
+		// call result is negated with 'xor i1 %call, true' before the error-union wrap.
+		"%t11 = xor i1 %t10, true",
 	}
 }
 
