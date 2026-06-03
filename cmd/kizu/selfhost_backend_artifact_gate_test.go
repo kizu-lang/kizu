@@ -1511,7 +1511,8 @@ func requiredLLVMFormatHelperFragments() []string {
 		// wraps into %kizu.error.i64 rather than returning a raw i64 as the error union.
 		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
 	}
-	return append(fragments, requiredLLVMFormatImportSortFragments()...)
+	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
+	return append(fragments, requiredLLVMFormatSortFragments()...)
 }
 
 // requiredLLVMFormatImportSortFragments locks the selfhost::parser::format import-sort
@@ -1558,6 +1559,56 @@ func requiredLLVMFormatImportSortFragments() []string {
 		// Pin the prefix-not call return ('return !is_semicolon_token(right_token);'): the bool
 		// call result is negated with 'xor i1 %call, true' before the error-union wrap.
 		"%t11 = xor i1 %t10, true",
+	}
+}
+
+// requiredLLVMFormatSortFragments locks the selfhost::parser::format sort_import_indices
+// structured-control-flow helper compiled into stage2 through compiled_struct_cf (issue
+// 1165 / 1162): the scan-shift insertion sort with an outer counter loop, a nested scan loop
+// carrying a cursor and a boolean flag through loop-head phis, an if/else that re-merges into
+// the loop, a try-call import_path_less condition, and Array<i64>.get/set element reads/writes
+// through the element-size-generic @kizu_rt_array_at / @kizu_rt_array_set / @kizu_rt_array_len
+// ABI on its '&var std::array::Array<i64>' parameter.
+func requiredLLVMFormatSortFragments() []string {
+	return []string{
+		// The void-returning define over the source slice, the tokens handle, and the mutable
+		// indices handle (all %kizu.owned), so a regression in the &var Array<i64> param ABI is
+		// caught.
+		"define %kizu.error.void @kizu_selfhost__parser_format_sort_import_indices(",
+		"  %kizu.owned %indices",
+		// Pin the outer counter loop head reading the array length through the generic runtime
+		// builtin and the nested scan loop's two loop-carried phis (a cursor i64 and a scanning
+		// i1), so a regression to flat single-induction lowering is caught.
+		"%outer_len = call i64 @kizu_rt_array_len(%kizu.owned %indices)",
+		"%cursor = phi i64 [ %index, %outer_body ], [ %cursor_next, %inner_latch ]",
+		"%scanning = phi i1 [ true, %outer_body ], [ %scanning_next, %inner_latch ]",
+		// Pin the short-circuit 'scanning and cursor > 0' inner header.
+		"%inner_cond = and i1 %scanning, %cursor_gt0",
+		// Pin the Array<i64>.get reads against the checked element accessor at cursor - 1 and
+		// cursor, with try-propagation of a failure as this function's own error union.
+		"%left_view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %indices, i64 %cursor_m1)",
+		"%right_view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %indices, i64 %cursor)",
+		"%left = load i64, ptr %left_ptr",
+		// Pin the try-call import_path_less condition (the comparator error union is called with
+		// the swapped right/left indices) and its error propagation + boolean branch.
+		"%cmp_eu = call %kizu.error.bool @kizu_selfhost__parser_format_import_path_less(" +
+			"%kizu.slice.u8 %source, %kizu.owned %tokens, i64 %right, i64 %left)",
+		"br i1 %cmp_ok, label %cmp_cont, label %cmp_fail",
+		"br i1 %cmp_val, label %if_then, label %if_else",
+		// Pin the Array<i64>.set writes against @kizu_rt_array_set with the element marshalled
+		// through an entry-block slot and the element size derived from the i64 element type
+		// (no hidden i64 special case), so a regression in the write ABI is caught.
+		"%set0_eslice = insertvalue %kizu.slice.u8 %set0_es0, " +
+			"i64 ptrtoint (ptr getelementptr (i64, ptr null, i32 1) to i64), 1",
+		"%set0_call = call %kizu.error.void @kizu_rt_array_set(%kizu.owned %indices, " +
+			"i64 %cursor_m1, %kizu.slice.u8 %set0_eslice)",
+		"%set1_call = call %kizu.error.void @kizu_rt_array_set(%kizu.owned %indices, " +
+			"i64 %cursor, %kizu.slice.u8 %set1_eslice)",
+		// Pin the if/else fall-through merge phis at the inner latch: the cursor decrements on
+		// the swap path and is unchanged on the else path; the scanning flag is unchanged on the
+		// swap path and stops (false) on the else path.
+		"%cursor_next = phi i64 [ %cursor_dec, %set1_cont ], [ %cursor, %if_else ]",
+		"%scanning_next = phi i1 [ %scanning, %set1_cont ], [ false, %if_else ]",
 	}
 }
 

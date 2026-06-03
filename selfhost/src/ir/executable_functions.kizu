@@ -581,6 +581,20 @@ fn append_format_function_facts(
     // BFS pulls in is_semicolon_token, token_text, and compare_bytes (all already seeded
     // members); tokens.len()/tokens.get(...) are inline Array<Token> read builtins.
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "import_path_less"));
+    // sort_import_indices is the first structured-control-flow import-sort helper on the
+    // compiled path (issue 1165 / 1162): 'var index = 1; while index < indices.len() { var
+    // cursor = index; var scanning = true; while scanning and cursor > 0 { let left = try
+    // indices.get(cursor - 1); let right = try indices.get(cursor); if try
+    // import_path_less(source, tokens, right, left) { try indices.set(cursor - 1, right); try
+    // indices.set(cursor, left); cursor = cursor - 1; } else { scanning = false; } } index =
+    // index + 1; } return;'. It is the scan-shift insertion sort: an outer counter loop, a
+    // nested scan loop carrying a cursor and a boolean flag through loop-head phis, an
+    // if/else that re-merges into the loop, a try-call import_path_less condition, and
+    // Array<i64>.get/set element reads/writes through the element-size-generic
+    // @kizu_rt_array_at / @kizu_rt_array_set ABI on the '&var std::array::Array<i64>' param.
+    // It lowers through compiled_struct_cf rather than the i64-induction While machinery. Its
+    // body BFS pulls in import_path_less (already a seeded member).
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "sort_import_indices"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);
@@ -1804,7 +1818,8 @@ fn collect_catalog_closure_field_callee(
 ) -> !void {
     if !namespace {
         let method = ast_node_text(text, ast, name_node);
-        if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "get") {
+        if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "get") or
+            std::mem::equal_bytes(method, "set") {
             return;
         }
         return error(unsupported_call_form_error);

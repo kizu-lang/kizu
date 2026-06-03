@@ -26,8 +26,14 @@ const parseFormatAllocMaxLines = 197
 // and import_path_less (the first multi-counter helper: two lockstep token cursors with
 // base-plus-offset inits advanced by a trailing run of constant-step increments under a
 // short-circuit `and` header, with a nested-call-argument compare_bytes let and a prefix-not
-// call return). They are the first selfhost::parser::format members on the compiled path and
-// must keep being emitted from both the IR fact catalog and the backend BFS.
+// call return), and sort_import_indices (the first structured-control-flow helper: the
+// scan-shift insertion sort with an outer counter loop, a nested scan loop carrying a cursor
+// and a boolean flag through loop-head phis, an if/else that re-merges into the loop, a
+// try-call import_path_less condition, and Array<i64>.get/set element reads/writes through the
+// element-size-generic @kizu_rt_array_at / @kizu_rt_array_set ABI on its '&var
+// std::array::Array<i64>' parameter, lowered through compiled_struct_cf). They are the first
+// selfhost::parser::format members on the compiled path and must keep being emitted from both
+// the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
 	"is_import_token",
 	"is_ident_token",
@@ -39,6 +45,7 @@ var formatCompiledHelperSeeds = []string{
 	"index_after_leading_imports",
 	"compare_bytes",
 	"import_path_less",
+	"sort_import_indices",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
@@ -48,7 +55,6 @@ var formatCompiledHelperSeeds = []string{
 var formatHandPathOnlyHelpers = []string{
 	"format_source",
 	"leading_import_indices",
-	"sort_import_indices",
 	"append_sorted_imports",
 	"append_indent",
 	"append_preserved_line_comments",
