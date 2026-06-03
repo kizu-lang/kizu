@@ -1510,6 +1510,19 @@ func requiredLLVMFormatHelperFragments() []string {
 		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64
 		// wraps into %kizu.error.i64 rather than returning a raw i64 as the error union.
 		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
+		// compare_bytes is the first import-sort helper on the compiled path: a non-error
+		// i64 byte comparison whose loop header is a short-circuit `and` of two comparisons
+		// over pure length locals, with []u8 index loads in the body guards (issue 1165 /
+		// 1162).
+		"define i64 @kizu_selfhost__parser_format_compare_bytes(",
+		// Pin that std::mem::len(left) / std::mem::len(right) lower to the slice_len builtin
+		// bound to the named length locals the loop header reads.
+		"%left_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %left)",
+		"%right_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %right)",
+		// Pin the short-circuit `and` while header: the two `index < *_len` comparisons lower
+		// to an eager `and i1` over the comparison results (their operands are side-effect
+		// free), so a regression that rejects an `and` header or mis-lowers it is caught.
+		"%t6 = and i1 %t2, %t5",
 	}
 }
 
