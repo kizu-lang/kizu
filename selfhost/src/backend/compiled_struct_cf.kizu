@@ -2427,9 +2427,16 @@ pub fn append_sorted_imports_function(
     let wb1_expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb1, "expr", 0, bs);
     let decl_call = try cf_call_under_try(ir_bytes, function_name, wb1_expr, bs);
     let decl_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, decl_call, bs);
+    // The single-import emitter is a '!void' helper, so its error union is %kizu.error.void (the
+    // ok flag at field 0, the message at field 1). The emit below reads those fixed field indices,
+    // so a callee whose return type drifts from %kizu.error.void is an explicit error rather than a
+    // silently mis-indexed extractvalue.
     let decl_eu = try compiled_mir_types::lower_call_return_type(
         ir_bytes, function_name, module_prefix, decl_call, bs
     );
+    if !std::mem::equal_bytes(decl_eu, "%kizu.error.void") {
+        return error("compiled struct-cf: single-import call must return %kizu.error.void");
+    }
     try cf_require_call_argc(ir_bytes, function_name, decl_call, 4,
         "compiled struct-cf: single-import emitter takes out, source, tokens and the import index", bs);
     let decl_arg0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, decl_call, "arg", 0, bs);
@@ -2508,9 +2515,7 @@ pub fn append_sorted_imports_function(
     // Scan body: read the next import index, emit its declaration, append the newline.
     try cf_l(out, "scan_body:");
     try cf_emit_get(out, import_index_var, arr_name, recv_type, element_llvm, llvm_return_type, index_var, "");
-    try cf_w(out, "  %decl_call = call ");
-    try cf_w(out, decl_eu);
-    try cf_w(out, " @");
+    try cf_w(out, "  %decl_call = call %kizu.error.void @");
     try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, decl_callee);
     try cf_w(out, "(");
     try cf_w(out, "%kizu.owned %");
