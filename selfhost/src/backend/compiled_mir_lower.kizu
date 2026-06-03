@@ -4852,21 +4852,21 @@ fn lower_multi_while_statement(
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
     );
-    // A while header is either a single comparison or a short-circuit 'and' chain of
-    // comparisons whose operands are side-effect-free (bool/int locals and literals, field
-    // reads, and pure '<receiver>.len()' calls). With pure operands an eager 'and i1' over
-    // the comparison results is observably identical to short-circuit evaluation, so such a
-    // header lowers through the same lower_expr_into path the single comparison uses. An 'or'
-    // header, or an 'and' whose operand could trap when the left side is false (a guarded
-    // array index load or a try-call), is rejected so the restricted loop support never
-    // silently reorders a guarded read (issue 1165 / 1162).
-    let cond_short_circuit = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
-    if cond_short_circuit == 2 {
+    // A while header is one of three shapes. A single comparison, or a short-circuit 'and'
+    // chain whose operands are all side-effect-free (bool/int locals and literals, field
+    // reads, and pure '<receiver>.len()' calls), folds into an eager 'and i1' that is
+    // observably identical to short-circuit evaluation, so it lowers through the same
+    // lower_expr_into path the bare comparison uses (mir_short_circuit stays 0). A genuine
+    // short-circuit 'and' -- one whose later operand could trap when an earlier one is false,
+    // such as line_end_excluding_break's '!is_line_break(source[index])' guarded by 'index <
+    // length' -- lowers as a chain of operand blocks: the first operand fills cond_insts (the
+    // loop head), the second fills cond_rhs_insts (a guarded loopN_head_rhs block), and any
+    // further operands fill cond_extra_operands, so the guarded byte load only runs when its
+    // guard holds. An 'or' header is rejected so the restricted loop support never silently
+    // reorders a guarded read (issue 1165 / 1162).
+    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_kind == 2 {
         return error("compiled mir: while condition or is not supported");
-    }
-    if cond_short_circuit == 1 and
-        !(try while_and_condition_eager_safe(ir_bytes, function_name, cond_node, bs)) {
-        return error("compiled mir: while and condition operands must be side-effect-free");
     }
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "body", 0, bs
@@ -4878,19 +4878,100 @@ fn lower_multi_while_statement(
         ir_bytes, function_name, induction_var, loop_index, bs
     );
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let cond_result = try lower_expr_into(
-        ir_bytes,
-        function_name,
-        module_prefix,
-        locals_spec,
-        cond_node,
-        string_counter,
-        temp_counter,
-        &var cond_insts,
-        bs
-    );
-    var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
-    var body_temp_counter = temp_counter + cond_insts.len();
+    var cond_rhs_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    var cond_extra_operands = std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator());
+    var cond_result = -1;
+    var cond_rhs_result = -1;
+    var mir_short_circuit = 0;
+    var body_string_counter = string_counter;
+    var body_temp_counter = temp_counter;
+    if cond_kind == 1 and
+        !(try while_and_condition_eager_safe(ir_bytes, function_name, cond_node, bs)) {
+        // A genuine short-circuit 'and' chain: the leaf operands are evaluated left to
+        // right, each guarded by every earlier operand. The first fills cond_insts, the
+        // second fills cond_rhs_insts, and any further operands fill cond_extra_operands,
+        // mirroring the short-circuit if-chain so the same operand-block renderer drives
+        // both. A nested 'or' is left a leaf by flatten_and_operands and rejected here as a
+        // near-miss explicit error rather than eager-evaluated (issue 1165 / 1162).
+        mir_short_circuit = 1;
+        var operands = std::array::Array<i64>(std::mem::page_allocator());
+        try flatten_and_operands(ir_bytes, function_name, cond_node, &var operands, bs);
+        var validate_index = 0;
+        while validate_index < operands.len() {
+            let operand_node = try operands.get(validate_index);
+            if (try short_circuit_kind(ir_bytes, function_name, operand_node, bs)) != 0 {
+                return error("compiled mir: nested short-circuit and/or unsupported");
+            }
+            validate_index = validate_index + 1;
+        }
+        let op0 = try operands.get(0);
+        cond_result = try lower_expr_into(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            op0,
+            string_counter,
+            temp_counter,
+            &var cond_insts,
+            bs
+        );
+        var acc_strings = try count_strings_in_insts(&cond_insts);
+        var acc_temp = temp_counter + cond_insts.len();
+        let op1 = try operands.get(1);
+        cond_rhs_result = try lower_expr_into(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            op1,
+            string_counter + acc_strings,
+            acc_temp,
+            &var cond_rhs_insts,
+            bs
+        );
+        acc_strings = acc_strings + try count_strings_in_insts(&cond_rhs_insts);
+        acc_temp = acc_temp + cond_rhs_insts.len();
+        var extra_index = 2;
+        while extra_index < operands.len() {
+            var operand_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+            let operand_node = try operands.get(extra_index);
+            let operand_result = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                operand_node,
+                string_counter + acc_strings,
+                acc_temp,
+                &var operand_insts,
+                bs
+            );
+            acc_strings = acc_strings + try count_strings_in_insts(&operand_insts);
+            acc_temp = acc_temp + operand_insts.len();
+            try cond_extra_operands.append(
+                compiled_mir::cond_operand(operand_result, operand_insts)
+            );
+            extra_index = extra_index + 1;
+        }
+        body_string_counter = string_counter + acc_strings;
+        body_temp_counter = acc_temp;
+        operands.deinit();
+    } else {
+        cond_result = try lower_expr_into(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            cond_node,
+            string_counter,
+            temp_counter,
+            &var cond_insts,
+            bs
+        );
+        body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
+        body_temp_counter = temp_counter + cond_insts.len();
+    }
     var body_try_counter = loop_index * 1000;
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
     // The body ends with a latch suffix: one statement (a constant-step 'index = index +
@@ -5046,6 +5127,10 @@ fn lower_multi_while_statement(
         step,
         cond_result,
         cond_insts,
+        mir_short_circuit,
+        cond_rhs_result,
+        cond_rhs_insts,
+        cond_extra_operands,
         body_stmts,
         latch_stmts,
         secondary_inductions
@@ -5167,6 +5252,60 @@ fn call_has_call_arg(
     return false;
 }
 
+// arg_is_single_element_index reports whether a call argument is a single-element byte
+// index load 'source[index]' (an IndexExpr whose 'end' bound is Empty), as distinct from a
+// two-bound slice 'source[start..end]'. A single-element index has no inline MirCallArg
+// descriptor -- the slice descriptor lower_call_index_arg builds assumes a real end bound --
+// so such an argument is hoisted into a preceding index-load expr temp and passed by Temp
+// reference instead. is_line_break(source[index]) inside line_end_excluding_break's
+// short-circuit while header is its first consumer (issue 1165 / 1162).
+fn arg_is_single_element_index(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arg_node: i64,
+    bs: i64
+) -> !bool {
+    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+    if !std::mem::equal_bytes(arg_kind, "IndexExpr") {
+        return false;
+    }
+    let end_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "end", 0, bs
+    );
+    let end_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, end_node, bs);
+    return std::mem::equal_bytes(end_kind, "Empty");
+}
+
+// call_has_hoisted_arg reports whether a call carries an argument that has no inline
+// MirCallArg descriptor and must be lowered into a preceding expr temp: a nested call, or a
+// single-element byte index load. Both are referenced through a Temp call arg once
+// materialized (issue 1165 / 1162).
+fn call_has_hoisted_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64
+) -> !bool {
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var index = 0;
+    while index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", index, bs
+        );
+        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        if std::mem::equal_bytes(arg_kind, "Call") {
+            return true;
+        }
+        if try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 // lower_expr_array_len lowers a value-receiver 'tokens.len()' into an ArrayLen expr
 // inst (issue 1165). The receiver is a std::array::Array<T> (or &Array<T>) param/local
 // that lowers to the runtime-owned %kizu.owned handle, so the element type T does not
@@ -5221,11 +5360,13 @@ fn lower_expr_array_len(
     return id;
 }
 
-// lower_expr_call_with_nested_args lowers a Call whose argument list contains nested
-// calls (equal_bytes(token_text(...), expected)) (issue 1165). Each nested-call argument
-// is lowered into a preceding expr temp and referenced through a Temp call arg; scalar
-// arguments use the shared single-arg descriptor. The outer call inst is appended once
-// every argument temp is materialized so the temps dominate the call.
+// lower_expr_call_with_nested_args lowers a Call whose argument list contains an argument
+// with no inline descriptor -- a nested call (equal_bytes(token_text(...), expected)) or a
+// single-element byte index load (is_line_break(source[index])) (issue 1165 / 1162). Each
+// such argument is lowered into a preceding expr temp (a call inst, or a checked index-load
+// inst) and referenced through a Temp call arg; scalar and two-bound-slice arguments use the
+// shared single-arg descriptor. The outer call inst is appended once every argument temp is
+// materialized so the temps dominate the call.
 fn lower_expr_call_with_nested_args(
     ir_bytes: []u8,
     function_name: []u8,
@@ -5263,7 +5404,9 @@ fn lower_expr_call_with_nested_args(
         let arg_type = try compiled_mir_types::lower_call_arg_type(
             ir_bytes, module_prefix, callee_name, arg_index
         );
-        if std::mem::equal_bytes(arg_kind, "Call") {
+        let hoist_arg = std::mem::equal_bytes(arg_kind, "Call") or
+            (try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs));
+        if hoist_arg {
             let before = insts.len();
             let temp_id = try lower_expr_into(
                 ir_bytes, function_name, module_prefix, params_spec, arg_node,
@@ -5547,10 +5690,11 @@ fn lower_expr_into(
             );
         }
         // A call whose argument list contains a nested call (equal_bytes(token_text(...),
-        // expected)) lowers each nested-call argument into a preceding expr temp and
-        // references it through a Temp call arg, since inline call-arg descriptors cannot
-        // carry a computed call result (issue 1165).
-        if try call_has_call_arg(ir_bytes, function_name, expr_node, bs) {
+        // expected)) or a single-element byte index load (is_line_break(source[index])) lowers
+        // each such argument into a preceding expr temp and references it through a Temp call
+        // arg, since inline call-arg descriptors cannot carry a computed call result or a
+        // checked byte load (issue 1165 / 1162).
+        if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, bs) {
             return try lower_expr_call_with_nested_args(
                 ir_bytes, function_name, module_prefix, params_spec, expr_node,
                 string_index, id_base, insts, bs

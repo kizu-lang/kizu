@@ -1518,7 +1518,65 @@ func requiredLLVMFormatHelperFragments() []string {
 	fragments = append(fragments, requiredLLVMFormatSortedImportsFragments()...)
 	fragments = append(fragments, requiredLLVMFormatAppendIndentFragments()...)
 	fragments = append(fragments, requiredLLVMFormatLineByteClassifierFragments()...)
-	return append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
+	fragments = append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
+	return append(fragments, requiredLLVMFormatLineEndFragments()...)
+}
+
+// requiredLLVMFormatLineEndFragments locks the selfhost::parser::format line_end_excluding_break
+// and line_end_including_break scalar helpers compiled into stage2 (issue 1165 / 1162): 'var index
+// = start; let length = std::mem::len(source); while index < length and
+// !is_line_break(source[index]) { index = index + 1; } return index;', with
+// line_end_including_break adding a trailing 'if index < length { return after_line_break(source,
+// index); } return index;'. They are the first compiled helpers with a genuine short-circuit 'and'
+// while header: the second operand '!is_line_break(source[index])' loads source[index] only when
+// the 'index < length' guard holds. The fragments pin that the header op0 branches into a guarded
+// loopN_head_rhs block carrying the checked byte load + is_line_break call + prefix-not, whose true
+// edge enters the loop body and whose false edge short-circuits to loopN_exit, so the byte load
+// never runs past the slice. The single-element index argument is hoisted into a checked index-load
+// temp (%t4) and passed by value, and line_end_including_break's tail folds a CRLF/LF into the line
+// through a single-comparison if whose then-block is a 'return after_line_break(..)' ReturnCall.
+func requiredLLVMFormatLineEndFragments() []string {
+	return []string{
+		// line_end_excluding_break: the i64-returning define over the source slice and the i64
+		// start, the length local, and the parameter-seeded induction phi (the loop counter seeds
+		// from %start, not a literal).
+		"define i64 @kizu_selfhost__parser_format_line_end_excluding_break(",
+		"  %kizu.slice.u8 %source",
+		"  i64 %start",
+		"%length = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %source)",
+		"%index = phi i64 [ %start, %loop2_preheader ], [ %index_next, %loop2_latch ]",
+		// Operand 0 in the loop head: the 'index < length' guard branching into the guarded
+		// loop2_head_rhs block on success and short-circuiting to loop2_exit on failure. This pins
+		// the short-circuit while header block layout: the byte load never runs unless the guard
+		// holds.
+		"%t2 = icmp slt i64 %index, %length",
+		"br i1 %t2, label %loop2_head_rhs, label %loop2_exit",
+		// Operand 1 in the guarded loop2_head_rhs block: the checked source[index] byte load (the
+		// single-element index argument hoisted into temp %t4), the is_line_break call, and the
+		// prefix-not xor, branching into the loop body on a non-break byte and to loop2_exit on a
+		// break byte.
+		"loop2_head_rhs:",
+		"%t4_bad = or i1 %t4_neg, %t4_high",
+		"%t4 = load i8, ptr %t4_gep",
+		"%t5 = call i1 @kizu_selfhost__parser_format_is_line_break(i8 %t4)",
+		"%t6 = xor i1 %t5, true",
+		"br i1 %t6, label %loop2_body, label %loop2_exit",
+		"%index_next = add i64 %index, 1",
+		"loop2_exit:",
+		// line_end_including_break: the same short-circuit while header plus the trailing 'if index
+		// < length { return after_line_break(source, index); } return index;' that folds a CRLF/LF
+		// into the line. The then-block is a 'return after_line_break(..)' ReturnCall returning a
+		// plain i64 (no error-union wrap on this scalar helper); the fall-through returns index.
+		"define i64 @kizu_selfhost__parser_format_line_end_including_break(",
+		"%t9 = icmp slt i64 %index, %length",
+		"br i1 %t9, label %if3_then, label %if3_cont",
+		"if3_then:",
+		"%t10 = call i64 @kizu_selfhost__parser_format_after_line_break(" +
+			"%kizu.slice.u8 %source, i64 %index)",
+		"  ret i64 %t10",
+		"if3_cont:",
+		"  ret i64 %index",
+	}
 }
 
 // requiredLLVMFormatAfterLineBreakFragments locks the selfhost::parser::format after_line_break

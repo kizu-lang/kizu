@@ -428,6 +428,18 @@ pub struct MirIfStmt {
 // 'var index = <param-or-local>' initializer, e.g. index_after_import's import_index),
 // otherwise from the induction_init integer literal ('var index = <int>'); only those
 // two init shapes are accepted (issue 1165).
+// The header condition is one of three shapes, selected by cond_short_circuit:
+//   0 = a single comparison, or an 'and' chain whose operands are all side-effect-free
+//       (an eager 'and i1' is observably identical to short-circuit, so it folds into
+//       cond_insts / cond_result_id and the head emits one 'br i1');
+//   1 = a genuine short-circuit 'and' chain whose later operands could trap when an
+//       earlier one is false (line_end_excluding_break's 'index < length and
+//       !is_line_break(source[index])' loads source[index] only when index < length),
+//       so cond_insts / cond_result_id hold the first operand in the head, cond_rhs_insts
+//       / cond_rhs_result_id hold the second in a guarded loopN_head_rhs block, and any
+//       further operands fill cond_extra_operands, each guarded by every earlier operand.
+// An 'or' header is rejected. cond_rhs_insts / cond_extra_operands are empty when
+// cond_short_circuit is 0 (issue 1165 / 1162).
 // The latch advances the induction variable. When latch_stmts is empty the latch is the
 // constant-step 'add i64 %<var>, induction_step' (the 'index = index + <int>' increment).
 // When latch_stmts holds one statement the latch is a generic loop-carried update: a
@@ -465,6 +477,10 @@ pub struct MirWhileStmt {
     pub induction_step: i64,
     pub cond_result_id: i64,
     pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_short_circuit: i64,
+    pub cond_rhs_result_id: i64,
+    pub cond_rhs_insts: std::array::Array<MirExprInst>,
+    pub cond_extra_operands: std::array::Array<MirCondOperand>,
     pub body_stmts: std::array::Array<MirStmt>,
     pub latch_stmts: std::array::Array<MirStmt>,
     pub secondary_inductions: std::array::Array<MirSecondaryInduction>,
@@ -1541,6 +1557,8 @@ impl MirIfStmt {
 impl MirWhileStmt {
     fn deinit(self: MirWhileStmt) -> void {
         self.cond_insts.deinit();
+        self.cond_rhs_insts.deinit();
+        self.cond_extra_operands.deinit();
         self.body_stmts.deinit();
         self.latch_stmts.deinit();
         self.secondary_inductions.deinit();
@@ -3301,6 +3319,10 @@ pub fn while_stmt(
     induction_step: i64,
     cond_result_id: i64,
     cond_insts: std::array::Array<MirExprInst>,
+    cond_short_circuit: i64,
+    cond_rhs_result_id: i64,
+    cond_rhs_insts: std::array::Array<MirExprInst>,
+    cond_extra_operands: std::array::Array<MirCondOperand>,
     body_stmts: std::array::Array<MirStmt>,
     latch_stmts: std::array::Array<MirStmt>,
     secondary_inductions: std::array::Array<MirSecondaryInduction>
@@ -3314,6 +3336,10 @@ pub fn while_stmt(
         induction_step: induction_step,
         cond_result_id: cond_result_id,
         cond_insts: cond_insts,
+        cond_short_circuit: cond_short_circuit,
+        cond_rhs_result_id: cond_rhs_result_id,
+        cond_rhs_insts: cond_rhs_insts,
+        cond_extra_operands: cond_extra_operands,
         body_stmts: body_stmts,
         latch_stmts: latch_stmts,
         secondary_inductions: secondary_inductions
