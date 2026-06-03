@@ -3212,6 +3212,12 @@ fn collect_component_compiled_callee(
     if compiled_callee_is_array_element_method(callee) {
         return;
     }
+    // The std::array::Array<T>(<allocator>) constructor is the element-size-generic
+    // @kizu_rt_array_new runtime builtin lowered inline, not a component function, so the BFS
+    // neither emits nor walks it (issue 1165).
+    if std::mem::starts_with(callee, "std::array::Array") {
+        return;
+    }
     if std::mem::starts_with(callee, prefix) {
         let local = callee[std::mem::len(prefix)..std::mem::len(callee)];
         if compiled_callee_has_namespace(local) {
@@ -3287,16 +3293,17 @@ fn compiled_callee_has_namespace(name: []u8) -> bool {
     return false;
 }
 
-// compiled_callee_is_array_read_method reports whether a callee names a value-receiver
-// Array<T> read method (<receiver>.len / <receiver>.get), i.e. a runtime builtin lowered
-// inline rather than a component function (issue 1165). Namespaced callees (carrying
+// compiled_callee_is_array_element_method reports whether a callee names a value-receiver
+// Array<T> element method (<receiver>.len / <receiver>.get / <receiver>.set /
+// <receiver>.append), i.e. a runtime builtin lowered inline through the element-size-generic
+// array ABI rather than a component function (issue 1165). Namespaced callees (carrying
 // '::') are excluded so a cross-module free function is never mistaken for a method.
 fn compiled_callee_is_array_element_method(name: []u8) -> bool {
     if compiled_callee_has_namespace(name) {
         return false;
     }
     return compiled_name_ends_with(name, ".len") or compiled_name_ends_with(name, ".get") or
-        compiled_name_ends_with(name, ".set");
+        compiled_name_ends_with(name, ".set") or compiled_name_ends_with(name, ".append");
 }
 
 fn compiled_name_ends_with(name: []u8, suffix: []u8) -> bool {
@@ -3545,6 +3552,18 @@ fn append_format_reachable_compiled_functions(
     // ABI on a '&var std::array::Array<i64>' param), so it lowers through compiled_struct_cf.
     // Its BFS pulls in import_path_less (already a seeded member).
     try pending.append("sort_import_indices");
+    // leading_import_indices is the first structured-control-flow collector on the compiled
+    // path (issue 1165 / 1162): 'var indices = std::array::Array<i64>(allocator); var index = 0;
+    // while index < tokens.len() { let token = try tokens.get(index); if !is_import_token(token)
+    // { index = tokens.len(); } else { try indices.append(index); index = try
+    // index_after_import(tokens, index); } } try sort_import_indices(source, tokens, &var
+    // indices); return indices;'. It builds a runtime-owned Array<i64> through the
+    // element-size-generic @kizu_rt_array_new / @kizu_rt_array_append ABI, scans the token array
+    // through an if/else branch-merge loop, then sorts the collected indices in place and returns
+    // the filled array as the '!std::array::Array<i64>' success, so it lowers through
+    // compiled_struct_cf. Its BFS pulls in is_import_token, index_after_import, and
+    // sort_import_indices (all already seeded members).
+    try pending.append("leading_import_indices");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,

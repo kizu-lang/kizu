@@ -1512,7 +1512,8 @@ func requiredLLVMFormatHelperFragments() []string {
 		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
 	}
 	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
-	return append(fragments, requiredLLVMFormatSortFragments()...)
+	fragments = append(fragments, requiredLLVMFormatSortFragments()...)
+	return append(fragments, requiredLLVMFormatLeadingImportFragments()...)
 }
 
 // requiredLLVMFormatImportSortFragments locks the selfhost::parser::format import-sort
@@ -1609,6 +1610,69 @@ func requiredLLVMFormatSortFragments() []string {
 		// swap path and stops (false) on the else path.
 		"%cursor_next = phi i64 [ %cursor_dec, %set1_cont ], [ %cursor, %if_else ]",
 		"%scanning_next = phi i1 [ %scanning, %set1_cont ], [ false, %if_else ]",
+	}
+}
+
+// requiredLLVMFormatLeadingImportFragments locks the selfhost::parser::format
+// leading_import_indices structured-control-flow collector compiled into stage2 through
+// compiled_struct_cf (issue 1165 / 1162): it builds a runtime-owned Array<i64> through the
+// element-size-generic @kizu_rt_array_new / @kizu_rt_array_append ABI, scans the token array
+// through an if/else branch-merge loop (a loop-terminating 'index = tokens.len()' on one arm,
+// an append-then-try-advance on the other re-merging at a loop-latch phi), sorts the collected
+// indices in place via the sort helper, and returns the filled array as the
+// '!std::array::Array<i64>' success (a %kizu.error.owned wrap).
+func requiredLLVMFormatLeadingImportFragments() []string {
+	return []string{
+		// The %kizu.error.owned-returning define over the allocator, source slice, and tokens
+		// handle, so a regression in the '!std::array::Array<i64>' return / Allocator param ABI
+		// is caught.
+		"define %kizu.error.owned @kizu_selfhost__parser_format_leading_import_indices(",
+		// Pin the runtime-owned Array<i64> constructor: the element size flows from the i64
+		// element type through getelementptr (no hidden constant), and the marshalling slot is
+		// pre-allocated in the entry block.
+		"%app_slot = alloca i64",
+		"%indices = call %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, " +
+			"i64 ptrtoint (ptr getelementptr (i64, ptr null, i32 1) to i64))",
+		// Pin the outer scan loop head carrying the i64 counter through a loop-head phi and
+		// testing it against the token length through the generic runtime builtin.
+		"%index = phi i64 [ 0, %entry ], [ %index_next, %scan_latch ]",
+		"%scan_len = call i64 @kizu_rt_array_len(%kizu.owned %tokens)",
+		// Pin the checked Array<Token>.get element read against @kizu_rt_array_at with
+		// try-propagation of a failure as this function's own %kizu.error.owned error union, and
+		// the boolean predicate call selecting the branch (a true predicate takes the import
+		// append arm; a false predicate terminates the scan).
+		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %tokens, i64 %index)",
+		"%token = load %kizu.kizu.lexer.token, ptr %token_ptr",
+		"%pred = call i1 @kizu_selfhost__parser_format_is_import_token(" +
+			"%kizu.kizu.lexer.token %token)",
+		"br i1 %pred, label %lii_else, label %lii_then",
+		// Pin the loop-terminating arm: 'index = tokens.len()' steps the counter to the length.
+		"%then_len = call i64 @kizu_rt_array_len(%kizu.owned %tokens)",
+		// Pin the Array<i64>.append against @kizu_rt_array_append with the element marshalled
+		// through the entry-block slot and the element size derived from the i64 element type
+		// (no hidden i64 special case), so a regression in the append ABI is caught.
+		"%app_eslice = insertvalue %kizu.slice.u8 %app_es0, " +
+			"i64 ptrtoint (ptr getelementptr (i64, ptr null, i32 1) to i64), 1",
+		"%app_call = call %kizu.error.void @kizu_rt_array_append(%kizu.owned %indices, " +
+			"%kizu.slice.u8 %app_eslice)",
+		// Pin the try-call advance (index = try index_after_import(tokens, index)): the
+		// %kizu.error.i64 union is unwrapped on the value field (1) on success and the message
+		// field (2) on failure, with the failure rewrapped into this function's own error union.
+		"%iai_call = call %kizu.error.i64 @kizu_selfhost__parser_format_index_after_import(" +
+			"%kizu.owned %tokens, i64 %index)",
+		"%iai_msg = extractvalue %kizu.error.i64 %iai_call, 2",
+		"%iai_val = extractvalue %kizu.error.i64 %iai_call, 1",
+		// Pin the if/else fall-through merge phi at the loop latch: the next counter is the token
+		// length on the terminating arm and the advance result on the import arm.
+		"%index_next = phi i64 [ %then_len, %lii_then ], [ %iai_val, %iai_cont ]",
+		// Pin the in-place sort try-call (try sort_import_indices(source, tokens, &var indices))
+		// with the mutable indices handle passed as %kizu.owned and its error propagation.
+		"%sort_call = call %kizu.error.void @kizu_selfhost__parser_format_sort_import_indices(" +
+			"%kizu.slice.u8 %source, %kizu.owned %tokens, %kizu.owned %indices)",
+		// Pin the 'return indices;' success wrap: the filled array lands in the %kizu.owned value
+		// field of the %kizu.error.owned success union, not a raw owned handle.
+		"%ret_ok1 = insertvalue %kizu.error.owned %ret_ok0, %kizu.owned %indices, 1",
+		"%ret_ok2 = insertvalue %kizu.error.owned %ret_ok1, %kizu.slice.u8 zeroinitializer, 2",
 	}
 }
 

@@ -31,9 +31,15 @@ const parseFormatAllocMaxLines = 197
 // and a boolean flag through loop-head phis, an if/else that re-merges into the loop, a
 // try-call import_path_less condition, and Array<i64>.get/set element reads/writes through the
 // element-size-generic @kizu_rt_array_at / @kizu_rt_array_set ABI on its '&var
-// std::array::Array<i64>' parameter, lowered through compiled_struct_cf). They are the first
-// selfhost::parser::format members on the compiled path and must keep being emitted from both
-// the IR fact catalog and the backend BFS.
+// std::array::Array<i64>' parameter, lowered through compiled_struct_cf), and
+// leading_import_indices (the first structured-control-flow collector: it builds a
+// runtime-owned Array<i64> through the element-size-generic @kizu_rt_array_new /
+// @kizu_rt_array_append ABI, scans the token array through an if/else branch-merge loop -- a
+// loop-terminating 'index = tokens.len()' on one arm, an append-then-try-advance on the other
+// re-merging at a loop-latch phi -- then sorts the collected indices in place and returns the
+// filled array as the '!std::array::Array<i64>' success (a %kizu.error.owned wrap), lowered
+// through compiled_struct_cf). They are the first selfhost::parser::format members on the
+// compiled path and must keep being emitted from both the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
 	"is_import_token",
 	"is_ident_token",
@@ -46,6 +52,7 @@ var formatCompiledHelperSeeds = []string{
 	"compare_bytes",
 	"import_path_less",
 	"sort_import_indices",
+	"leading_import_indices",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
@@ -54,7 +61,6 @@ var formatCompiledHelperSeeds = []string{
 // logic into the compiled closure instead of lowering it as a real component.
 var formatHandPathOnlyHelpers = []string{
 	"format_source",
-	"leading_import_indices",
 	"append_sorted_imports",
 	"append_indent",
 	"append_preserved_line_comments",
@@ -74,6 +80,52 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertFormatClosureExcludesHandPath(t, irEmission, backendEmission)
 	assertParseFormatAllocNotExtended(t, parseLLVM)
 	assertImportSortShapeValidated(t)
+	assertLeadingImportShapeValidated(t)
+}
+
+// leadingImportShapeValidationErrors pins the explicit shape-validation diagnostics that the
+// structured-control-flow lowering raises when a near-miss helper drifts from the
+// leading-import collector skeleton. compiled_struct_cf reads only some identifiers off the
+// AST and then emits a fixed array-constructor / branch-merge / try-call / owned-wrap shape,
+// so it must reject any helper whose constructor, scan condition, predicate negation, branch
+// assignments, append target, advance arguments, sort call or return shape differ -- never
+// silently mis-lower a near-miss. Pinning the strings keeps the per-operand validation from
+// being quietly weakened back to name-only checks.
+var leadingImportShapeValidationErrors = []string{
+	"compiled struct-cf: leading-import collector must open with the array constructor",
+	"compiled struct-cf: array constructor takes exactly the allocator argument",
+	"compiled struct-cf: array constructor allocator must be a parameter",
+	"compiled struct-cf: scan counter must be initialized to an integer literal",
+	"compiled struct-cf: scan loop condition must be '<index> < <tokens>.len()'",
+	"compiled struct-cf: token read must index the scan counter",
+	"compiled struct-cf: predicate must be negated with '!'",
+	"compiled struct-cf: predicate must test the current token",
+	"compiled struct-cf: scan terminator must be '<index> = <tokens>.len()'",
+	"compiled struct-cf: append must target the indices array",
+	"compiled struct-cf: append must store the scan counter",
+	"compiled struct-cf: scan advance must pass the token array first",
+	"compiled struct-cf: scan advance must pass the scan counter second",
+	"compiled struct-cf: sort call takes the source, the token array, and the indices handle",
+	"compiled struct-cf: sort call must pass the source first",
+	"compiled struct-cf: sort call must pass the token array second",
+	"compiled struct-cf: sort call must pass the indices array by mutable borrow",
+	"compiled struct-cf: sort call indices argument must be a borrow, not another prefix",
+	"compiled struct-cf: sort call must borrow the constructed indices array",
+	"compiled struct-cf: collector must return the filled indices array",
+}
+
+// assertLeadingImportShapeValidated pins that the structured-control-flow lowering keeps its
+// explicit per-operand shape diagnostics for the leading-import collector, so a near-miss
+// helper is rejected with an error rather than silently lowered to the hard-coded
+// array-constructor / branch-merge skeleton.
+func assertLeadingImportShapeValidated(t *testing.T) {
+	t.Helper()
+	structCF := readSelfhostSrc(t, filepath.Join("backend", "compiled_struct_cf.kizu"))
+	for _, diagnostic := range leadingImportShapeValidationErrors {
+		if !strings.Contains(structCF, diagnostic) {
+			t.Errorf("compiled_struct_cf.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
 }
 
 // importSortShapeValidationErrors pins the explicit shape-validation diagnostics that the

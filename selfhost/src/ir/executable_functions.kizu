@@ -595,6 +595,20 @@ fn append_format_function_facts(
     // It lowers through compiled_struct_cf rather than the i64-induction While machinery. Its
     // body BFS pulls in import_path_less (already a seeded member).
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "sort_import_indices"));
+    // leading_import_indices is the first structured-control-flow collector on the compiled
+    // path (issue 1165 / 1162): 'var indices = std::array::Array<i64>(allocator); var index =
+    // 0; while index < tokens.len() { let token = try tokens.get(index); if
+    // !is_import_token(token) { index = tokens.len(); } else { try indices.append(index); index
+    // = try index_after_import(tokens, index); } } try sort_import_indices(source, tokens, &var
+    // indices); return indices;'. It builds a runtime-owned Array<i64> through the
+    // element-size-generic @kizu_rt_array_new / @kizu_rt_array_append ABI, scans the token array
+    // through an if/else branch-merge loop (a loop-terminating 'index = tokens.len()' on one
+    // arm, an append-then-try-advance on the other re-merging at a loop-latch phi), then sorts
+    // the collected indices in place and returns the filled array as the '!std::array::Array<i64>'
+    // success (a %kizu.error.owned wrap). It lowers through compiled_struct_cf rather than the
+    // i64-induction While machinery. Its body BFS pulls in is_import_token, index_after_import,
+    // and sort_import_indices (all already seeded members).
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "leading_import_indices"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);
@@ -1784,6 +1798,12 @@ fn collect_catalog_closure_call_callee(
     if std::mem::equal_bytes(callee_text, "error") {
         return;
     }
+    // The 'std::array::Array<T>(<allocator>)' constructor is the element-size-generic
+    // @kizu_rt_array_new runtime builtin lowered inline, not a component function, so the
+    // closure does not walk it (issue 1165).
+    if std::mem::starts_with(callee_text, "std::array::Array") {
+        return;
+    }
     if collect_catalog_closure_external_callee_allowed(callee_text, qualified_prefix) {
         return;
     }
@@ -1800,10 +1820,11 @@ fn collect_catalog_closure_call_callee(
 }
 
 // collect_catalog_closure_field_callee classifies a FieldExpr callee. A field-mode
-// method on a value receiver (tokens.len() / tokens.get(...)) is an Array<T> read
-// builtin lowered inline, not a component function, so the closure does not walk it
-// (issue 1165); any other value-method callee is an explicit error. A namespace-mode
-// FieldExpr is a qualified callee resolved against the component prefix.
+// method on a value receiver (tokens.len() / tokens.get(...) / indices.set(...) /
+// indices.append(...)) is an Array<T> element builtin lowered inline through the
+// element-size-generic array runtime ABI, not a component function, so the closure does
+// not walk it (issue 1165); any other value-method callee is an explicit error. A
+// namespace-mode FieldExpr is a qualified callee resolved against the component prefix.
 fn collect_catalog_closure_field_callee(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -1819,7 +1840,7 @@ fn collect_catalog_closure_field_callee(
     if !namespace {
         let method = ast_node_text(text, ast, name_node);
         if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "get") or
-            std::mem::equal_bytes(method, "set") {
+            std::mem::equal_bytes(method, "set") or std::mem::equal_bytes(method, "append") {
             return;
         }
         return error(unsupported_call_form_error);
