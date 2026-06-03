@@ -395,6 +395,130 @@ fn cf_emit_append(
     return;
 }
 
+// cf_emit_string_global emits a private module-level constant for a string-literal token, named
+// '@.kizu.compiled.<llvm_symbol>.s<slot>'. The payload length and escaped bytes are decoded from
+// the source string token (with its surrounding quotes), matching the layout the generic call
+// lowering emits, so the import output helpers reference their "import " / ";" literals through
+// the same global form (issue 1165).
+fn cf_emit_string_global(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    slot: i64,
+    token: []u8
+) -> !void {
+    let quote = cast<u8>(34);
+    let payload_len = try compiled_util::string_token_decoded_len(
+        token, "compiled struct-cf: invalid string literal"
+    );
+    try cf_w(out, "@.kizu.compiled.");
+    try cf_w(out, llvm_symbol);
+    try cf_w(out, ".s");
+    try std::fmt::append_i64(out, slot);
+    try cf_w(out, " = private unnamed_addr constant [");
+    try std::fmt::append_i64(out, payload_len);
+    try cf_w(out, " x i8] c");
+    try out.append_byte(quote);
+    try compiled_util::append_string_token_payload(
+        out, token, "compiled struct-cf: invalid string literal"
+    );
+    try out.append_byte(quote);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// cf_emit_string_literal_slice materializes a string-literal global into a '%kizu.slice.u8' SSA
+// value named '%<prefix>_slice' (a getelementptr to the constant's first byte plus its decoded
+// length), so the literal can be passed to the @kizu_rt_string_append_bytes ABI. The slot must
+// match the global emitted by cf_emit_string_global.
+fn cf_emit_string_literal_slice(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    slot: i64,
+    prefix: []u8,
+    token: []u8
+) -> !void {
+    let payload_len = try compiled_util::string_token_decoded_len(
+        token, "compiled struct-cf: invalid string literal"
+    );
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ptr = getelementptr [");
+    try std::fmt::append_i64(out, payload_len);
+    try cf_w(out, " x i8], ptr @.kizu.compiled.");
+    try cf_w(out, llvm_symbol);
+    try cf_w(out, ".s");
+    try std::fmt::append_i64(out, slot);
+    try cf_l(out, ", i64 0, i64 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_ptr, 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_slice = insertvalue %kizu.slice.u8 %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_base, i64 ");
+    try std::fmt::append_i64(out, payload_len);
+    try cf_l(out, ", 1");
+    return;
+}
+
+// cf_emit_string_append lowers a 'try <out>.<method>(<operand>);' append against a
+// @kizu_rt_string_append_* runtime helper: it calls the helper (which returns %kizu.error.void
+// over the %kizu.owned string handle and a single operand), branches on the ok flag, propagates
+// a failure as this function's own error union, and leaves '<prefix>_cont' current. The operand
+// is already materialized (a built literal slice, a slice local, or an i8 literal). The operand
+// is spelled '<operand_sigil><operand>', so a register operand passes operand_sigil "%" with the
+// SSA name (append_bytes over %kizu.slice.u8) and an immediate passes operand_sigil "" with the
+// literal (append_byte over i8); the same helper serves both append methods.
+fn cf_emit_string_append(
+    out: &var std::string::String,
+    ret_type: []u8,
+    prefix: []u8,
+    runtime_symbol: []u8,
+    out_name: []u8,
+    operand_type: []u8,
+    operand_sigil: []u8,
+    operand: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_call = call %kizu.error.void @");
+    try cf_w(out, runtime_symbol);
+    try cf_w(out, "(%kizu.owned %");
+    try cf_w(out, out_name);
+    try cf_w(out, ", ");
+    try cf_w(out, operand_type);
+    try cf_w(out, " ");
+    try cf_w(out, operand_sigil);
+    try cf_w(out, operand);
+    try cf_l(out, ")");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok = extractvalue %kizu.error.void %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_call, 0");
+    try cf_w(out, "  br i1 %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok, label %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_cont, label %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_fail");
+    try cf_w(out, prefix);
+    try cf_l(out, "_fail:");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_msg = extractvalue %kizu.error.void %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_call, 1");
+    try cf_emit_own_fail(out, ret_type, prefix, prefix, "_msg");
+    try cf_w(out, prefix);
+    try cf_l(out, "_cont:");
+    return;
+}
+
 // cf_ctor_element_llvm derives the element LLVM type of a 'std::array::Array<T>(<allocator>)'
 // constructor from the constructor callee token, so a local array's element size flows from
 // its declared <T> rather than a hidden i64 special case. The callee is the constructor type
@@ -565,6 +689,49 @@ pub fn is_leading_import_shape(
     }
     let s2_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s2, "body", 0, bs);
     return try cf_block_has_nested_if(ir_bytes, function_name, s2_body, bs);
+}
+
+// is_import_decl_shape detects the single-import emitter skeleton: a function whose body is
+// exactly 'try <out>.append_bytes(<lit>); var <index> = <import_index> + 1; while <index> <
+// <tokens>.len() { let <token> = try <tokens>.get(<index>); let <text> = <token_text>(<source>,
+// <token>); if <semi>(<token>) { try <out>.append_bytes(<lit>); return; } if <ident>(<token>) or
+// <colon>(<token>) { try <out>.append_bytes(<text>); } <index> = <index> + 1; } return;'. It is
+// the first compiled helper that mutates a '&var std::string::String' accumulator: a 4-statement
+// body opening with a string-literal append (an ExprStmt, not a Let or Int seed), a scan loop
+// whose body carries an early-return if and a fall-through boolean-or if, and a bare void return.
+// The full per-node validation lives in append_import_decl_function, which errors on any
+// deviation. append_import_decl is its first consumer.
+pub fn is_import_decl_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 4 {
+        return false;
+    }
+    let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s0, "ExprStmt", bs)) {
+        return false;
+    }
+    let s1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 1, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s1, "Let", bs)) {
+        return false;
+    }
+    let s1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "value", 0, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s1_value, "Binary", bs)) {
+        return false;
+    }
+    let s2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 2, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s2, "While", bs)) {
+        return false;
+    }
+    let s3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 3, bs);
+    if !(try cf_kind_is(ir_bytes, function_name, s3, "Return", bs)) {
+        return false;
+    }
+    let s3_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s3, "value", 0, bs);
+    return try cf_kind_is(ir_bytes, function_name, s3_value, "Empty", bs);
 }
 
 // cf_expect requires a node to have a given kind, raising an explicit error otherwise.
@@ -1661,5 +1828,409 @@ fn cf_append_call_eu_type(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
     try cf_w(out, call_eu);
+    return;
+}
+
+// cf_string_append_arg validates a 'try <out_name>.<method>(<arg>);' ExprStmt against the out
+// accumulator and returns the single argument node id, so the caller can pin it as a string
+// literal (append_bytes "import " / ";") or a slice local (append_bytes <text>). The receiver,
+// the try-call wrapping, the method name, and the single-argument arity are all explicit errors
+// on a near-miss.
+fn cf_string_append_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    stmt_node: i64,
+    out_name: []u8,
+    method: []u8,
+    message: []u8,
+    bs: i64
+) -> !i64 {
+    try cf_expect(ir_bytes, function_name, stmt_node, "ExprStmt", message, bs);
+    let expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, stmt_node, "expr", 0, bs);
+    let call = try cf_call_under_try(ir_bytes, function_name, expr, bs);
+    let recv = try cf_method_receiver_name(ir_bytes, function_name, call, method, bs);
+    if !std::mem::equal_bytes(recv, out_name) {
+        return error(message);
+    }
+    try cf_require_call_argc(ir_bytes, function_name, call, 1, message, bs);
+    return try ir_contract::body_child_sequence_from(ir_bytes, function_name, call, "arg", 0, bs);
+}
+
+// cf_emit_void_success_ret writes the '%<value_name> = insertvalue <ret_type> zeroinitializer, i1
+// true, 0' / 'ret' pair that returns the bare-'return;' void success. The value SSA name is
+// caller-supplied so the same shape can terminate more than one block (the early ';' return and
+// the loop-exit return) without colliding SSA names.
+fn cf_emit_void_success_ret(
+    out: &var std::string::String,
+    ret_type: []u8,
+    value_name: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, value_name);
+    try cf_w(out, " = insertvalue ");
+    try cf_w(out, ret_type);
+    try cf_l(out, " zeroinitializer, i1 true, 0");
+    try cf_w(out, "  ret ");
+    try cf_w(out, ret_type);
+    try cf_w(out, " %");
+    try cf_l(out, value_name);
+    return;
+}
+
+// cf_emit_token_predicate emits a single-token boolean predicate call ('%<result> = call i1
+// @<callee>(<token_llvm> %<token>)') off the AST: the callee symbol, return type and the token
+// operand type are all derived from the call node, so no predicate name is special-cased.
+fn cf_emit_token_predicate(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    result_name: []u8,
+    call_node: i64,
+    token_llvm: []u8,
+    token_var: []u8,
+    bs: i64
+) -> !void {
+    let callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, call_node, bs);
+    let pred_ret = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    try cf_w(out, "  %");
+    try cf_w(out, result_name);
+    try cf_w(out, " = call ");
+    try cf_w(out, pred_ret);
+    try cf_w(out, " @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, callee);
+    try cf_w(out, "(");
+    try cf_w(out, token_llvm);
+    try cf_w(out, " %");
+    try cf_w(out, token_var);
+    try cf_l(out, ")");
+    return;
+}
+
+// append_import_decl_function emits the full define for the single-import emitter. It re-reads
+// and validates the whole skeleton off the AST, then renders the basic-block / phi control flow:
+// a leading 'import ' string-literal append, a 'var index = import_index + 1' preheader seed, an
+// outer scan loop carrying the i64 counter through a loop-head phi, a checked Array<Token>.get
+// element read, a token_text slice read, an early-return ';' append guarded by the semicolon
+// predicate, a fall-through text append guarded by the 'ident or double-colon' boolean-or, and a
+// bare '%kizu.error.void' success. The 'import ' / ';' literals are emitted as module-level
+// private constants and materialized into %kizu.slice.u8 operands for the @kizu_rt_string_append_*
+// ABI. Any unsupported deviation is an explicit error.
+pub fn append_import_decl_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !void {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+
+    // Statement 0: 'try <out>.append_bytes("import ");'. The accumulator is the first parameter
+    // (the '&var std::string::String' handle, %kizu.owned); the literal seeds module-slot 0.
+    let out_name = cf_nth_param_name(params_spec, 0);
+    if std::mem::len(out_name) == 0 {
+        return error("compiled struct-cf: import emitter requires the out accumulator parameter");
+    }
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, out_name), "%kizu.owned") {
+        return error("compiled struct-cf: import emitter out accumulator must be a String handle");
+    }
+    let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
+    let import_arg = try cf_string_append_arg(
+        ir_bytes, function_name, s0, out_name, "append_bytes",
+        "compiled struct-cf: import emitter must open with the 'import ' literal append", bs
+    );
+    try cf_expect(ir_bytes, function_name, import_arg, "String",
+        "compiled struct-cf: import emitter prefix append must be a string literal", bs);
+    let import_lit = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, import_arg, bs);
+
+    // Statement 1: 'var <index> = <import_index> + 1;' seeds the scan counter from the import
+    // index parameter; the materialized sum feeds the loop-head phi's entry edge.
+    let s1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 1, bs);
+    let s1_name = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "name", 0, bs);
+    let index_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, s1_name, bs);
+    let s1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "value", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, s1_value, "add",
+        "compiled struct-cf: scan counter must be seeded as '<import_index> + 1'", bs);
+    let s1_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1_value, "left", 0, bs);
+    try cf_expect(ir_bytes, function_name, s1_left, "Var",
+        "compiled struct-cf: scan counter seed must add to the import index parameter", bs);
+    let import_index_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, s1_left, bs);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, import_index_name), "i64") {
+        return error("compiled struct-cf: scan counter seed must add to an i64 import index parameter");
+    }
+    let s1_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1_value, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, s1_right, 1,
+        "compiled struct-cf: scan counter seed must add exactly 1", bs);
+
+    // Statement 2: 'while <index> < <tokens>.len() { ... }'.
+    let s2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 2, bs);
+    let scan_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s2, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, scan_cond, "lt",
+        "compiled struct-cf: scan loop condition must be '<index> < <tokens>.len()'", bs);
+    let scan_cond_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_cond, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, scan_cond_left, index_var,
+        "compiled struct-cf: scan loop must compare the counter on the left", bs);
+    let scan_cond_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_cond, "right", 0, bs);
+    let arr_name = try cf_method_receiver_name(ir_bytes, function_name, scan_cond_right, "len", bs);
+    try cf_require_call_argc(ir_bytes, function_name, scan_cond_right, 0,
+        "compiled struct-cf: token length call takes no arguments", bs);
+    let recv_type = cf_param_type_or_empty(params_spec, arr_name);
+    if std::mem::len(recv_type) == 0 {
+        return error("compiled struct-cf: token array receiver must be a parameter");
+    }
+    let token_element_llvm = try cf_array_element_llvm(
+        ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
+    );
+
+    // Scan body: the token read, the token_text slice read, the early-return semicolon if, the
+    // fall-through ident/double-colon if, and the counter increment.
+    let scan_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s2, "body", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, scan_body, bs)) != 5 {
+        return error("compiled struct-cf: import emitter scan body must be read, text, semi-if, ident-if, increment");
+    }
+    let wb0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 0, bs);
+    let wb1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 1, bs);
+    let wb2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 2, bs);
+    let wb3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 3, bs);
+    let wb4 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 4, bs);
+
+    // 'let <token> = try <tokens>.get(<index>);'.
+    try cf_expect(ir_bytes, function_name, wb0, "Let",
+        "compiled struct-cf: scan body must bind the current token", bs);
+    let token_name_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb0, "name", 0, bs);
+    let token_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, token_name_node, bs);
+    let wb0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb0, "value", 0, bs);
+    let wb0_call = try cf_call_under_try(ir_bytes, function_name, wb0_value, bs);
+    let wb0_recv = try cf_method_receiver_name(ir_bytes, function_name, wb0_call, "get", bs);
+    if !std::mem::equal_bytes(wb0_recv, arr_name) {
+        return error("compiled struct-cf: token read must target the token array");
+    }
+    try cf_require_call_argc(ir_bytes, function_name, wb0_call, 1,
+        "compiled struct-cf: token read must take a single index", bs);
+    let wb0_index = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb0_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, wb0_index, index_var,
+        "compiled struct-cf: token read must index the scan counter", bs);
+
+    // 'let <text> = <token_text>(<source>, <token>);'. The source slice is the second parameter.
+    try cf_expect(ir_bytes, function_name, wb1, "Let",
+        "compiled struct-cf: scan body must bind the token text", bs);
+    let text_name_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb1, "name", 0, bs);
+    let text_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, text_name_node, bs);
+    let wb1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb1, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, wb1_value, "Call",
+        "compiled struct-cf: token text must be a token_text call", bs);
+    let text_ret = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, wb1_value, bs
+    );
+    try cf_require_call_argc(ir_bytes, function_name, wb1_value, 2,
+        "compiled struct-cf: token_text takes the source and the token", bs);
+    let text_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, wb1_value, bs);
+    let source_name = cf_nth_param_name(params_spec, 1);
+    if std::mem::len(source_name) == 0 {
+        return error("compiled struct-cf: token_text requires the source parameter");
+    }
+    let source_type = cf_param_type_or_empty(params_spec, source_name);
+    let text_arg0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb1_value, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, text_arg0, source_name,
+        "compiled struct-cf: token_text must pass the source first", bs);
+    let text_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb1_value, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, text_arg1, token_var,
+        "compiled struct-cf: token_text must pass the current token second", bs);
+
+    // 'if <semi>(<token>) { try <out>.append_bytes(";"); return; }'.
+    try cf_expect(ir_bytes, function_name, wb2, "If",
+        "compiled struct-cf: scan body must guard the semicolon early return", bs);
+    let semi_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb2, "condition", 0, bs);
+    try cf_expect(ir_bytes, function_name, semi_cond, "Call",
+        "compiled struct-cf: semicolon guard must be a predicate call", bs);
+    try cf_require_call_argc(ir_bytes, function_name, semi_cond, 1,
+        "compiled struct-cf: semicolon guard takes the current token", bs);
+    let semi_arg = try ir_contract::body_child_sequence_from(ir_bytes, function_name, semi_cond, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, semi_arg, token_var,
+        "compiled struct-cf: semicolon guard must test the current token", bs);
+    let semi_then = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb2, "then", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, semi_then, bs)) != 2 {
+        return error("compiled struct-cf: semicolon branch must append ';' then return");
+    }
+    let semi_then0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, semi_then, "statement", 0, bs);
+    let semi_arg_node = try cf_string_append_arg(
+        ir_bytes, function_name, semi_then0, out_name, "append_bytes",
+        "compiled struct-cf: semicolon branch must append the ';' literal", bs
+    );
+    try cf_expect(ir_bytes, function_name, semi_arg_node, "String",
+        "compiled struct-cf: semicolon branch append must be a string literal", bs);
+    let semi_lit = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, semi_arg_node, bs);
+    let semi_then1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, semi_then, "statement", 1, bs);
+    try cf_expect(ir_bytes, function_name, semi_then1, "Return",
+        "compiled struct-cf: semicolon branch must end with a return", bs);
+    let semi_ret_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, semi_then1, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, semi_ret_value, "Empty",
+        "compiled struct-cf: semicolon branch return must be a bare 'return;'", bs);
+
+    // 'if <ident>(<token>) or <colon>(<token>) { try <out>.append_bytes(<text>); }'.
+    try cf_expect(ir_bytes, function_name, wb3, "If",
+        "compiled struct-cf: scan body must guard the text append", bs);
+    let ident_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb3, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, ident_cond, "or",
+        "compiled struct-cf: text guard must be 'ident or double-colon'", bs);
+    let ident_call = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ident_cond, "left", 0, bs);
+    try cf_expect(ir_bytes, function_name, ident_call, "Call",
+        "compiled struct-cf: text guard left must be a predicate call", bs);
+    try cf_require_call_argc(ir_bytes, function_name, ident_call, 1,
+        "compiled struct-cf: text guard left takes the current token", bs);
+    let ident_arg = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ident_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, ident_arg, token_var,
+        "compiled struct-cf: text guard left must test the current token", bs);
+    let colon_call = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ident_cond, "right", 0, bs);
+    try cf_expect(ir_bytes, function_name, colon_call, "Call",
+        "compiled struct-cf: text guard right must be a predicate call", bs);
+    try cf_require_call_argc(ir_bytes, function_name, colon_call, 1,
+        "compiled struct-cf: text guard right takes the current token", bs);
+    let colon_arg = try ir_contract::body_child_sequence_from(ir_bytes, function_name, colon_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, colon_arg, token_var,
+        "compiled struct-cf: text guard right must test the current token", bs);
+    let ident_then = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb3, "then", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, ident_then, bs)) != 1 {
+        return error("compiled struct-cf: text branch must append the token text");
+    }
+    let ident_then0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, ident_then, "statement", 0, bs);
+    let text_append_arg = try cf_string_append_arg(
+        ir_bytes, function_name, ident_then0, out_name, "append_bytes",
+        "compiled struct-cf: text branch must append the token text local", bs
+    );
+    try cf_require_var(ir_bytes, function_name, text_append_arg, text_var,
+        "compiled struct-cf: text branch must append the token text local", bs);
+
+    // 'index = index + 1' advances the scan counter.
+    try cf_expect(ir_bytes, function_name, wb4, "Assign",
+        "compiled struct-cf: scan body must end with the counter increment", bs);
+    let wb4_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb4, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, wb4_target, index_var,
+        "compiled struct-cf: counter increment must assign the scan counter", bs);
+    let wb4_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb4, "value", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, wb4_value, "add",
+        "compiled struct-cf: counter increment must be '<index> + 1'", bs);
+    let wb4_add_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb4_value, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, wb4_add_left, index_var,
+        "compiled struct-cf: counter increment must add to the scan counter", bs);
+    let wb4_add_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wb4_value, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, wb4_add_right, 1,
+        "compiled struct-cf: counter increment must add exactly 1", bs);
+
+    // ---- Emit the string-literal globals then the define ----
+    try cf_emit_string_global(out, llvm_symbol, 0, import_lit);
+    try cf_emit_string_global(out, llvm_symbol, 1, semi_lit);
+
+    try cf_w(out, "define ");
+    try cf_w(out, llvm_return_type);
+    try cf_w(out, " @");
+    try cf_w(out, llvm_symbol);
+    try cf_w(out, "(");
+    try compiled_signature::append_params_signature(out, params_spec);
+    try cf_l(out, ") {");
+
+    // Entry: append the 'import ' prefix, then seed the scan counter from 'import_index + 1'.
+    try cf_l(out, "entry:");
+    try cf_emit_string_literal_slice(out, llvm_symbol, 0, "imp", import_lit);
+    try cf_emit_string_append(
+        out, llvm_return_type, "imp", "kizu_rt_string_append_bytes", out_name,
+        "%kizu.slice.u8", "%", "imp_slice"
+    );
+    try cf_w(out, "  %");
+    try cf_w(out, index_var);
+    try cf_w(out, "_init = add i64 %");
+    try cf_w(out, import_index_name);
+    try cf_l(out, ", 1");
+    try cf_l(out, "  br label %scan_head");
+
+    // Scan head: phi the counter, test it against the token length.
+    try cf_l(out, "scan_head:");
+    try cf_w(out, "  %");
+    try cf_w(out, index_var);
+    try cf_w(out, " = phi i64 [ %");
+    try cf_w(out, index_var);
+    try cf_w(out, "_init, %imp_cont ], [ %");
+    try cf_w(out, index_var);
+    try cf_l(out, "_next, %scan_latch ]");
+    try cf_w(out, "  %scan_len = call i64 @kizu_rt_array_len(");
+    try cf_w(out, recv_type);
+    try cf_w(out, " %");
+    try cf_w(out, arr_name);
+    try cf_l(out, ")");
+    try cf_w(out, "  %scan_cond = icmp slt i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", %scan_len");
+    try cf_l(out, "  br i1 %scan_cond, label %scan_body, label %scan_exit");
+
+    // Scan body: read the token, read its text, then guard the semicolon early return.
+    try cf_l(out, "scan_body:");
+    try cf_emit_get(out, token_var, arr_name, recv_type, token_element_llvm, llvm_return_type, index_var, "");
+    try cf_w(out, "  %");
+    try cf_w(out, text_var);
+    try cf_w(out, " = call ");
+    try cf_w(out, text_ret);
+    try cf_w(out, " @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, text_callee);
+    try cf_w(out, "(");
+    try cf_w(out, source_type);
+    try cf_w(out, " %");
+    try cf_w(out, source_name);
+    try cf_w(out, ", ");
+    try cf_w(out, token_element_llvm);
+    try cf_w(out, " %");
+    try cf_w(out, token_var);
+    try cf_l(out, ")");
+    try cf_emit_token_predicate(
+        out, ir_bytes, function_name, module_prefix, "semi", semi_cond, token_element_llvm, token_var, bs
+    );
+    try cf_l(out, "  br i1 %semi, label %semi_then, label %semi_skip");
+
+    // Semicolon branch: append ';' and return the void success.
+    try cf_l(out, "semi_then:");
+    try cf_emit_string_literal_slice(out, llvm_symbol, 1, "semi", semi_lit);
+    try cf_emit_string_append(
+        out, llvm_return_type, "semi", "kizu_rt_string_append_bytes", out_name,
+        "%kizu.slice.u8", "%", "semi_slice"
+    );
+    try cf_emit_void_success_ret(out, llvm_return_type, "ret_semi");
+
+    // Skip branch: guard the text append with the short-circuit 'ident or double-colon'.
+    try cf_l(out, "semi_skip:");
+    try cf_emit_token_predicate(
+        out, ir_bytes, function_name, module_prefix, "ident", ident_call, token_element_llvm, token_var, bs
+    );
+    try cf_l(out, "  br i1 %ident, label %emit_text, label %check_colon");
+    try cf_l(out, "check_colon:");
+    try cf_emit_token_predicate(
+        out, ir_bytes, function_name, module_prefix, "colon", colon_call, token_element_llvm, token_var, bs
+    );
+    try cf_l(out, "  br i1 %colon, label %emit_text, label %scan_latch");
+
+    // Emit-text block: append the token text slice, then fall through to the latch.
+    try cf_l(out, "emit_text:");
+    try cf_emit_string_append(
+        out, llvm_return_type, "txt", "kizu_rt_string_append_bytes", out_name,
+        "%kizu.slice.u8", "%", text_var
+    );
+    try cf_l(out, "  br label %scan_latch");
+
+    // Scan latch: advance the counter and loop back to the head.
+    try cf_l(out, "scan_latch:");
+    try cf_w(out, "  %");
+    try cf_w(out, index_var);
+    try cf_w(out, "_next = add i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", 1");
+    try cf_l(out, "  br label %scan_head");
+
+    // Scan exit: return the void success.
+    try cf_l(out, "scan_exit:");
+    try cf_emit_void_success_ret(out, llvm_return_type, "ret_ok");
+    try cf_l(out, "}");
+    try out.append_byte(cast<u8>(10));
     return;
 }

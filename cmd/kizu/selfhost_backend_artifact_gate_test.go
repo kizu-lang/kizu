@@ -1513,7 +1513,65 @@ func requiredLLVMFormatHelperFragments() []string {
 	}
 	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
 	fragments = append(fragments, requiredLLVMFormatSortFragments()...)
-	return append(fragments, requiredLLVMFormatLeadingImportFragments()...)
+	fragments = append(fragments, requiredLLVMFormatLeadingImportFragments()...)
+	return append(fragments, requiredLLVMFormatImportDeclFragments()...)
+}
+
+// requiredLLVMFormatImportDeclFragments locks the selfhost::parser::format append_import_decl
+// structured-control-flow emitter compiled into stage2 through compiled_struct_cf (issue 1165 /
+// 1162): the first compiled helper that mutates a '&var std::string::String' accumulator. It
+// appends the 'import ' prefix and ';' terminator as string literals through the
+// @kizu_rt_string_append_bytes ABI, reads each token's text via token_text, scans the import's
+// tokens through a loop carrying an early-return semicolon branch and a fall-through 'ident or
+// double-colon' text append, and returns the %kizu.error.void success.
+func requiredLLVMFormatImportDeclFragments() []string {
+	return []string{
+		// The void-returning define over the String accumulator (%kizu.owned), the source slice,
+		// the tokens handle, and the i64 import index, so a regression in the &var String param ABI
+		// is caught.
+		"define %kizu.error.void @kizu_selfhost__parser_format_append_import_decl(",
+		"  %kizu.owned %out",
+		"  i64 %import_index",
+		// Pin the 'import ' / ';' string-literal globals emitted as private module constants and
+		// materialized into %kizu.slice.u8 operands for the @kizu_rt_string_append_bytes ABI, so a
+		// regression to a source-literal or fixed-slice form is caught.
+		"@.kizu.compiled.kizu_selfhost__parser_format_append_import_decl.s0 = " +
+			"private unnamed_addr constant [7 x i8] c\"import \"",
+		"@.kizu.compiled.kizu_selfhost__parser_format_append_import_decl.s1 = " +
+			"private unnamed_addr constant [1 x i8] c\";\"",
+		"%imp_slice = insertvalue %kizu.slice.u8 %imp_base, i64 7, 1",
+		"%imp_call = call %kizu.error.void @kizu_rt_string_append_bytes(" +
+			"%kizu.owned %out, %kizu.slice.u8 %imp_slice)",
+		// Pin the 'var index = import_index + 1' preheader seed feeding the scan loop-head phi.
+		"%index_init = add i64 %import_index, 1",
+		"%index = phi i64 [ %index_init, %imp_cont ], [ %index_next, %scan_latch ]",
+		// Pin the checked Array<Token>.get element read and the token_text slice read off the
+		// source, both AST-derived (no token name special-cased).
+		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %tokens, i64 %index)",
+		"%text = call %kizu.slice.u8 @kizu_selfhost__parser_format_token_text(" +
+			"%kizu.slice.u8 %source, %kizu.kizu.lexer.token %token)",
+		// Pin the semicolon predicate branch: a true predicate appends ';' and returns the void
+		// success early; a false predicate falls through to the text guard.
+		"%semi = call i1 @kizu_selfhost__parser_format_is_semicolon_token(" +
+			"%kizu.kizu.lexer.token %token)",
+		"br i1 %semi, label %semi_then, label %semi_skip",
+		"%semi_call = call %kizu.error.void @kizu_rt_string_append_bytes(" +
+			"%kizu.owned %out, %kizu.slice.u8 %semi_slice)",
+		"%ret_semi = insertvalue %kizu.error.void zeroinitializer, i1 true, 0",
+		// Pin the short-circuit 'ident or double-colon' text guard: either predicate routes to the
+		// text append, otherwise the scan falls through to the latch.
+		"%ident = call i1 @kizu_selfhost__parser_format_is_ident_token(%kizu.kizu.lexer.token %token)",
+		"br i1 %ident, label %emit_text, label %check_colon",
+		"%colon = call i1 @kizu_selfhost__parser_format_is_double_colon_token(" +
+			"%kizu.kizu.lexer.token %token)",
+		"br i1 %colon, label %emit_text, label %scan_latch",
+		// Pin the token-text append against the runtime ABI and the fall-through to the latch.
+		"%txt_call = call %kizu.error.void @kizu_rt_string_append_bytes(" +
+			"%kizu.owned %out, %kizu.slice.u8 %text)",
+		// Pin the latch counter advance and the loop-exit void success wrap.
+		"%index_next = add i64 %index, 1",
+		"%ret_ok = insertvalue %kizu.error.void zeroinitializer, i1 true, 0",
+	}
 }
 
 // requiredLLVMFormatImportSortFragments locks the selfhost::parser::format import-sort

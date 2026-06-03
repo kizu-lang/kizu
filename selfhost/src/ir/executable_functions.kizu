@@ -609,6 +609,20 @@ fn append_format_function_facts(
     // i64-induction While machinery. Its body BFS pulls in is_import_token, index_after_import,
     // and sort_import_indices (all already seeded members).
     try pending.append(try component_function_catalog::find_local_function_index(&catalog, "leading_import_indices"));
+    // append_import_decl is the first selfhost::parser::format member that mutates a '&var
+    // std::string::String' accumulator on the compiled path (issue 1165 / 1162): 'try
+    // out.append_bytes("import "); var index = import_index + 1; while index < tokens.len() {
+    // let token = try tokens.get(index); let text = token_text(source, token); if
+    // is_semicolon_token(token) { try out.append_bytes(";"); return; } if is_ident_token(token)
+    // or is_double_colon_token(token) { try out.append_bytes(text); } index = index + 1; }
+    // return;'. It appends the 'import ' prefix and the ';' terminator as string literals through
+    // the @kizu_rt_string_append_bytes runtime ABI, reads each token's text via token_text, and
+    // emits the import path identifiers, scanning the import's tokens through a loop carrying an
+    // early-return semicolon branch and a fall-through 'ident or double-colon' text append. It
+    // lowers through compiled_struct_cf rather than the i64-induction While machinery. Its body
+    // BFS pulls in token_text, is_semicolon_token, is_ident_token, and is_double_colon_token (all
+    // already seeded members).
+    try pending.append(try component_function_catalog::find_local_function_index(&catalog, "append_import_decl"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);
@@ -1823,8 +1837,10 @@ fn collect_catalog_closure_call_callee(
 // method on a value receiver (tokens.len() / tokens.get(...) / indices.set(...) /
 // indices.append(...)) is an Array<T> element builtin lowered inline through the
 // element-size-generic array runtime ABI, not a component function, so the closure does
-// not walk it (issue 1165); any other value-method callee is an explicit error. A
-// namespace-mode FieldExpr is a qualified callee resolved against the component prefix.
+// not walk it (issue 1165); the std::string::String mutators out.append_bytes(...) /
+// out.append_byte(...) lower inline through the @kizu_rt_string_append_* ABI the same way.
+// Any other value-method callee is an explicit error. A namespace-mode FieldExpr is a
+// qualified callee resolved against the component prefix.
 fn collect_catalog_closure_field_callee(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -1840,7 +1856,9 @@ fn collect_catalog_closure_field_callee(
     if !namespace {
         let method = ast_node_text(text, ast, name_node);
         if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "get") or
-            std::mem::equal_bytes(method, "set") or std::mem::equal_bytes(method, "append") {
+            std::mem::equal_bytes(method, "set") or std::mem::equal_bytes(method, "append") or
+            std::mem::equal_bytes(method, "append_bytes") or
+            std::mem::equal_bytes(method, "append_byte") {
             return;
         }
         return error(unsupported_call_form_error);
