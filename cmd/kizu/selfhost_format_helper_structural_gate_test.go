@@ -22,9 +22,12 @@ const parseFormatAllocMaxLines = 197
 // whose loop latch is a loop-carried try-call, 'index = try index_after_import(tokens,
 // index);', feeding the loop-head phi from the try-call success value), and compare_bytes
 // (the first import-sort helper, an i64 byte comparison whose loop header is a short-circuit
-// `and` of two comparisons over pure length locals with []u8 index loads in the body
-// guards). They are the first selfhost::parser::format members on the compiled path and must
-// keep being emitted from both the IR fact catalog and the backend BFS.
+// `and` of two comparisons over pure length locals with []u8 index loads in the body guards),
+// and import_path_less (the first multi-counter helper: two lockstep token cursors with
+// base-plus-offset inits advanced by a trailing run of constant-step increments under a
+// short-circuit `and` header, with a nested-call-argument compare_bytes let and a prefix-not
+// call return). They are the first selfhost::parser::format members on the compiled path and
+// must keep being emitted from both the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
 	"is_import_token",
 	"is_ident_token",
@@ -35,6 +38,7 @@ var formatCompiledHelperSeeds = []string{
 	"index_after_import",
 	"index_after_leading_imports",
 	"compare_bytes",
+	"import_path_less",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
