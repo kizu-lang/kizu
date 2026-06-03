@@ -1514,7 +1514,43 @@ func requiredLLVMFormatHelperFragments() []string {
 	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
 	fragments = append(fragments, requiredLLVMFormatSortFragments()...)
 	fragments = append(fragments, requiredLLVMFormatLeadingImportFragments()...)
-	return append(fragments, requiredLLVMFormatImportDeclFragments()...)
+	fragments = append(fragments, requiredLLVMFormatImportDeclFragments()...)
+	return append(fragments, requiredLLVMFormatSortedImportsFragments()...)
+}
+
+// requiredLLVMFormatSortedImportsFragments locks the selfhost::parser::format
+// append_sorted_imports structured-control-flow emitter compiled into stage2 through
+// compiled_struct_cf (issue 1165 / 1162): the import-cluster emitter that scans the sorted
+// indices array and, for each, appends a single import declaration via append_import_decl
+// followed by a newline byte through the @kizu_rt_string_append_byte ABI.
+func requiredLLVMFormatSortedImportsFragments() []string {
+	return []string{
+		// The void-returning define over the String accumulator (%kizu.owned), the source slice,
+		// the tokens handle, and the indices handle (%kizu.owned), so a regression in the &var
+		// String / &Array param ABI is caught.
+		"define %kizu.error.void @kizu_selfhost__parser_format_append_sorted_imports(",
+		"  %kizu.owned %indices",
+		// Pin the scan loop head reading the indices length through the runtime builtin and the
+		// i64 counter loop-head phi.
+		"%scan_len = call i64 @kizu_rt_array_len(%kizu.owned %indices)",
+		"%index = phi i64 [ 0, %entry ], [ %index_next, %scan_latch ]",
+		// Pin the checked Array<i64>.get read of the next sorted import index against the element
+		// accessor, with try-propagation of a failure as this function's own error union.
+		"%import_index_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +
+			"%kizu.owned %indices, i64 %index)",
+		"%import_index = load i64, ptr %import_index_ptr",
+		// Pin the try-call to the single-import emitter forwarding the accumulator / source /
+		// tokens / import index, with its %kizu.error.void propagated as this function's own union.
+		"%decl_call = call %kizu.error.void @kizu_selfhost__parser_format_append_import_decl(" +
+			"%kizu.owned %out, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %import_index)",
+		"br i1 %decl_ok, label %decl_cont, label %decl_fail",
+		// Pin the newline append against the @kizu_rt_string_append_byte ABI with the i8 immediate
+		// derived from the cast<u8>(10) literal (no hidden constant).
+		"%nl_call = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %out, i8 10)",
+		// Pin the latch counter advance and the loop-exit void success wrap.
+		"%index_next = add i64 %index, 1",
+		"%ret_ok = insertvalue %kizu.error.void zeroinitializer, i1 true, 0",
+	}
 }
 
 // requiredLLVMFormatImportDeclFragments locks the selfhost::parser::format append_import_decl
