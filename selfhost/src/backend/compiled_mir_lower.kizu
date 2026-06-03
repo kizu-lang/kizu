@@ -2685,6 +2685,7 @@ fn append_short_circuit_or_operand_ifs(
         0,
         -1,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
         compiled_mir::MirIfThenKind::ReturnBool,
         true,
         llvm_return_type,
@@ -4165,6 +4166,32 @@ fn condition_op_is_comparison(op: []u8) -> bool {
         std::mem::equal_bytes(op, "lt") or std::mem::equal_bytes(op, "lte") or
         std::mem::equal_bytes(op, "gt") or std::mem::equal_bytes(op, "gte");
 }
+// flatten_and_operands collects the leaf operands of a short-circuit 'and' chain in
+// left-to-right evaluation order. A nested 'and' is descended (so '((a and b) and c)'
+// and 'a and (b and c)' both flatten to [a, b, c]); any other node, including an 'or',
+// is a leaf appended as-is, so the caller can reject a nested 'or' as a near-miss
+// explicit error rather than silently eager-evaluating it (issue 1165 / 1162).
+fn flatten_and_operands(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    operands: &var std::array::Array<i64>,
+    bs: i64
+) -> !void {
+    if (try short_circuit_kind(ir_bytes, function_name, node, bs)) == 1 {
+        let left = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "left", 0, bs
+        );
+        let right = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "right", 0, bs
+        );
+        try flatten_and_operands(ir_bytes, function_name, left, operands, bs);
+        try flatten_and_operands(ir_bytes, function_name, right, operands, bs);
+        return;
+    }
+    try operands.append(node);
+    return;
+}
 fn lower_multi_if_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4187,8 +4214,10 @@ fn lower_multi_if_statement(
     let cond_short_circuit = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var cond_rhs_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    var cond_extra_operands = std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator());
     var cond_result = -1;
     var cond_rhs_result = -1;
+    var last_cond_result = -1;
     var cond_strings = 0;
     if cond_short_circuit == 0 {
         cond_result = try lower_expr_into(
@@ -4203,49 +4232,121 @@ fn lower_multi_if_statement(
             bs
         );
         cond_strings = try count_strings_in_insts(&cond_insts);
+        last_cond_result = cond_result;
     } else {
-        let left_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, cond_node, "left", 0, bs
-        );
-        let right_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, cond_node, "right", 0, bs
-        );
-        if (try short_circuit_kind(ir_bytes, function_name, left_node, bs)) != 0 or
-            (try short_circuit_kind(ir_bytes, function_name, right_node, bs)) != 0 {
-            return error("compiled mir: nested short-circuit and/or unsupported");
+        if cond_short_circuit == 1 {
+            // An 'and' header lowers as a short-circuit chain of leaf operands evaluated
+            // left to right, each guarded by every earlier operand (issue 1165 / 1162).
+            // The first operand fills cond_insts (the unguarded entry block), the second
+            // fills cond_rhs_insts (the first guarded block), and any further operands fill
+            // cond_extra_operands. A nested 'or' is left a leaf by flatten_and_operands and
+            // rejected here as a near-miss explicit error rather than eager-evaluated.
+            var operands = std::array::Array<i64>(std::mem::page_allocator());
+            try flatten_and_operands(ir_bytes, function_name, cond_node, &var operands, bs);
+            var validate_index = 0;
+            while validate_index < operands.len() {
+                let operand_node = try operands.get(validate_index);
+                if (try short_circuit_kind(ir_bytes, function_name, operand_node, bs)) != 0 {
+                    return error("compiled mir: nested short-circuit and/or unsupported");
+                }
+                validate_index = validate_index + 1;
+            }
+            let op0 = try operands.get(0);
+            cond_result = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                op0,
+                string_counter,
+                temp_counter,
+                &var cond_insts,
+                bs
+            );
+            var acc_strings = try count_strings_in_insts(&cond_insts);
+            var acc_temp = temp_counter + cond_insts.len();
+            let op1 = try operands.get(1);
+            cond_rhs_result = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                op1,
+                string_counter + acc_strings,
+                acc_temp,
+                &var cond_rhs_insts,
+                bs
+            );
+            acc_strings = acc_strings + try count_strings_in_insts(&cond_rhs_insts);
+            acc_temp = acc_temp + cond_rhs_insts.len();
+            last_cond_result = cond_rhs_result;
+            var extra_index = 2;
+            while extra_index < operands.len() {
+                var operand_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+                let operand_node = try operands.get(extra_index);
+                let operand_result = try lower_expr_into(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    operand_node,
+                    string_counter + acc_strings,
+                    acc_temp,
+                    &var operand_insts,
+                    bs
+                );
+                acc_strings = acc_strings + try count_strings_in_insts(&operand_insts);
+                acc_temp = acc_temp + operand_insts.len();
+                last_cond_result = operand_result;
+                try cond_extra_operands.append(
+                    compiled_mir::cond_operand(operand_result, operand_insts)
+                );
+                extra_index = extra_index + 1;
+            }
+            cond_strings = acc_strings;
+            operands.deinit();
+        } else {
+            let left_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, cond_node, "left", 0, bs
+            );
+            let right_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, cond_node, "right", 0, bs
+            );
+            if (try short_circuit_kind(ir_bytes, function_name, left_node, bs)) != 0 or
+                (try short_circuit_kind(ir_bytes, function_name, right_node, bs)) != 0 {
+                return error("compiled mir: nested short-circuit and/or unsupported");
+            }
+            cond_result = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                left_node,
+                string_counter,
+                temp_counter,
+                &var cond_insts,
+                bs
+            );
+            let lhs_strings = try count_strings_in_insts(&cond_insts);
+            let rhs_temp_base = temp_counter + cond_insts.len();
+            let rhs_string_base = string_counter + lhs_strings;
+            cond_rhs_result = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                right_node,
+                rhs_string_base,
+                rhs_temp_base,
+                &var cond_rhs_insts,
+                bs
+            );
+            cond_strings = lhs_strings + try count_strings_in_insts(&cond_rhs_insts);
+            last_cond_result = cond_rhs_result;
         }
-        cond_result = try lower_expr_into(
-            ir_bytes,
-            function_name,
-            module_prefix,
-            locals_spec,
-            left_node,
-            string_counter,
-            temp_counter,
-            &var cond_insts,
-            bs
-        );
-        let lhs_strings = try count_strings_in_insts(&cond_insts);
-        let rhs_temp_base = temp_counter + cond_insts.len();
-        let rhs_string_base = string_counter + lhs_strings;
-        cond_rhs_result = try lower_expr_into(
-            ir_bytes,
-            function_name,
-            module_prefix,
-            locals_spec,
-            right_node,
-            rhs_string_base,
-            rhs_temp_base,
-            &var cond_rhs_insts,
-            bs
-        );
-        cond_strings = lhs_strings + try count_strings_in_insts(&cond_rhs_insts);
     }
     let then_string_base = string_counter + cond_strings;
-    var then_base = cond_result + 1;
-    if cond_short_circuit != 0 {
-        then_base = cond_rhs_result + 1;
-    }
+    let then_base = last_cond_result + 1;
     let then_stmt = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, then_node, "statement", 0, bs
     );
@@ -4354,6 +4455,7 @@ fn lower_multi_if_statement(
             cond_short_circuit,
             cond_rhs_result,
             cond_rhs_insts,
+            cond_extra_operands,
             then_kind,
             bool_value,
             call_type,

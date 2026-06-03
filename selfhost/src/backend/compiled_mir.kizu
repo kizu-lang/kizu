@@ -367,13 +367,30 @@ pub struct MirLetArrayGetStmt {
     pub expr_insts: std::array::Array<MirExprInst>,
 }
 
+// MirCondOperand backs one operand of an 'and' short-circuit chain beyond the first
+// two (cond_insts and cond_rhs_insts). result_id names the operand's i1 result and
+// insts holds the operand's expression lowered into its own guarded block, so a
+// trapping/loading operand (e.g. a byte index) never runs unless every earlier operand
+// was true (issue 1165 / 1162). It references MirExprInst through a heap-backed Array
+// like the lhs/rhs operands, so the union stays fixed-size.
+pub struct MirCondOperand {
+    pub result_id: i64,
+    pub insts: std::array::Array<MirExprInst>,
+}
+
 // cond_short_circuit selects how the condition drives the branch:
 //   0 = single condition (cond_insts / cond_result_id only)
 //   1 = lhs and rhs short-circuit; rhs is only evaluated when lhs is true
 //   2 = lhs or rhs short-circuit; rhs is only evaluated when lhs is false
-// When short-circuit is active cond_insts/cond_result_id hold the lhs and
-// cond_rhs_insts/cond_rhs_result_id hold the rhs, lowered in the guarded block
-// so a trapping/loading rhs (e.g. a byte index) never runs unless reached.
+// When short-circuit is active cond_insts/cond_result_id hold the lhs (the first
+// operand) and cond_rhs_insts/cond_rhs_result_id hold the second operand, lowered in
+// the guarded block so a trapping/loading operand (e.g. a byte index) never runs unless
+// reached. An 'and' header may carry further operands in cond_extra_operands: each is
+// guarded by every earlier operand, so a chained 'a and b and c' short-circuit
+// (after_line_break's 'source[index] == 13 and index + 1 < length and source[index + 1]
+// == 10') evaluates the guarded byte loads only when their guards hold (issue 1165 /
+// 1162). cond_extra_operands is empty for a single condition, an 'or', and a two-operand
+// 'and', so those keep their existing block layout.
 pub struct MirIfStmt {
     pub if_index: i64,
     pub string_index: i64,
@@ -383,6 +400,7 @@ pub struct MirIfStmt {
     pub cond_short_circuit: i64,
     pub cond_rhs_result_id: i64,
     pub cond_rhs_insts: std::array::Array<MirExprInst>,
+    pub cond_extra_operands: std::array::Array<MirCondOperand>,
     pub if_then_kind: MirIfThenKind,
     pub bool_value: bool,
     pub then_call_module_prefix: []u8,
@@ -1497,10 +1515,18 @@ impl MirReturnArrayGetStmt {
     }
 }
 
+impl MirCondOperand {
+    fn deinit(self: MirCondOperand) -> void {
+        self.insts.deinit();
+        return;
+    }
+}
+
 impl MirIfStmt {
     fn deinit(self: MirIfStmt) -> void {
         self.cond_insts.deinit();
         self.cond_rhs_insts.deinit();
+        self.cond_extra_operands.deinit();
         self.then_call_args.deinit();
         self.then_expr_insts.deinit();
         self.then_struct_fields.deinit();
@@ -3309,6 +3335,16 @@ pub fn secondary_induction(
     };
 }
 
+pub fn cond_operand(
+    result_id: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirCondOperand {
+    return MirCondOperand {
+        result_id: result_id,
+        insts: insts
+    };
+}
+
 pub fn if_stmt(
     if_index: i64,
     string_index: i64,
@@ -3317,6 +3353,7 @@ pub fn if_stmt(
     cond_short_circuit: i64,
     cond_rhs_result_id: i64,
     cond_rhs_insts: std::array::Array<MirExprInst>,
+    cond_extra_operands: std::array::Array<MirCondOperand>,
     then_kind: MirIfThenKind,
     bool_value: bool,
     call_type: []u8,
@@ -3337,6 +3374,7 @@ pub fn if_stmt(
         cond_short_circuit: cond_short_circuit,
         cond_rhs_result_id: cond_rhs_result_id,
         cond_rhs_insts: cond_rhs_insts,
+        cond_extra_operands: cond_extra_operands,
         if_then_kind: then_kind,
         bool_value: bool_value,
         then_call_module_prefix: module_prefix,
