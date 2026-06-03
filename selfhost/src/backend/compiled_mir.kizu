@@ -417,16 +417,39 @@ pub struct MirIfStmt {
 // phi as %<var>_next and whose failure propagates as this function's own error union
 // (index_after_leading_imports is its first consumer, issue 1165). It is a 0-or-1 element
 // Array<MirStmt> exactly like body_stmts so the union stays fixed-size.
+// MirSecondaryInduction is one extra lockstep i64 counter advanced alongside the primary
+// induction variable in a multi-counter bounded loop (issue 1165 / 1162). import_path_less
+// walks two token cursors ('var left_index = left + 1; var right_index = right + 1; while
+// left_index < tokens.len() and right_index < tokens.len() { ...; left_index = left_index +
+// 1; right_index = right_index + 1; }'): left_index is the primary induction and right_index
+// is one secondary. Each secondary gets its own loop-head phi (named after the variable, so
+// plain Var reads resolve to it) seeded on the preheader edge from init_var + init_offset
+// when init_var is non-empty (a 'var right_index = right + 1' base-plus-offset initializer)
+// or from the init_literal otherwise, and a constant-step latch '%<var>_next = add i64
+// %<var>, step'.
+pub struct MirSecondaryInduction {
+    pub var_name: []u8,
+    pub init_literal: i64,
+    pub init_var: []u8,
+    pub init_offset: i64,
+    pub step: i64,
+}
 pub struct MirWhileStmt {
     pub loop_index: i64,
     pub induction_var: []u8,
     pub induction_init: i64,
     pub induction_init_var: []u8,
+    // induction_init_offset seeds a base-plus-offset primary init ('var left_index = left +
+    // 1'): when induction_init_var is non-empty and the offset is non-zero the preheader
+    // computes '%<var>_init = add i64 %<init_var>, offset' and the phi seeds from it; a zero
+    // offset keeps the plain '%<init_var>' copy seed (issue 1165 / 1162).
+    pub induction_init_offset: i64,
     pub induction_step: i64,
     pub cond_result_id: i64,
     pub cond_insts: std::array::Array<MirExprInst>,
     pub body_stmts: std::array::Array<MirStmt>,
     pub latch_stmts: std::array::Array<MirStmt>,
+    pub secondary_inductions: std::array::Array<MirSecondaryInduction>,
 }
 
 // MirTraversalArg is one payload-field argument forwarded to a node_count traversal arm's
@@ -1494,6 +1517,7 @@ impl MirWhileStmt {
         self.cond_insts.deinit();
         self.body_stmts.deinit();
         self.latch_stmts.deinit();
+        self.secondary_inductions.deinit();
         return;
     }
 }
@@ -3247,23 +3271,42 @@ pub fn while_stmt(
     induction_var: []u8,
     induction_init: i64,
     induction_init_var: []u8,
+    induction_init_offset: i64,
     induction_step: i64,
     cond_result_id: i64,
     cond_insts: std::array::Array<MirExprInst>,
     body_stmts: std::array::Array<MirStmt>,
-    latch_stmts: std::array::Array<MirStmt>
+    latch_stmts: std::array::Array<MirStmt>,
+    secondary_inductions: std::array::Array<MirSecondaryInduction>
 ) -> MirStmt {
     return MirStmt::While(MirWhileStmt {
         loop_index: loop_index,
         induction_var: induction_var,
         induction_init: induction_init,
         induction_init_var: induction_init_var,
+        induction_init_offset: induction_init_offset,
         induction_step: induction_step,
         cond_result_id: cond_result_id,
         cond_insts: cond_insts,
         body_stmts: body_stmts,
-        latch_stmts: latch_stmts
+        latch_stmts: latch_stmts,
+        secondary_inductions: secondary_inductions
     });
+}
+pub fn secondary_induction(
+    var_name: []u8,
+    init_literal: i64,
+    init_var: []u8,
+    init_offset: i64,
+    step: i64
+) -> MirSecondaryInduction {
+    return MirSecondaryInduction {
+        var_name: var_name,
+        init_literal: init_literal,
+        init_var: init_var,
+        init_offset: init_offset,
+        step: step
+    };
 }
 
 pub fn if_stmt(

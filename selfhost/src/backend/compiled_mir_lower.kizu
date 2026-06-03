@@ -1030,7 +1030,28 @@ pub fn is_count_range_function(
     }
     let s3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 3, bs);
     let k3 = try ir_contract::body_node_kind_from(ir_bytes, function_name, s3, bs);
-    return std::mem::equal_bytes(k3, "Return");
+    if !std::mem::equal_bytes(k3, "Return") {
+        return false;
+    }
+    // The count_range accumulator seeds both counters from integer literals ('var count = 0;
+    // var index = 0;') and returns the accumulator local ('return count;'). A multi-counter
+    // import-sort loop like import_path_less has base-plus-offset inits ('var left_index =
+    // left + 1;') and a bool return ('return false;'), so it must fall through to the generic
+    // multi-statement path instead of being mis-detected as the child_at / node_count
+    // traversal template (issue 1165 / 1162).
+    let s0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0, "value", 0, bs);
+    let s0_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, s0_value, bs);
+    if !std::mem::equal_bytes(s0_value_kind, "Int") {
+        return false;
+    }
+    let s1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "value", 0, bs);
+    let s1_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, s1_value, bs);
+    if !std::mem::equal_bytes(s1_value_kind, "Int") {
+        return false;
+    }
+    let s3_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s3, "value", 0, bs);
+    let s3_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, s3_value, bs);
+    return std::mem::equal_bytes(s3_value_kind, "Var");
 }
 
 // nth_param_field returns the name (want_name true) or LLVM type (false) of the index-th
@@ -3546,6 +3567,42 @@ fn lower_multi_let_statement(
                 let_name, let_value, string_counter, temp_counter, try_counter, stmts, bs
             );
         }
+        // 'let comparison = compare_bytes(token_text(source, left_token), token_text(source,
+        // right_token));' carries nested call arguments the inline call-arg descriptors cannot
+        // model, so it lowers through the generic expression path (which materializes each
+        // nested call into a preceding expr temp) as a let-expr statement, mirroring the
+        // return-statement nested-call handling (issue 1165 / 1162).
+        if try call_has_call_arg(ir_bytes, function_name, let_value, bs) {
+            var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+            let nested_result_id = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                let_value,
+                string_counter,
+                temp_counter,
+                &var nested_insts,
+                bs
+            );
+            let nested_strings = try count_strings_in_insts(&nested_insts);
+            let nested_inst_count = nested_insts.len();
+            let nested_call_type = try compiled_mir_types::lower_call_return_type(
+                ir_bytes, function_name, module_prefix, let_value, bs
+            );
+            let nested_locals = try compiled_signature::extend_locals_spec(
+                ir_bytes, locals_spec, let_name, nested_call_type
+            );
+            try stmts.append(compiled_mir::let_expr_stmt(
+                let_name, string_counter, nested_result_id, nested_insts
+            ));
+            return MultiLowerResult {
+                locals_spec: nested_locals,
+                string_counter: string_counter + nested_strings,
+                temp_counter: temp_counter + nested_inst_count,
+                try_counter: try_counter
+            };
+        }
         let call_type = try compiled_mir_types::lower_call_return_type(
             ir_bytes, function_name, module_prefix, let_value, bs
         );
@@ -4365,9 +4422,12 @@ fn while_induction_var(
     }
     return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
 }
-// statement_is_induction_init reports whether a top-level let declares the induction
-// counter of some while in the same function, by matching the let name against each
-// while's induction variable.
+// statement_is_induction_init reports whether a top-level let declares an induction counter
+// of some while in the same function, by matching the let name against each while's induction
+// variables. Both the primary counter (the trailing increment target) and every secondary
+// lockstep counter (an earlier increment in the trailing run) are matched, so a 'var
+// left_index = left + 1;' seed for a secondary counter is skipped at the top level and never
+// emitted as a let that would redefine the loop-head phi %left_index (issue 1165 / 1162).
 fn statement_is_induction_init(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4388,8 +4448,45 @@ fn statement_is_induction_init(
         );
         let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
         if std::mem::equal_bytes(kind, "While") {
-            let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
-            if std::mem::equal_bytes(induction_var, let_name) {
+            if try while_carries_induction_var(ir_bytes, function_name, statement, let_name, bs) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+// while_carries_induction_var reports whether a while loop advances a counter named name,
+// counting both the primary trailing increment target and every secondary increment in the
+// trailing run (issue 1165 / 1162).
+fn while_carries_induction_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    name: []u8,
+    bs: i64
+) -> !bool {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_node, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    let latch_count = try while_trailing_increment_count(
+        ir_bytes, function_name, body_node, body_count, bs
+    );
+    var index = body_count - latch_count;
+    while index < body_count {
+        let increment_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", index, bs
+        );
+        let target = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, increment_stmt, "target", 0, bs
+        );
+        let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+        if std::mem::equal_bytes(target_kind, "Var") {
+            let target_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, target, bs
+            );
+            if std::mem::equal_bytes(target_name, name) {
                 return true;
             }
         }
@@ -4400,11 +4497,15 @@ fn statement_is_induction_init(
 // InductionInit is the resolved 'var counter = <init>' loop-head phi seed. An integer
 // literal initializer ('var index = 0') sets literal and leaves var_name empty; a
 // parameter/local initializer ('var index = import_index') sets var_name to the source
-// name and leaves literal at 0. The renderer prints %<var_name> on the preheader edge
-// when var_name is non-empty, otherwise the literal (issue 1165).
+// name and leaves literal at 0; a base-plus-offset initializer ('var left_index = left + 1')
+// sets var_name to the base name and offset to the integer addend. The renderer prints
+// %<var_name> on the preheader edge when var_name is non-empty and offset is zero, computes
+// '%<var>_init = add i64 %<var_name>, offset' for a non-zero offset, and otherwise prints the
+// literal (issue 1165 / 1162).
 pub struct InductionInit {
     pub literal: i64,
     pub var_name: []u8,
+    pub offset: i64,
 }
 // find_induction_init finds the 'var counter = <init>' initializer for the while at
 // while_stmt_index and returns its loop-head phi seed. Only top-level Let statements that
@@ -4454,13 +4555,38 @@ fn find_induction_init(
         let literal = try ir_contract::body_int_value_from(
             ir_bytes, function_name, init_value, bs
         );
-        return InductionInit { literal: literal, var_name: "" };
+        return InductionInit { literal: literal, var_name: "", offset: 0 };
     }
     if std::mem::equal_bytes(value_kind, "Var") {
         let var_name = try ir_contract::body_token_or_empty_from(
             ir_bytes, function_name, init_value, bs
         );
-        return InductionInit { literal: 0, var_name: var_name };
+        return InductionInit { literal: 0, var_name: var_name, offset: 0 };
+    }
+    // 'var left_index = left + 1;' seeds the phi from a base parameter/local plus an integer
+    // offset; the preheader computes the addend so two lockstep cursors can start one past
+    // their respective import keywords (issue 1165 / 1162).
+    if std::mem::equal_bytes(value_kind, "Binary") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-binary ", function_name, init_value, bs
+        );
+        if !std::mem::equal_bytes(op, "add") {
+            return error("compiled mir: induction base-plus-offset init must be an addition");
+        }
+        let base_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, init_value, "left", 0, bs
+        );
+        let offset_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, init_value, "right", 0, bs
+        );
+        let base_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, base_node, bs);
+        let offset_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, offset_node, bs);
+        if !std::mem::equal_bytes(base_kind, "Var") or !std::mem::equal_bytes(offset_kind, "Int") {
+            return error("compiled mir: induction base-plus-offset init must be name + integer");
+        }
+        let base_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, base_node, bs);
+        let offset = try ir_contract::body_int_value_from(ir_bytes, function_name, offset_node, bs);
+        return InductionInit { literal: 0, var_name: base_name, offset: offset };
     }
     return error("compiled mir: induction variable must be initialized to an integer or a parameter");
 }
@@ -4504,6 +4630,103 @@ fn parse_induction_step(
         return error("compiled mir: induction increment must add to the induction variable");
     }
     return try ir_contract::body_int_value_from(ir_bytes, function_name, right_node, bs);
+}
+// while_assign_is_constant_step reports whether a body Assign is a constant-step
+// 'name = name + <int>' induction increment: a Var target, a Binary add value whose left is
+// that same Var and whose right is an integer literal. It backs the trailing-increment run
+// detection that recognizes a multi-counter latch suffix (issue 1165 / 1162).
+fn while_assign_is_constant_step(
+    ir_bytes: []u8,
+    function_name: []u8,
+    assign_node: i64,
+    bs: i64
+) -> !bool {
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return false;
+    }
+    let target_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "value", 0, bs
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if !std::mem::equal_bytes(value_kind, "Binary") {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, value, bs
+    );
+    if !std::mem::equal_bytes(op, "add") {
+        return false;
+    }
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "left", 0, bs
+    );
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "right", 0, bs
+    );
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right_node, bs);
+    if !std::mem::equal_bytes(left_kind, "Var") or !std::mem::equal_bytes(right_kind, "Int") {
+        return false;
+    }
+    let left_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, left_node, bs);
+    return std::mem::equal_bytes(left_name, target_name);
+}
+// while_trailing_increment_count returns the number of trailing latch statements at the end
+// of a loop body. A loop-carried 'index = try <callee>(.., index);' try-call latch is a
+// single statement; otherwise the latch is the maximal trailing run of constant-step
+// 'name = name + <int>' increments (one for a single counter, several for lockstep counters).
+// The last body statement must be an Assign in both shapes (issue 1165 / 1162).
+fn while_trailing_increment_count(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    body_count: i64,
+    bs: i64
+) -> !i64 {
+    if body_count < 1 {
+        return error("compiled mir: while body must end with the induction increment");
+    }
+    let last_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let last_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, last_stmt, bs);
+    if !std::mem::equal_bytes(last_kind, "Assign") {
+        return error("compiled mir: while body must end with the induction increment");
+    }
+    let last_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, last_stmt, "value", 0, bs
+    );
+    let last_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, last_value, bs);
+    if std::mem::equal_bytes(last_value_kind, "TryExpr") {
+        return 1;
+    }
+    var count = 0;
+    var index = body_count - 1;
+    while index >= 0 {
+        let stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, stmt, bs);
+        if !std::mem::equal_bytes(kind, "Assign") {
+            index = -1;
+            continue;
+        }
+        if !(try while_assign_is_constant_step(ir_bytes, function_name, stmt, bs)) {
+            index = -1;
+            continue;
+        }
+        count = count + 1;
+        index = index - 1;
+    }
+    if count < 1 {
+        return error("compiled mir: while body must end with the induction increment");
+    }
+    return count;
 }
 // lower_multi_while_statement lowers a restricted bounded counter loop: a single i64
 // induction variable, a non-short-circuit comparison condition that reads it, a body
@@ -4568,9 +4791,19 @@ fn lower_multi_while_statement(
     var body_temp_counter = temp_counter + cond_insts.len();
     var body_try_counter = loop_index * 1000;
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    // The body ends with a latch suffix: one statement (a constant-step 'index = index +
+    // <int>' increment or a loop-carried 'index = try <callee>(.., index);' try-call), or a
+    // run of constant-step increments when the loop advances several lockstep counters
+    // ('left_index = left_index + 1; right_index = right_index + 1;'). The primary induction
+    // is the last increment; earlier increments in the run become secondary inductions
+    // rendered alongside it (issue 1165 / 1162).
+    let latch_count = try while_trailing_increment_count(
+        ir_bytes, function_name, body_node, body_count, bs
+    );
+    let body_boundary = body_count - latch_count;
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var body_index = 0;
-    while body_index < body_count - 1 {
+    while body_index < body_boundary {
         let body_stmt = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, body_node, "statement", body_index, bs
         );
@@ -4670,16 +4903,50 @@ fn lower_multi_while_statement(
             ir_bytes, function_name, increment_stmt, induction_var, bs
         );
     }
+    // The increments before the primary latch (body_boundary .. body_count - 2) are the
+    // secondary lockstep counters. Each is a constant-step 'name = name + <int>' increment
+    // with its own preceding 'var name = <init>' initializer, so it gets its own loop-head
+    // phi and latch add (issue 1165 / 1162).
+    var secondary_inductions =
+        std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator());
+    var secondary_index = body_boundary;
+    while secondary_index < body_count - 1 {
+        let secondary_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", secondary_index, bs
+        );
+        let secondary_target = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, secondary_stmt, "target", 0, bs
+        );
+        let secondary_var = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, secondary_target, bs
+        );
+        let secondary_step = try parse_induction_step(
+            ir_bytes, function_name, secondary_stmt, secondary_var, bs
+        );
+        let secondary_init = try find_induction_init(
+            ir_bytes, function_name, secondary_var, loop_index, bs
+        );
+        try secondary_inductions.append(compiled_mir::secondary_induction(
+            secondary_var,
+            secondary_init.literal,
+            secondary_init.var_name,
+            secondary_init.offset,
+            secondary_step
+        ));
+        secondary_index = secondary_index + 1;
+    }
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
         induction_var,
         induction_init.literal,
         induction_init.var_name,
+        induction_init.offset,
         step,
         cond_result,
         cond_insts,
         body_stmts,
-        latch_stmts
+        latch_stmts,
+        secondary_inductions
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
