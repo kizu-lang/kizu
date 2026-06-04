@@ -4610,10 +4610,13 @@ fn statement_is_induction_init(
 // while_carries_induction_var reports whether a while loop advances a counter named name,
 // counting both the primary trailing increment target and every secondary increment in the
 // trailing run (issue 1165 / 1162).
-// if_then_ends_in_continue reports whether an if statement's then-block's last statement is a
-// 'continue', the continue-latch marker. It only inspects the then-block shape; the increment is
-// validated in lower_multi_if_statement / lower_multi_while_continue_latch (issue 1165 / 1162).
-fn if_then_ends_in_continue(
+// if_carries_continue_increment reports whether an if statement is the continue-latch marker: a
+// then-block of exactly two statements, a constant-step '<var> = <var> + <int>' increment followed
+// by a bare 'continue'. Requiring the constant-step shape here -- not merely a trailing 'continue'
+// -- keeps the continue-latch routing from claiming an if whose increment the shared latch cannot
+// fold (e.g. a 'cursor = previous; continue;' copy), which would otherwise be diverted away from a
+// path that might handle it (issue 1165 / 1162).
+fn if_carries_continue_increment(
     ir_bytes: []u8,
     function_name: []u8,
     if_node: i64,
@@ -4623,21 +4626,35 @@ fn if_then_ends_in_continue(
         ir_bytes, function_name, if_node, "then", 0, bs
     );
     let count = try while_body_statement_count(ir_bytes, function_name, then_node, bs);
-    if count < 1 {
+    if count != 2 {
         return false;
     }
-    let last = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, then_node, "statement", count - 1, bs
+    let increment = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
     );
-    let last_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, last, bs);
-    return std::mem::equal_bytes(last_kind, "Continue");
+    let continue_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 1, bs
+    );
+    let continue_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, continue_stmt, bs
+    );
+    if !std::mem::equal_bytes(continue_kind, "Continue") {
+        return false;
+    }
+    let increment_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, increment, bs
+    );
+    if !std::mem::equal_bytes(increment_kind, "Assign") {
+        return false;
+    }
+    return try while_assign_is_constant_step(ir_bytes, function_name, increment, bs);
 }
 // while_is_continue_latch reports whether a while loop advances its induction variable through a
 // continue-latch: a body 'if <cond> { <induction> = <induction> + <step>; continue; }' whose
-// then-block ends in 'continue', rather than a trailing increment assign. Such a loop has no
-// trailing latch statement -- the increment lives inside the continue-if and the loop's
-// non-continue path falls through to a 'return'. line_comment_has_blank_after is its first consumer
-// (issue 1165 / 1162).
+// then-block is a constant-step increment followed by 'continue', rather than a trailing increment
+// assign. Such a loop has no trailing latch statement -- the increment lives inside the continue-if
+// and the loop's non-continue path falls through to a 'return'. line_comment_has_blank_after is its
+// first consumer (issue 1165 / 1162).
 fn while_is_continue_latch(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4655,7 +4672,7 @@ fn while_is_continue_latch(
         );
         let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, stmt, bs);
         if std::mem::equal_bytes(kind, "If") {
-            if try if_then_ends_in_continue(ir_bytes, function_name, stmt, bs) {
+            if try if_carries_continue_increment(ir_bytes, function_name, stmt, bs) {
                 return true;
             }
         }
@@ -4683,7 +4700,7 @@ fn while_continue_increment_assign(
         );
         let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, stmt, bs);
         if std::mem::equal_bytes(kind, "If") {
-            if try if_then_ends_in_continue(ir_bytes, function_name, stmt, bs) {
+            if try if_carries_continue_increment(ir_bytes, function_name, stmt, bs) {
                 let then_node = try ir_contract::body_child_sequence_from(
                     ir_bytes, function_name, stmt, "then", 0, bs
                 );
@@ -5455,6 +5472,34 @@ fn lower_multi_while_statement(
         string_counter: body_string_counter
     };
 }
+// return_expr_advance returns the counters past an expression-return statement's instructions: the
+// temp counter advances by the instruction count and the string counter by the string literals
+// among them. It backs continue_latch_return_advance (issue 1165 / 1162).
+fn return_expr_advance(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    base_temp: i64,
+    base_string: i64
+) -> !MultiIfLowerResult {
+    return MultiIfLowerResult {
+        temp_counter: base_temp + insts.len(),
+        string_counter: base_string + try count_strings_in_insts(insts)
+    };
+}
+// continue_latch_return_advance returns the counters past a continue-latch loop's terminal return so
+// statements after the while never reuse a temp or string slot the return emitted. The tail must be
+// an expression return (a hoisted-call 'return is_line_break(source[cursor])', a bool, or a plain
+// value); any other return shape is an explicit error rather than a silently un-counted lowering
+// (issue 1165 / 1162).
+fn continue_latch_return_advance(
+    stmt: &compiled_mir::MirStmt,
+    base_temp: i64,
+    base_string: i64
+) -> !MultiIfLowerResult {
+    match stmt {
+        ReturnExpr(payload) => return try return_expr_advance(&payload.expr_insts, base_temp, base_string);,
+        _ => return error("compiled mir: continue-latch loop tail must be an expression return");,
+    }
+}
 // lower_multi_while_continue_latch lowers a continue-latch bounded loop -- one whose induction
 // variable advances inside a body 'if <cond> { <induction> = <induction> + <step>; continue; }'
 // rather than through a trailing increment assign. line_comment_has_blank_after is its first
@@ -5623,6 +5668,17 @@ fn lower_multi_while_continue_latch(
                         body_temp_counter,
                         bs
                     ));
+                    // Advance the counters past the loop's terminal return so the result counters
+                    // this function returns -- consumed by statements after the while -- never reuse
+                    // a temp or string slot the return emitted. The tail must lower to an expression
+                    // return ('return is_line_break(source[cursor])'); any other return shape is an
+                    // explicit error rather than a silently un-counted lowering (issue 1165 / 1162).
+                    let return_stmt = try body_stmts.at(body_stmts.len() - 1);
+                    let advance = try continue_latch_return_advance(
+                        return_stmt, body_temp_counter, body_string_counter
+                    );
+                    body_temp_counter = advance.temp_counter;
+                    body_string_counter = advance.string_counter;
                 } else {
                     return error("compiled mir: unsupported continue-latch body statement");
                 }
