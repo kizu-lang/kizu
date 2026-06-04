@@ -178,6 +178,7 @@ var commentPreserveShapeValidationErrors = []string{
 	"compiled struct-cf: comment arm must be the 12-statement comment emitter",
 	"compiled struct-cf: comment loop else arm must be the bare cursor advance",
 	"compiled struct-cf: else arm must be '<index> + 1'",
+	"compiled struct-cf: else arm must add to the cursor",
 	"compiled struct-cf: comment arm must open with the full-line predicate",
 	"compiled struct-cf: blank-before guard must be 'full and has_blank_before'",
 	"compiled struct-cf: comment arm must close by advancing the cursor",
