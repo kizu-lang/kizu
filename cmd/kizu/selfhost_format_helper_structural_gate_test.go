@@ -64,7 +64,17 @@ const parseFormatAllocMaxLines = 197
 // 'if <cond> { cursor = cursor + 1; continue; }' that branches back to the loop latch rather than a
 // trailing increment, its primary init is call-seeded so the line_end_including_break call runs in
 // the preheader, and its non-continue path returns is_line_break(source[cursor]) whose call
-// argument is a checked byte load). They are the
+// argument is a checked byte load), and line_comment_has_blank_before (the first compiled helper
+// with a nested continue-latch loop and the first whose continue-latch step is a copy-decrement:
+// 'var cursor = comment_start; while cursor > start { let previous = cursor - 1; if
+// is_horizontal_space(source[previous]) { cursor = previous; continue; } if
+// !is_line_break(source[previous]) { return false; } cursor = previous; while cursor > start { let
+// before = cursor - 1; if is_horizontal_space(source[before]) { cursor = before; continue; } return
+// is_line_break(source[before]); } return false; } return false;' -- both scans advance the cursor
+// inside a body 'if <cond> { cursor = previous; continue; }' whose latch reads the decrement local
+// rather than a constant-step add, both headers are non-literal 'cursor > start' comparisons, and
+// the inner scan reuses the cursor induction renamed so its loop-head phi does not clash with the
+// outer scan's). They are the
 // first selfhost::parser::format members on the compiled path and must keep being emitted from
 // both the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
@@ -90,6 +100,7 @@ var formatCompiledHelperSeeds = []string{
 	"line_end_including_break",
 	"line_comment_is_full_line",
 	"line_comment_has_blank_after",
+	"line_comment_has_blank_before",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
