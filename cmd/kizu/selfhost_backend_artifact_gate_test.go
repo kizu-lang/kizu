@@ -1520,7 +1520,44 @@ func requiredLLVMFormatHelperFragments() []string {
 	fragments = append(fragments, requiredLLVMFormatLineByteClassifierFragments()...)
 	fragments = append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
 	fragments = append(fragments, requiredLLVMFormatLineEndFragments()...)
-	return append(fragments, requiredLLVMFormatCommentPreserveFragments()...)
+	fragments = append(fragments, requiredLLVMFormatCommentPreserveFragments()...)
+	return append(fragments, requiredLLVMFormatTrailingCommaFragments()...)
+}
+
+// requiredLLVMFormatTrailingCommaFragments locks the selfhost::parser::format is_trailing_comma
+// helper compiled into stage2 (issue 1165 / 1162): the first compiled member with a try-call in
+// sub-expression position. Its '!(try <call>)' guard and '!(try <call>)' return lower through the
+// generic prefix-not-of-try-call path -- an if-not-try-call-return-bool statement and a
+// return-not-try-call statement -- each namespaced under 'nottry<N>' by the render-time statement
+// index. The renderer emits the call, propagates a failure as this function's own %kizu.error.bool
+// (never 'unreachable'), negates the unwrapped i1 success with 'xor i1 %success, true', and either
+// branches into the guard's bool return or wraps the negation as the error-union success. Pinning
+// these fragments keeps the sub-expression try-call capability from regressing to a name-only
+// emission or losing its failure propagation / negation.
+func requiredLLVMFormatTrailingCommaFragments() []string {
+	return []string{
+		"define %kizu.error.bool @kizu_selfhost__parser_format_is_trailing_comma(",
+		// The 'if !(try next_token_text_equals(source, tokens, index, "}")) { return false; }' guard:
+		// the hoisted try-call, its failure propagation as this function's own %kizu.error.bool, the
+		// negation of the unwrapped i1, and the branch into the bool-return then-block or the
+		// fall-through join the following statements render into.
+		"%nottry5_call = call %kizu.error.bool " +
+			"@kizu_selfhost__parser_format_next_token_text_equals(",
+		"%nottry5_fail_val = insertvalue %kizu.error.bool %nottry5_fail_flag, " +
+			"%kizu.slice.u8 %nottry5_msg, 2",
+		"%nottry5_neg = xor i1 %nottry5_success, true",
+		"br i1 %nottry5_neg, label %nottry5_then, label %nottry5_join",
+		"%nottry5_ret_val = insertvalue %kizu.error.bool %nottry5_ret_flag, i1 false, 1",
+		// The 'return !(try is_match_arm_trailing_comma(source, tokens, index));' tail: the hoisted
+		// try-call, its failure propagation, the negation of the unwrapped i1, and the wrap of the
+		// negation as the error-union success.
+		"%nottry6_call = call %kizu.error.bool " +
+			"@kizu_selfhost__parser_format_is_match_arm_trailing_comma(",
+		"%nottry6_fail_val = insertvalue %kizu.error.bool %nottry6_fail_flag, " +
+			"%kizu.slice.u8 %nottry6_msg, 2",
+		"%nottry6_neg = xor i1 %nottry6_success, true",
+		"%nottry6_wrap_val = insertvalue %kizu.error.bool %nottry6_wrap_flag, i1 %nottry6_neg, 1",
+	}
 }
 
 // requiredLLVMFormatCommentPreserveFragments locks the selfhost::parser::format

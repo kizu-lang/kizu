@@ -145,6 +145,17 @@ var formatCompiledHelperSeeds = []string{
 	"last_byte",
 	"has_line_comment_between",
 	"rbrace_wants_newline",
+	// is_trailing_comma is the first compiled helper with a try-call in sub-expression position
+	// (issue 1165 / 1162): a ',' early-return guard, two 'let <name> = try next_token_text_equals(
+	// ...)' let-try binds with bool early returns, an 'if !(try next_token_text_equals(source,
+	// tokens, index, "}")) { return false; }' guard, and a closing 'return !(try
+	// is_match_arm_trailing_comma(source, tokens, index));'. The two '!(try <call>)' sub-expression
+	// try-calls lower through the generic prefix-not-of-try-call path (a return-not-try-call and an
+	// if-not-try-call-return-bool statement): the renderer emits the call, propagates a failure as
+	// this function's own error union, negates the unwrapped bool, and either wraps it as the
+	// error-union success or branches into the guard's bool return. Its BFS pulls in
+	// next_token_text_equals and is_match_arm_trailing_comma (both seeded members).
+	"is_trailing_comma",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: format_source is the
