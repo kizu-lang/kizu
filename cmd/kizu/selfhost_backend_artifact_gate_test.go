@@ -1519,7 +1519,59 @@ func requiredLLVMFormatHelperFragments() []string {
 	fragments = append(fragments, requiredLLVMFormatAppendIndentFragments()...)
 	fragments = append(fragments, requiredLLVMFormatLineByteClassifierFragments()...)
 	fragments = append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
-	return append(fragments, requiredLLVMFormatLineEndFragments()...)
+	fragments = append(fragments, requiredLLVMFormatLineEndFragments()...)
+	return append(fragments, requiredLLVMFormatCommentPreserveFragments()...)
+}
+
+// requiredLLVMFormatCommentPreserveFragments locks the selfhost::parser::format
+// append_preserved_line_comments comment-preservation driver compiled into stage2 through
+// compiled_struct_cf (issue 1165 / 1162): the first compiled member returning a struct in an error
+// union ('-> !CommentFormatState'). It threads the loop-carried scalar state current_last /
+// at_line_start / after_comment through a forward 'while index < end' scan loop whose if/else
+// comment arm scans a '// ...' full-line comment and mutates the '&var std::string::String'
+// accumulator through the @kizu_rt_string_append_* ABI, and closes with a 'return
+// CommentFormatState { ... }' success wrap. Dispatched by its error-union return type.
+func requiredLLVMFormatCommentPreserveFragments() []string {
+	return []string{
+		// The CommentFormatState struct value + error-union ABI define over the String accumulator
+		// (%kizu.owned), the source slice, the i64 start/end/depth cursors, the i8 last byte, and the
+		// i1 at_line_start flag, so a regression in the struct-in-error-union return ABI is caught.
+		"define %kizu.error.comment_format_state " +
+			"@kizu_selfhost__parser_format_append_preserved_line_comments(",
+		"  i8 %last,",
+		"  i1 %at_line_start",
+		// Pin the four loop-head carried phis (the i64 cursor plus the three scalar state fields), so
+		// a regression in the carried-scalar phi seeding is caught.
+		"%index = phi i64 [ %start, %entry ], [ %index_next, %cp_latch ]",
+		"%current_last = phi i8 [ %last, %entry ], [ %current_last_next, %cp_latch ]",
+		"%current_at_line_start = phi i1 [ %at_line_start, %entry ], " +
+			"[ %current_at_line_start_next, %cp_latch ]",
+		"%current_after_comment = phi i1 [ false, %entry ], [ %current_after_comment_next, %cp_latch ]",
+		// Pin the short-circuit '//' detection: the guarded byte loads run only after the bounds and
+		// first-slash checks pass, so a regression to an eager out-of-bounds load is caught.
+		"%cp_g1 = icmp slt i64 %cp_ip1, %end",
+		"%cp_g2v = icmp eq i8 %cp_c0, 47",
+		"%cp_g3v = icmp eq i8 %cp_c1, 47",
+		// Pin the out.len() guard of the blank-before insertion against the runtime string-length ABI.
+		"%cp_olen = call i64 @kizu_rt_string_len(%kizu.owned %out)",
+		// Pin the at_line_start merge after the blank-before insertion (true on the ran edge, the
+		// carried value on the three skip edges).
+		"%cp_als_b = phi i1 [ %current_at_line_start, %cp_cmt ], " +
+			"[ %current_at_line_start, %cp_blank0 ], [ %current_at_line_start, %cp_len ], " +
+			"[ true, %cp_in2_cont ]",
+		// Pin the comment-slice materialization 'source[index..comment_end]' and its append against
+		// the @kizu_rt_string_append_bytes ABI.
+		"%cp_sub_len = sub i64 %cp_cend, %index",
+		"%cp_fa_call = call %kizu.error.void @kizu_rt_string_append_bytes(" +
+			"%kizu.owned %out, %kizu.slice.u8 %cp_sub_slice)",
+		// Pin the latch phis: the else arm carries the scalars unchanged with index + 1, the comment
+		// arm carries the constant (10, true, true) state with the new cursor.
+		"%current_last_next = phi i8 [ %current_last, %cp_else ], [ 10, %cp_k_done ]",
+		// Pin the CommentFormatState success wrap: the struct value (field 1) carrying the three
+		// scalar state fields, wrapped with the ok flag (field 0) into the error union.
+		"%cp_ret_full = insertvalue %kizu.error.comment_format_state %cp_ret_ok, " +
+			"%kizu.selfhost.parser.format.comment_format_state %cp_ret_sv2, 1",
+	}
 }
 
 // requiredLLVMFormatLineEndFragments locks the selfhost::parser::format line_end_excluding_break

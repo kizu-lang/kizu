@@ -2024,6 +2024,108 @@ fn cf_emit_void_success_ret(
     return;
 }
 
+// cf_emit_comment_state_success builds the '%kizu.error.comment_format_state' success wrap for
+// 'return CommentFormatState { last: <last>, at_line_start: <als>, after_comment: <ac> };' and
+// emits the 'ret'. The three scalar operands are SSA registers (the loop-head phi values that
+// exit the comment-preservation loop): last is the i8 byte, at_line_start / after_comment are the
+// i1 booleans. The value struct (field 1) is built by successive insertvalue, then wrapped with
+// the ok flag (field 0 = true) into the error union; the borrowed message field (field 2) stays
+// zeroinitialized. Mirrors cf_emit_void_success_ret but carries the struct value instead of void.
+fn cf_emit_comment_state_success(
+    out: &var std::string::String,
+    ret_type: []u8,
+    prefix: []u8,
+    last_reg: []u8,
+    als_reg: []u8,
+    ac_reg: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv0 = insertvalue %kizu.selfhost.parser.format.comment_format_state poison, i8 %");
+    try cf_w(out, last_reg);
+    try cf_l(out, ", 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv1 = insertvalue %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv0, i1 %");
+    try cf_w(out, als_reg);
+    try cf_l(out, ", 1");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv2 = insertvalue %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv1, i1 %");
+    try cf_w(out, ac_reg);
+    try cf_l(out, ", 2");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok = insertvalue ");
+    try cf_w(out, ret_type);
+    try cf_l(out, " zeroinitializer, i1 true, 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_full = insertvalue ");
+    try cf_w(out, ret_type);
+    try cf_w(out, " %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok, %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_sv2, 1");
+    try cf_w(out, "  ret ");
+    try cf_w(out, ret_type);
+    try cf_w(out, " %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_full");
+    return;
+}
+
+// cf_emit_subslice materializes a two-bound slice '<base>[<lo>..<hi>]' over a '%kizu.slice.u8'
+// base into '%<prefix>_slice' (a %kizu.slice.u8 of base.ptr + lo with length hi - lo), so it can
+// be passed to the @kizu_rt_string_append_bytes ABI. The base is a %kizu.slice.u8 register; lo /
+// hi are i64 registers. source[index..comment_end] in append_preserved_line_comments is its first
+// consumer.
+fn cf_emit_subslice(
+    out: &var std::string::String,
+    prefix: []u8,
+    base_reg: []u8,
+    lo_reg: []u8,
+    hi_reg: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_bptr = extractvalue %kizu.slice.u8 %");
+    try cf_w(out, base_reg);
+    try cf_l(out, ", 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_eptr = getelementptr i8, ptr %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_bptr, i64 %");
+    try cf_w(out, lo_reg);
+    try cf_l(out, "");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_len = sub i64 %");
+    try cf_w(out, hi_reg);
+    try cf_w(out, ", %");
+    try cf_w(out, lo_reg);
+    try cf_l(out, "");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_s0 = insertvalue %kizu.slice.u8 poison, ptr %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_eptr, 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_slice = insertvalue %kizu.slice.u8 %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_s0, i64 %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_len, 1");
+    return;
+}
+
 // cf_emit_token_predicate emits a single-token boolean predicate call ('%<result> = call i1
 // @<callee>(<token_llvm> %<token>)') off the AST: the callee symbol, return type and the token
 // operand type are all derived from the call node, so no predicate name is special-cased.
@@ -2764,6 +2866,819 @@ pub fn append_append_indent_function(
     // Scan exit: return the void success.
     try cf_l(out, "scan_exit:");
     try cf_emit_void_success_ret(out, llvm_return_type, "ret_ok");
+    try cf_l(out, "}");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// cf_let_name reads the bound name of a 'let'/'var' statement.
+fn cf_let_name(ir_bytes: []u8, function_name: []u8, let_node: i64, bs: i64) -> ![]u8 {
+    let name_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, let_node, "name", 0, bs);
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+}
+
+// cf_emit_cp_phi emits a loop-head phi '%<name> = phi <ty> [ %<entry_reg>, %entry ], [ <latch> ]'
+// for a register-seeded carried value.
+fn cf_emit_cp_phi(
+    out: &var std::string::String,
+    name: []u8,
+    ty: []u8,
+    entry_reg: []u8,
+    latch_sigil: []u8,
+    latch_base: []u8,
+    latch_tail: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, name);
+    try cf_w(out, " = phi ");
+    try cf_w(out, ty);
+    try cf_w(out, " [ %");
+    try cf_w(out, entry_reg);
+    try cf_w(out, ", %entry ], [ ");
+    try cf_w(out, latch_sigil);
+    try cf_w(out, latch_base);
+    try cf_w(out, latch_tail);
+    try cf_l(out, ", %cp_latch ]");
+    return;
+}
+
+// cf_emit_cp_phi_lit is cf_emit_cp_phi for a literal-seeded entry edge (current_after_comment
+// seeds from 'false' = 0).
+fn cf_emit_cp_phi_lit(
+    out: &var std::string::String,
+    name: []u8,
+    ty: []u8,
+    entry_lit: []u8,
+    latch_sigil: []u8,
+    latch_base: []u8,
+    latch_tail: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, name);
+    try cf_w(out, " = phi ");
+    try cf_w(out, ty);
+    try cf_w(out, " [ ");
+    try cf_w(out, entry_lit);
+    try cf_w(out, ", %entry ], [ ");
+    try cf_w(out, latch_sigil);
+    try cf_w(out, latch_base);
+    try cf_w(out, latch_tail);
+    try cf_l(out, ", %cp_latch ]");
+    return;
+}
+
+// cf_emit_cp_call_i1 emits '%<result> = call i1 @<callee>(%kizu.slice.u8 %source, i64 %a[, i64
+// <b_sigil><b>])' for the comment driver's plain boolean scalar helpers. A two-argument call
+// passes b "" (empty); a three-argument call passes the third operand.
+fn cf_emit_cp_call_i1(
+    out: &var std::string::String,
+    module_prefix: []u8,
+    result: []u8,
+    callee: []u8,
+    source_name: []u8,
+    a: []u8,
+    b_sigil: []u8,
+    b: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, result);
+    try cf_w(out, " = call i1 @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, callee);
+    try cf_w(out, "(%kizu.slice.u8 %");
+    try cf_w(out, source_name);
+    try cf_w(out, ", i64 %");
+    try cf_w(out, a);
+    if std::mem::len(b) > 0 {
+        try cf_w(out, ", i64 ");
+        try cf_w(out, b_sigil);
+        try cf_w(out, b);
+    }
+    try cf_l(out, ")");
+    return;
+}
+
+// cf_emit_cp_call_i64 emits '%<result> = call i64 @<callee>(%kizu.slice.u8 %source, i64 %arg)'
+// for the comment driver's plain i64 line-scan helpers.
+fn cf_emit_cp_call_i64(
+    out: &var std::string::String,
+    module_prefix: []u8,
+    result: []u8,
+    callee: []u8,
+    source_name: []u8,
+    arg_reg: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, result);
+    try cf_w(out, " = call i64 @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, callee);
+    try cf_w(out, "(%kizu.slice.u8 %");
+    try cf_w(out, source_name);
+    try cf_w(out, ", i64 %");
+    try cf_w(out, arg_reg);
+    try cf_l(out, ")");
+    return;
+}
+
+// cf_require_cast_u8 requires a node to be 'cast<u8>(<value>)': a CastExpr whose type token is 'u8'
+// and whose value is the integer literal <value>. The comment driver emit renders every byte as a
+// fixed 'i8 <value>', so a different cast target or literal must be an explicit error.
+fn cf_require_cast_u8(
+    ir_bytes: []u8, function_name: []u8, node: i64, value: i64, message: []u8, bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, node, "CastExpr", message, bs);
+    let type_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "type", 0, bs);
+    let type_token = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, type_node, bs);
+    if !std::mem::equal_bytes(type_token, "u8") {
+        return error(message);
+    }
+    let value_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "value", 0, bs);
+    try cf_require_int(ir_bytes, function_name, value_node, value, message, bs);
+    return;
+}
+
+// cf_require_append_byte_cast requires a statement to be 'try <out>.append_byte(cast<u8>(<value>));'.
+fn cf_require_append_byte_cast(
+    ir_bytes: []u8, function_name: []u8, stmt_node: i64, out_name: []u8, value: i64, message: []u8, bs: i64
+) -> !void {
+    let arg = try cf_string_append_arg(ir_bytes, function_name, stmt_node, out_name, "append_byte", message, bs);
+    try cf_require_cast_u8(ir_bytes, function_name, arg, value, message, bs);
+    return;
+}
+
+// cf_require_assign_cast_u8 requires a statement to be '<var> = cast<u8>(<value>);'.
+fn cf_require_assign_cast_u8(
+    ir_bytes: []u8, function_name: []u8, stmt_node: i64, var_name: []u8, value: i64, message: []u8, bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, stmt_node, "Assign", message, bs);
+    let target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, stmt_node, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, target, var_name, message, bs);
+    let value_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, stmt_node, "value", 0, bs);
+    try cf_require_cast_u8(ir_bytes, function_name, value_node, value, message, bs);
+    return;
+}
+
+// cf_require_assign_true requires a statement to be '<var> = true;'.
+fn cf_require_assign_true(
+    ir_bytes: []u8, function_name: []u8, stmt_node: i64, var_name: []u8, message: []u8, bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, stmt_node, "Assign", message, bs);
+    let target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, stmt_node, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, target, var_name, message, bs);
+    let value_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, stmt_node, "value", 0, bs);
+    try cf_require_bool(ir_bytes, function_name, value_node, "true", message, bs);
+    return;
+}
+
+// cf_require_not_var requires a node to be the prefix negation '!<var>'.
+fn cf_require_not_var(
+    ir_bytes: []u8, function_name: []u8, node: i64, var_name: []u8, message: []u8, bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, node, "Prefix", message, bs);
+    let op = try ir_contract::sequence_fact_value_from(ir_bytes, "body-prefix ", function_name, node, bs);
+    if !std::mem::equal_bytes(op, "not") {
+        return error(message);
+    }
+    let right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "right", 0, bs);
+    try cf_require_var(ir_bytes, function_name, right, var_name, message, bs);
+    return;
+}
+
+// cf_require_no_else requires an If node to carry no else arm. The comment driver emit renders
+// every comment-arm guard as a then-only conditional branch (the only if/else is the top-level
+// '//' guard handled separately), so an else block on any other guard would be silently dropped --
+// it is an explicit error instead. A missing else child reads as either an absent child or an
+// 'Empty' node depending on how the body facts were emitted; both are accepted, anything else is
+// rejected.
+fn cf_require_no_else(
+    ir_bytes: []u8, function_name: []u8, if_node: i64, message: []u8, bs: i64
+) -> !void {
+    let else_node = try ir_contract::body_child_sequence_or_minus_one_from(ir_bytes, function_name, if_node, "else", 0, bs);
+    if else_node < 0 {
+        return;
+    }
+    let else_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, else_node, bs);
+    if !std::mem::equal_bytes(else_kind, "Empty") {
+        return error(message);
+    }
+    return;
+}
+
+// cf_require_guarded_newline requires an 'if !<var> { try <out>.append_byte(cast<u8>(10)); }' guard:
+// a single-statement then-block that appends the newline byte, with no else arm (the emit renders
+// the guard as a then-only conditional newline branch).
+fn cf_require_guarded_newline(
+    ir_bytes: []u8, function_name: []u8, if_node: i64, var_name: []u8, out_name: []u8, message: []u8, bs: i64
+) -> !void {
+    try cf_expect(ir_bytes, function_name, if_node, "If", message, bs);
+    let cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, if_node, "condition", 0, bs);
+    try cf_require_not_var(ir_bytes, function_name, cond, var_name, message, bs);
+    let then_block = try ir_contract::body_child_sequence_from(ir_bytes, function_name, if_node, "then", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, then_block, bs)) != 1 {
+        return error(message);
+    }
+    let then0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_block, "statement", 0, bs);
+    try cf_require_append_byte_cast(ir_bytes, function_name, then0, out_name, 10, message, bs);
+    try cf_require_no_else(ir_bytes, function_name, if_node, message, bs);
+    return;
+}
+
+// cf_require_source_index requires a node to be 'source[<idx>]' over the source slice: an IndexExpr
+// whose target is the source parameter and whose end bound is Empty (a single-element load). It
+// returns the 'start' index expression for the caller to pin.
+fn cf_require_source_index(
+    ir_bytes: []u8, function_name: []u8, node: i64, source_name: []u8, message: []u8, bs: i64
+) -> !i64 {
+    try cf_expect(ir_bytes, function_name, node, "IndexExpr", message, bs);
+    let target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, target, source_name, message, bs);
+    let end_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "end", 0, bs);
+    try cf_expect(ir_bytes, function_name, end_node, "Empty", message, bs);
+    return try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "start", 0, bs);
+}
+
+// cf_require_index_add requires a node to be '<index> + <addend>'.
+fn cf_require_index_add(
+    ir_bytes: []u8, function_name: []u8, node: i64, index_var: []u8, addend: i64, message: []u8, bs: i64
+) -> !void {
+    try cf_require_binary_op(ir_bytes, function_name, node, "add", message, bs);
+    let left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, left, index_var, message, bs);
+    let right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, right, addend, message, bs);
+    return;
+}
+
+// cf_require_slash_eq requires a node to be 'source[<idx>] == cast<u8>(47)' (a '/' byte test). It
+// returns the byte load's index expression so the caller pins which offset is compared.
+fn cf_require_slash_eq(
+    ir_bytes: []u8, function_name: []u8, node: i64, source_name: []u8, message: []u8, bs: i64
+) -> !i64 {
+    try cf_require_binary_op(ir_bytes, function_name, node, "eq", message, bs);
+    let left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "left", 0, bs);
+    let idx = try cf_require_source_index(ir_bytes, function_name, left, source_name, message, bs);
+    let right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, node, "right", 0, bs);
+    try cf_require_cast_u8(ir_bytes, function_name, right, 47, message, bs);
+    return idx;
+}
+
+// cf_require_call_two / cf_require_call_three pin a plain helper call '<callee>(source, <a>[, <b>])'
+// down to its argument count and the source-first operand, returning the trailing argument node(s)
+// for the caller to pin. They keep the comment driver's scalar helper calls (full-line predicate,
+// blank-before / blank-after, line-end scans) from drifting their operands away from the fixed
+// '%kizu.slice.u8 %source, i64 ...' shape the emit renders.
+fn cf_require_call_source_first(
+    ir_bytes: []u8, function_name: []u8, call_node: i64, source_name: []u8, argc: i64, message: []u8, bs: i64
+) -> !void {
+    try cf_require_call_argc(ir_bytes, function_name, call_node, argc, message, bs);
+    let arg0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, call_node, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, arg0, source_name, message, bs);
+    return;
+}
+
+// cf_require_state_field requires the <field_index>'th field of a struct literal to be
+// '<field_name>: <var_name>'. The comment driver's CommentFormatState success wrap builds the
+// struct value field-by-field from the loop-head phi values, so the returned literal must list the
+// three state fields in declaration order (last / at_line_start / after_comment), each carrying its
+// matching carried scalar -- a reorder or a different operand would mis-map the returned state.
+fn cf_require_state_field(
+    ir_bytes: []u8, function_name: []u8, struct_node: i64, field_index: i64,
+    field_name: []u8, var_name: []u8, message: []u8, bs: i64
+) -> !void {
+    let field_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, struct_node, "field", field_index, bs);
+    let name = try ir_contract::sequence_fact_value_from(ir_bytes, "body-field-init ", function_name, field_node, bs);
+    if !std::mem::equal_bytes(name, field_name) {
+        return error(message);
+    }
+    let value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, field_node, "value", 0, bs);
+    try cf_require_var(ir_bytes, function_name, value, var_name, message, bs);
+    return;
+}
+
+// append_comment_preserve_function emits the full define for the comment-preservation driver
+// append_preserved_line_comments. It re-reads and validates the whole skeleton off the AST, then
+// renders the basic-block / phi control flow: a forward 'while index < end' loop carrying four
+// loop-head phis (the i64 cursor plus the three scalar state fields current_last / at_line_start /
+// after_comment), an if/else whose comment arm scans a '// ...' full-line comment (a short-circuit
+// '//' detection, a blank-before insertion guarded by out.len(), an indentation + comment-slice +
+// newline emit through the @kizu_rt_string_append_* ABI, and a blank-after insertion) and whose
+// else arm is a bare 'index = index + 1' advance, both re-merging at '%cp_latch', and a
+// 'return CommentFormatState { ... }' success wrap into the %kizu.error.comment_format_state error
+// union. The comment arm always exits with current_last = 10 / at_line_start = true /
+// after_comment = true, so the latch carries those constants; only at_line_start needs an in-arm
+// phi (read by the 'if !current_at_line_start' newline guard after the blank-before insertion).
+// Dispatched by its %kizu.error.comment_format_state return type. Any unsupported deviation is an
+// explicit error (issue 1165 / 1162).
+pub fn append_comment_preserve_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !void {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+
+    // ---- Parameters: out, source, start, end, depth, last, at_line_start ----
+    let out_name = cf_nth_param_name(params_spec, 0);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, out_name), "%kizu.owned") {
+        return error("compiled struct-cf: comment driver out accumulator must be a String handle");
+    }
+    let source_name = cf_nth_param_name(params_spec, 1);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, source_name), "%kizu.slice.u8") {
+        return error("compiled struct-cf: comment driver source must be a '[]u8' slice");
+    }
+    let start_name = cf_nth_param_name(params_spec, 2);
+    let end_name = cf_nth_param_name(params_spec, 3);
+    let depth_name = cf_nth_param_name(params_spec, 4);
+    let last_name = cf_nth_param_name(params_spec, 5);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, last_name), "i8") {
+        return error("compiled struct-cf: comment driver last must be a 'u8'");
+    }
+    let als_name = cf_nth_param_name(params_spec, 6);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, als_name), "i1") {
+        return error("compiled struct-cf: comment driver at_line_start must be a 'bool'");
+    }
+    // The emit binds exactly the seven (out, source, start, end, depth, last, at_line_start)
+    // parameters; an eighth parameter would be dropped from the rendered signature, so it is an
+    // explicit error rather than a silent truncation.
+    if std::mem::len(cf_nth_param_name(params_spec, 7)) > 0 {
+        return error("compiled struct-cf: comment driver must take exactly seven parameters");
+    }
+
+    // ---- Top-level body: exactly 6 statements ----
+    // The emit renders exactly the three scalar-state seeds, the cursor seed, the scan loop and the
+    // state return; a seventh top-level statement would be silently dropped, so it is an explicit
+    // error.
+    if (try ir_contract::body_child_sequence_or_minus_one_from(ir_bytes, function_name, 0, "statement", 6, bs)) >= 0 {
+        return error("compiled struct-cf: comment driver body must be exactly six statements");
+    }
+    let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
+    // Statement 0: 'var current_last = last;' -- the i8 state seed reads the last parameter, which
+    // the emit feeds onto the current_last loop-head phi's entry edge.
+    let cur_last_var = try cf_let_name(ir_bytes, function_name, s0, bs);
+    let s0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0, "value", 0, bs);
+    try cf_require_var(ir_bytes, function_name, s0_value, last_name,
+        "compiled struct-cf: comment driver current_last must be seeded from the last parameter", bs);
+    // Statement 1: 'var current_at_line_start = at_line_start;' -- the i1 state seed reads the
+    // at_line_start parameter, fed onto the current_at_line_start loop-head phi's entry edge.
+    let s1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 1, bs);
+    let cur_als_var = try cf_let_name(ir_bytes, function_name, s1, bs);
+    let s1_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "value", 0, bs);
+    try cf_require_var(ir_bytes, function_name, s1_value, als_name,
+        "compiled struct-cf: comment driver current_at_line_start must be seeded from the at_line_start parameter", bs);
+    // Statement 2: 'var current_after_comment = false;' -- the emit seeds the current_after_comment
+    // loop-head phi's entry edge from the literal false.
+    let s2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 2, bs);
+    let cur_ac_var = try cf_let_name(ir_bytes, function_name, s2, bs);
+    let s2_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s2, "value", 0, bs);
+    try cf_require_bool(ir_bytes, function_name, s2_value, "false",
+        "compiled struct-cf: comment driver current_after_comment must be seeded from false", bs);
+    // Statement 3: 'var index = start;' -- the i64 cursor seed reads the start parameter, fed onto
+    // the index loop-head phi's entry edge.
+    let s3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 3, bs);
+    let index_var = try cf_let_name(ir_bytes, function_name, s3, bs);
+    let s3_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s3, "value", 0, bs);
+    try cf_require_var(ir_bytes, function_name, s3_value, start_name,
+        "compiled struct-cf: comment driver index must be seeded from the start parameter", bs);
+
+    // Statement 4: 'while index < end { if <//> { ... } else { index = index + 1; } }'.
+    let s4 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 4, bs);
+    try cf_expect(ir_bytes, function_name, s4, "While",
+        "compiled struct-cf: comment driver fourth statement must be the scan loop", bs);
+    let scan_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s4, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, scan_cond, "lt",
+        "compiled struct-cf: comment loop condition must be '<index> < <end>'", bs);
+    let scan_cond_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_cond, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, scan_cond_left, index_var,
+        "compiled struct-cf: comment loop must compare the cursor on the left", bs);
+    let scan_cond_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_cond, "right", 0, bs);
+    try cf_require_var(ir_bytes, function_name, scan_cond_right, end_name,
+        "compiled struct-cf: comment loop must compare against the end parameter", bs);
+
+    let scan_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s4, "body", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, scan_body, bs)) != 1 {
+        return error("compiled struct-cf: comment loop body must be a single if/else");
+    }
+    let wif = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 0, bs);
+    try cf_expect(ir_bytes, function_name, wif, "If",
+        "compiled struct-cf: comment loop body must guard the comment arm", bs);
+    // Comment guard: 'index + 1 < end and source[index] == cast<u8>(47) and source[index + 1] ==
+    // cast<u8>(47)'. The emit renders this as the fixed short-circuit '//' detection (cp_g1: the
+    // bounds check, cp_g2: the source[index] byte, cp_g3: the source[index + 1] byte), so every
+    // operand must match or the detection would read the wrong bytes. The chain is left-associative,
+    // so the outer 'and' carries the third operand on the right and the first two on a nested 'and'.
+    let wguard = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wif, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, wguard, "and",
+        "compiled struct-cf: comment guard must be the three-operand '//' detection 'and'", bs);
+    let wguard_c = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wguard, "right", 0, bs);
+    let wguard_inner = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wguard, "left", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, wguard_inner, "and",
+        "compiled struct-cf: comment guard must nest 'index + 1 < end and source[index] == 47'", bs);
+    let wguard_a = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wguard_inner, "left", 0, bs);
+    let wguard_b = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wguard_inner, "right", 0, bs);
+    // Operand A: 'index + 1 < end'.
+    try cf_require_binary_op(ir_bytes, function_name, wguard_a, "lt",
+        "compiled struct-cf: comment guard bounds check must be 'index + 1 < end'", bs);
+    let wguard_a_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wguard_a, "left", 0, bs);
+    try cf_require_index_add(ir_bytes, function_name, wguard_a_left, index_var, 1,
+        "compiled struct-cf: comment guard bounds check must test 'index + 1'", bs);
+    let wguard_a_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wguard_a, "right", 0, bs);
+    try cf_require_var(ir_bytes, function_name, wguard_a_right, end_name,
+        "compiled struct-cf: comment guard bounds check must compare against end", bs);
+    // Operand B: 'source[index] == cast<u8>(47)'.
+    let wguard_b_idx = try cf_require_slash_eq(ir_bytes, function_name, wguard_b, source_name,
+        "compiled struct-cf: comment guard must test 'source[index] == cast<u8>(47)'", bs);
+    try cf_require_var(ir_bytes, function_name, wguard_b_idx, index_var,
+        "compiled struct-cf: comment guard first slash must load 'source[index]'", bs);
+    // Operand C: 'source[index + 1] == cast<u8>(47)'.
+    let wguard_c_idx = try cf_require_slash_eq(ir_bytes, function_name, wguard_c, source_name,
+        "compiled struct-cf: comment guard must test 'source[index + 1] == cast<u8>(47)'", bs);
+    try cf_require_index_add(ir_bytes, function_name, wguard_c_idx, index_var, 1,
+        "compiled struct-cf: comment guard second slash must load 'source[index + 1]'", bs);
+    let then_blk = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wif, "then", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, then_blk, bs)) != 12 {
+        return error("compiled struct-cf: comment arm must be the 12-statement comment emitter");
+    }
+    let else_blk = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wif, "else", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, else_blk, bs)) != 1 {
+        return error("compiled struct-cf: comment loop else arm must be the bare cursor advance");
+    }
+    let else0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else_blk, "statement", 0, bs);
+    try cf_expect(ir_bytes, function_name, else0, "Assign",
+        "compiled struct-cf: comment loop else arm must advance the cursor", bs);
+    let else0_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, else0_target, index_var,
+        "compiled struct-cf: else arm must advance the cursor", bs);
+    let else0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0, "value", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, else0_value, "add",
+        "compiled struct-cf: else arm must be '<index> + 1'", bs);
+    let else0_add_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0_value, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, else0_add_left, index_var,
+        "compiled struct-cf: else arm must add to the cursor", bs);
+    let else0_add_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0_value, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, else0_add_right, 1,
+        "compiled struct-cf: else arm must advance by exactly 1", bs);
+
+    // ---- Comment arm statements (then_blk[0..11]) ----
+    // t0: 'let full_line_comment = line_comment_is_full_line(source, index);'.
+    let t0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 0, bs);
+    let full_var = try cf_let_name(ir_bytes, function_name, t0, bs);
+    let t0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t0, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, t0_value, "Call",
+        "compiled struct-cf: comment arm must open with the full-line predicate", bs);
+    let full_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t0_value, bs);
+    try cf_require_call_source_first(ir_bytes, function_name, t0_value, source_name, 2,
+        "compiled struct-cf: full-line predicate must take (source, index)", bs);
+    let t0_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t0_value, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, t0_arg1, index_var,
+        "compiled struct-cf: full-line predicate must test the cursor", bs);
+
+    // t1: 'if full_line_comment and line_comment_has_blank_before(source, start, index) {
+    //        if out.len() > 0 { if !current_at_line_start { append 10 } append 10; current_last = 10;
+    //        current_at_line_start = true; } }'.
+    let t1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 1, bs);
+    try cf_expect(ir_bytes, function_name, t1, "If",
+        "compiled struct-cf: comment arm must guard the blank-before insertion", bs);
+    let t1_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, t1_cond, "and",
+        "compiled struct-cf: blank-before guard must be 'full and has_blank_before'", bs);
+    let t1_cond_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1_cond, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, t1_cond_left, full_var,
+        "compiled struct-cf: blank-before guard left must be the full-line flag", bs);
+    let t1_cond_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1_cond, "right", 0, bs);
+    try cf_expect(ir_bytes, function_name, t1_cond_right, "Call",
+        "compiled struct-cf: blank-before guard right must be the has_blank_before call", bs);
+    let blank_before_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t1_cond_right, bs);
+    try cf_require_call_source_first(ir_bytes, function_name, t1_cond_right, source_name, 3,
+        "compiled struct-cf: has_blank_before must take (source, start, index)", bs);
+    let bb_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1_cond_right, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, bb_arg1, start_name,
+        "compiled struct-cf: has_blank_before must pass start second", bs);
+    let bb_arg2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1_cond_right, "arg", 2, bs);
+    try cf_require_var(ir_bytes, function_name, bb_arg2, index_var,
+        "compiled struct-cf: has_blank_before must pass the cursor last", bs);
+    let t1_then = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1, "then", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, t1_then, bs)) != 1 {
+        return error("compiled struct-cf: blank-before guard body must be the out.len() insertion");
+    }
+    let t1_len_if = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1_then, "statement", 0, bs);
+    try cf_expect(ir_bytes, function_name, t1_len_if, "If",
+        "compiled struct-cf: blank-before insertion must guard on out.len()", bs);
+    let len_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1_len_if, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, len_cond, "gt",
+        "compiled struct-cf: blank-before insertion must test 'out.len() > 0'", bs);
+    let len_call = try ir_contract::body_child_sequence_from(ir_bytes, function_name, len_cond, "left", 0, bs);
+    let len_recv = try cf_method_receiver_name(ir_bytes, function_name, len_call, "len", bs);
+    if !std::mem::equal_bytes(len_recv, out_name) {
+        return error("compiled struct-cf: blank-before insertion must read out.len()");
+    }
+    try cf_require_call_argc(ir_bytes, function_name, len_call, 0,
+        "compiled struct-cf: out.len() takes no arguments", bs);
+    let len_zero = try ir_contract::body_child_sequence_from(ir_bytes, function_name, len_cond, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, len_zero, 0,
+        "compiled struct-cf: blank-before insertion must compare out.len() against 0", bs);
+    let len_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1_len_if, "then", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, len_body, bs)) != 4 {
+        return error("compiled struct-cf: blank-before insertion must be guard, newline, two state assigns");
+    }
+    let lb0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, len_body, "statement", 0, bs);
+    try cf_require_guarded_newline(ir_bytes, function_name, lb0, cur_als_var, out_name,
+        "compiled struct-cf: blank-before insertion must open with the '!at_line_start' newline guard", bs);
+    let lb1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, len_body, "statement", 1, bs);
+    try cf_require_append_byte_cast(ir_bytes, function_name, lb1, out_name, 10,
+        "compiled struct-cf: blank-before insertion must append the blank newline", bs);
+    let lb2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, len_body, "statement", 2, bs);
+    try cf_require_assign_cast_u8(ir_bytes, function_name, lb2, cur_last_var, 10,
+        "compiled struct-cf: blank-before insertion must set current_last = 10", bs);
+    let lb3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, len_body, "statement", 3, bs);
+    try cf_require_assign_true(ir_bytes, function_name, lb3, cur_als_var,
+        "compiled struct-cf: blank-before insertion must set current_at_line_start = true", bs);
+    // Both the blank-before guard and its inner out.len() guard are then-only; an else arm on either
+    // would be silently dropped by the emit.
+    try cf_require_no_else(ir_bytes, function_name, t1_len_if,
+        "compiled struct-cf: blank-before insertion must not carry an else arm", bs);
+    try cf_require_no_else(ir_bytes, function_name, t1,
+        "compiled struct-cf: blank-before guard must not carry an else arm", bs);
+
+    // t2: 'if !current_at_line_start { try out.append_byte(cast<u8>(10)); }'.
+    let t2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 2, bs);
+    try cf_require_guarded_newline(ir_bytes, function_name, t2, cur_als_var, out_name,
+        "compiled struct-cf: comment arm must guard the pre-comment newline on '!at_line_start'", bs);
+
+    // t3: 'try append_indent(out, depth);'.
+    let t3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 3, bs);
+    let t3_expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t3, "expr", 0, bs);
+    let t3_call = try cf_call_under_try(ir_bytes, function_name, t3_expr, bs);
+    let indent_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t3_call, bs);
+    try cf_require_call_argc(ir_bytes, function_name, t3_call, 2,
+        "compiled struct-cf: append_indent must take (out, depth)", bs);
+    let t3_arg0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t3_call, "arg", 0, bs);
+    try cf_require_var(ir_bytes, function_name, t3_arg0, out_name,
+        "compiled struct-cf: append_indent must pass the out accumulator first", bs);
+    let t3_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t3_call, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, t3_arg1, depth_name,
+        "compiled struct-cf: append_indent must pass the depth second", bs);
+
+    // t4: 'let comment_end = line_end_excluding_break(source, index + 2);'.
+    let t4 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 4, bs);
+    let comment_end_var = try cf_let_name(ir_bytes, function_name, t4, bs);
+    let t4_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t4, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, t4_value, "Call",
+        "compiled struct-cf: comment arm must bind the comment end", bs);
+    let line_end_excl_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t4_value, bs);
+    try cf_require_call_source_first(ir_bytes, function_name, t4_value, source_name, 2,
+        "compiled struct-cf: line_end_excluding_break must take (source, index + 2)", bs);
+    let t4_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t4_value, "arg", 1, bs);
+    try cf_require_index_add(ir_bytes, function_name, t4_arg1, index_var, 2,
+        "compiled struct-cf: line_end_excluding_break must scan from 'index + 2'", bs);
+
+    // t5: 'try out.append_bytes(source[index..comment_end]);'.
+    let t5 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 5, bs);
+    let t5_arg = try cf_string_append_arg(ir_bytes, function_name, t5, out_name, "append_bytes",
+        "compiled struct-cf: comment arm must append the comment slice", bs);
+    try cf_expect(ir_bytes, function_name, t5_arg, "IndexExpr",
+        "compiled struct-cf: comment slice must be 'source[index..comment_end]'", bs);
+    let t5_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t5_arg, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, t5_target, source_name,
+        "compiled struct-cf: comment slice must index the source", bs);
+    let t5_start = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t5_arg, "start", 0, bs);
+    try cf_require_var(ir_bytes, function_name, t5_start, index_var,
+        "compiled struct-cf: comment slice must start at the cursor", bs);
+    let t5_end = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t5_arg, "end", 0, bs);
+    try cf_require_var(ir_bytes, function_name, t5_end, comment_end_var,
+        "compiled struct-cf: comment slice must end at the comment end", bs);
+
+    // t6: 'try out.append_byte(cast<u8>(10));'.
+    let t6 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 6, bs);
+    try cf_require_append_byte_cast(ir_bytes, function_name, t6, out_name, 10,
+        "compiled struct-cf: comment arm must append the trailing newline", bs);
+
+    // t7..t9: 'current_last = cast<u8>(10); current_at_line_start = true; current_after_comment = true;'.
+    let t7 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 7, bs);
+    try cf_require_assign_cast_u8(ir_bytes, function_name, t7, cur_last_var, 10,
+        "compiled struct-cf: comment arm must set current_last = 10", bs);
+    let t8 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 8, bs);
+    try cf_require_assign_true(ir_bytes, function_name, t8, cur_als_var,
+        "compiled struct-cf: comment arm must set current_at_line_start = true", bs);
+    let t9 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 9, bs);
+    try cf_require_assign_true(ir_bytes, function_name, t9, cur_ac_var,
+        "compiled struct-cf: comment arm must set current_after_comment = true", bs);
+
+    // t10: 'if line_comment_has_blank_after(source, comment_end, end) {
+    //         try out.append_byte(10); current_last = 10; current_at_line_start = true; }'.
+    let t10 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 10, bs);
+    try cf_expect(ir_bytes, function_name, t10, "If",
+        "compiled struct-cf: comment arm must guard the blank-after insertion", bs);
+    let t10_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10, "condition", 0, bs);
+    try cf_expect(ir_bytes, function_name, t10_cond, "Call",
+        "compiled struct-cf: blank-after guard must be the has_blank_after call", bs);
+    let blank_after_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t10_cond, bs);
+    try cf_require_call_source_first(ir_bytes, function_name, t10_cond, source_name, 3,
+        "compiled struct-cf: has_blank_after must take (source, comment_end, end)", bs);
+    let ba_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10_cond, "arg", 1, bs);
+    try cf_require_var(ir_bytes, function_name, ba_arg1, comment_end_var,
+        "compiled struct-cf: has_blank_after must pass the comment end second", bs);
+    let ba_arg2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10_cond, "arg", 2, bs);
+    try cf_require_var(ir_bytes, function_name, ba_arg2, end_name,
+        "compiled struct-cf: has_blank_after must pass end last", bs);
+    let t10_then = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10, "then", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, t10_then, bs)) != 3 {
+        return error("compiled struct-cf: blank-after insertion must be newline and two state assigns");
+    }
+    let ka0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10_then, "statement", 0, bs);
+    try cf_require_append_byte_cast(ir_bytes, function_name, ka0, out_name, 10,
+        "compiled struct-cf: blank-after insertion must append the blank newline", bs);
+    let ka1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10_then, "statement", 1, bs);
+    try cf_require_assign_cast_u8(ir_bytes, function_name, ka1, cur_last_var, 10,
+        "compiled struct-cf: blank-after insertion must set current_last = 10", bs);
+    let ka2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10_then, "statement", 2, bs);
+    try cf_require_assign_true(ir_bytes, function_name, ka2, cur_als_var,
+        "compiled struct-cf: blank-after insertion must set current_at_line_start = true", bs);
+    // The blank-after guard is then-only; an else arm would be silently dropped by the emit.
+    try cf_require_no_else(ir_bytes, function_name, t10,
+        "compiled struct-cf: blank-after guard must not carry an else arm", bs);
+
+    // t11: 'index = line_end_including_break(source, index + 2);'.
+    let t11 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 11, bs);
+    try cf_expect(ir_bytes, function_name, t11, "Assign",
+        "compiled struct-cf: comment arm must close by advancing the cursor", bs);
+    let t11_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t11, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, t11_target, index_var,
+        "compiled struct-cf: comment arm cursor advance must assign the cursor", bs);
+    let t11_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t11, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, t11_value, "Call",
+        "compiled struct-cf: comment arm cursor advance must call line_end_including_break", bs);
+    let line_end_incl_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t11_value, bs);
+    try cf_require_call_source_first(ir_bytes, function_name, t11_value, source_name, 2,
+        "compiled struct-cf: line_end_including_break must take (source, index + 2)", bs);
+    let t11_arg1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t11_value, "arg", 1, bs);
+    try cf_require_index_add(ir_bytes, function_name, t11_arg1, index_var, 2,
+        "compiled struct-cf: line_end_including_break must scan from 'index + 2'", bs);
+
+    // Statement 5: 'return CommentFormatState { last: current_last, at_line_start:
+    // current_at_line_start, after_comment: current_after_comment };'. The success wrap builds the
+    // struct value field-by-field, so the literal must name exactly the three state fields in
+    // declaration order, each carrying its matching carried scalar.
+    let s5 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 5, bs);
+    try cf_expect(ir_bytes, function_name, s5, "Return",
+        "compiled struct-cf: comment driver must end with the state return", bs);
+    let s5_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s5, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, s5_value, "StructLiteralExpr",
+        "compiled struct-cf: comment driver must return a CommentFormatState literal", bs);
+    let s5_type = try ir_contract::sequence_fact_value_from(ir_bytes, "body-struct-literal ", function_name, s5_value, bs);
+    if !std::mem::equal_bytes(s5_type, "CommentFormatState") {
+        return error("compiled struct-cf: comment driver must return a CommentFormatState literal");
+    }
+    if (try ir_contract::body_child_sequence_or_minus_one_from(ir_bytes, function_name, s5_value, "field", 3, bs)) >= 0 {
+        return error("compiled struct-cf: CommentFormatState literal must have exactly three fields");
+    }
+    try cf_require_state_field(ir_bytes, function_name, s5_value, 0, "last", cur_last_var,
+        "compiled struct-cf: CommentFormatState 'last' field must be current_last", bs);
+    try cf_require_state_field(ir_bytes, function_name, s5_value, 1, "at_line_start", cur_als_var,
+        "compiled struct-cf: CommentFormatState 'at_line_start' field must be current_at_line_start", bs);
+    try cf_require_state_field(ir_bytes, function_name, s5_value, 2, "after_comment", cur_ac_var,
+        "compiled struct-cf: CommentFormatState 'after_comment' field must be current_after_comment", bs);
+
+    // ================= Emit =================
+    try cf_w(out, "define ");
+    try cf_w(out, llvm_return_type);
+    try cf_w(out, " @");
+    try cf_w(out, llvm_symbol);
+    try cf_w(out, "(");
+    try compiled_signature::append_params_signature(out, params_spec);
+    try cf_l(out, ") {");
+
+    try cf_l(out, "entry:");
+    try cf_l(out, "  br label %cp_head");
+
+    try cf_l(out, "cp_head:");
+    try cf_emit_cp_phi(out, index_var, "i64", start_name, "%", index_var, "_next");
+    try cf_emit_cp_phi(out, cur_last_var, "i8", last_name, "%", cur_last_var, "_next");
+    try cf_emit_cp_phi(out, cur_als_var, "i1", als_name, "%", cur_als_var, "_next");
+    try cf_emit_cp_phi_lit(out, cur_ac_var, "i1", "false", "%", cur_ac_var, "_next");
+    try cf_w(out, "  %cp_cond = icmp slt i64 %");
+    try cf_w(out, index_var);
+    try cf_w(out, ", %");
+    try cf_l(out, end_name);
+    try cf_l(out, "  br i1 %cp_cond, label %cp_body, label %cp_exit");
+
+    try cf_l(out, "cp_body:");
+    try cf_w(out, "  %cp_ip1 = add i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", 1");
+    try cf_w(out, "  %cp_g1 = icmp slt i64 %cp_ip1, %");
+    try cf_l(out, end_name);
+    try cf_l(out, "  br i1 %cp_g1, label %cp_g2, label %cp_else");
+    try cf_l(out, "cp_g2:");
+    try cf_w(out, "  %cp_sptr = extractvalue %kizu.slice.u8 %");
+    try cf_w(out, source_name);
+    try cf_l(out, ", 0");
+    try cf_w(out, "  %cp_c0p = getelementptr i8, ptr %cp_sptr, i64 %");
+    try cf_l(out, index_var);
+    try cf_l(out, "  %cp_c0 = load i8, ptr %cp_c0p");
+    try cf_l(out, "  %cp_g2v = icmp eq i8 %cp_c0, 47");
+    try cf_l(out, "  br i1 %cp_g2v, label %cp_g3, label %cp_else");
+    try cf_l(out, "cp_g3:");
+    try cf_l(out, "  %cp_c1p = getelementptr i8, ptr %cp_sptr, i64 %cp_ip1");
+    try cf_l(out, "  %cp_c1 = load i8, ptr %cp_c1p");
+    try cf_l(out, "  %cp_g3v = icmp eq i8 %cp_c1, 47");
+    try cf_l(out, "  br i1 %cp_g3v, label %cp_cmt, label %cp_else");
+
+    try cf_l(out, "cp_else:");
+    try cf_w(out, "  %cp_index_e = add i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", 1");
+    try cf_l(out, "  br label %cp_latch");
+
+    try cf_l(out, "cp_cmt:");
+    try cf_w(out, "  %cp_ip2 = add i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", 2");
+    try cf_emit_cp_call_i1(out, module_prefix, "cp_full", full_callee, source_name, index_var, "", "");
+    try cf_l(out, "  br i1 %cp_full, label %cp_blank0, label %cp_afterb");
+    try cf_l(out, "cp_blank0:");
+    try cf_emit_cp_call_i1(out, module_prefix, "cp_blank", blank_before_callee, source_name, start_name, "%", index_var);
+    try cf_l(out, "  br i1 %cp_blank, label %cp_len, label %cp_afterb");
+    try cf_l(out, "cp_len:");
+    try cf_w(out, "  %cp_olen = call i64 @kizu_rt_string_len(%kizu.owned %");
+    try cf_w(out, out_name);
+    try cf_l(out, ")");
+    try cf_l(out, "  %cp_olen_pos = icmp sgt i64 %cp_olen, 0");
+    try cf_l(out, "  br i1 %cp_olen_pos, label %cp_inner, label %cp_afterb");
+    try cf_l(out, "cp_inner:");
+    try cf_w(out, "  br i1 %");
+    try cf_w(out, cur_als_var);
+    try cf_l(out, ", label %cp_inl_done, label %cp_inl_do");
+    try cf_l(out, "cp_inl_do:");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_inl", out_name, 10);
+    try cf_l(out, "  br label %cp_inl_done");
+    try cf_l(out, "cp_inl_done:");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_in2", out_name, 10);
+    try cf_l(out, "  br label %cp_afterb");
+    try cf_l(out, "cp_afterb:");
+    try cf_w(out, "  %cp_als_b = phi i1 [ %");
+    try cf_w(out, cur_als_var);
+    try cf_w(out, ", %cp_cmt ], [ %");
+    try cf_w(out, cur_als_var);
+    try cf_w(out, ", %cp_blank0 ], [ %");
+    try cf_w(out, cur_als_var);
+    try cf_l(out, ", %cp_len ], [ true, %cp_in2_cont ]");
+    try cf_l(out, "  br i1 %cp_als_b, label %cp_c_done, label %cp_c_do");
+    try cf_l(out, "cp_c_do:");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_c", out_name, 10);
+    try cf_l(out, "  br label %cp_c_done");
+    try cf_l(out, "cp_c_done:");
+    try cf_w(out, "  %cp_ind_call = call %kizu.error.void @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, indent_callee);
+    try cf_w(out, "(%kizu.owned %");
+    try cf_w(out, out_name);
+    try cf_w(out, ", i64 %");
+    try cf_w(out, depth_name);
+    try cf_l(out, ")");
+    try cf_l(out, "  %cp_ind_ok = extractvalue %kizu.error.void %cp_ind_call, 0");
+    try cf_l(out, "  br i1 %cp_ind_ok, label %cp_ind_cont, label %cp_ind_fail");
+    try cf_l(out, "cp_ind_fail:");
+    try cf_l(out, "  %cp_ind_msg = extractvalue %kizu.error.void %cp_ind_call, 1");
+    try cf_emit_own_fail(out, llvm_return_type, "cp_ind", "cp_ind", "_msg");
+    try cf_l(out, "cp_ind_cont:");
+    try cf_emit_cp_call_i64(out, module_prefix, "cp_cend", line_end_excl_callee, source_name, "cp_ip2");
+    try cf_emit_subslice(out, "cp_sub", source_name, index_var, "cp_cend");
+    try cf_emit_string_append(out, llvm_return_type, "cp_fa", "kizu_rt_string_append_bytes",
+        out_name, "%kizu.slice.u8", "%", "cp_sub_slice");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_g", out_name, 10);
+    try cf_emit_cp_call_i1(out, module_prefix, "cp_baf", blank_after_callee, source_name, "cp_cend", "%", end_name);
+    try cf_l(out, "  br i1 %cp_baf, label %cp_k_do, label %cp_k_done");
+    try cf_l(out, "cp_k_do:");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_k", out_name, 10);
+    try cf_l(out, "  br label %cp_k_done");
+    try cf_l(out, "cp_k_done:");
+    try cf_emit_cp_call_i64(out, module_prefix, "cp_idxnew", line_end_incl_callee, source_name, "cp_ip2");
+    try cf_l(out, "  br label %cp_latch");
+
+    try cf_l(out, "cp_latch:");
+    try cf_w(out, "  %");
+    try cf_w(out, index_var);
+    try cf_l(out, "_next = phi i64 [ %cp_index_e, %cp_else ], [ %cp_idxnew, %cp_k_done ]");
+    try cf_w(out, "  %");
+    try cf_w(out, cur_last_var);
+    try cf_w(out, "_next = phi i8 [ %");
+    try cf_w(out, cur_last_var);
+    try cf_l(out, ", %cp_else ], [ 10, %cp_k_done ]");
+    try cf_w(out, "  %");
+    try cf_w(out, cur_als_var);
+    try cf_w(out, "_next = phi i1 [ %");
+    try cf_w(out, cur_als_var);
+    try cf_l(out, ", %cp_else ], [ true, %cp_k_done ]");
+    try cf_w(out, "  %");
+    try cf_w(out, cur_ac_var);
+    try cf_w(out, "_next = phi i1 [ %");
+    try cf_w(out, cur_ac_var);
+    try cf_l(out, ", %cp_else ], [ true, %cp_k_done ]");
+    try cf_l(out, "  br label %cp_head");
+
+    try cf_l(out, "cp_exit:");
+    try cf_emit_comment_state_success(out, llvm_return_type, "cp_ret", cur_last_var, cur_als_var, cur_ac_var);
     try cf_l(out, "}");
     try out.append_byte(cast<u8>(10));
     return;
