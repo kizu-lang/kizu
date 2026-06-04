@@ -183,6 +183,31 @@ var commentPreserveShapeValidationErrors = []string{
 	"compiled struct-cf: blank-before guard must be 'full and has_blank_before'",
 	"compiled struct-cf: comment arm must close by advancing the cursor",
 	"compiled struct-cf: comment driver must end with the state return",
+	// Top-level state seeds.
+	"compiled struct-cf: comment driver current_last must be seeded from the last parameter",
+	"compiled struct-cf: comment driver current_after_comment must be seeded from false",
+	// The short-circuit '//' detection guard.
+	"compiled struct-cf: comment guard must be the three-operand '//' detection 'and'",
+	"compiled struct-cf: comment guard bounds check must be 'index + 1 < end'",
+	"compiled struct-cf: comment guard must test 'source[index] == cast<u8>(47)'",
+	"compiled struct-cf: comment guard must test 'source[index + 1] == cast<u8>(47)'",
+	// The blank-before insertion operands.
+	"compiled struct-cf: blank-before insertion must test 'out.len() > 0'",
+	"compiled struct-cf: blank-before insertion must set current_last = 10",
+	"compiled struct-cf: blank-before insertion must set current_at_line_start = true",
+	// The main comment emit operands.
+	"compiled struct-cf: append_indent must take (out, depth)",
+	"compiled struct-cf: line_end_excluding_break must scan from 'index + 2'",
+	"compiled struct-cf: comment slice must be 'source[index..comment_end]'",
+	"compiled struct-cf: comment arm must set current_after_comment = true",
+	// The blank-after insertion operands.
+	"compiled struct-cf: has_blank_after must take (source, comment_end, end)",
+	"compiled struct-cf: line_end_including_break must scan from 'index + 2'",
+	// The CommentFormatState success-wrap fields.
+	"compiled struct-cf: CommentFormatState literal must have exactly three fields",
+	"compiled struct-cf: CommentFormatState 'last' field must be current_last",
+	"compiled struct-cf: CommentFormatState 'at_line_start' field must be current_at_line_start",
+	"compiled struct-cf: CommentFormatState 'after_comment' field must be current_after_comment",
 }
 
 // assertCommentPreserveShapeValidated pins that the structured-control-flow lowering keeps its
