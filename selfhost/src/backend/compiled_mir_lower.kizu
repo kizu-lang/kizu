@@ -4843,6 +4843,23 @@ fn while_carries_induction_var(
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, while_node, "body", 0, bs
     );
+    // A leading-decrement loop has no trailing increment run either; its induction variable is the
+    // target of the body-opening '<var> = <var> - <int>' self-decrement. Recognizing it here keeps
+    // its 'var <var> = <init>' seed off the emitted-let path (the loop-head phi supplies the seed on
+    // the preheader edge) and avoids the trailing-increment count erroring on its non-Assign tail
+    // (issue 1165 / 1162).
+    if try while_is_leading_decrement(ir_bytes, function_name, body_node, bs) {
+        let first_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", 0, bs
+        );
+        let decrement_target = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, first_stmt, "target", 0, bs
+        );
+        let decrement_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, decrement_target, bs
+        );
+        return std::mem::equal_bytes(decrement_name, name);
+    }
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
     let latch_count = try while_trailing_increment_count(
         ir_bytes, function_name, body_node, body_count, bs
@@ -5284,6 +5301,26 @@ fn lower_multi_while_statement(
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "body", 0, bs
     );
+    // A leading-decrement loop advances its counter through a body-opening '<var> = <var> - <int>'
+    // self-decrement rather than a trailing increment, so the trailing-latch machinery below (which
+    // requires the last body statement to be the induction increment) does not apply. It lowers
+    // through a dedicated path that reseats the loop-head phi and synthesizes the decrement as a body
+    // let (lbrace_opens_enum_decl, issue 1165 / 1162).
+    if try while_is_leading_decrement(ir_bytes, function_name, body_node, bs) {
+        return try lower_multi_while_leading_decrement(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            statement,
+            string_counter,
+            temp_counter,
+            loop_index,
+            stmts,
+            bs
+        );
+    }
     let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
     // loop_index is this while's top-level statement index, so the induction initializer
     // is the nearest preceding 'var <induction_var> = <init>'.
@@ -5564,6 +5601,295 @@ fn lower_multi_while_statement(
         latch_stmts,
         latch_copy_var,
         secondary_inductions,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        -1
+    ));
+    return MultiIfLowerResult {
+        temp_counter: body_temp_counter,
+        string_counter: body_string_counter
+    };
+}
+// assign_is_self_decrement reports whether a body Assign is a constant-step self-decrement
+// '<var> = <var> - <int>' of the named variable: a Binary 'sub' value whose left is that same Var
+// and whose right is a positive integer literal. It classifies the leading induction advance of a
+// leading-decrement loop (issue 1165 / 1162).
+fn assign_is_self_decrement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    assign_node: i64,
+    var_name: []u8,
+    bs: i64
+) -> !bool {
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "value", 0, bs
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if !std::mem::equal_bytes(value_kind, "Binary") {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, value, bs
+    );
+    if !std::mem::equal_bytes(op, "sub") {
+        return false;
+    }
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "left", 0, bs
+    );
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "right", 0, bs
+    );
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right_node, bs);
+    if !std::mem::equal_bytes(left_kind, "Var") or !std::mem::equal_bytes(right_kind, "Int") {
+        return false;
+    }
+    let left_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, left_node, bs);
+    if !std::mem::equal_bytes(left_name, var_name) {
+        return false;
+    }
+    let offset = try ir_contract::body_int_value_from(ir_bytes, function_name, right_node, bs);
+    return offset >= 1;
+}
+// while_is_leading_decrement reports whether a bounded loop advances its induction variable through
+// a leading self-decrement rather than a trailing 'name = name + step' increment or a continue-latch:
+// its first body statement is '<var> = <var> - <int>' and its last body statement is not an
+// induction increment assign. lbrace_opens_enum_decl's backward brace scan is its first consumer
+// (issue 1165 / 1162):
+//   var cursor = index;
+//   while cursor > 0 {
+//       cursor = cursor - 1;
+//       let token = try tokens.get(cursor);
+//       ...
+//   }
+// The continue-latch shape is dispatched before this check, so a leading decrement here is always a
+// fall-through (non-continue) loop whose body reads the decremented counter.
+fn while_is_leading_decrement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    bs: i64
+) -> !bool {
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 2 {
+        return false;
+    }
+    let first_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    let first_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, first_stmt, bs);
+    if !std::mem::equal_bytes(first_kind, "Assign") {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, first_stmt, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return false;
+    }
+    let target_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
+    if !(try assign_is_self_decrement(ir_bytes, function_name, first_stmt, target_name, bs)) {
+        return false;
+    }
+    // The induction is advanced only by the leading decrement: a trailing Assign as the last body
+    // statement is the trailing-latch (or lockstep-counter) path, so a loop that both leads with a
+    // decrement and trails with an increment is left to that lowering rather than mis-detected here.
+    let last_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let last_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, last_stmt, bs);
+    if std::mem::equal_bytes(last_kind, "Assign") {
+        return false;
+    }
+    return true;
+}
+// lower_multi_while_leading_decrement lowers a bounded loop whose induction variable is advanced by a
+// leading self-decrement '<var> = <var> - <int>' (issue 1165 / 1162). The decrement reassigns the
+// counter at the top of the body, so every later body read of <var> means the decremented value. To
+// keep the loop-head phi (the pre-decrement value the 'cursor > bound' header tests) distinct from
+// the body value, the phi is reseated onto a reserved name (leading.decrement.head, which no kizu
+// identifier can spell) and the decrement is synthesized as the first body statement 'let <var> =
+// leading.decrement.head - <int>'. The header comparison and the decrement's right-hand side rename
+// their <var> read to the reserved phi name; every other body statement reads <var> unchanged and so
+// resolves to the synthesized let. The loop-head phi reads %<var> on the latch edge (the
+// copy-decrement latch the renderer already supports, latch_copy_var = <var>), and the body carries
+// no trailing latch. Only one leading-decrement loop per function is supported (a second would reuse
+// the reserved phi name); every current consumer carries exactly one.
+fn lower_multi_while_leading_decrement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    loop_index: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let head_var = "leading.decrement.head";
+    // The reserved phi name is shared by every leading-decrement loop, so a second one in the same
+    // function would define %leading.decrement.head twice. Leading-decrement loops only lower at the
+    // top level (a nested while is an unsupported body statement below), so scanning the already
+    // lowered top-level statements for an earlier leading-decrement while catches the collision as an
+    // explicit error rather than emitting an invalid duplicate phi (issue 1165 / 1162).
+    var existing_index = 0;
+    while existing_index < stmts.len() {
+        let existing = try stmts.at(existing_index);
+        let existing_head = match existing {
+            While(payload) => payload.induction_var,
+            _ => "",
+        };
+        if std::mem::len(existing_head) > 0 and std::mem::equal_bytes(existing_head, head_var) {
+            return error("compiled mir: only one leading-decrement loop per function is supported");
+        }
+        existing_index = existing_index + 1;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_kind != 0 {
+        return error("compiled mir: leading-decrement loop header must be a single comparison");
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    let decrement_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, decrement_stmt, "target", 0, bs
+    );
+    let induction_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
+    let induction_init = try find_induction_init(
+        ir_bytes, function_name, induction_var, loop_index, bs
+    );
+    // The loop-head comparison reads the pre-decrement counter, so its <var> read renames to the
+    // reserved phi name.
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        bs
+    );
+    try rename_induction_in_insts(&var cond_insts, induction_var, head_var);
+    // The header must test the decremented counter: after the rename, the condition has to read the
+    // reserved phi name at least once. A no-op rename means the loop-head comparison reads some other
+    // variable (e.g. 'while other > 0 { cursor = cursor - 1; ... }'), so the phi would track 'cursor'
+    // while the header tests 'other' -- a mis-detected shape that is an explicit error here rather
+    // than a silent mis-lower (issue 1165 / 1162).
+    if !(try insts_reference_var(&cond_insts, head_var)) {
+        return error("compiled mir: leading-decrement loop header must test the induction variable");
+    }
+    var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
+    var body_temp_counter = temp_counter + cond_insts.len();
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    // The synthesized decrement 'let <var> = leading.decrement.head - <int>' binds the body value of
+    // the counter; its right-hand side reads the pre-decrement phi, so it too renames to the reserved
+    // name.
+    let decrement_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, decrement_stmt, "value", 0, bs
+    );
+    var dec_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let dec_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        decrement_value,
+        body_string_counter,
+        body_temp_counter,
+        &var dec_insts,
+        bs
+    );
+    try rename_induction_in_insts(&var dec_insts, induction_var, head_var);
+    let dec_strings = try count_strings_in_insts(&dec_insts);
+    let dec_temp = body_temp_counter + dec_insts.len();
+    try body_stmts.append(compiled_mir::let_expr_stmt(
+        induction_var, body_string_counter, dec_result, dec_insts
+    ));
+    body_string_counter = body_string_counter + dec_strings;
+    body_temp_counter = dec_temp;
+    // The remaining body statements read the decremented counter through the synthesized let, so they
+    // lower exactly like a top-level Let/If run with no rename. The body-if index reuses the same
+    // 'loop_index * 1000 + statement_index + 1' encoding the trailing-latch body uses; the
+    // synthesized decrement occupies body_stmts[0] at the same statement_index 0 as the source
+    // decrement, so later statement indices line up with their body_stmts slots.
+    var body_try_counter = loop_index * 1000;
+    var body_index = 1;
+    while body_index < body_count {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                locals_spec,
+                body_stmt,
+                body_string_counter,
+                body_temp_counter,
+                body_try_counter,
+                &var body_stmts,
+                bs
+            );
+            body_string_counter = let_result.string_counter;
+            body_temp_counter = let_result.temp_counter;
+            body_try_counter = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(body_kind, "If") {
+                let body_if_index = loop_index * 1000 + body_index + 1;
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    body_stmt,
+                    body_string_counter,
+                    body_temp_counter,
+                    body_if_index,
+                    &var body_stmts,
+                    bs
+                );
+                body_temp_counter = if_result.temp_counter;
+                body_string_counter = if_result.string_counter;
+            } else {
+                return error("compiled mir: unsupported leading-decrement while body statement");
+            }
+        }
+        body_index = body_index + 1;
+    }
+    try stmts.append(compiled_mir::while_stmt(
+        loop_index,
+        head_var,
+        induction_init.literal,
+        induction_init.var_name,
+        induction_init.offset,
+        0,
+        cond_result,
+        cond_insts,
+        0,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
+        body_stmts,
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        induction_var,
+        std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         -1
     ));

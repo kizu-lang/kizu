@@ -109,6 +109,7 @@ var formatCompiledHelperSeeds = []string{
 	"line_comment_has_blank_after",
 	"line_comment_has_blank_before",
 	"should_insert_space",
+	"lbrace_opens_enum_decl",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
