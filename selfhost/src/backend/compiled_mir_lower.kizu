@@ -3892,11 +3892,13 @@ fn lower_multi_return_statement(
                 locals_spec, value, string_counter, temp_counter, bs
             );
         }
-        // 'return equal_bytes(token_text(...), expected);' carries a nested call argument
-        // the inline call-arg descriptors cannot model, so it lowers through the generic
-        // expression path (which materializes each nested call into a preceding temp) as a
-        // return-expr statement instead of an inline return-call (issue 1165).
-        if try call_has_call_arg(ir_bytes, function_name, value, bs) {
+        // 'return equal_bytes(token_text(...), expected);' carries a nested call argument and
+        // 'return is_line_break(source[cursor]);' carries a single-element byte index load --
+        // arguments the inline call-arg descriptors cannot model -- so each lowers through the
+        // generic expression path (which materializes the nested call or checked byte load into a
+        // preceding temp) as a return-expr statement instead of an inline return-call (issue 1165 /
+        // 1162).
+        if try call_has_hoisted_arg(ir_bytes, function_name, value, bs) {
             var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             let nested_result_id = try lower_expr_into(
                 ir_bytes,
@@ -4351,14 +4353,50 @@ fn lower_multi_if_statement(
         ir_bytes, function_name, then_node, "statement", 0, bs
     );
     let then_stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, then_stmt, bs);
-    if !std::mem::equal_bytes(then_stmt_kind, "Return") {
-        return error("compiled mir: unsupported then block");
-    }
-    let ret_value = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, then_stmt, "value", 0, bs
+    // A continue-latch then-block ('{ <induction> = <induction> + <step>; continue; }') carries no
+    // return value: it folds its increment into the loop's shared constant-step latch and branches
+    // back to the loop head, so it lowers to a ContinueLatch if whose then-block the renderer turns
+    // into 'br label %loop<N>_latch'. line_comment_has_blank_after is its first consumer (issue 1165
+    // / 1162). It shares the single if_stmt append below: the then-block fields stay empty and the
+    // temp / string counters do not advance.
+    var is_continue_latch_then = false;
+    let then_continue = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, then_node, "statement", 1, bs
     );
-    let ret_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, ret_value, bs);
-    var then_kind = compiled_mir::MirIfThenKind::ReturnExpr;
+    if then_continue >= 0 {
+        let then_continue_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, then_continue, bs
+        );
+        if std::mem::equal_bytes(then_stmt_kind, "Assign") and
+            std::mem::equal_bytes(then_continue_kind, "Continue") {
+            is_continue_latch_then = true;
+            let then_extra = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, then_node, "statement", 2, bs
+            );
+            if then_extra >= 0 {
+                return error("compiled mir: continue-latch then-block must be '<increment>; continue;'");
+            }
+            // Validate the increment is a constant-step '<var> = <var> + <int>' against its own
+            // target so a near-miss assign is an explicit error rather than a silently dropped latch
+            // update; the while lowering re-reads the target/step to drive the shared latch add.
+            let incr_target = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, then_stmt, "target", 0, bs
+            );
+            let incr_target_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, incr_target, bs
+            );
+            if !std::mem::equal_bytes(incr_target_kind, "Var") {
+                return error("compiled mir: continue-latch increment target must be a var");
+            }
+            let incr_target_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, incr_target, bs
+            );
+            let _step = try parse_induction_step(
+                ir_bytes, function_name, then_stmt, incr_target_name, bs
+            );
+        }
+    }
+    var then_kind = compiled_mir::MirIfThenKind::ContinueLatch;
     var bool_value = false;
     var call_type = llvm_return_type;
     var then_module_prefix = "";
@@ -4368,84 +4406,95 @@ fn lower_multi_if_statement(
     var then_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var then_struct_fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
     var then_struct_strings = 0;
-    if std::mem::equal_bytes(ret_kind, "Bool") {
-        let token = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, ret_value, bs
+    var next_temp = then_base;
+    var new_string_counter = then_string_base;
+    if !is_continue_latch_then {
+        if !std::mem::equal_bytes(then_stmt_kind, "Return") {
+            return error("compiled mir: unsupported then block");
+        }
+        let ret_value = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, then_stmt, "value", 0, bs
         );
-        then_kind = compiled_mir::MirIfThenKind::ReturnBool;
-        bool_value = std::mem::equal_bytes(token, "true");
-    } else {
-        if std::mem::equal_bytes(ret_kind, "Call") {
-            if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, ret_value, bs) {
-                then_kind = compiled_mir::MirIfThenKind::ReturnError;
-                let message_node = try ir_contract::body_child_sequence_from(
-                    ir_bytes, function_name, ret_value, "arg", 0, bs
-                );
-                then_result = try lower_expr_into(
-                    ir_bytes,
-                    function_name,
-                    module_prefix,
-                    locals_spec,
-                    message_node,
-                    then_string_base,
-                    then_base,
-                    &var then_insts,
-                    bs
-                );
-            } else {
-            call_type = try compiled_mir_types::lower_call_return_type(
-                ir_bytes, function_name, module_prefix, ret_value, bs
+        let ret_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, ret_value, bs);
+        then_kind = compiled_mir::MirIfThenKind::ReturnExpr;
+        if std::mem::equal_bytes(ret_kind, "Bool") {
+            let token = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, ret_value, bs
             );
-            callee_name = try compiled_mir_types::lower_call_callee_name(
-                ir_bytes, function_name, module_prefix, ret_value, bs
-            );
-            call_args = try compiled_mir_lower_call::lower_call_args(
-                ir_bytes, function_name, module_prefix, locals_spec, ret_value, then_string_base, bs
-            );
-            then_kind = compiled_mir::MirIfThenKind::ReturnCall;
-            then_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-                ir_bytes, function_name, module_prefix, ret_value, bs
-            );
-            }
+            then_kind = compiled_mir::MirIfThenKind::ReturnBool;
+            bool_value = std::mem::equal_bytes(token, "true");
         } else {
-            if std::mem::equal_bytes(ret_kind, "StructLiteralExpr") {
-                // A struct-literal then-block such as a return of PayloadSpan { .. }
-                // reuses the generic struct-field lowering. The struct SSA and global
-                // names are seeded from then_string_base, and the string counter then
-                // advances by the field count so a later then-block in the same
-                // function never reuses the same per-field SSA names.
-                then_struct_fields = try compiled_mir_lower_struct::lower_struct_fields(
-                    ir_bytes, function_name, module_prefix, locals_spec, ret_value, bs
+            if std::mem::equal_bytes(ret_kind, "Call") {
+                if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, ret_value, bs) {
+                    then_kind = compiled_mir::MirIfThenKind::ReturnError;
+                    let message_node = try ir_contract::body_child_sequence_from(
+                        ir_bytes, function_name, ret_value, "arg", 0, bs
+                    );
+                    then_result = try lower_expr_into(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        locals_spec,
+                        message_node,
+                        then_string_base,
+                        then_base,
+                        &var then_insts,
+                        bs
+                    );
+                } else {
+                call_type = try compiled_mir_types::lower_call_return_type(
+                    ir_bytes, function_name, module_prefix, ret_value, bs
                 );
-                then_kind = compiled_mir::MirIfThenKind::ReturnStruct;
-                then_struct_strings = then_struct_fields.len();
+                callee_name = try compiled_mir_types::lower_call_callee_name(
+                    ir_bytes, function_name, module_prefix, ret_value, bs
+                );
+                call_args = try compiled_mir_lower_call::lower_call_args(
+                    ir_bytes, function_name, module_prefix, locals_spec, ret_value, then_string_base, bs
+                );
+                then_kind = compiled_mir::MirIfThenKind::ReturnCall;
+                then_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+                    ir_bytes, function_name, module_prefix, ret_value, bs
+                );
+                }
             } else {
-                then_result = try lower_expr_into(
-                    ir_bytes,
-                    function_name,
-                    module_prefix,
-                    locals_spec,
-                    ret_value,
-                    then_string_base,
-                    then_base,
-                    &var then_insts,
-                    bs
-                );
+                if std::mem::equal_bytes(ret_kind, "StructLiteralExpr") {
+                    // A struct-literal then-block such as a return of PayloadSpan { .. }
+                    // reuses the generic struct-field lowering. The struct SSA and global
+                    // names are seeded from then_string_base, and the string counter then
+                    // advances by the field count so a later then-block in the same
+                    // function never reuses the same per-field SSA names.
+                    then_struct_fields = try compiled_mir_lower_struct::lower_struct_fields(
+                        ir_bytes, function_name, module_prefix, locals_spec, ret_value, bs
+                    );
+                    then_kind = compiled_mir::MirIfThenKind::ReturnStruct;
+                    then_struct_strings = then_struct_fields.len();
+                } else {
+                    then_result = try lower_expr_into(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        locals_spec,
+                        ret_value,
+                        then_string_base,
+                        then_base,
+                        &var then_insts,
+                        bs
+                    );
+                }
             }
         }
-    }
-    let then_call_strings = try compiled_mir_lower_call::count_string_args(&call_args);
-    let then_expr_strings = try count_strings_in_insts(&then_insts);
-    let new_string_counter = then_string_base + then_call_strings + then_expr_strings + then_struct_strings;
-    var next_temp = then_base;
-    if then_kind == compiled_mir::MirIfThenKind::ReturnCall {
-        next_temp = then_base + 1;
-    }
-    if then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
-        next_temp = then_result + 1;
-    }
-    if then_kind == compiled_mir::MirIfThenKind::ReturnError {
-        next_temp = then_result + 1;
+        let then_call_strings = try compiled_mir_lower_call::count_string_args(&call_args);
+        let then_expr_strings = try count_strings_in_insts(&then_insts);
+        new_string_counter = then_string_base + then_call_strings + then_expr_strings + then_struct_strings;
+        if then_kind == compiled_mir::MirIfThenKind::ReturnCall {
+            next_temp = then_base + 1;
+        }
+        if then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
+            next_temp = then_result + 1;
+        }
+        if then_kind == compiled_mir::MirIfThenKind::ReturnError {
+            next_temp = then_result + 1;
+        }
     }
     try stmts.append(compiled_mir::if_stmt(
             if_index,
@@ -4561,6 +4610,128 @@ fn statement_is_induction_init(
 // while_carries_induction_var reports whether a while loop advances a counter named name,
 // counting both the primary trailing increment target and every secondary increment in the
 // trailing run (issue 1165 / 1162).
+// if_carries_continue_increment reports whether an if statement is the continue-latch marker: a
+// then-block of exactly two statements, a constant-step '<var> = <var> + <int>' increment followed
+// by a bare 'continue'. Requiring the constant-step shape here -- not merely a trailing 'continue'
+// -- keeps the continue-latch routing from claiming an if whose increment the shared latch cannot
+// fold (e.g. a 'cursor = previous; continue;' copy), which would otherwise be diverted away from a
+// path that might handle it (issue 1165 / 1162).
+fn if_carries_continue_increment(
+    ir_bytes: []u8,
+    function_name: []u8,
+    if_node: i64,
+    bs: i64
+) -> !bool {
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "then", 0, bs
+    );
+    let count = try while_body_statement_count(ir_bytes, function_name, then_node, bs);
+    if count != 2 {
+        return false;
+    }
+    let increment = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    let continue_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 1, bs
+    );
+    let continue_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, continue_stmt, bs
+    );
+    if !std::mem::equal_bytes(continue_kind, "Continue") {
+        return false;
+    }
+    let increment_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, increment, bs
+    );
+    if !std::mem::equal_bytes(increment_kind, "Assign") {
+        return false;
+    }
+    return try while_assign_is_constant_step(ir_bytes, function_name, increment, bs);
+}
+// while_is_continue_latch reports whether a while loop advances its induction variable through a
+// continue-latch: a body 'if <cond> { <induction> = <induction> + <step>; continue; }' whose
+// then-block is a constant-step increment followed by 'continue', rather than a trailing increment
+// assign. Such a loop has no trailing latch statement -- the increment lives inside the continue-if
+// and the loop's non-continue path falls through to a 'return'. line_comment_has_blank_after is its
+// first consumer (issue 1165 / 1162).
+fn while_is_continue_latch(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> !bool {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_node, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var index = 0;
+    while index < body_count {
+        let stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, stmt, bs);
+        if std::mem::equal_bytes(kind, "If") {
+            if try if_carries_continue_increment(ir_bytes, function_name, stmt, bs) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+// while_continue_increment_assign returns the '<induction> = <induction> + <step>' Assign node
+// inside a continue-latch loop's body continue-if -- the first statement of the if whose then-block
+// ends in 'continue' (issue 1165 / 1162).
+fn while_continue_increment_assign(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> !i64 {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_node, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var index = 0;
+    while index < body_count {
+        let stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, stmt, bs);
+        if std::mem::equal_bytes(kind, "If") {
+            if try if_carries_continue_increment(ir_bytes, function_name, stmt, bs) {
+                let then_node = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, stmt, "then", 0, bs
+                );
+                return try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, then_node, "statement", 0, bs
+                );
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled mir: continue-latch increment not found");
+}
+// while_continue_induction_var returns the induction variable a continue-latch loop advances: the
+// target of the '<induction> = <induction> + <step>' increment inside the body continue-if (issue
+// 1165 / 1162).
+fn while_continue_induction_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let assign = try while_continue_increment_assign(ir_bytes, function_name, while_node, bs);
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return error("compiled mir: continue-latch increment target must be a var");
+    }
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
+}
 fn while_carries_induction_var(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4568,6 +4739,12 @@ fn while_carries_induction_var(
     name: []u8,
     bs: i64
 ) -> !bool {
+    // A continue-latch loop has no trailing increment run; its induction variable is the target of
+    // the increment inside the body continue-if (issue 1165 / 1162).
+    if try while_is_continue_latch(ir_bytes, function_name, while_node, bs) {
+        let continue_var = try while_continue_induction_var(ir_bytes, function_name, while_node, bs);
+        return std::mem::equal_bytes(continue_var, name);
+    }
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, while_node, "body", 0, bs
     );
@@ -4691,6 +4868,48 @@ fn find_induction_init(
         return InductionInit { literal: 0, var_name: base_name, offset: offset };
     }
     return error("compiled mir: induction variable must be initialized to an integer or a parameter");
+}
+// find_induction_init_value_node returns the value node of the nearest preceding 'var counter =
+// <value>' initializer for the while at while_stmt_index, without classifying the value. The
+// continue-latch lowering uses it to detect a call-seeded init ('var cursor =
+// line_end_including_break(source, comment_end)') and lower the call into the preheader; a
+// non-call seed falls back to find_induction_init's literal/copy/offset classification (issue 1165
+// / 1162).
+fn find_induction_init_value_node(
+    ir_bytes: []u8,
+    function_name: []u8,
+    induction_var: []u8,
+    while_stmt_index: i64,
+    bs: i64
+) -> !i64 {
+    var found = false;
+    var init_value = -1;
+    var index = 0;
+    while index < while_stmt_index {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(kind, "Let") {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
+            );
+            let name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, name_node, bs
+            );
+            if std::mem::equal_bytes(name, induction_var) {
+                found = true;
+                init_value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "value", 0, bs
+                );
+            }
+        }
+        index = index + 1;
+    }
+    if !found {
+        return error("compiled mir: induction variable initializer not found");
+    }
+    return init_value;
 }
 // parse_induction_step validates the trailing 'name = name + <int>' increment for
 // the induction variable and returns the integer step. Only this simple counter
@@ -4942,6 +5161,25 @@ fn lower_multi_while_statement(
     let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
     if cond_kind == 2 {
         return error("compiled mir: while condition or is not supported");
+    }
+    // A continue-latch loop carries its increment inside a body 'if <cond> { <induction> =
+    // <induction> + <step>; continue; }' rather than in a trailing assign, so it has no trailing
+    // latch statement and the existing trailing-increment machinery does not apply. It lowers
+    // through a dedicated path (line_comment_has_blank_after, issue 1165 / 1162).
+    if try while_is_continue_latch(ir_bytes, function_name, statement, bs) {
+        return try lower_multi_while_continue_latch(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            statement,
+            string_counter,
+            temp_counter,
+            loop_index,
+            stmts,
+            bs
+        );
     }
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "body", 0, bs
@@ -5225,7 +5463,248 @@ fn lower_multi_while_statement(
         body_stmts,
         latch_stmts,
         latch_copy_var,
-        secondary_inductions
+        secondary_inductions,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        -1
+    ));
+    return MultiIfLowerResult {
+        temp_counter: body_temp_counter,
+        string_counter: body_string_counter
+    };
+}
+// return_expr_advance returns the counters past an expression-return statement's instructions: the
+// temp counter advances by the instruction count and the string counter by the string literals
+// among them. It backs continue_latch_return_advance (issue 1165 / 1162).
+fn return_expr_advance(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    base_temp: i64,
+    base_string: i64
+) -> !MultiIfLowerResult {
+    return MultiIfLowerResult {
+        temp_counter: base_temp + insts.len(),
+        string_counter: base_string + try count_strings_in_insts(insts)
+    };
+}
+// continue_latch_return_advance returns the counters past a continue-latch loop's terminal return so
+// statements after the while never reuse a temp or string slot the return emitted. The tail must be
+// an expression return (a hoisted-call 'return is_line_break(source[cursor])', a bool, or a plain
+// value); any other return shape is an explicit error rather than a silently un-counted lowering
+// (issue 1165 / 1162).
+fn continue_latch_return_advance(
+    stmt: &compiled_mir::MirStmt,
+    base_temp: i64,
+    base_string: i64
+) -> !MultiIfLowerResult {
+    match stmt {
+        ReturnExpr(payload) => return try return_expr_advance(&payload.expr_insts, base_temp, base_string);,
+        _ => return error("compiled mir: continue-latch loop tail must be an expression return");,
+    }
+}
+// lower_multi_while_continue_latch lowers a continue-latch bounded loop -- one whose induction
+// variable advances inside a body 'if <cond> { <induction> = <induction> + <step>; continue; }'
+// rather than through a trailing increment assign. line_comment_has_blank_after is its first
+// consumer (issue 1165 / 1162):
+//   var cursor = line_end_including_break(source, comment_end);
+//   while cursor < end {
+//       if is_horizontal_space(source[cursor]) { cursor = cursor + 1; continue; }
+//       return is_line_break(source[cursor]);
+//   }
+//   return false;
+// The increment folds into the shared constant-step latch ('%cursor_next = add i64 %cursor, step'
+// in loopN_latch), the continue-if's then-block becomes 'br label %loopN_latch', and the loop's
+// non-continue tail (here 'return is_line_break(source[cursor])') falls through the if-continuation
+// block, so the body already terminates and append_multi_while emits no trailing 'br' into the
+// latch. The init is call-seeded: the preheader runs the 'line_end_including_break' call and the
+// loop-head phi reads its result on the preheader edge. Only a single-comparison header is
+// supported; a short-circuit header, a non-return body tail, or a non-call/-literal/-copy seed is
+// an explicit error so a near-miss never silently mis-lowers.
+fn lower_multi_while_continue_latch(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    loop_index: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_kind != 0 {
+        return error("compiled mir: continue-latch loop header must be a single comparison");
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 2 {
+        return error("compiled mir: continue-latch loop body must carry the continue-if and a return");
+    }
+    // The loop's non-continue path must terminate: its last body statement is the 'return' the
+    // continue-if falls through to. Because it already terminates, append_multi_while emits no
+    // trailing 'br' into the latch -- the only edge back to the head is the continue-if's branch.
+    let last_body = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let last_body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, last_body, bs);
+    if !std::mem::equal_bytes(last_body_kind, "Return") {
+        return error("compiled mir: continue-latch loop body must end with a return");
+    }
+    let induction_var = try while_continue_induction_var(ir_bytes, function_name, statement, bs);
+    let increment_assign = try while_continue_increment_assign(ir_bytes, function_name, statement, bs);
+    let step = try parse_induction_step(
+        ir_bytes, function_name, increment_assign, induction_var, bs
+    );
+    // Resolve the 'var <induction> = <init>' seed. A call-seeded init lowers the call into
+    // init_insts (rendered in the preheader, with the loop-head phi reading its result); a literal,
+    // plain-copy, or base-plus-offset seed reuses find_induction_init's classification.
+    let init_node = try find_induction_init_value_node(
+        ir_bytes, function_name, induction_var, loop_index, bs
+    );
+    let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
+    var induction_init = 0;
+    var induction_init_var = "";
+    var induction_init_offset = 0;
+    var init_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    var init_result_id = -1;
+    var body_string_counter = string_counter;
+    var body_temp_counter = temp_counter;
+    if std::mem::equal_bytes(init_kind, "Call") {
+        init_result_id = try lower_expr_into(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            init_node,
+            string_counter,
+            temp_counter,
+            &var init_insts,
+            bs
+        );
+        body_string_counter = string_counter + try count_strings_in_insts(&init_insts);
+        body_temp_counter = temp_counter + init_insts.len();
+    } else {
+        let resolved_init = try find_induction_init(
+            ir_bytes, function_name, induction_var, loop_index, bs
+        );
+        induction_init = resolved_init.literal;
+        induction_init_var = resolved_init.var_name;
+        induction_init_offset = resolved_init.offset;
+    }
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        body_string_counter,
+        body_temp_counter,
+        &var cond_insts,
+        bs
+    );
+    body_string_counter = body_string_counter + try count_strings_in_insts(&cond_insts);
+    body_temp_counter = body_temp_counter + cond_insts.len();
+    // Every body statement lowers; there is no trailing latch assign to strip. The continue-if
+    // lowers to a ContinueLatch if, the trailing return to a return statement.
+    var body_try_counter = loop_index * 1000;
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_index = 0;
+    while body_index < body_count {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                locals_spec,
+                body_stmt,
+                body_string_counter,
+                body_temp_counter,
+                body_try_counter,
+                &var body_stmts,
+                bs
+            );
+            body_string_counter = let_result.string_counter;
+            body_temp_counter = let_result.temp_counter;
+            body_try_counter = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(body_kind, "If") {
+                let body_if_index = loop_index * 1000 + body_index + 1;
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    body_stmt,
+                    body_string_counter,
+                    body_temp_counter,
+                    body_if_index,
+                    &var body_stmts,
+                    bs
+                );
+                body_temp_counter = if_result.temp_counter;
+                body_string_counter = if_result.string_counter;
+            } else {
+                if std::mem::equal_bytes(body_kind, "Return") {
+                    try body_stmts.append(try lower_multi_return_statement(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        llvm_return_type,
+                        locals_spec,
+                        body_stmt,
+                        body_string_counter,
+                        body_temp_counter,
+                        bs
+                    ));
+                    // Advance the counters past the loop's terminal return so the result counters
+                    // this function returns -- consumed by statements after the while -- never reuse
+                    // a temp or string slot the return emitted. The tail must lower to an expression
+                    // return ('return is_line_break(source[cursor])'); any other return shape is an
+                    // explicit error rather than a silently un-counted lowering (issue 1165 / 1162).
+                    let return_stmt = try body_stmts.at(body_stmts.len() - 1);
+                    let advance = try continue_latch_return_advance(
+                        return_stmt, body_temp_counter, body_string_counter
+                    );
+                    body_temp_counter = advance.temp_counter;
+                    body_string_counter = advance.string_counter;
+                } else {
+                    return error("compiled mir: unsupported continue-latch body statement");
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    try stmts.append(compiled_mir::while_stmt(
+        loop_index,
+        induction_var,
+        induction_init,
+        induction_init_var,
+        induction_init_offset,
+        step,
+        cond_result,
+        cond_insts,
+        0,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
+        body_stmts,
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        "",
+        std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
+        init_insts,
+        init_result_id
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
