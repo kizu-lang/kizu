@@ -5252,28 +5252,24 @@ fn append_short_circuit_branches(
     try out.append_bytes("_rhs:");
     try out.append_byte(cast<u8>(10));
     try append_expr_insts(out, llvm_symbol, &stmt.cond_rhs_insts);
+    let extra_count = stmt.cond_extra_operands.len();
+    // The second operand (cond_rhs_insts) routes to the next operand block ifN_rhs2 when the
+    // chain carries more operands, otherwise to its decisive block. An 'and' chain advances on a
+    // true edge (a false short-circuits to ifN_cont); an 'or' chain advances on a false edge (a
+    // true short-circuits to ifN_then), so the two chains share the block layout and only swap
+    // which edge advances (issue 1165 / 1162).
     try out.append_bytes("  br i1 ");
     try append_expr_value_ref(out, &stmt.cond_rhs_insts, stmt.cond_rhs_result_id);
-    // The first guarded block flows to the first extra operand block when the 'and'
-    // chain carries more than two operands, otherwise straight to the then block. An
-    // 'or' header never carries extra operands.
-    if stmt.cond_short_circuit == 1 and stmt.cond_extra_operands.len() > 0 {
-        try out.append_bytes(", label %if");
-        try std::fmt::append_i64(out, stmt.if_index);
-        try out.append_bytes("_rhs2, label %if");
-        try std::fmt::append_i64(out, stmt.if_index);
-        try out.append_bytes("_cont");
+    if extra_count > 0 {
+        try append_short_circuit_operand_edges(out, stmt, 0);
     } else {
-        try out.append_bytes(", label %if");
-        try std::fmt::append_i64(out, stmt.if_index);
-        try out.append_bytes("_then, label %if");
-        try std::fmt::append_i64(out, stmt.if_index);
-        try out.append_bytes("_cont");
+        try append_short_circuit_decisive_edges(out, stmt);
     }
     try out.append_byte(cast<u8>(10));
-    // Each extra operand j (0-based) lives in ifN_rhs{j+2}; its true edge flows to the
-    // next operand's block ifN_rhs{j+3}, or to ifN_then for the last operand. A false
-    // edge always short-circuits to ifN_cont.
+    // Each extra operand j (0-based) lives in ifN_rhs{j+2}; for an 'and' chain a true edge flows
+    // to the next operand's block ifN_rhs{j+3} (or ifN_then for the last) and a false edge
+    // short-circuits to ifN_cont, while an 'or' chain swaps the two so a false edge advances and a
+    // true edge short-circuits to ifN_then (issue 1165 / 1162).
     let extra_operands = &stmt.cond_extra_operands;
     var extra_index = 0;
     while extra_index < extra_operands.len() {
@@ -5288,23 +5284,56 @@ fn append_short_circuit_branches(
         try out.append_bytes("  br i1 ");
         try append_expr_value_ref(out, &operand.insts, operand.result_id);
         if extra_index + 1 < extra_operands.len() {
-            try out.append_bytes(", label %if");
-            try std::fmt::append_i64(out, stmt.if_index);
-            try out.append_bytes("_rhs");
-            try std::fmt::append_i64(out, extra_index + 3);
-            try out.append_bytes(", label %if");
-            try std::fmt::append_i64(out, stmt.if_index);
-            try out.append_bytes("_cont");
+            try append_short_circuit_operand_edges(out, stmt, extra_index + 1);
         } else {
-            try out.append_bytes(", label %if");
-            try std::fmt::append_i64(out, stmt.if_index);
-            try out.append_bytes("_then, label %if");
-            try std::fmt::append_i64(out, stmt.if_index);
-            try out.append_bytes("_cont");
+            try append_short_circuit_decisive_edges(out, stmt);
         }
         try out.append_byte(cast<u8>(10));
         extra_index = extra_index + 1;
     }
+    return;
+}
+// append_short_circuit_operand_edges emits the branch targets for a guarded operand that still
+// has a later operand to evaluate. next_extra_index is the 0-based index of the following extra
+// operand, so its block is ifN_rhs{next_extra_index + 2}. An 'and' chain advances on the true edge
+// (false short-circuits to ifN_cont); an 'or' chain advances on the false edge (true
+// short-circuits to ifN_then) (issue 1165 / 1162).
+fn append_short_circuit_operand_edges(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt,
+    next_extra_index: i64
+) -> !void {
+    if stmt.cond_short_circuit == 1 {
+        try out.append_bytes(", label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_rhs");
+        try std::fmt::append_i64(out, next_extra_index + 2);
+        try out.append_bytes(", label %if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_cont");
+        return;
+    }
+    try out.append_bytes(", label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_then, label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_rhs");
+    try std::fmt::append_i64(out, next_extra_index + 2);
+    return;
+}
+// append_short_circuit_decisive_edges emits the branch targets for the last operand of a chain,
+// which decides the condition: an 'and' chain takes ifN_then on a true edge (false to ifN_cont),
+// an 'or' chain takes ifN_then on a true edge (false to ifN_cont) -- both end with the same
+// then/cont split because the last operand alone determines the outcome (issue 1165 / 1162).
+fn append_short_circuit_decisive_edges(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    try out.append_bytes(", label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_then, label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_cont");
     return;
 }
 fn append_multi_then_call(
