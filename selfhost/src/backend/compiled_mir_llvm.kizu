@@ -4857,13 +4857,13 @@ fn append_multi_while(
     // named after its variable so plain Var reads in the condition and body resolve to it.
     try append_while_counter_phi(
         out, stmt, stmt.induction_var, stmt.induction_init_var,
-        stmt.induction_init_offset, stmt.induction_init
+        stmt.induction_init_offset, stmt.induction_init, stmt.latch_copy_var
     );
     var phi_index = 0;
     while phi_index < secondary.len() {
         let entry = try secondary.at(phi_index);
         try append_while_counter_phi(
-            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal
+            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, ""
         );
         phi_index = phi_index + 1;
     }
@@ -4915,13 +4915,17 @@ fn append_multi_while(
             stmt.loop_index * 1000 + body_stmts.len() + 1
         );
     } else {
-        try out.append_bytes("  %");
-        try out.append_bytes(stmt.induction_var);
-        try out.append_bytes("_next = add i64 %");
-        try out.append_bytes(stmt.induction_var);
-        try out.append_bytes(", ");
-        try std::fmt::append_i64(out, stmt.induction_step);
-        try out.append_byte(cast<u8>(10));
+        // A copy-decrement latch ('index = previous') needs no primary add: the loop-head phi
+        // already reads the body-local %<latch_copy_var> on the latch edge (issue 1165 / 1162).
+        if std::mem::len(stmt.latch_copy_var) == 0 {
+            try out.append_bytes("  %");
+            try out.append_bytes(stmt.induction_var);
+            try out.append_bytes("_next = add i64 %");
+            try out.append_bytes(stmt.induction_var);
+            try out.append_bytes(", ");
+            try std::fmt::append_i64(out, stmt.induction_step);
+            try out.append_byte(cast<u8>(10));
+        }
     }
     // Each secondary lockstep counter advances by its own constant step in the same latch
     // block; a try-call latch never carries secondaries, so these always follow the primary
@@ -5064,13 +5068,19 @@ fn append_while_counter_preheader_init(
 // [ <seed>, %loopN_preheader ], [ %<var>_next, <latch-pred> ]'. The seed is %<var>_init for a
 // base-plus-offset init, %<init_var> for a plain copy, or the integer literal otherwise. The
 // latch-edge predecessor is shared with the primary counter (issue 1165 / 1162).
+// latch_copy_var overrides the phi's latch-edge incoming value: when it is non-empty (a
+// copy-decrement latch's body-local, e.g. %previous for 'index = previous') the phi reads
+// %<latch_copy_var> on the latch edge instead of %<counter_var>_next, since the body already holds
+// the decremented value and the latch computes no separate _next. It is "" for the constant-step
+// and try-call latches and for every secondary counter (issue 1165 / 1162).
 fn append_while_counter_phi(
     out: &var std::string::String,
     stmt: &compiled_mir::MirWhileStmt,
     counter_var: []u8,
     init_var: []u8,
     init_offset: i64,
-    init_literal: i64
+    init_literal: i64,
+    latch_copy_var: []u8
 ) -> !void {
     try out.append_bytes("  %");
     try out.append_bytes(counter_var);
@@ -5089,8 +5099,13 @@ fn append_while_counter_phi(
     try out.append_bytes(", %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_preheader ], [ %");
-    try out.append_bytes(counter_var);
-    try out.append_bytes("_next, ");
+    if std::mem::len(latch_copy_var) > 0 {
+        try out.append_bytes(latch_copy_var);
+    } else {
+        try out.append_bytes(counter_var);
+        try out.append_bytes("_next");
+    }
+    try out.append_bytes(", ");
     try append_while_latch_pred_label(out, stmt);
     try out.append_bytes(" ]");
     try out.append_byte(cast<u8>(10));
