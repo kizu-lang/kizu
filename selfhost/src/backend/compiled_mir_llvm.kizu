@@ -406,6 +406,7 @@ fn append_multi_stmt(
         LetStruct(payload) => try append_multi_let_struct(out, function.name, payload);,
         LetArenaAdd(payload) => try append_multi_let_arena_add(out, function.name, payload);,
         LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
+        ScalarSelectAssign(payload) => try append_scalar_select_assign(out, function.name, payload);,
         LetTryCall(payload) => try append_multi_let_try_call(out, function, payload, local_prefix);,
         ReturnTryBinary(payload) => try append_multi_return_try_binary(out, function, payload, local_prefix);,
         StringTryAppend(payload) => try append_multi_string_try_append(out, function, payload, local_prefix);,
@@ -4156,6 +4157,40 @@ fn append_multi_let_expr(
     try out.append_byte(cast<u8>(10));
     return;
 }
+
+fn append_scalar_select_assign(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirScalarSelectAssignStmt
+) -> !void {
+    try append_expr_insts(out, llvm_symbol, &stmt.cond_insts);
+    try append_expr_insts(out, llvm_symbol, &stmt.value_insts);
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.output_name);
+    try out.append_bytes(" = select i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, &stmt.value_insts, stmt.value_result_id);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.input_name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_scalar_select_assign_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirScalarSelectAssignStmt
+) -> !void {
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    try append_expr_globals(out, llvm_symbol, &stmt.value_insts);
+    return;
+}
+
 fn append_multi_statement_globals(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction
@@ -4179,6 +4214,7 @@ fn append_stmt_globals(
         LetStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         LetArenaAdd(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
+        ScalarSelectAssign(payload) => try append_scalar_select_assign_globals(out, llvm_symbol, payload);,
         LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         StringTryAppend(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
@@ -4889,6 +4925,15 @@ fn append_multi_while(
         );
         secondary_index = secondary_index + 1;
     }
+    let carried = &stmt.carried_scalars;
+    var carried_init_index = 0;
+    while carried_init_index < carried.len() {
+        let entry = try carried.at(carried_init_index);
+        try append_while_counter_preheader_init(
+            out, entry.var_name, entry.init_var, entry.init_offset
+        );
+        carried_init_index = carried_init_index + 1;
+    }
     try out.append_bytes("  br label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_head");
@@ -4911,6 +4956,15 @@ fn append_multi_while(
             out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, "", -1
         );
         phi_index = phi_index + 1;
+    }
+    var carried_phi_index = 0;
+    while carried_phi_index < carried.len() {
+        let entry = try carried.at(carried_phi_index);
+        try append_while_counter_phi(
+            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal,
+            entry.latch_var, -1
+        );
+        carried_phi_index = carried_phi_index + 1;
     }
     try append_expr_insts(out, function.name, &stmt.cond_insts);
     if stmt.cond_short_circuit == 0 {
