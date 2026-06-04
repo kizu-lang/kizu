@@ -4376,9 +4376,12 @@ fn lower_multi_if_statement(
             if then_extra >= 0 {
                 return error("compiled mir: continue-latch then-block must be '<increment>; continue;'");
             }
-            // Validate the increment is a constant-step '<var> = <var> + <int>' against its own
-            // target so a near-miss assign is an explicit error rather than a silently dropped latch
-            // update; the while lowering re-reads the target/step to drive the shared latch add.
+            // Validate the increment is a foldable induction advance against its own target so a
+            // near-miss assign is an explicit error rather than a silently dropped latch update; the
+            // while lowering re-reads the target/step (or copy source) to drive the latch. The
+            // advance is either a constant-step '<var> = <var> + <int>' increment or a copy-decrement
+            // '<var> = <local>' copy (its local validated as a '<var> - <int>' decrement at the while
+            // level through validate_copy_latch_source).
             let incr_target = try ir_contract::body_child_sequence_from(
                 ir_bytes, function_name, then_stmt, "target", 0, bs
             );
@@ -4391,9 +4394,11 @@ fn lower_multi_if_statement(
             let incr_target_name = try ir_contract::body_token_or_empty_from(
                 ir_bytes, function_name, incr_target, bs
             );
-            let _step = try parse_induction_step(
-                ir_bytes, function_name, then_stmt, incr_target_name, bs
-            );
+            if !(try while_assign_is_induction_copy(ir_bytes, function_name, then_stmt, bs)) {
+                let _step = try parse_induction_step(
+                    ir_bytes, function_name, then_stmt, incr_target_name, bs
+                );
+            }
         }
     }
     var then_kind = compiled_mir::MirIfThenKind::ContinueLatch;
@@ -4610,12 +4615,38 @@ fn statement_is_induction_init(
 // while_carries_induction_var reports whether a while loop advances a counter named name,
 // counting both the primary trailing increment target and every secondary increment in the
 // trailing run (issue 1165 / 1162).
+// while_assign_is_induction_copy reports whether a body Assign is a copy-decrement latch advance:
+// a Var target and a plain Var value ('cursor = previous'). The continue-latch lowering validates
+// the copied local is a genuine '<induction> - <int>' decrement of the target through
+// validate_copy_latch_source before lowering it; here it only classifies the assign shape so the
+// continue-latch marker recognizes a copy-decrement step alongside the constant-step one (issue
+// 1165 / 1162).
+fn while_assign_is_induction_copy(
+    ir_bytes: []u8,
+    function_name: []u8,
+    assign_node: i64,
+    bs: i64
+) -> !bool {
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "value", 0, bs
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    return std::mem::equal_bytes(value_kind, "Var");
+}
 // if_carries_continue_increment reports whether an if statement is the continue-latch marker: a
-// then-block of exactly two statements, a constant-step '<var> = <var> + <int>' increment followed
-// by a bare 'continue'. Requiring the constant-step shape here -- not merely a trailing 'continue'
-// -- keeps the continue-latch routing from claiming an if whose increment the shared latch cannot
-// fold (e.g. a 'cursor = previous; continue;' copy), which would otherwise be diverted away from a
-// path that might handle it (issue 1165 / 1162).
+// then-block of exactly two statements, an induction advance followed by a bare 'continue'. The
+// advance is either a constant-step '<var> = <var> + <int>' increment (folded into the shared
+// latch add) or a copy-decrement '<var> = <local>' copy whose local is a '<var> - <int>' decrement
+// computed earlier in the loop body (driving the latch through latch_copy_var). Both shapes are
+// foldable by lower_multi_while_continue_latch, so recognizing them here routes the loop to that
+// dedicated path rather than the trailing-increment machinery (issue 1165 / 1162).
 fn if_carries_continue_increment(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4647,7 +4678,10 @@ fn if_carries_continue_increment(
     if !std::mem::equal_bytes(increment_kind, "Assign") {
         return false;
     }
-    return try while_assign_is_constant_step(ir_bytes, function_name, increment, bs);
+    if try while_assign_is_constant_step(ir_bytes, function_name, increment, bs) {
+        return true;
+    }
+    return try while_assign_is_induction_copy(ir_bytes, function_name, increment, bs);
 }
 // while_is_continue_latch reports whether a while loop advances its induction variable through a
 // continue-latch: a body 'if <cond> { <induction> = <induction> + <step>; continue; }' whose
@@ -5167,6 +5201,9 @@ fn lower_multi_while_statement(
     // latch statement and the existing trailing-increment machinery does not apply. It lowers
     // through a dedicated path (line_comment_has_blank_after, issue 1165 / 1162).
     if try while_is_continue_latch(ir_bytes, function_name, statement, bs) {
+        // A top-level continue-latch loop resolves its 'var <induction> = <init>' seed from the
+        // function body and keeps the induction variable's own name (no rename): "" / "" leave the
+        // seed and rename to lower_multi_while_continue_latch's defaults (issue 1165 / 1162).
         return try lower_multi_while_continue_latch(
             ir_bytes,
             function_name,
@@ -5177,6 +5214,8 @@ fn lower_multi_while_statement(
             string_counter,
             temp_counter,
             loop_index,
+            "",
+            "",
             stmts,
             bs
         );
@@ -5500,24 +5539,134 @@ fn continue_latch_return_advance(
         _ => return error("compiled mir: continue-latch loop tail must be an expression return");,
     }
 }
+// rename_induction_in_insts rewrites every plain Var read of 'from' to 'to' in an expression
+// instruction array. A nested continue-latch loop reuses the enclosing loop's induction variable
+// name ('cursor' in line_comment_has_blank_before's inner scan), so its loop-head phi would clash
+// with the enclosing loop's phi of the same name. Renaming the induction reads in the inner loop's
+// header and body lets it take a distinct phi name. The induction variable is always an i64 loop
+// counter, so the rewritten Var keeps the i64 type; only the Var name carries the induction, so
+// operand-id references (Binary / IndexLoad index / call args) follow the renamed Var without
+// further rewriting (issue 1165 / 1162).
+fn rename_induction_in_insts(
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    from: []u8,
+    to: []u8
+) -> !void {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        let name = match inst {
+            Var(payload) => payload.value,
+            _ => "",
+        };
+        var do_rename = false;
+        var hold_id = 0;
+        if std::mem::len(name) > 0 and std::mem::equal_bytes(name, from) {
+            do_rename = true;
+            hold_id = compiled_mir::expr_inst_id(inst);
+        }
+        if do_rename {
+            try insts.set(index, compiled_mir::var_expr_inst(hold_id, "i64", to));
+        }
+        index = index + 1;
+    }
+    return;
+}
+// insts_reference_var reports whether an expression instruction array reads a Var named 'name'.
+// A renamed nested continue-latch body lowers its if / return statements through the shared
+// lowering (no rename threaded in), so this guards that those statements never reference the
+// induction variable in a position the inner rename did not reach -- a near-miss shape is an
+// explicit error rather than a silent unrenamed phi reference (issue 1165 / 1162).
+fn insts_reference_var(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    name: []u8
+) -> !bool {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        let var_name = match inst {
+            Var(payload) => payload.value,
+            _ => "",
+        };
+        if std::mem::len(var_name) > 0 and std::mem::equal_bytes(var_name, name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+// if_payload_references_induction reports whether an if statement reads the induction variable in
+// any of its condition operand blocks or its expression then-block. A copy-decrement continue-if's
+// then-block carries no expression insts (its increment folds into the latch), so this catches an
+// induction reference only where the inner rename did not reach (issue 1165 / 1162).
+fn if_payload_references_induction(
+    payload: &compiled_mir::MirIfStmt,
+    name: []u8
+) -> !bool {
+    if try insts_reference_var(&payload.cond_insts, name) {
+        return true;
+    }
+    if try insts_reference_var(&payload.cond_rhs_insts, name) {
+        return true;
+    }
+    let extra_operands = &payload.cond_extra_operands;
+    var extra_index = 0;
+    while extra_index < extra_operands.len() {
+        let operand = try extra_operands.at(extra_index);
+        if try insts_reference_var(&operand.insts, name) {
+            return true;
+        }
+        extra_index = extra_index + 1;
+    }
+    return try insts_reference_var(&payload.then_expr_insts, name);
+}
+// stmt_references_induction reports whether a renamed nested continue-latch body's if or return
+// statement still reads the induction variable. The inner rename only rewrites the loop header and
+// the body lets it lowers itself; an if condition or a return value that reads the induction is an
+// unsupported shape, so it is an explicit error rather than a silently unrenamed reference (issue
+// 1165 / 1162).
+fn stmt_references_induction(
+    stmt: &compiled_mir::MirStmt,
+    name: []u8
+) -> !bool {
+    match stmt {
+        If(payload) => return try if_payload_references_induction(payload, name);,
+        ReturnExpr(payload) => return try insts_reference_var(&payload.expr_insts, name);,
+        _ => return error("compiled mir: nested continue-latch body statement is not an if or return");,
+    }
+}
 // lower_multi_while_continue_latch lowers a continue-latch bounded loop -- one whose induction
-// variable advances inside a body 'if <cond> { <induction> = <induction> + <step>; continue; }'
-// rather than through a trailing increment assign. line_comment_has_blank_after is its first
-// consumer (issue 1165 / 1162):
+// variable advances inside a body 'if <cond> { <induction> = <step>; continue; }' rather than
+// through a trailing increment assign. line_comment_has_blank_after is its first consumer, with the
+// nested-loop / copy-decrement generalization added for line_comment_has_blank_before (issue 1165 /
+// 1162):
 //   var cursor = line_end_including_break(source, comment_end);
 //   while cursor < end {
 //       if is_horizontal_space(source[cursor]) { cursor = cursor + 1; continue; }
 //       return is_line_break(source[cursor]);
 //   }
 //   return false;
-// The increment folds into the shared constant-step latch ('%cursor_next = add i64 %cursor, step'
-// in loopN_latch), the continue-if's then-block becomes 'br label %loopN_latch', and the loop's
-// non-continue tail (here 'return is_line_break(source[cursor])') falls through the if-continuation
-// block, so the body already terminates and append_multi_while emits no trailing 'br' into the
-// latch. The init is call-seeded: the preheader runs the 'line_end_including_break' call and the
-// loop-head phi reads its result on the preheader edge. Only a single-comparison header is
-// supported; a short-circuit header, a non-return body tail, or a non-call/-literal/-copy seed is
-// an explicit error so a near-miss never silently mis-lowers.
+// The induction advance is either a constant-step '<var> = <var> + <int>' increment (folded into a
+// shared '%var_next = add i64 %var, step' in loopN_latch) or a copy-decrement '<var> = <local>'
+// copy whose local is a '<var> - <int>' decrement computed earlier in the body (the loop-head phi
+// reads %<local> on the latch edge through latch_copy_var, and the latch emits no add). The
+// continue-if's then-block becomes 'br label %loopN_latch' either way, and the loop's non-continue
+// tail (a 'return') falls through the if-continuation block, so the body already terminates and
+// append_multi_while emits no trailing 'br' into the latch.
+//
+// The seed comes from one of two places. A top-level loop (explicit_seed_var == "") resolves its
+// 'var <induction> = <init>' from the function body: a call-seeded init lowers the call into
+// init_insts (run in the preheader, the phi reading its result), and a literal / plain-copy /
+// base-plus-offset seed reuses find_induction_init's classification. A nested loop (explicit_seed_var
+// != "") seeds its phi by a plain copy of that local -- the '<induction> = <local>' re-seed assign
+// that precedes it in the enclosing body -- and renames its induction reads to rename_to so its
+// loop-head phi does not clash with the enclosing loop's phi of the same induction name.
+//
+// The body carries the continue-if, optional early-return ifs, and -- for a nested scan -- a
+// '<induction> = <local>' re-seed assign immediately followed by the nested while it seeds. A
+// short-circuit header, a non-return body tail, a re-seed assign not followed by a nested while,
+// nesting deeper than one level, or any other body statement is an explicit error so a near-miss
+// never silently mis-lowers.
 fn lower_multi_while_continue_latch(
     ir_bytes: []u8,
     function_name: []u8,
@@ -5528,6 +5677,8 @@ fn lower_multi_while_continue_latch(
     string_counter: i64,
     temp_counter: i64,
     loop_index: i64,
+    explicit_seed_var: []u8,
+    rename_to: []u8,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiIfLowerResult {
@@ -5557,16 +5708,32 @@ fn lower_multi_while_continue_latch(
     }
     let induction_var = try while_continue_induction_var(ir_bytes, function_name, statement, bs);
     let increment_assign = try while_continue_increment_assign(ir_bytes, function_name, statement, bs);
-    let step = try parse_induction_step(
-        ir_bytes, function_name, increment_assign, induction_var, bs
+    // The continue-if's induction advance is a constant-step increment or a copy-decrement. A
+    // copy-decrement drives the latch through latch_copy_var (validated as a '<induction> - <int>'
+    // decrement bound earlier in the body); a constant-step folds into the shared latch add.
+    let increment_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, increment_assign, "value", 0, bs
     );
-    // Resolve the 'var <induction> = <init>' seed. A call-seeded init lowers the call into
-    // init_insts (rendered in the preheader, with the loop-head phi reading its result); a literal,
-    // plain-copy, or base-plus-offset seed reuses find_induction_init's classification.
-    let init_node = try find_induction_init_value_node(
-        ir_bytes, function_name, induction_var, loop_index, bs
+    let increment_value_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, increment_value, bs
     );
-    let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
+    var step = 0;
+    var latch_copy_var = "";
+    if std::mem::equal_bytes(increment_value_kind, "Var") {
+        latch_copy_var = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, increment_value, bs
+        );
+        try validate_copy_latch_source(
+            ir_bytes, function_name, body_node, body_count, induction_var, latch_copy_var, bs
+        );
+    } else {
+        step = try parse_induction_step(
+            ir_bytes, function_name, increment_assign, induction_var, bs
+        );
+    }
+    // Resolve the seed. A nested loop seeds its phi by a plain copy of explicit_seed_var (the
+    // enclosing body's '<induction> = <local>' re-seed); a top-level loop resolves the 'var
+    // <induction> = <init>' initializer, lowering a call seed into init_insts.
     var induction_init = 0;
     var induction_init_var = "";
     var induction_init_offset = 0;
@@ -5574,27 +5741,35 @@ fn lower_multi_while_continue_latch(
     var init_result_id = -1;
     var body_string_counter = string_counter;
     var body_temp_counter = temp_counter;
-    if std::mem::equal_bytes(init_kind, "Call") {
-        init_result_id = try lower_expr_into(
-            ir_bytes,
-            function_name,
-            module_prefix,
-            locals_spec,
-            init_node,
-            string_counter,
-            temp_counter,
-            &var init_insts,
-            bs
-        );
-        body_string_counter = string_counter + try count_strings_in_insts(&init_insts);
-        body_temp_counter = temp_counter + init_insts.len();
+    if std::mem::len(explicit_seed_var) > 0 {
+        induction_init_var = explicit_seed_var;
     } else {
-        let resolved_init = try find_induction_init(
+        let init_node = try find_induction_init_value_node(
             ir_bytes, function_name, induction_var, loop_index, bs
         );
-        induction_init = resolved_init.literal;
-        induction_init_var = resolved_init.var_name;
-        induction_init_offset = resolved_init.offset;
+        let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
+        if std::mem::equal_bytes(init_kind, "Call") {
+            init_result_id = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                init_node,
+                string_counter,
+                temp_counter,
+                &var init_insts,
+                bs
+            );
+            body_string_counter = string_counter + try count_strings_in_insts(&init_insts);
+            body_temp_counter = temp_counter + init_insts.len();
+        } else {
+            let resolved_init = try find_induction_init(
+                ir_bytes, function_name, induction_var, loop_index, bs
+            );
+            induction_init = resolved_init.literal;
+            induction_init_var = resolved_init.var_name;
+            induction_init_offset = resolved_init.offset;
+        }
     }
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let cond_result = try lower_expr_into(
@@ -5610,8 +5785,13 @@ fn lower_multi_while_continue_latch(
     );
     body_string_counter = body_string_counter + try count_strings_in_insts(&cond_insts);
     body_temp_counter = body_temp_counter + cond_insts.len();
+    if std::mem::len(rename_to) > 0 {
+        try rename_induction_in_insts(&var cond_insts, induction_var, rename_to);
+    }
     // Every body statement lowers; there is no trailing latch assign to strip. The continue-if
-    // lowers to a ContinueLatch if, the trailing return to a return statement.
+    // lowers to a ContinueLatch if, the trailing return to a return statement, and -- for a nested
+    // scan -- a '<induction> = <local>' re-seed assign is consumed (it emits no instruction) and
+    // its following nested while lowers through a recursive continue-latch call.
     var body_try_counter = loop_index * 1000;
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var body_index = 0;
@@ -5621,22 +5801,32 @@ fn lower_multi_while_continue_latch(
         );
         let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
         if std::mem::equal_bytes(body_kind, "Let") {
-            let let_result = try lower_multi_let_statement(
-                ir_bytes,
-                function_name,
-                module_prefix,
-                llvm_return_type,
-                locals_spec,
-                body_stmt,
-                body_string_counter,
-                body_temp_counter,
-                body_try_counter,
-                &var body_stmts,
-                bs
-            );
-            body_string_counter = let_result.string_counter;
-            body_temp_counter = let_result.temp_counter;
-            body_try_counter = let_result.try_counter;
+            if std::mem::len(rename_to) > 0 {
+                let let_advance = try lower_renamed_continue_latch_let(
+                    ir_bytes, function_name, module_prefix, locals_spec, body_stmt,
+                    induction_var, rename_to, body_string_counter, body_temp_counter,
+                    &var body_stmts, bs
+                );
+                body_string_counter = let_advance.string_counter;
+                body_temp_counter = let_advance.temp_counter;
+            } else {
+                let let_result = try lower_multi_let_statement(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    body_stmt,
+                    body_string_counter,
+                    body_temp_counter,
+                    body_try_counter,
+                    &var body_stmts,
+                    bs
+                );
+                body_string_counter = let_result.string_counter;
+                body_temp_counter = let_result.temp_counter;
+                body_try_counter = let_result.try_counter;
+            }
         } else {
             if std::mem::equal_bytes(body_kind, "If") {
                 let body_if_index = loop_index * 1000 + body_index + 1;
@@ -5655,6 +5845,14 @@ fn lower_multi_while_continue_latch(
                 );
                 body_temp_counter = if_result.temp_counter;
                 body_string_counter = if_result.string_counter;
+                // A renamed nested body lowers its ifs through the shared path without a rename, so
+                // an induction reference in the if condition would be an unrenamed phi reference.
+                if std::mem::len(rename_to) > 0 {
+                    let if_stmt = try body_stmts.at(body_stmts.len() - 1);
+                    if try stmt_references_induction(if_stmt, induction_var) {
+                        return error("compiled mir: nested continue-latch if references the induction variable");
+                    }
+                }
             } else {
                 if std::mem::equal_bytes(body_kind, "Return") {
                     try body_stmts.append(try lower_multi_return_statement(
@@ -5668,6 +5866,16 @@ fn lower_multi_while_continue_latch(
                         body_temp_counter,
                         bs
                     ));
+                    // A renamed nested body lowers its return through the shared path without a
+                    // rename, so an induction reference in the return value would be an unrenamed phi
+                    // reference. The canonical tail ('return is_line_break(source[<local>])') reads
+                    // only the decrement local.
+                    if std::mem::len(rename_to) > 0 {
+                        let checked_return = try body_stmts.at(body_stmts.len() - 1);
+                        if try stmt_references_induction(checked_return, induction_var) {
+                            return error("compiled mir: nested continue-latch return references the induction variable");
+                        }
+                    }
                     // Advance the counters past the loop's terminal return so the result counters
                     // this function returns -- consumed by statements after the while -- never reuse
                     // a temp or string slot the return emitted. The tail must lower to an expression
@@ -5680,15 +5888,62 @@ fn lower_multi_while_continue_latch(
                     body_temp_counter = advance.temp_counter;
                     body_string_counter = advance.string_counter;
                 } else {
-                    return error("compiled mir: unsupported continue-latch body statement");
+                    if std::mem::equal_bytes(body_kind, "Assign") {
+                        // A '<induction> = <local>' re-seed before a nested while: it does not advance
+                        // the enclosing continue-latch (whose only back-edge is its continue-if) and
+                        // emits no instruction -- it names the seed the following nested loop's phi
+                        // reads on its preheader edge. The next body statement must be that while.
+                        try validate_continue_latch_reseed(
+                            ir_bytes, function_name, body_node, body_count, body_index, induction_var, bs
+                        );
+                    } else {
+                        if std::mem::equal_bytes(body_kind, "While") {
+                            // A nested continue-latch scan. It seeds from the immediately preceding
+                            // '<induction> = <local>' re-seed assign and renames its induction reads to
+                            // a dot-qualified reserved name that no kizu source identifier can spell, so
+                            // its loop-head phi never clashes with the enclosing loop's phi or any other
+                            // SSA name. One level of nesting is supported; a deeper nest is an explicit
+                            // error.
+                            if std::mem::len(rename_to) > 0 {
+                                return error("compiled mir: nested continue-latch nesting deeper than one level is unsupported");
+                            }
+                            let seed_var = try continue_latch_nested_seed_var(
+                                ir_bytes, function_name, body_node, body_index, induction_var, bs
+                            );
+                            let inner_loop_index = loop_index * 1000 + body_index + 1;
+                            let inner_result = try lower_multi_while_continue_latch(
+                                ir_bytes,
+                                function_name,
+                                module_prefix,
+                                llvm_return_type,
+                                locals_spec,
+                                body_stmt,
+                                body_string_counter,
+                                body_temp_counter,
+                                inner_loop_index,
+                                seed_var,
+                                "nested.loop.induction",
+                                &var body_stmts,
+                                bs
+                            );
+                            body_string_counter = inner_result.string_counter;
+                            body_temp_counter = inner_result.temp_counter;
+                        } else {
+                            return error("compiled mir: unsupported continue-latch body statement");
+                        }
+                    }
                 }
             }
         }
         body_index = body_index + 1;
     }
+    var induction_field = induction_var;
+    if std::mem::len(rename_to) > 0 {
+        induction_field = rename_to;
+    }
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
-        induction_var,
+        induction_field,
         induction_init,
         induction_init_var,
         induction_init_offset,
@@ -5701,7 +5956,7 @@ fn lower_multi_while_continue_latch(
         std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
         body_stmts,
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
-        "",
+        latch_copy_var,
         std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
         init_insts,
         init_result_id
@@ -5710,6 +5965,149 @@ fn lower_multi_while_continue_latch(
         temp_counter: body_temp_counter,
         string_counter: body_string_counter
     };
+}
+// lower_renamed_continue_latch_let lowers a nested continue-latch body's 'let <name> = <expr>' with
+// the induction variable renamed to rename_to. The inner scan's lets are simple i64 expressions
+// (the '<local> = <induction> - <int>' decrement that feeds both the source[<local>] byte load and
+// the copy latch); a call / struct / try let would need the rename threaded through its own
+// lowering, so it is an explicit error rather than a silently unrenamed reference (issue 1165 /
+// 1162).
+fn lower_renamed_continue_latch_let(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    induction_var: []u8,
+    rename_to: []u8,
+    string_counter: i64,
+    temp_counter: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let let_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "name", 0, bs
+    );
+    let let_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, let_name_node, bs
+    );
+    let let_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    let let_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, let_value, bs);
+    if std::mem::equal_bytes(let_value_kind, "Call") or
+        std::mem::equal_bytes(let_value_kind, "TryExpr") or
+        std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
+        return error("compiled mir: nested continue-latch let must be a simple expression");
+    }
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let result_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        let_value,
+        string_counter,
+        temp_counter,
+        &var insts,
+        bs
+    );
+    try rename_induction_in_insts(&var insts, induction_var, rename_to);
+    let expr_strings = try count_strings_in_insts(&insts);
+    let next_temp = temp_counter + insts.len();
+    try stmts.append(compiled_mir::let_expr_stmt(
+        let_name, string_counter, result_id, insts
+    ));
+    return MultiIfLowerResult {
+        temp_counter: next_temp,
+        string_counter: string_counter + expr_strings
+    };
+}
+// validate_continue_latch_reseed checks a '<induction> = <local>' re-seed assign: its target is the
+// induction variable, its value is a plain Var copy, and the next body statement is the nested
+// while it seeds. Anything else is an explicit error so a near-miss never silently mis-lowers (issue
+// 1165 / 1162).
+fn validate_continue_latch_reseed(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    body_count: i64,
+    body_index: i64,
+    induction_var: []u8,
+    bs: i64
+) -> !void {
+    let assign_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_index, bs
+    );
+    let assign_target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_stmt, "target", 0, bs
+    );
+    let assign_target_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, assign_target, bs
+    );
+    if !std::mem::equal_bytes(assign_target_kind, "Var") {
+        return error("compiled mir: continue-latch body assign target must be a var");
+    }
+    let assign_target_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, assign_target, bs
+    );
+    if !std::mem::equal_bytes(assign_target_name, induction_var) {
+        return error("compiled mir: continue-latch body assign must target the induction variable");
+    }
+    if !(try while_assign_is_induction_copy(ir_bytes, function_name, assign_stmt, bs)) {
+        return error("compiled mir: continue-latch body assign must copy a local");
+    }
+    let next_index = body_index + 1;
+    if next_index >= body_count {
+        return error("compiled mir: continue-latch re-seed assign must precede a nested while");
+    }
+    let next_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", next_index, bs
+    );
+    let next_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, next_stmt, bs);
+    if !std::mem::equal_bytes(next_kind, "While") {
+        return error("compiled mir: continue-latch re-seed assign must precede a nested while");
+    }
+    return;
+}
+// continue_latch_nested_seed_var returns the local a nested continue-latch while seeds from: the
+// value of the immediately preceding '<induction> = <local>' re-seed assign. The assign was already
+// validated when the body loop visited it, so this re-reads its copy source (issue 1165 / 1162).
+fn continue_latch_nested_seed_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    body_index: i64,
+    induction_var: []u8,
+    bs: i64
+) -> ![]u8 {
+    if body_index < 1 {
+        return error("compiled mir: nested continue-latch while must follow a re-seed assign");
+    }
+    let seed_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_index - 1, bs
+    );
+    let seed_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, seed_stmt, bs);
+    if !std::mem::equal_bytes(seed_kind, "Assign") {
+        return error("compiled mir: nested continue-latch while must follow a re-seed assign");
+    }
+    let seed_target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, seed_stmt, "target", 0, bs
+    );
+    let seed_target_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, seed_target, bs
+    );
+    if !std::mem::equal_bytes(seed_target_name, induction_var) {
+        return error("compiled mir: nested continue-latch re-seed must target the induction variable");
+    }
+    let seed_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, seed_stmt, "value", 0, bs
+    );
+    let seed_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, seed_value, bs);
+    if !std::mem::equal_bytes(seed_value_kind, "Var") {
+        return error("compiled mir: nested continue-latch re-seed must copy a local");
+    }
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, seed_value, bs);
 }
 
 // lower_while_latch_try_call lowers a loop-carried 'index = try <callee>(.., index);' latch
