@@ -4226,6 +4226,9 @@ fn append_while_globals(
     llvm_symbol: []u8,
     stmt: &compiled_mir::MirWhileStmt
 ) -> !void {
+    // A call-seeded primary init's call instructions may carry string-literal arguments whose
+    // globals must be emitted; init_insts is empty for every other seed shape (issue 1165 / 1162).
+    try append_expr_globals(out, llvm_symbol, &stmt.init_insts);
     try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
     // A genuine short-circuit 'and' header lowers its later operands into cond_rhs_insts and
     // cond_extra_operands; any string literal among them needs its global emitted too. Both
@@ -4663,33 +4666,45 @@ fn append_multi_if(
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_then:");
     try out.append_byte(cast<u8>(10));
-    if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnBool {
-        try append_multi_if_return_bool(out, function.return_type.llvm_name, stmt);
+    if stmt.if_then_kind == compiled_mir::MirIfThenKind::ContinueLatch {
+        // A continue-latch then-block branches straight back to the loop latch; the increment folds
+        // into the shared constant-step latch add and the if-continuation block falls through to the
+        // loop's non-continue tail (issue 1165 / 1162). The owning loop index is recovered from the
+        // body-if index encoding (loop_index * 1000 + body_index + 1), so the branch targets the
+        // same loopN_latch the loop-head phi reads on its latch edge.
+        try out.append_bytes("  br label %loop");
+        try std::fmt::append_i64(out, stmt.if_index / 1000);
+        try out.append_bytes("_latch");
+        try out.append_byte(cast<u8>(10));
     } else {
-        if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnCall {
-            try append_multi_then_call(out, function.name, stmt, local_prefix);
-            try out.append_bytes("  ret ");
-            try out.append_bytes(stmt.llvm_type);
-            try out.append_bytes(" %t");
-            try std::fmt::append_i64(out, try then_temp_base(stmt));
-            try out.append_byte(cast<u8>(10));
+        if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnBool {
+            try append_multi_if_return_bool(out, function.return_type.llvm_name, stmt);
         } else {
-            if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
-                try append_multi_if_return_expr(out, function, stmt);
+            if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnCall {
+                try append_multi_then_call(out, function.name, stmt, local_prefix);
+                try out.append_bytes("  ret ");
+                try out.append_bytes(stmt.llvm_type);
+                try out.append_bytes(" %t");
+                try std::fmt::append_i64(out, try then_temp_base(stmt));
+                try out.append_byte(cast<u8>(10));
             } else {
-                if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnStruct {
-                    try append_multi_then_struct(out, function, stmt);
+                if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
+                    try append_multi_if_return_expr(out, function, stmt);
                 } else {
-                    if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnError {
-                        try append_expr_insts(out, function.name, &stmt.then_expr_insts);
-                        try append_error_union_failure_value(
-                            out,
-                            function.return_type.llvm_name,
-                            &stmt.then_expr_insts,
-                            stmt.then_expr_result_id
-                        );
+                    if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnStruct {
+                        try append_multi_then_struct(out, function, stmt);
                     } else {
-                        return error("compiled mir llvm: unsupported if then kind");
+                        if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnError {
+                            try append_expr_insts(out, function.name, &stmt.then_expr_insts);
+                            try append_error_union_failure_value(
+                                out,
+                                function.return_type.llvm_name,
+                                &stmt.then_expr_insts,
+                                stmt.then_expr_result_id
+                            );
+                        } else {
+                            return error("compiled mir llvm: unsupported if then kind");
+                        }
                     }
                 }
             }
@@ -4817,6 +4832,28 @@ fn append_multi_if_return_expr(
 // Plain Var reads of the induction variable resolve to %v because the phi is named
 // after the variable, so the loop-carried value flows without extra plumbing. The
 // single loop-carried phi is the only phi this lowering emits.
+// while_body_terminates reports whether a while body's last statement is a return, i.e. the body
+// block already ends in a terminator. A continue-latch loop's non-continue tail is such a return,
+// so append_multi_while must not emit a trailing fall-through 'br' into the latch (it would follow a
+// terminator); every other loop shape falls through from the body into the latch (issue 1165 /
+// 1162).
+fn while_body_terminates(
+    body_stmts: &std::array::Array<compiled_mir::MirStmt>
+) -> !bool {
+    if body_stmts.len() < 1 {
+        return false;
+    }
+    let last = try body_stmts.at(body_stmts.len() - 1);
+    match last {
+        ReturnCall(_) => return true;,
+        ReturnStruct(_) => return true;,
+        ReturnExpr(_) => return true;,
+        ReturnError(_) => return true;,
+        ReturnArrayGet(_) => return true;,
+        ReturnTryBinary(_) => return true;,
+        _ => return false;,
+    }
+}
 fn append_multi_while(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -4830,6 +4867,13 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_preheader:");
     try out.append_byte(cast<u8>(10));
+    // A call-seeded primary init ('var cursor = line_end_including_break(source, comment_end)')
+    // runs its call instructions in the preheader; the loop-head phi reads the result on the
+    // preheader edge through init_result_id (issue 1165 / 1162). init_insts is empty for a
+    // literal, plain-copy, or base-plus-offset seed.
+    if stmt.init_insts.len() > 0 {
+        try append_expr_insts(out, function.name, &stmt.init_insts);
+    }
     // A base-plus-offset counter ('var left_index = left + 1') computes its preheader seed
     // here so the loop-head phi can reference %<var>_init on the preheader edge (issue 1165
     // / 1162). A literal or plain-copy seed needs no preheader instruction.
@@ -4857,13 +4901,14 @@ fn append_multi_while(
     // named after its variable so plain Var reads in the condition and body resolve to it.
     try append_while_counter_phi(
         out, stmt, stmt.induction_var, stmt.induction_init_var,
-        stmt.induction_init_offset, stmt.induction_init, stmt.latch_copy_var
+        stmt.induction_init_offset, stmt.induction_init, stmt.latch_copy_var,
+        stmt.init_result_id
     );
     var phi_index = 0;
     while phi_index < secondary.len() {
         let entry = try secondary.at(phi_index);
         try append_while_counter_phi(
-            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, ""
+            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, "", -1
         );
         phi_index = phi_index + 1;
     }
@@ -4893,10 +4938,16 @@ fn append_multi_while(
         );
         body_index = body_index + 1;
     }
-    try out.append_bytes("  br label %loop");
-    try std::fmt::append_i64(out, stmt.loop_index);
-    try out.append_bytes("_latch");
-    try out.append_byte(cast<u8>(10));
+    // A continue-latch loop's body already terminates -- its non-continue path falls through to a
+    // 'return' -- and the only edge into the latch is the continue-if's 'br label %loopN_latch', so
+    // no trailing fall-through branch is emitted (it would follow a terminator). Every other loop
+    // shape falls through from the body into the latch and needs the branch (issue 1165 / 1162).
+    if !try while_body_terminates(&stmt.body_stmts) {
+        try out.append_bytes("  br label %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_latch");
+        try out.append_byte(cast<u8>(10));
+    }
     try out.append_bytes("loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_latch:");
@@ -5073,6 +5124,10 @@ fn append_while_counter_preheader_init(
 // %<latch_copy_var> on the latch edge instead of %<counter_var>_next, since the body already holds
 // the decremented value and the latch computes no separate _next. It is "" for the constant-step
 // and try-call latches and for every secondary counter (issue 1165 / 1162).
+// init_result_id overrides the preheader-edge seed: when it is non-negative the primary counter is
+// call-seeded ('var cursor = line_end_including_break(source, comment_end)'), so the phi reads the
+// preheader call's result temp instead of %<init_var> / the literal. It is -1 for a literal,
+// plain-copy, or base-plus-offset seed and for every secondary counter (issue 1165 / 1162).
 fn append_while_counter_phi(
     out: &var std::string::String,
     stmt: &compiled_mir::MirWhileStmt,
@@ -5080,21 +5135,26 @@ fn append_while_counter_phi(
     init_var: []u8,
     init_offset: i64,
     init_literal: i64,
-    latch_copy_var: []u8
+    latch_copy_var: []u8,
+    init_result_id: i64
 ) -> !void {
     try out.append_bytes("  %");
     try out.append_bytes(counter_var);
     try out.append_bytes(" = phi i64 [ ");
-    if std::mem::len(init_var) > 0 {
-        try out.append_bytes("%");
-        if init_offset == 0 {
-            try out.append_bytes(init_var);
-        } else {
-            try out.append_bytes(counter_var);
-            try out.append_bytes("_init");
-        }
+    if init_result_id >= 0 {
+        try append_expr_value_ref(out, &stmt.init_insts, init_result_id);
     } else {
-        try std::fmt::append_i64(out, init_literal);
+        if std::mem::len(init_var) > 0 {
+            try out.append_bytes("%");
+            if init_offset == 0 {
+                try out.append_bytes(init_var);
+            } else {
+                try out.append_bytes(counter_var);
+                try out.append_bytes("_init");
+            }
+        } else {
+            try std::fmt::append_i64(out, init_literal);
+        }
     }
     try out.append_bytes(", %loop");
     try std::fmt::append_i64(out, stmt.loop_index);

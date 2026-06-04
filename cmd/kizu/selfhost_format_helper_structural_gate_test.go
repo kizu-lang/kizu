@@ -56,7 +56,15 @@ const parseFormatAllocMaxLines = 197
 // index); }' ReturnCall tail), and line_comment_is_full_line (the first compiled helper with a
 // downward 'while index > 0' header over a literal bound: its loop body opens with a 'let
 // previous = index - 1' decrement local feeding both a checked 'source[previous]' byte-load call
-// argument and the 'index = previous' latch, and carries two boolean early returns). They are the
+// argument and the 'index = previous' latch, and carries two boolean early returns), and
+// line_comment_has_blank_after (the first compiled helper with a continue-latch loop: 'var cursor =
+// line_end_including_break(source, comment_end); while cursor < end { if
+// is_horizontal_space(source[cursor]) { cursor = cursor + 1; continue; } return
+// is_line_break(source[cursor]); } return false;' -- its induction variable advances inside a body
+// 'if <cond> { cursor = cursor + 1; continue; }' that branches back to the loop latch rather than a
+// trailing increment, its primary init is call-seeded so the line_end_including_break call runs in
+// the preheader, and its non-continue path returns is_line_break(source[cursor]) whose call
+// argument is a checked byte load). They are the
 // first selfhost::parser::format members on the compiled path and must keep being emitted from
 // both the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
@@ -81,6 +89,7 @@ var formatCompiledHelperSeeds = []string{
 	"line_end_excluding_break",
 	"line_end_including_break",
 	"line_comment_is_full_line",
+	"line_comment_has_blank_after",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the

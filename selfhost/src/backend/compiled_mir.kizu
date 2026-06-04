@@ -228,6 +228,14 @@ pub enum MirIfThenKind {
     ReturnExpr,
     ReturnStruct,
     ReturnError,
+    // ContinueLatch backs an 'if <cond> { <induction> = <induction> + <step>; continue; }'
+    // body statement of a continue-latch while loop (line_comment_has_blank_after, issue 1165
+    // / 1162). The then-block carries no return value: it branches straight back to the loop
+    // latch ('br label %loop<N>_latch') so the increment is folded into the shared
+    // constant-step latch add, and the if-continuation block falls through to the loop's
+    // non-continue tail (the trailing 'return'). The increment local is validated but never
+    // rendered here.
+    ContinueLatch,
 }
 
 // Per-variant MirStmt payloads. Each holds only the fields its variant needs and
@@ -492,6 +500,14 @@ pub struct MirWhileStmt {
     // 1165 / 1162).
     pub latch_copy_var: []u8,
     pub secondary_inductions: std::array::Array<MirSecondaryInduction>,
+    // init_insts / init_result_id back a call-seeded primary induction init ('var cursor =
+    // line_end_including_break(source, comment_end)' for line_comment_has_blank_after, issue
+    // 1165 / 1162). When init_insts is non-empty the preheader renders the call instructions and
+    // the loop-head phi seeds from %t<init_result_id> on the preheader edge instead of from
+    // induction_init_var / induction_init. Both stay empty (init_result_id is -1) for a literal,
+    // plain-copy, or base-plus-offset seed.
+    pub init_insts: std::array::Array<MirExprInst>,
+    pub init_result_id: i64,
 }
 
 // MirTraversalArg is one payload-field argument forwarded to a node_count traversal arm's
@@ -3334,7 +3350,9 @@ pub fn while_stmt(
     body_stmts: std::array::Array<MirStmt>,
     latch_stmts: std::array::Array<MirStmt>,
     latch_copy_var: []u8,
-    secondary_inductions: std::array::Array<MirSecondaryInduction>
+    secondary_inductions: std::array::Array<MirSecondaryInduction>,
+    init_insts: std::array::Array<MirExprInst>,
+    init_result_id: i64
 ) -> MirStmt {
     return MirStmt::While(MirWhileStmt {
         loop_index: loop_index,
@@ -3352,7 +3370,9 @@ pub fn while_stmt(
         body_stmts: body_stmts,
         latch_stmts: latch_stmts,
         latch_copy_var: latch_copy_var,
-        secondary_inductions: secondary_inductions
+        secondary_inductions: secondary_inductions,
+        init_insts: init_insts,
+        init_result_id: init_result_id
     });
 }
 pub fn secondary_induction(
