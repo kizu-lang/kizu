@@ -3696,6 +3696,38 @@ fn append_format_reachable_compiled_functions(
     // scalar state through a forward scan loop and closing with 'return CommentFormatState { ... };'.
     // Its BFS reaches the already-seeded line_comment_* / line_end_* / append_indent helpers.
     try pending.append("append_preserved_line_comments");
+    // is_top_level_decl_start is a top-level-keyword classifier (issue 1165 / 1162): 'return
+    // equal_bytes(text, "import") or equal_bytes(text, "pub") or ... ;', a single-return
+    // short-circuit 'or' of std::mem::equal_bytes calls over a []u8 text param -- the same
+    // multi-operand 'or'-return shape already compiled for no_space_before / no_space_after, lowered
+    // through the generic short-circuit-or-return path. It is a BFS leaf (only std::mem callees).
+    try pending.append("is_top_level_decl_start");
+    // starts_new_top_level_decl guards a top-level-decl boundary (issue 1165 / 1162): 'if
+    // !is_top_level_decl_start(current) { return false; } return !(equal_bytes(previous, "pub") or
+    // equal_bytes(previous, "@") or equal_bytes(previous, "extern"));'. It is the first compiled
+    // helper whose body pairs a leading 'if !<predicate call> { return false; }' guard with a
+    // prefix-not-of-short-circuit-or return, lowered through the generic multi-statement path. Its
+    // BFS pulls in is_top_level_decl_start (a seeded member).
+    try pending.append("starts_new_top_level_decl");
+    // last_byte reads a slice's final byte (issue 1165 / 1162): 'return text[std::mem::len(text) -
+    // 1];', a single-return checked single-element index load whose index is a 'len - 1' binary over
+    // a std::mem::len call, lowered through the generic expression path's IndexExpr load. It is a BFS
+    // leaf (only std::mem::len).
+    try pending.append("last_byte");
+    // has_line_comment_between scans a byte range for a '//' line comment (issue 1165 / 1162): 'var
+    // index = start; while index + 1 < end { if source[index] == cast<u8>(47) and source[index + 1]
+    // == cast<u8>(47) { return true; } index = index + 1; } return false;'. It is the first compiled
+    // helper whose while header compares a 'counter + 1' binary on the left ('index + 1 < end') and
+    // whose body carries a short-circuit-'and' byte-pair guard with an early return true, lowered
+    // through the generic multi-statement path. It is a BFS leaf (only std::mem / cast).
+    try pending.append("has_line_comment_between");
+    // rbrace_wants_newline decides whether a '}' needs a trailing newline by inspecting the next
+    // token (issue 1165 / 1162): two 'if <guard> { return false; }' early returns (index bound and
+    // lexer::is_eof), a 'let text = token_text(source, next);', and a closing 'return !(equal_bytes(
+    // text, ",") or ... or equal_bytes(text, "else"));' -- a prefix-not of a ten-operand short-circuit
+    // 'or' over a token-array read. It lowers through the generic multi-statement path; its BFS pulls
+    // in token_text (a seeded member) and references lexer::is_eof across the module boundary.
+    try pending.append("rbrace_wants_newline");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,
