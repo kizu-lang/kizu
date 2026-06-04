@@ -4075,6 +4075,83 @@ fn try_call_success_type(
     let success_kizu = ret_kizu[1..std::mem::len(ret_kizu)];
     return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, success_kizu);
 }
+// prefix_not_try_call_inner_or_minus_one recognizes a '!(try <callee>(<args>))' expression: a
+// prefix 'not' whose operand is a 'try <call>' over a free function returning an error-union bool
+// (a try-call in sub-expression position, issue 1165 / 1162). It returns the inner Call node so the
+// caller can lower it as a hoisted try-call whose unwrapped bool success is negated, or -1 when the
+// shape does not match. A field-mode method call is rejected (returns -1) so only free-function
+// try-calls take this path, and a callee whose unwrapped success type is not 'i1' is rejected too:
+// the renderer negates the success with 'xor i1' and wraps an 'i1' field, so a non-bool callee (e.g.
+// a '!i64') must fall through to the generic path rather than be silently mis-lowered.
+fn prefix_not_try_call_inner_or_minus_one(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    node: i64,
+    bs: i64
+) -> !i64 {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
+    if !std::mem::equal_bytes(kind, "Prefix") {
+        return -1;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-prefix ", function_name, node, bs
+    );
+    if !std::mem::equal_bytes(op, "not") {
+        return -1;
+    }
+    let right = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node, "right", 0, bs
+    );
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right, bs);
+    if !std::mem::equal_bytes(right_kind, "TryExpr") {
+        return -1;
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, right, "value", 0, bs
+    );
+    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+    if !std::mem::equal_bytes(inner_kind, "Call") {
+        return -1;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+        return -1;
+    }
+    let success_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, inner, bs
+    );
+    if !std::mem::equal_bytes(success_type, "i1") {
+        return -1;
+    }
+    return inner;
+}
+
+// require_if_not_try_guard_no_else rejects an 'if !(try <call>) { return <bool>; }' guard that also
+// carries an else arm (issue 1165 / 1162). The if-not-try-call-return-bool statement is rendered as
+// a then-only conditional branch -- the negation either returns the bool or falls through to the
+// join the following statements render into -- so an else block with a real body would be silently
+// dropped. It is an explicit error instead of a silent mis-lower. A missing else child reads as
+// either an absent child or an 'Empty' node depending on how the body facts were emitted; both are
+// accepted.
+fn require_if_not_try_guard_no_else(
+    ir_bytes: []u8,
+    function_name: []u8,
+    if_node: i64,
+    bs: i64
+) -> !void {
+    let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, if_node, "else", 0, bs
+    );
+    if else_node < 0 {
+        return;
+    }
+    let else_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, else_node, bs);
+    if !std::mem::equal_bytes(else_kind, "Empty") {
+        return error("compiled mir: if-not-try guard must not carry an else arm");
+    }
+    return;
+}
+
 fn lower_multi_return_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4090,6 +4167,30 @@ fn lower_multi_return_statement(
         ir_bytes, function_name, statement, "value", 0, bs
     );
     let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    // 'return !(try <callee>(<args>));' hoists the sub-expression try-call: the renderer emits the
+    // call, propagates a failure as this function's own error union, and negates the unwrapped bool
+    // success before wrapping it as the error-union success (issue 1165 / 1162).
+    let return_not_try = try prefix_not_try_call_inner_or_minus_one(
+        ir_bytes, function_name, module_prefix, value, bs
+    );
+    if return_not_try >= 0 {
+        let called_error_union = try compiled_mir_types::lower_call_return_type(
+            ir_bytes, function_name, module_prefix, return_not_try, bs
+        );
+        let callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, return_not_try, bs
+        );
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, return_not_try, bs
+        );
+        let args = try compiled_mir_lower_call::lower_call_args(
+            ir_bytes, function_name, module_prefix, locals_spec, return_not_try, string_counter, bs
+        );
+        return compiled_mir::return_not_try_call_stmt(
+            called_error_union, llvm_return_type, callee_module_prefix, callee_name,
+            string_counter, args
+        );
+    }
     if std::mem::equal_bytes(value_kind, "Call") {
         if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, value, bs) {
             let message_node = try ir_contract::body_child_sequence_from(
@@ -4486,6 +4587,66 @@ fn lower_multi_if_statement(
     let then_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "then", 0, bs
     );
+    // 'if !(try <callee>(<args>)) { return <bool>; }' hoists the sub-expression try-call in the
+    // guard condition (issue 1165 / 1162): the renderer emits the call, propagates a failure as this
+    // function's own error union, negates the unwrapped bool, and branches on the negation into the
+    // bool-return then-block or a fall-through join the next statement renders into.
+    let guard_not_try = try prefix_not_try_call_inner_or_minus_one(
+        ir_bytes, function_name, module_prefix, cond_node, bs
+    );
+    if guard_not_try >= 0 {
+        let guard_then_extra = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, then_node, "statement", 1, bs
+        );
+        if guard_then_extra < 0 {
+            let guard_then_stmt = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, then_node, "statement", 0, bs
+            );
+            let guard_then_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, guard_then_stmt, bs
+            );
+            if std::mem::equal_bytes(guard_then_kind, "Return") {
+                let guard_ret_value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, guard_then_stmt, "value", 0, bs
+                );
+                let guard_ret_kind = try ir_contract::body_node_kind_from(
+                    ir_bytes, function_name, guard_ret_value, bs
+                );
+                if std::mem::equal_bytes(guard_ret_kind, "Bool") {
+                    // The guard is rendered then-only (the negation returns the bool or falls through
+                    // to the join), so an else arm with a real body would be silently dropped: reject
+                    // it as an explicit error rather than mis-lower it (issue 1165 / 1162).
+                    try require_if_not_try_guard_no_else(ir_bytes, function_name, statement, bs);
+                    let guard_token = try ir_contract::body_token_or_empty_from(
+                        ir_bytes, function_name, guard_ret_value, bs
+                    );
+                    let guard_bool_value = std::mem::equal_bytes(guard_token, "true");
+                    let guard_error_union = try compiled_mir_types::lower_call_return_type(
+                        ir_bytes, function_name, module_prefix, guard_not_try, bs
+                    );
+                    let guard_callee_name = try compiled_mir_types::lower_call_callee_name(
+                        ir_bytes, function_name, module_prefix, guard_not_try, bs
+                    );
+                    let guard_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+                        ir_bytes, function_name, module_prefix, guard_not_try, bs
+                    );
+                    let guard_args = try compiled_mir_lower_call::lower_call_args(
+                        ir_bytes, function_name, module_prefix, locals_spec, guard_not_try,
+                        string_counter, bs
+                    );
+                    let guard_arg_strings = try compiled_mir_lower_call::count_string_args(&guard_args);
+                    try stmts.append(compiled_mir::if_not_try_call_return_bool_stmt(
+                        guard_error_union, llvm_return_type, guard_module_prefix, guard_callee_name,
+                        guard_bool_value, string_counter, guard_args
+                    ));
+                    return MultiIfLowerResult {
+                        temp_counter: temp_counter,
+                        string_counter: string_counter + guard_arg_strings
+                    };
+                }
+            }
+        }
+    }
     let cond_short_circuit = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var cond_rhs_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());

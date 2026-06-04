@@ -145,6 +145,17 @@ var formatCompiledHelperSeeds = []string{
 	"last_byte",
 	"has_line_comment_between",
 	"rbrace_wants_newline",
+	// is_trailing_comma is the first compiled helper with a try-call in sub-expression position
+	// (issue 1165 / 1162): a ',' early-return guard, two 'let <name> = try next_token_text_equals(
+	// ...)' let-try binds with bool early returns, an 'if !(try next_token_text_equals(source,
+	// tokens, index, "}")) { return false; }' guard, and a closing 'return !(try
+	// is_match_arm_trailing_comma(source, tokens, index));'. The two '!(try <call>)' sub-expression
+	// try-calls lower through the generic prefix-not-of-try-call path (a return-not-try-call and an
+	// if-not-try-call-return-bool statement): the renderer emits the call, propagates a failure as
+	// this function's own error union, negates the unwrapped bool, and either wraps it as the
+	// error-union success or branches into the guard's bool return. Its BFS pulls in
+	// next_token_text_equals and is_match_arm_trailing_comma (both seeded members).
+	"is_trailing_comma",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: format_source is the
@@ -174,6 +185,32 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertSortedImportsShapeValidated(t)
 	assertAppendIndentShapeValidated(t)
 	assertCommentPreserveShapeValidated(t)
+	assertIfNotTryGuardShapeValidated(t)
+}
+
+// ifNotTryGuardShapeValidationErrors pins the explicit shape-validation diagnostic that the
+// prefix-not-of-try-call lowering raises when an 'if !(try <call>) { return <bool>; }' guard drifts
+// from its then-only skeleton. The if-not-try-call-return-bool statement renders a then-only
+// conditional branch (the negation returns the bool or falls through to the join the following
+// statements render into), so an else arm with a real body would be silently dropped -- it must be
+// an explicit error rather than a silent mis-lower. Pinning the string keeps the else-absence check
+// from being quietly removed.
+var ifNotTryGuardShapeValidationErrors = []string{
+	"compiled mir: if-not-try guard must not carry an else arm",
+}
+
+// assertIfNotTryGuardShapeValidated pins that the prefix-not-of-try-call lowering keeps its
+// explicit else-absence diagnostic for the 'if !(try <call>) { return <bool>; }' guard, so a
+// near-miss helper whose guard carries an else arm is rejected with an error rather than silently
+// lowered to the then-only skeleton.
+func assertIfNotTryGuardShapeValidated(t *testing.T) {
+	t.Helper()
+	mirLower := readSelfhostSrc(t, filepath.Join("backend", "compiled_mir_lower.kizu"))
+	for _, diagnostic := range ifNotTryGuardShapeValidationErrors {
+		if !strings.Contains(mirLower, diagnostic) {
+			t.Errorf("compiled_mir_lower.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
 }
 
 // commentPreserveShapeValidationErrors pins the explicit shape-validation diagnostics that the

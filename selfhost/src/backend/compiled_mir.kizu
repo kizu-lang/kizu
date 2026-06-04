@@ -1070,6 +1070,40 @@ pub struct MirReturnTryBinaryStmt {
     pub call_args: std::array::Array<MirCallArg>,
 }
 
+// MirReturnNotTryCallStmt backs a 'return !(try <callee>(<args>));' single return whose callee
+// returns an error-union bool (issue 1165 / 1162): the first compiled member with a try-call in
+// sub-expression position. The renderer emits the call, branches on its ok flag, propagates the
+// failure as this function's own error union (own_error_union), and on success negates the
+// unwrapped bool with 'xor i1 %success, true' and returns the negation wrapped as the error-union
+// success. The block labels / SSA temps are namespaced by the render-time statement index
+// ('nottry<N>_*') so multiple sub-expression try-calls in one function never collide. It owns the
+// call-argument Array. is_trailing_comma is its first consumer.
+pub struct MirReturnNotTryCallStmt {
+    pub called_error_union: []u8,
+    pub own_error_union: []u8,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub string_index: i64,
+    pub call_args: std::array::Array<MirCallArg>,
+}
+
+// MirIfNotTryCallReturnBoolStmt backs an 'if !(try <callee>(<args>)) { return <bool>; }' guard
+// whose callee returns an error-union bool (issue 1165 / 1162): the if-condition twin of
+// MirReturnNotTryCallStmt. The renderer emits the call, branches on its ok flag, propagates the
+// failure as this function's own error union, negates the unwrapped bool, and branches on the
+// negation into a 'return <bool_value>' then-block or a fall-through join block that subsequent
+// statements render into. The labels / SSA temps are namespaced by the render-time statement index
+// ('nottry<N>_*'). It owns the call-argument Array. is_trailing_comma is its first consumer.
+pub struct MirIfNotTryCallReturnBoolStmt {
+    pub called_error_union: []u8,
+    pub own_error_union: []u8,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub bool_value: bool,
+    pub string_index: i64,
+    pub call_args: std::array::Array<MirCallArg>,
+}
+
 // MirStringTryAppendStmt backs a mutating 'try <receiver>.append_bytes(<arg>);' or
 // 'try <receiver>.append_byte(<arg>);' statement on a std::string::String value
 // (issue 1165 slice 1). String lowers to the runtime-owned handle %kizu.owned, and the
@@ -1111,6 +1145,8 @@ pub union MirStmt {
     ScalarSelectAssign(MirScalarSelectAssignStmt),
     LetTryCall(MirLetTryCallStmt),
     ReturnTryBinary(MirReturnTryBinaryStmt),
+    ReturnNotTryCall(MirReturnNotTryCallStmt),
+    IfNotTryCallReturnBool(MirIfNotTryCallReturnBoolStmt),
     StringTryAppend(MirStringTryAppendStmt),
     CountRange(MirCountRangeStmt),
     TrimAscii(MirTrimAsciiStmt),
@@ -1381,6 +1417,20 @@ impl MirReturnTryBinaryStmt {
     }
 }
 
+impl MirReturnNotTryCallStmt {
+    fn deinit(self: MirReturnNotTryCallStmt) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
+impl MirIfNotTryCallReturnBoolStmt {
+    fn deinit(self: MirIfNotTryCallReturnBoolStmt) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
 impl MirStringTryAppendStmt {
     fn deinit(self: MirStringTryAppendStmt) -> void {
         self.call_args.deinit();
@@ -1640,6 +1690,8 @@ impl MirStmt {
             ScalarSelectAssign(payload) => payload.deinit(),
             LetTryCall(payload) => payload.deinit(),
             ReturnTryBinary(payload) => payload.deinit(),
+            ReturnNotTryCall(payload) => payload.deinit(),
+            IfNotTryCallReturnBool(payload) => payload.deinit(),
             StringTryAppend(payload) => payload.deinit(),
             CountRange(payload) => payload.deinit(),
             TrimAscii(payload) => payload.deinit(),
@@ -2716,6 +2768,44 @@ pub fn return_try_binary_stmt(
         call_callee_name: callee_name,
         string_index: string_index,
         try_index: try_index,
+        call_args: args
+    });
+}
+
+pub fn return_not_try_call_stmt(
+    called_error_union: []u8,
+    own_error_union: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    string_index: i64,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::ReturnNotTryCall(MirReturnNotTryCallStmt {
+        called_error_union: called_error_union,
+        own_error_union: own_error_union,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        string_index: string_index,
+        call_args: args
+    });
+}
+
+pub fn if_not_try_call_return_bool_stmt(
+    called_error_union: []u8,
+    own_error_union: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    bool_value: bool,
+    string_index: i64,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::IfNotTryCallReturnBool(MirIfNotTryCallReturnBoolStmt {
+        called_error_union: called_error_union,
+        own_error_union: own_error_union,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        bool_value: bool_value,
+        string_index: string_index,
         call_args: args
     });
 }

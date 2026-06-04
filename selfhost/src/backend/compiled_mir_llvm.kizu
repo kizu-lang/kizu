@@ -409,6 +409,8 @@ fn append_multi_stmt(
         ScalarSelectAssign(payload) => try append_scalar_select_assign(out, function.name, payload);,
         LetTryCall(payload) => try append_multi_let_try_call(out, function, payload, local_prefix);,
         ReturnTryBinary(payload) => try append_multi_return_try_binary(out, function, payload, local_prefix);,
+        ReturnNotTryCall(payload) => try append_multi_return_not_try_call(out, function, payload, local_prefix);,
+        IfNotTryCallReturnBool(payload) => try append_multi_if_not_try_call_return_bool(out, function, payload, local_prefix);,
         StringTryAppend(payload) => try append_multi_string_try_append(out, function, payload, local_prefix);,
         CountRange(payload) => try append_multi_count_range(out, payload);,
         TrimAscii(payload) => try append_multi_trim_ascii(out, payload);,
@@ -723,6 +725,191 @@ fn append_multi_return_try_binary(
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.own_error_union);
     try append_ll_line(out, " %rettry_wrap_val");
+    return;
+}
+
+// append_nottry_ref / append_nottry_label namespace a sub-expression try-call's helper SSA temps
+// and block labels under 'nottry<local_prefix>' so several '!(try <call>)' hoists in one function
+// never collide (issue 1165 / 1162). local_prefix is the render-time statement index, unique per
+// rendered statement, so it disambiguates without a separate try counter and stays clear of the
+// let-position try-call's 'try<N>' namespace.
+fn append_nottry_ref(out: &var std::string::String, local_prefix: i64, suffix: []u8) -> !void {
+    try out.append_bytes("%nottry");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes(suffix);
+    return;
+}
+fn append_nottry_label(out: &var std::string::String, local_prefix: i64, suffix: []u8) -> !void {
+    try out.append_bytes("nottry");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes(suffix);
+    return;
+}
+// append_not_try_call_eval renders the shared head of a '!(try <callee>(<args>))' hoist: the call,
+// the ok-flag branch, the failure propagation as own_error_union (never 'unreachable'), the success
+// unwrap, and the boolean negation. It leaves the negated i1 in '%nottry<P>_neg' and control in the
+// 'nottry<P>_cont' block for the caller to terminate (a return wrap or a guard branch). The callee
+// returns an error-union bool, so the success field (field 1) is an i1 (issue 1165 / 1162).
+fn append_not_try_call_eval(
+    out: &var std::string::String,
+    function_name: []u8,
+    called_error_union: []u8,
+    own_error_union: []u8,
+    call_module_prefix: []u8,
+    call_callee_name: []u8,
+    call_args: &std::array::Array<compiled_mir::MirCallArg>,
+    local_prefix: i64
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function_name, call_args, local_prefix
+    );
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_call");
+    try out.append_bytes(" = call ");
+    try out.append_bytes(called_error_union);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, call_module_prefix, call_callee_name);
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, call_args, local_prefix);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_ok");
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(called_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_call");
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  br i1 ");
+    try append_nottry_ref(out, local_prefix, "_ok");
+    try out.append_bytes(", label %");
+    try append_nottry_label(out, local_prefix, "_cont");
+    try out.append_bytes(", label %");
+    try append_nottry_label(out, local_prefix, "_fail");
+    try out.append_byte(cast<u8>(10));
+    try append_nottry_label(out, local_prefix, "_fail");
+    try append_ll_line(out, ":");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_msg");
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(called_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_call");
+    try append_ll_line(out, ", 2");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_fail_flag");
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_fail_val");
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(own_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_fail_flag");
+    try out.append_bytes(", %kizu.slice.u8 ");
+    try append_nottry_ref(out, local_prefix, "_msg");
+    try append_ll_line(out, ", 2");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(own_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_fail_val");
+    try out.append_byte(cast<u8>(10));
+    try append_nottry_label(out, local_prefix, "_cont");
+    try append_ll_line(out, ":");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_success");
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(called_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_call");
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_neg");
+    try out.append_bytes(" = xor i1 ");
+    try append_nottry_ref(out, local_prefix, "_success");
+    try append_ll_line(out, ", true");
+    return;
+}
+
+// append_multi_return_not_try_call renders 'return !(try <callee>(<args>));' (is_trailing_comma,
+// issue 1165 / 1162): it evaluates the hoisted try-call, then on success wraps the negated bool as
+// the error-union success and returns it.
+fn append_multi_return_not_try_call(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirReturnNotTryCallStmt,
+    local_prefix: i64
+) -> !void {
+    try append_not_try_call_eval(
+        out, function.name, stmt.called_error_union, stmt.own_error_union,
+        stmt.call_module_prefix, stmt.call_callee_name, &stmt.call_args, local_prefix
+    );
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_wrap_flag");
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_wrap_val");
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_wrap_flag");
+    try out.append_bytes(", i1 ");
+    try append_nottry_ref(out, local_prefix, "_neg");
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_wrap_val");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_multi_if_not_try_call_return_bool renders 'if !(try <callee>(<args>)) { return <bool>; }'
+// (is_trailing_comma, issue 1165 / 1162): it evaluates the hoisted try-call, then branches on the
+// negated bool into a 'return <bool_value>' then-block or a fall-through join block the following
+// statements render into.
+fn append_multi_if_not_try_call_return_bool(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirIfNotTryCallReturnBoolStmt,
+    local_prefix: i64
+) -> !void {
+    try append_not_try_call_eval(
+        out, function.name, stmt.called_error_union, stmt.own_error_union,
+        stmt.call_module_prefix, stmt.call_callee_name, &stmt.call_args, local_prefix
+    );
+    try out.append_bytes("  br i1 ");
+    try append_nottry_ref(out, local_prefix, "_neg");
+    try out.append_bytes(", label %");
+    try append_nottry_label(out, local_prefix, "_then");
+    try out.append_bytes(", label %");
+    try append_nottry_label(out, local_prefix, "_join");
+    try out.append_byte(cast<u8>(10));
+    try append_nottry_label(out, local_prefix, "_then");
+    try append_ll_line(out, ":");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_ret_flag");
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  ");
+    try append_nottry_ref(out, local_prefix, "_ret_val");
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_ret_flag");
+    try out.append_bytes(", i1 ");
+    try append_bool_literal(out, stmt.bool_value);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" ");
+    try append_nottry_ref(out, local_prefix, "_ret_val");
+    try out.append_byte(cast<u8>(10));
+    try append_nottry_label(out, local_prefix, "_join");
+    try append_ll_line(out, ":");
     return;
 }
 
@@ -4217,6 +4404,8 @@ fn append_stmt_globals(
         ScalarSelectAssign(payload) => try append_scalar_select_assign_globals(out, llvm_symbol, payload);,
         LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        ReturnNotTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        IfNotTryCallReturnBool(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         StringTryAppend(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         CountRange(payload) => try append_count_range_globals(payload);,
         TrimAscii(payload) => try append_trim_ascii_globals(payload);,
