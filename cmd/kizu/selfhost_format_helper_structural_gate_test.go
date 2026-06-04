@@ -125,6 +125,26 @@ var formatCompiledHelperSeeds = []string{
 	// union ABI), and is the last selfhost::parser::format member that parse_format_alloc owns to
 	// move onto the compiled path (issue 1165 / 1162).
 	"append_preserved_line_comments",
+	// The following read-only helpers join the closure through the shared catalog + BFS without
+	// new per-helper lowering (issue 1165 / 1162); they lower through the existing generic
+	// single-statement / multi-statement expression paths:
+	//   - is_top_level_decl_start: a single-return short-circuit 'or' of std::mem::equal_bytes calls
+	//     (the no_space_before / no_space_after shape), a BFS leaf.
+	//   - starts_new_top_level_decl: a leading 'if !is_top_level_decl_start(current) { return false;
+	//     }' guard plus a prefix-not-of-short-circuit-or return; BFS pulls in is_top_level_decl_start.
+	//   - last_byte: a single-return checked single-element index load
+	//     'text[std::mem::len(text) - 1]'.
+	//   - has_line_comment_between: the first compiled helper whose while header compares a 'counter +
+	//     1' binary on the left ('while index + 1 < end'), its body a short-circuit '//' byte-pair
+	//     guard with an early return true, a BFS leaf.
+	//   - rbrace_wants_newline: two early-return guards, a token_text let, and a prefix-not of a
+	//     ten-operand short-circuit 'or' over the next token's text; BFS pulls in token_text and
+	//     references lexer::is_eof across the module boundary.
+	"is_top_level_decl_start",
+	"starts_new_top_level_decl",
+	"last_byte",
+	"has_line_comment_between",
+	"rbrace_wants_newline",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: format_source is the
