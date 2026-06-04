@@ -185,6 +185,32 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertSortedImportsShapeValidated(t)
 	assertAppendIndentShapeValidated(t)
 	assertCommentPreserveShapeValidated(t)
+	assertIfNotTryGuardShapeValidated(t)
+}
+
+// ifNotTryGuardShapeValidationErrors pins the explicit shape-validation diagnostic that the
+// prefix-not-of-try-call lowering raises when an 'if !(try <call>) { return <bool>; }' guard drifts
+// from its then-only skeleton. The if-not-try-call-return-bool statement renders a then-only
+// conditional branch (the negation returns the bool or falls through to the join the following
+// statements render into), so an else arm with a real body would be silently dropped -- it must be
+// an explicit error rather than a silent mis-lower. Pinning the string keeps the else-absence check
+// from being quietly removed.
+var ifNotTryGuardShapeValidationErrors = []string{
+	"compiled mir: if-not-try guard must not carry an else arm",
+}
+
+// assertIfNotTryGuardShapeValidated pins that the prefix-not-of-try-call lowering keeps its
+// explicit else-absence diagnostic for the 'if !(try <call>) { return <bool>; }' guard, so a
+// near-miss helper whose guard carries an else arm is rejected with an error rather than silently
+// lowered to the then-only skeleton.
+func assertIfNotTryGuardShapeValidated(t *testing.T) {
+	t.Helper()
+	mirLower := readSelfhostSrc(t, filepath.Join("backend", "compiled_mir_lower.kizu"))
+	for _, diagnostic := range ifNotTryGuardShapeValidationErrors {
+		if !strings.Contains(mirLower, diagnostic) {
+			t.Errorf("compiled_mir_lower.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
 }
 
 // commentPreserveShapeValidationErrors pins the explicit shape-validation diagnostics that the

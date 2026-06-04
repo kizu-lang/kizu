@@ -4126,6 +4126,32 @@ fn prefix_not_try_call_inner_or_minus_one(
     return inner;
 }
 
+// require_if_not_try_guard_no_else rejects an 'if !(try <call>) { return <bool>; }' guard that also
+// carries an else arm (issue 1165 / 1162). The if-not-try-call-return-bool statement is rendered as
+// a then-only conditional branch -- the negation either returns the bool or falls through to the
+// join the following statements render into -- so an else block with a real body would be silently
+// dropped. It is an explicit error instead of a silent mis-lower. A missing else child reads as
+// either an absent child or an 'Empty' node depending on how the body facts were emitted; both are
+// accepted.
+fn require_if_not_try_guard_no_else(
+    ir_bytes: []u8,
+    function_name: []u8,
+    if_node: i64,
+    bs: i64
+) -> !void {
+    let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, if_node, "else", 0, bs
+    );
+    if else_node < 0 {
+        return;
+    }
+    let else_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, else_node, bs);
+    if !std::mem::equal_bytes(else_kind, "Empty") {
+        return error("compiled mir: if-not-try guard must not carry an else arm");
+    }
+    return;
+}
+
 fn lower_multi_return_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4587,6 +4613,10 @@ fn lower_multi_if_statement(
                     ir_bytes, function_name, guard_ret_value, bs
                 );
                 if std::mem::equal_bytes(guard_ret_kind, "Bool") {
+                    // The guard is rendered then-only (the negation returns the bool or falls through
+                    // to the join), so an else arm with a real body would be silently dropped: reject
+                    // it as an explicit error rather than mis-lower it (issue 1165 / 1162).
+                    try require_if_not_try_guard_no_else(ir_bytes, function_name, statement, bs);
                     let guard_token = try ir_contract::body_token_or_empty_from(
                         ir_bytes, function_name, guard_ret_value, bs
                     );
