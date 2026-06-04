@@ -2024,6 +2024,108 @@ fn cf_emit_void_success_ret(
     return;
 }
 
+// cf_emit_comment_state_success builds the '%kizu.error.comment_format_state' success wrap for
+// 'return CommentFormatState { last: <last>, at_line_start: <als>, after_comment: <ac> };' and
+// emits the 'ret'. The three scalar operands are SSA registers (the loop-head phi values that
+// exit the comment-preservation loop): last is the i8 byte, at_line_start / after_comment are the
+// i1 booleans. The value struct (field 1) is built by successive insertvalue, then wrapped with
+// the ok flag (field 0 = true) into the error union; the borrowed message field (field 2) stays
+// zeroinitialized. Mirrors cf_emit_void_success_ret but carries the struct value instead of void.
+fn cf_emit_comment_state_success(
+    out: &var std::string::String,
+    ret_type: []u8,
+    prefix: []u8,
+    last_reg: []u8,
+    als_reg: []u8,
+    ac_reg: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv0 = insertvalue %kizu.selfhost.parser.format.comment_format_state poison, i8 %");
+    try cf_w(out, last_reg);
+    try cf_l(out, ", 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv1 = insertvalue %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv0, i1 %");
+    try cf_w(out, als_reg);
+    try cf_l(out, ", 1");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv2 = insertvalue %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_sv1, i1 %");
+    try cf_w(out, ac_reg);
+    try cf_l(out, ", 2");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok = insertvalue ");
+    try cf_w(out, ret_type);
+    try cf_l(out, " zeroinitializer, i1 true, 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_full = insertvalue ");
+    try cf_w(out, ret_type);
+    try cf_w(out, " %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_ok, %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_sv2, 1");
+    try cf_w(out, "  ret ");
+    try cf_w(out, ret_type);
+    try cf_w(out, " %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_full");
+    return;
+}
+
+// cf_emit_subslice materializes a two-bound slice '<base>[<lo>..<hi>]' over a '%kizu.slice.u8'
+// base into '%<prefix>_slice' (a %kizu.slice.u8 of base.ptr + lo with length hi - lo), so it can
+// be passed to the @kizu_rt_string_append_bytes ABI. The base is a %kizu.slice.u8 register; lo /
+// hi are i64 registers. source[index..comment_end] in append_preserved_line_comments is its first
+// consumer.
+fn cf_emit_subslice(
+    out: &var std::string::String,
+    prefix: []u8,
+    base_reg: []u8,
+    lo_reg: []u8,
+    hi_reg: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_bptr = extractvalue %kizu.slice.u8 %");
+    try cf_w(out, base_reg);
+    try cf_l(out, ", 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_eptr = getelementptr i8, ptr %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_bptr, i64 %");
+    try cf_w(out, lo_reg);
+    try cf_l(out, "");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_len = sub i64 %");
+    try cf_w(out, hi_reg);
+    try cf_w(out, ", %");
+    try cf_w(out, lo_reg);
+    try cf_l(out, "");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_s0 = insertvalue %kizu.slice.u8 poison, ptr %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_eptr, 0");
+    try cf_w(out, "  %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_slice = insertvalue %kizu.slice.u8 %");
+    try cf_w(out, prefix);
+    try cf_w(out, "_s0, i64 %");
+    try cf_w(out, prefix);
+    try cf_l(out, "_len, 1");
+    return;
+}
+
 // cf_emit_token_predicate emits a single-token boolean predicate call ('%<result> = call i1
 // @<callee>(<token_llvm> %<token>)') off the AST: the callee symbol, return type and the token
 // operand type are all derived from the call node, so no predicate name is special-cased.
@@ -2764,6 +2866,417 @@ pub fn append_append_indent_function(
     // Scan exit: return the void success.
     try cf_l(out, "scan_exit:");
     try cf_emit_void_success_ret(out, llvm_return_type, "ret_ok");
+    try cf_l(out, "}");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// cf_let_call_callee navigates 'let <name> = <callee>(...)' (a plain, non-try call) to the callee
+// token, validating the value is a Call. Used to derive the comment-preservation driver's plain
+// scalar helper call symbols (line_comment_is_full_line, line_end_excluding_break).
+fn cf_let_call_callee(
+    ir_bytes: []u8,
+    function_name: []u8,
+    let_node: i64,
+    message: []u8,
+    bs: i64
+) -> ![]u8 {
+    let value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, let_node, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, value, "Call", message, bs);
+    return try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, value, bs);
+}
+
+// cf_let_name reads the bound name of a 'let'/'var' statement.
+fn cf_let_name(ir_bytes: []u8, function_name: []u8, let_node: i64, bs: i64) -> ![]u8 {
+    let name_node = try ir_contract::body_child_sequence_from(ir_bytes, function_name, let_node, "name", 0, bs);
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+}
+
+// cf_emit_cp_phi emits a loop-head phi '%<name> = phi <ty> [ %<entry_reg>, %entry ], [ <latch> ]'
+// for a register-seeded carried value.
+fn cf_emit_cp_phi(
+    out: &var std::string::String,
+    name: []u8,
+    ty: []u8,
+    entry_reg: []u8,
+    latch_sigil: []u8,
+    latch_base: []u8,
+    latch_tail: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, name);
+    try cf_w(out, " = phi ");
+    try cf_w(out, ty);
+    try cf_w(out, " [ %");
+    try cf_w(out, entry_reg);
+    try cf_w(out, ", %entry ], [ ");
+    try cf_w(out, latch_sigil);
+    try cf_w(out, latch_base);
+    try cf_w(out, latch_tail);
+    try cf_l(out, ", %cp_latch ]");
+    return;
+}
+
+// cf_emit_cp_phi_lit is cf_emit_cp_phi for a literal-seeded entry edge (current_after_comment
+// seeds from 'false' = 0).
+fn cf_emit_cp_phi_lit(
+    out: &var std::string::String,
+    name: []u8,
+    ty: []u8,
+    entry_lit: []u8,
+    latch_sigil: []u8,
+    latch_base: []u8,
+    latch_tail: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, name);
+    try cf_w(out, " = phi ");
+    try cf_w(out, ty);
+    try cf_w(out, " [ ");
+    try cf_w(out, entry_lit);
+    try cf_w(out, ", %entry ], [ ");
+    try cf_w(out, latch_sigil);
+    try cf_w(out, latch_base);
+    try cf_w(out, latch_tail);
+    try cf_l(out, ", %cp_latch ]");
+    return;
+}
+
+// cf_emit_cp_call_i1 emits '%<result> = call i1 @<callee>(%kizu.slice.u8 %source, i64 %a[, i64
+// <b_sigil><b>])' for the comment driver's plain boolean scalar helpers. A two-argument call
+// passes b "" (empty); a three-argument call passes the third operand.
+fn cf_emit_cp_call_i1(
+    out: &var std::string::String,
+    module_prefix: []u8,
+    result: []u8,
+    callee: []u8,
+    source_name: []u8,
+    a: []u8,
+    b_sigil: []u8,
+    b: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, result);
+    try cf_w(out, " = call i1 @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, callee);
+    try cf_w(out, "(%kizu.slice.u8 %");
+    try cf_w(out, source_name);
+    try cf_w(out, ", i64 %");
+    try cf_w(out, a);
+    if std::mem::len(b) > 0 {
+        try cf_w(out, ", i64 ");
+        try cf_w(out, b_sigil);
+        try cf_w(out, b);
+    }
+    try cf_l(out, ")");
+    return;
+}
+
+// cf_emit_cp_call_i64 emits '%<result> = call i64 @<callee>(%kizu.slice.u8 %source, i64 %arg)'
+// for the comment driver's plain i64 line-scan helpers.
+fn cf_emit_cp_call_i64(
+    out: &var std::string::String,
+    module_prefix: []u8,
+    result: []u8,
+    callee: []u8,
+    source_name: []u8,
+    arg_reg: []u8
+) -> !void {
+    try cf_w(out, "  %");
+    try cf_w(out, result);
+    try cf_w(out, " = call i64 @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, callee);
+    try cf_w(out, "(%kizu.slice.u8 %");
+    try cf_w(out, source_name);
+    try cf_w(out, ", i64 %");
+    try cf_w(out, arg_reg);
+    try cf_l(out, ")");
+    return;
+}
+
+// append_comment_preserve_function emits the full define for the comment-preservation driver
+// append_preserved_line_comments. It re-reads and validates the whole skeleton off the AST, then
+// renders the basic-block / phi control flow: a forward 'while index < end' loop carrying four
+// loop-head phis (the i64 cursor plus the three scalar state fields current_last / at_line_start /
+// after_comment), an if/else whose comment arm scans a '// ...' full-line comment (a short-circuit
+// '//' detection, a blank-before insertion guarded by out.len(), an indentation + comment-slice +
+// newline emit through the @kizu_rt_string_append_* ABI, and a blank-after insertion) and whose
+// else arm is a bare 'index = index + 1' advance, both re-merging at '%cp_latch', and a
+// 'return CommentFormatState { ... }' success wrap into the %kizu.error.comment_format_state error
+// union. The comment arm always exits with current_last = 10 / at_line_start = true /
+// after_comment = true, so the latch carries those constants; only at_line_start needs an in-arm
+// phi (read by the 'if !current_at_line_start' newline guard after the blank-before insertion).
+// Dispatched by its %kizu.error.comment_format_state return type. Any unsupported deviation is an
+// explicit error (issue 1165 / 1162).
+pub fn append_comment_preserve_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !void {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+
+    // ---- Parameters: out, source, start, end, depth, last, at_line_start ----
+    let out_name = cf_nth_param_name(params_spec, 0);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, out_name), "%kizu.owned") {
+        return error("compiled struct-cf: comment driver out accumulator must be a String handle");
+    }
+    let source_name = cf_nth_param_name(params_spec, 1);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, source_name), "%kizu.slice.u8") {
+        return error("compiled struct-cf: comment driver source must be a '[]u8' slice");
+    }
+    let start_name = cf_nth_param_name(params_spec, 2);
+    let end_name = cf_nth_param_name(params_spec, 3);
+    let depth_name = cf_nth_param_name(params_spec, 4);
+    let last_name = cf_nth_param_name(params_spec, 5);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, last_name), "i8") {
+        return error("compiled struct-cf: comment driver last must be a 'u8'");
+    }
+    let als_name = cf_nth_param_name(params_spec, 6);
+    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, als_name), "i1") {
+        return error("compiled struct-cf: comment driver at_line_start must be a 'bool'");
+    }
+
+    // ---- Top-level body: 6 statements ----
+    let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
+    let cur_last_var = try cf_let_name(ir_bytes, function_name, s0, bs);
+    let s1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 1, bs);
+    let cur_als_var = try cf_let_name(ir_bytes, function_name, s1, bs);
+    let s2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 2, bs);
+    let cur_ac_var = try cf_let_name(ir_bytes, function_name, s2, bs);
+    let s3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 3, bs);
+    let index_var = try cf_let_name(ir_bytes, function_name, s3, bs);
+    let s3_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s3, "value", 0, bs);
+    try cf_require_var(ir_bytes, function_name, s3_value, start_name,
+        "compiled struct-cf: comment driver index must be seeded from the start parameter", bs);
+
+    // Statement 4: 'while index < end { if <//> { ... } else { index = index + 1; } }'.
+    let s4 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 4, bs);
+    try cf_expect(ir_bytes, function_name, s4, "While",
+        "compiled struct-cf: comment driver fourth statement must be the scan loop", bs);
+    let scan_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s4, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, scan_cond, "lt",
+        "compiled struct-cf: comment loop condition must be '<index> < <end>'", bs);
+    let scan_cond_left = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_cond, "left", 0, bs);
+    try cf_require_var(ir_bytes, function_name, scan_cond_left, index_var,
+        "compiled struct-cf: comment loop must compare the cursor on the left", bs);
+    let scan_cond_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_cond, "right", 0, bs);
+    try cf_require_var(ir_bytes, function_name, scan_cond_right, end_name,
+        "compiled struct-cf: comment loop must compare against the end parameter", bs);
+
+    let scan_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s4, "body", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, scan_body, bs)) != 1 {
+        return error("compiled struct-cf: comment loop body must be a single if/else");
+    }
+    let wif = try ir_contract::body_child_sequence_from(ir_bytes, function_name, scan_body, "statement", 0, bs);
+    try cf_expect(ir_bytes, function_name, wif, "If",
+        "compiled struct-cf: comment loop body must guard the comment arm", bs);
+    let then_blk = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wif, "then", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, then_blk, bs)) != 12 {
+        return error("compiled struct-cf: comment arm must be the 12-statement comment emitter");
+    }
+    let else_blk = try ir_contract::body_child_sequence_from(ir_bytes, function_name, wif, "else", 0, bs);
+    if (try cf_block_statement_count(ir_bytes, function_name, else_blk, bs)) != 1 {
+        return error("compiled struct-cf: comment loop else arm must be the bare cursor advance");
+    }
+    let else0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else_blk, "statement", 0, bs);
+    try cf_expect(ir_bytes, function_name, else0, "Assign",
+        "compiled struct-cf: comment loop else arm must advance the cursor", bs);
+    let else0_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, else0_target, index_var,
+        "compiled struct-cf: else arm must advance the cursor", bs);
+    let else0_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0, "value", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, else0_value, "add",
+        "compiled struct-cf: else arm must be '<index> + 1'", bs);
+    let else0_add_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, else0_value, "right", 0, bs);
+    try cf_require_int(ir_bytes, function_name, else0_add_right, 1,
+        "compiled struct-cf: else arm must advance by exactly 1", bs);
+
+    // ---- Comment arm statements (then_blk[0..11]) ----
+    let t0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 0, bs);
+    let full_callee = try cf_let_call_callee(ir_bytes, function_name, t0,
+        "compiled struct-cf: comment arm must open with the full-line predicate", bs);
+    let t1 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 1, bs);
+    try cf_expect(ir_bytes, function_name, t1, "If",
+        "compiled struct-cf: comment arm must guard the blank-before insertion", bs);
+    let t1_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1, "condition", 0, bs);
+    try cf_require_binary_op(ir_bytes, function_name, t1_cond, "and",
+        "compiled struct-cf: blank-before guard must be 'full and has_blank_before'", bs);
+    let t1_cond_right = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t1_cond, "right", 0, bs);
+    try cf_expect(ir_bytes, function_name, t1_cond_right, "Call",
+        "compiled struct-cf: blank-before guard right must be the has_blank_before call", bs);
+    let blank_before_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t1_cond_right, bs);
+    let t3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 3, bs);
+    let t3_expr = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t3, "expr", 0, bs);
+    let t3_call = try cf_call_under_try(ir_bytes, function_name, t3_expr, bs);
+    let indent_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t3_call, bs);
+    let t4 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 4, bs);
+    let line_end_excl_callee = try cf_let_call_callee(ir_bytes, function_name, t4,
+        "compiled struct-cf: comment arm must bind the comment end", bs);
+    let t10 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 10, bs);
+    try cf_expect(ir_bytes, function_name, t10, "If",
+        "compiled struct-cf: comment arm must guard the blank-after insertion", bs);
+    let t10_cond = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10, "condition", 0, bs);
+    try cf_expect(ir_bytes, function_name, t10_cond, "Call",
+        "compiled struct-cf: blank-after guard must be the has_blank_after call", bs);
+    let blank_after_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t10_cond, bs);
+    let t11 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 11, bs);
+    try cf_expect(ir_bytes, function_name, t11, "Assign",
+        "compiled struct-cf: comment arm must close by advancing the cursor", bs);
+    let t11_target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t11, "target", 0, bs);
+    try cf_require_var(ir_bytes, function_name, t11_target, index_var,
+        "compiled struct-cf: comment arm cursor advance must assign the cursor", bs);
+    let t11_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t11, "value", 0, bs);
+    try cf_expect(ir_bytes, function_name, t11_value, "Call",
+        "compiled struct-cf: comment arm cursor advance must call line_end_including_break", bs);
+    let line_end_incl_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, t11_value, bs);
+
+    let s5 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 5, bs);
+    try cf_expect(ir_bytes, function_name, s5, "Return",
+        "compiled struct-cf: comment driver must end with the state return", bs);
+
+    // ================= Emit =================
+    try cf_w(out, "define ");
+    try cf_w(out, llvm_return_type);
+    try cf_w(out, " @");
+    try cf_w(out, llvm_symbol);
+    try cf_w(out, "(");
+    try compiled_signature::append_params_signature(out, params_spec);
+    try cf_l(out, ") {");
+
+    try cf_l(out, "entry:");
+    try cf_l(out, "  br label %cp_head");
+
+    try cf_l(out, "cp_head:");
+    try cf_emit_cp_phi(out, index_var, "i64", start_name, "%", index_var, "_next");
+    try cf_emit_cp_phi(out, cur_last_var, "i8", last_name, "%", cur_last_var, "_next");
+    try cf_emit_cp_phi(out, cur_als_var, "i1", als_name, "%", cur_als_var, "_next");
+    try cf_emit_cp_phi_lit(out, cur_ac_var, "i1", "false", "%", cur_ac_var, "_next");
+    try cf_w(out, "  %cp_cond = icmp slt i64 %");
+    try cf_w(out, index_var);
+    try cf_w(out, ", %");
+    try cf_l(out, end_name);
+    try cf_l(out, "  br i1 %cp_cond, label %cp_body, label %cp_exit");
+
+    try cf_l(out, "cp_body:");
+    try cf_w(out, "  %cp_ip1 = add i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", 1");
+    try cf_w(out, "  %cp_g1 = icmp slt i64 %cp_ip1, %");
+    try cf_l(out, end_name);
+    try cf_l(out, "  br i1 %cp_g1, label %cp_g2, label %cp_else");
+    try cf_l(out, "cp_g2:");
+    try cf_w(out, "  %cp_sptr = extractvalue %kizu.slice.u8 %");
+    try cf_w(out, source_name);
+    try cf_l(out, ", 0");
+    try cf_w(out, "  %cp_c0p = getelementptr i8, ptr %cp_sptr, i64 %");
+    try cf_l(out, index_var);
+    try cf_l(out, "  %cp_c0 = load i8, ptr %cp_c0p");
+    try cf_l(out, "  %cp_g2v = icmp eq i8 %cp_c0, 47");
+    try cf_l(out, "  br i1 %cp_g2v, label %cp_g3, label %cp_else");
+    try cf_l(out, "cp_g3:");
+    try cf_l(out, "  %cp_c1p = getelementptr i8, ptr %cp_sptr, i64 %cp_ip1");
+    try cf_l(out, "  %cp_c1 = load i8, ptr %cp_c1p");
+    try cf_l(out, "  %cp_g3v = icmp eq i8 %cp_c1, 47");
+    try cf_l(out, "  br i1 %cp_g3v, label %cp_cmt, label %cp_else");
+
+    try cf_l(out, "cp_else:");
+    try cf_w(out, "  %cp_index_e = add i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", 1");
+    try cf_l(out, "  br label %cp_latch");
+
+    try cf_l(out, "cp_cmt:");
+    try cf_w(out, "  %cp_ip2 = add i64 %");
+    try cf_w(out, index_var);
+    try cf_l(out, ", 2");
+    try cf_emit_cp_call_i1(out, module_prefix, "cp_full", full_callee, source_name, index_var, "", "");
+    try cf_l(out, "  br i1 %cp_full, label %cp_blank0, label %cp_afterb");
+    try cf_l(out, "cp_blank0:");
+    try cf_emit_cp_call_i1(out, module_prefix, "cp_blank", blank_before_callee, source_name, start_name, "%", index_var);
+    try cf_l(out, "  br i1 %cp_blank, label %cp_len, label %cp_afterb");
+    try cf_l(out, "cp_len:");
+    try cf_w(out, "  %cp_olen = call i64 @kizu_rt_string_len(%kizu.owned %");
+    try cf_w(out, out_name);
+    try cf_l(out, ")");
+    try cf_l(out, "  %cp_olen_pos = icmp sgt i64 %cp_olen, 0");
+    try cf_l(out, "  br i1 %cp_olen_pos, label %cp_inner, label %cp_afterb");
+    try cf_l(out, "cp_inner:");
+    try cf_w(out, "  br i1 %");
+    try cf_w(out, cur_als_var);
+    try cf_l(out, ", label %cp_inl_done, label %cp_inl_do");
+    try cf_l(out, "cp_inl_do:");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_inl", out_name, 10);
+    try cf_l(out, "  br label %cp_inl_done");
+    try cf_l(out, "cp_inl_done:");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_in2", out_name, 10);
+    try cf_l(out, "  br label %cp_afterb");
+    try cf_l(out, "cp_afterb:");
+    try cf_w(out, "  %cp_als_b = phi i1 [ %");
+    try cf_w(out, cur_als_var);
+    try cf_w(out, ", %cp_cmt ], [ %");
+    try cf_w(out, cur_als_var);
+    try cf_w(out, ", %cp_blank0 ], [ %");
+    try cf_w(out, cur_als_var);
+    try cf_l(out, ", %cp_len ], [ true, %cp_in2_cont ]");
+    try cf_l(out, "  br i1 %cp_als_b, label %cp_c_done, label %cp_c_do");
+    try cf_l(out, "cp_c_do:");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_c", out_name, 10);
+    try cf_l(out, "  br label %cp_c_done");
+    try cf_l(out, "cp_c_done:");
+    try cf_w(out, "  %cp_ind_call = call %kizu.error.void @");
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, indent_callee);
+    try cf_w(out, "(%kizu.owned %");
+    try cf_w(out, out_name);
+    try cf_w(out, ", i64 %");
+    try cf_w(out, depth_name);
+    try cf_l(out, ")");
+    try cf_l(out, "  %cp_ind_ok = extractvalue %kizu.error.void %cp_ind_call, 0");
+    try cf_l(out, "  br i1 %cp_ind_ok, label %cp_ind_cont, label %cp_ind_fail");
+    try cf_l(out, "cp_ind_fail:");
+    try cf_l(out, "  %cp_ind_msg = extractvalue %kizu.error.void %cp_ind_call, 1");
+    try cf_emit_own_fail(out, llvm_return_type, "cp_ind", "cp_ind", "_msg");
+    try cf_l(out, "cp_ind_cont:");
+    try cf_emit_cp_call_i64(out, module_prefix, "cp_cend", line_end_excl_callee, source_name, "cp_ip2");
+    try cf_emit_subslice(out, "cp_sub", source_name, index_var, "cp_cend");
+    try cf_emit_string_append(out, llvm_return_type, "cp_fa", "kizu_rt_string_append_bytes",
+        out_name, "%kizu.slice.u8", "%", "cp_sub_slice");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_g", out_name, 10);
+    try cf_emit_cp_call_i1(out, module_prefix, "cp_baf", blank_after_callee, source_name, "cp_cend", "%", end_name);
+    try cf_l(out, "  br i1 %cp_baf, label %cp_k_do, label %cp_k_done");
+    try cf_l(out, "cp_k_do:");
+    try cf_emit_string_append_byte(out, llvm_return_type, "cp_k", out_name, 10);
+    try cf_l(out, "  br label %cp_k_done");
+    try cf_l(out, "cp_k_done:");
+    try cf_emit_cp_call_i64(out, module_prefix, "cp_idxnew", line_end_incl_callee, source_name, "cp_ip2");
+    try cf_l(out, "  br label %cp_latch");
+
+    try cf_l(out, "cp_latch:");
+    try cf_w(out, "  %");
+    try cf_w(out, index_var);
+    try cf_l(out, "_next = phi i64 [ %cp_index_e, %cp_else ], [ %cp_idxnew, %cp_k_done ]");
+    try cf_w(out, "  %");
+    try cf_w(out, cur_last_var);
+    try cf_w(out, "_next = phi i8 [ %");
+    try cf_w(out, cur_last_var);
+    try cf_l(out, ", %cp_else ], [ 10, %cp_k_done ]");
+    try cf_w(out, "  %");
+    try cf_w(out, cur_als_var);
+    try cf_w(out, "_next = phi i1 [ %");
+    try cf_w(out, cur_als_var);
+    try cf_l(out, ", %cp_else ], [ true, %cp_k_done ]");
+    try cf_w(out, "  %");
+    try cf_w(out, cur_ac_var);
+    try cf_w(out, "_next = phi i1 [ %");
+    try cf_w(out, cur_ac_var);
+    try cf_l(out, ", %cp_else ], [ true, %cp_k_done ]");
+    try cf_l(out, "  br label %cp_head");
+
+    try cf_l(out, "cp_exit:");
+    try cf_emit_comment_state_success(out, llvm_return_type, "cp_ret", cur_last_var, cur_als_var, cur_ac_var);
     try cf_l(out, "}");
     try out.append_byte(cast<u8>(10));
     return;

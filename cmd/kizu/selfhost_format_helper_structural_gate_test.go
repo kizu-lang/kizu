@@ -112,15 +112,27 @@ var formatCompiledHelperSeeds = []string{
 	"lbrace_opens_enum_decl",
 	"is_match_arm_trailing_comma",
 	"rbrace_closes_enum_decl",
+	// append_preserved_line_comments is the comment-preservation driver: the first
+	// selfhost::parser::format member returning a struct in an error union
+	// ('-> !CommentFormatState'). It mutates the '&var std::string::String' accumulator, threads
+	// the loop-carried scalar state current_last / current_at_line_start / current_after_comment
+	// through a forward 'while index < end' scan loop whose if/else comment arm scans a '// ...'
+	// full-line comment (a short-circuit '//' detection, a blank-before insertion guarded by
+	// out.len(), an indentation + comment-slice + newline emit through the @kizu_rt_string_append_*
+	// ABI, and a blank-after insertion), and closes with 'return CommentFormatState { ... };'. It
+	// lowers through compiled_struct_cf::append_comment_preserve_function, dispatched by its
+	// %kizu.error.comment_format_state return type (the CommentFormatState struct value + error
+	// union ABI), and is the last selfhost::parser::format member that parse_format_alloc owns to
+	// move onto the compiled path (issue 1165 / 1162).
+	"append_preserved_line_comments",
 }
 
-// formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
-// indentation / import-sort / comment / whole-formatter helpers whose logic lives in the
-// hand-written parse_format_alloc path. Seeding them would smuggle the legacy formatter
-// logic into the compiled closure instead of lowering it as a real component.
+// formatHandPathOnlyHelpers stay out of the compiled format closure: format_source is the
+// whole-formatter entry whose import-sort / indentation / spacing orchestration still lives in the
+// hand-written parse_format_alloc path. Seeding it would smuggle the legacy formatter driver into
+// the compiled closure instead of lowering it as a real component.
 var formatHandPathOnlyHelpers = []string{
 	"format_source",
-	"append_preserved_line_comments",
 }
 
 // TestSelfhostFormatHelperStructuralGate pins that the first selfhost::parser::format
@@ -141,6 +153,49 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertImportDeclShapeValidated(t)
 	assertSortedImportsShapeValidated(t)
 	assertAppendIndentShapeValidated(t)
+	assertCommentPreserveShapeValidated(t)
+}
+
+// commentPreserveShapeValidationErrors pins the explicit shape-validation diagnostics that the
+// structured-control-flow lowering raises when a near-miss helper drifts from the
+// comment-preservation driver skeleton. append_comment_preserve_function reads only some
+// identifiers off the AST and then emits a fixed forward-scan-loop / if-else comment-arm /
+// CommentFormatState success-wrap shape, so it must reject any helper whose accumulator, source,
+// scalar-state parameters, cursor seed, loop condition, if/else arms, comment-arm statements,
+// blank-before / blank-after guards, cursor advance or state return differ -- never silently
+// mis-lower a near-miss. Pinning the strings keeps the per-operand validation from being quietly
+// weakened back to a name-only check.
+var commentPreserveShapeValidationErrors = []string{
+	"compiled struct-cf: comment driver out accumulator must be a String handle",
+	"compiled struct-cf: comment driver source must be a '[]u8' slice",
+	"compiled struct-cf: comment driver last must be a 'u8'",
+	"compiled struct-cf: comment driver at_line_start must be a 'bool'",
+	"compiled struct-cf: comment driver index must be seeded from the start parameter",
+	"compiled struct-cf: comment loop condition must be '<index> < <end>'",
+	"compiled struct-cf: comment loop must compare the cursor on the left",
+	"compiled struct-cf: comment loop must compare against the end parameter",
+	"compiled struct-cf: comment loop body must be a single if/else",
+	"compiled struct-cf: comment arm must be the 12-statement comment emitter",
+	"compiled struct-cf: comment loop else arm must be the bare cursor advance",
+	"compiled struct-cf: else arm must be '<index> + 1'",
+	"compiled struct-cf: comment arm must open with the full-line predicate",
+	"compiled struct-cf: blank-before guard must be 'full and has_blank_before'",
+	"compiled struct-cf: comment arm must close by advancing the cursor",
+	"compiled struct-cf: comment driver must end with the state return",
+}
+
+// assertCommentPreserveShapeValidated pins that the structured-control-flow lowering keeps its
+// explicit per-operand shape diagnostics for the comment-preservation driver, so a near-miss
+// helper is rejected with an error rather than silently lowered to the hard-coded forward-scan /
+// comment-arm / CommentFormatState success-wrap skeleton.
+func assertCommentPreserveShapeValidated(t *testing.T) {
+	t.Helper()
+	structCF := readSelfhostSrc(t, filepath.Join("backend", "compiled_struct_cf.kizu"))
+	for _, diagnostic := range commentPreserveShapeValidationErrors {
+		if !strings.Contains(structCF, diagnostic) {
+			t.Errorf("compiled_struct_cf.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
 }
 
 // appendIndentShapeValidationErrors pins the explicit shape-validation diagnostics that the

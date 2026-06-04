@@ -84,6 +84,15 @@ pub fn kizu_type_to_llvm(
         if std::mem::starts_with(inner, "std::array::Array<") {
             return "%kizu.error.owned";
         }
+        // !CommentFormatState backs the comment-preservation driver
+        // append_preserved_line_comments (issue 1165 / 1162): the loop-carried scalar state
+        // { last: u8, at_line_start: bool, after_comment: bool } returned by value in an error
+        // union. The success value is the CommentFormatState struct at field 1, so its error union
+        // is { i1, %kizu.selfhost.parser.format.comment_format_state, %kizu.slice.u8 } -- the same
+        // struct-in-error-union shape RelatedSpan / NodeId already use.
+        if std::mem::equal_bytes(inner, "CommentFormatState") {
+            return "%kizu.error.comment_format_state";
+        }
         return error("compiled function: unsupported error type");
     }
     if std::mem::equal_bytes(kizu_type, "i64") {
@@ -117,6 +126,12 @@ pub fn kizu_type_to_llvm(
     // every Array<T> instantiation (Array<Token>, Array<i64>, ...).
     if std::mem::starts_with(kizu_type, "std::array::Array<") {
         return "%kizu.owned";
+    }
+    // CommentFormatState is the comment-preservation driver's loop-carried scalar state value
+    // { last: u8, at_line_start: bool, after_comment: bool } -> { i8, i1, i1 }, constructed by
+    // 'return CommentFormatState { ... }' in append_preserved_line_comments (issue 1165 / 1162).
+    if std::mem::equal_bytes(kizu_type, "CommentFormatState") {
+        return "%kizu.selfhost.parser.format.comment_format_state";
     }
     if compiled_fact_lookup::is_enum_type(ir_bytes, module_prefix, kizu_type) {
         return "i64";
