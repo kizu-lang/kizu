@@ -5730,6 +5730,23 @@ fn lower_multi_while_leading_decrement(
     bs: i64
 ) -> !MultiIfLowerResult {
     let head_var = "leading.decrement.head";
+    // The reserved phi name is shared by every leading-decrement loop, so a second one in the same
+    // function would define %leading.decrement.head twice. Leading-decrement loops only lower at the
+    // top level (a nested while is an unsupported body statement below), so scanning the already
+    // lowered top-level statements for an earlier leading-decrement while catches the collision as an
+    // explicit error rather than emitting an invalid duplicate phi (issue 1165 / 1162).
+    var existing_index = 0;
+    while existing_index < stmts.len() {
+        let existing = try stmts.at(existing_index);
+        let existing_head = match existing {
+            While(payload) => payload.induction_var,
+            _ => "",
+        };
+        if std::mem::len(existing_head) > 0 and std::mem::equal_bytes(existing_head, head_var) {
+            return error("compiled mir: only one leading-decrement loop per function is supported");
+        }
+        existing_index = existing_index + 1;
+    }
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
     );
@@ -5766,6 +5783,14 @@ fn lower_multi_while_leading_decrement(
         bs
     );
     try rename_induction_in_insts(&var cond_insts, induction_var, head_var);
+    // The header must test the decremented counter: after the rename, the condition has to read the
+    // reserved phi name at least once. A no-op rename means the loop-head comparison reads some other
+    // variable (e.g. 'while other > 0 { cursor = cursor - 1; ... }'), so the phi would track 'cursor'
+    // while the header tests 'other' -- a mis-detected shape that is an explicit error here rather
+    // than a silent mis-lower (issue 1165 / 1162).
+    if !(try insts_reference_var(&cond_insts, head_var)) {
+        return error("compiled mir: leading-decrement loop header must test the induction variable");
+    }
     var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
     var body_temp_counter = temp_counter + cond_insts.len();
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
