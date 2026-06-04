@@ -3043,9 +3043,29 @@ fn cf_require_not_var(
     return;
 }
 
+// cf_require_no_else requires an If node to carry no else arm. The comment driver emit renders
+// every comment-arm guard as a then-only conditional branch (the only if/else is the top-level
+// '//' guard handled separately), so an else block on any other guard would be silently dropped --
+// it is an explicit error instead. A missing else child reads as either an absent child or an
+// 'Empty' node depending on how the body facts were emitted; both are accepted, anything else is
+// rejected.
+fn cf_require_no_else(
+    ir_bytes: []u8, function_name: []u8, if_node: i64, message: []u8, bs: i64
+) -> !void {
+    let else_node = try ir_contract::body_child_sequence_or_minus_one_from(ir_bytes, function_name, if_node, "else", 0, bs);
+    if else_node < 0 {
+        return;
+    }
+    let else_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, else_node, bs);
+    if !std::mem::equal_bytes(else_kind, "Empty") {
+        return error(message);
+    }
+    return;
+}
+
 // cf_require_guarded_newline requires an 'if !<var> { try <out>.append_byte(cast<u8>(10)); }' guard:
-// a single-statement then-block that appends the newline byte (the emit renders the guard as a
-// conditional newline branch with no else arm).
+// a single-statement then-block that appends the newline byte, with no else arm (the emit renders
+// the guard as a then-only conditional newline branch).
 fn cf_require_guarded_newline(
     ir_bytes: []u8, function_name: []u8, if_node: i64, var_name: []u8, out_name: []u8, message: []u8, bs: i64
 ) -> !void {
@@ -3058,6 +3078,7 @@ fn cf_require_guarded_newline(
     }
     let then0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_block, "statement", 0, bs);
     try cf_require_append_byte_cast(ir_bytes, function_name, then0, out_name, 10, message, bs);
+    try cf_require_no_else(ir_bytes, function_name, if_node, message, bs);
     return;
 }
 
@@ -3178,8 +3199,20 @@ pub fn append_comment_preserve_function(
     if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, als_name), "i1") {
         return error("compiled struct-cf: comment driver at_line_start must be a 'bool'");
     }
+    // The emit binds exactly the seven (out, source, start, end, depth, last, at_line_start)
+    // parameters; an eighth parameter would be dropped from the rendered signature, so it is an
+    // explicit error rather than a silent truncation.
+    if std::mem::len(cf_nth_param_name(params_spec, 7)) > 0 {
+        return error("compiled struct-cf: comment driver must take exactly seven parameters");
+    }
 
-    // ---- Top-level body: 6 statements ----
+    // ---- Top-level body: exactly 6 statements ----
+    // The emit renders exactly the three scalar-state seeds, the cursor seed, the scan loop and the
+    // state return; a seventh top-level statement would be silently dropped, so it is an explicit
+    // error.
+    if (try ir_contract::body_child_sequence_or_minus_one_from(ir_bytes, function_name, 0, "statement", 6, bs)) >= 0 {
+        return error("compiled struct-cf: comment driver body must be exactly six statements");
+    }
     let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
     // Statement 0: 'var current_last = last;' -- the i8 state seed reads the last parameter, which
     // the emit feeds onto the current_last loop-head phi's entry edge.
@@ -3361,6 +3394,12 @@ pub fn append_comment_preserve_function(
     let lb3 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, len_body, "statement", 3, bs);
     try cf_require_assign_true(ir_bytes, function_name, lb3, cur_als_var,
         "compiled struct-cf: blank-before insertion must set current_at_line_start = true", bs);
+    // Both the blank-before guard and its inner out.len() guard are then-only; an else arm on either
+    // would be silently dropped by the emit.
+    try cf_require_no_else(ir_bytes, function_name, t1_len_if,
+        "compiled struct-cf: blank-before insertion must not carry an else arm", bs);
+    try cf_require_no_else(ir_bytes, function_name, t1,
+        "compiled struct-cf: blank-before guard must not carry an else arm", bs);
 
     // t2: 'if !current_at_line_start { try out.append_byte(cast<u8>(10)); }'.
     let t2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 2, bs);
@@ -3456,6 +3495,9 @@ pub fn append_comment_preserve_function(
     let ka2 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, t10_then, "statement", 2, bs);
     try cf_require_assign_true(ir_bytes, function_name, ka2, cur_als_var,
         "compiled struct-cf: blank-after insertion must set current_at_line_start = true", bs);
+    // The blank-after guard is then-only; an else arm would be silently dropped by the emit.
+    try cf_require_no_else(ir_bytes, function_name, t10,
+        "compiled struct-cf: blank-after guard must not carry an else arm", bs);
 
     // t11: 'index = line_end_including_break(source, index + 2);'.
     let t11 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, then_blk, "statement", 11, bs);

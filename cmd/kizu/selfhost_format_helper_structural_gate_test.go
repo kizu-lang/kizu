@@ -208,6 +208,13 @@ var commentPreserveShapeValidationErrors = []string{
 	"compiled struct-cf: CommentFormatState 'last' field must be current_last",
 	"compiled struct-cf: CommentFormatState 'at_line_start' field must be current_at_line_start",
 	"compiled struct-cf: CommentFormatState 'after_comment' field must be current_after_comment",
+	// Exact signature / top-level body shape.
+	"compiled struct-cf: comment driver must take exactly seven parameters",
+	"compiled struct-cf: comment driver body must be exactly six statements",
+	// The then-only comment-arm guards must carry no else arm.
+	"compiled struct-cf: blank-before insertion must not carry an else arm",
+	"compiled struct-cf: blank-before guard must not carry an else arm",
+	"compiled struct-cf: blank-after guard must not carry an else arm",
 }
 
 // assertCommentPreserveShapeValidated pins that the structured-control-flow lowering keeps its
