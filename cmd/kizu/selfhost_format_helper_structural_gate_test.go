@@ -74,7 +74,14 @@ const parseFormatAllocMaxLines = 197
 // inside a body 'if <cond> { cursor = previous; continue; }' whose latch reads the decrement local
 // rather than a constant-step add, both headers are non-literal 'cursor > start' comparisons, and
 // the inner scan reuses the cursor induction renamed so its loop-head phi does not clash with the
-// outer scan's). They are the
+// outer scan's), and should_insert_space (the spacing predicate, the first compiled helper whose
+// body lowers a multi-operand short-circuit 'or' in an 'if' condition: 'if last == cast<u8>(0) or
+// last == cast<u8>(10) or last == cast<u8>(32) { return false; }' flattens to three operand blocks
+// where each true edge short-circuits to the then block and only an all-false fall-through reaches
+// the next guard -- the 'or' twin of the existing short-circuit 'and' if-chain -- alongside an
+// 'and' guard of two predicate calls ('equal_bytes(previous, "]") and
+// can_follow_slice_marker(current)') and a run of call-guarded early returns; its body BFS pulls in
+// no_space_before, no_space_after, and can_follow_slice_marker). They are the
 // first selfhost::parser::format members on the compiled path and must keep being emitted from
 // both the IR fact catalog and the backend BFS.
 var formatCompiledHelperSeeds = []string{
@@ -101,6 +108,7 @@ var formatCompiledHelperSeeds = []string{
 	"line_comment_is_full_line",
 	"line_comment_has_blank_after",
 	"line_comment_has_blank_before",
+	"should_insert_space",
 }
 
 // formatHandPathOnlyHelpers stay out of the compiled format closure: they are the
