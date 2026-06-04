@@ -314,6 +314,22 @@ pub struct MirLetExprStmt {
     pub expr_insts: std::array::Array<MirExprInst>,
 }
 
+// MirScalarSelectAssignStmt backs a side-effect-free conditional scalar update inside a loop:
+// 'if <cond> { depth = depth +/- <int>; }'. The condition and value expressions are both lowered
+// in the current block, and the renderer emits
+// '%<output_name> = select i1 <cond>, <value>, %<input_name>'. The owning while carries the source
+// variable through a loop-head phi and uses output_name as the latch incoming value (issue 1162).
+pub struct MirScalarSelectAssignStmt {
+    pub source_name: []u8,
+    pub input_name: []u8,
+    pub output_name: []u8,
+    pub llvm_type: []u8,
+    pub cond_result_id: i64,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub value_result_id: i64,
+    pub value_insts: std::array::Array<MirExprInst>,
+}
+
 // MirLetTryCallStmt backs a 'let <name> = try <callee>(<args>);' statement: a try-call
 // over a free function whose return type is an error union (the node_count traversal
 // cluster, tracker 961). The renderer emits the call into called_error_union, extracts the
@@ -474,6 +490,13 @@ pub struct MirSecondaryInduction {
     pub init_offset: i64,
     pub step: i64,
 }
+pub struct MirCarriedScalar {
+    pub var_name: []u8,
+    pub init_literal: i64,
+    pub init_var: []u8,
+    pub init_offset: i64,
+    pub latch_var: []u8,
+}
 pub struct MirWhileStmt {
     pub loop_index: i64,
     pub induction_var: []u8,
@@ -502,6 +525,10 @@ pub struct MirWhileStmt {
     // 1165 / 1162).
     pub latch_copy_var: []u8,
     pub secondary_inductions: std::array::Array<MirSecondaryInduction>,
+    // carried_scalars are i64 locals conditionally mutated inside the loop body and threaded
+    // through loop-head phis. They are not induction counters, so the latch emits no add; each phi
+    // reads the final body SSA name (latch_var) on the latch edge (issue 1162).
+    pub carried_scalars: std::array::Array<MirCarriedScalar>,
     // init_insts / init_result_id back a call-seeded primary induction init ('var cursor =
     // line_end_including_break(source, comment_end)' for line_comment_has_blank_after, issue
     // 1165 / 1162). When init_insts is non-empty the preheader renders the call instructions and
@@ -1081,6 +1108,7 @@ pub union MirStmt {
     LetStruct(MirLetStructStmt),
     LetArenaAdd(MirLetArenaAddStmt),
     LetExpr(MirLetExprStmt),
+    ScalarSelectAssign(MirScalarSelectAssignStmt),
     LetTryCall(MirLetTryCallStmt),
     ReturnTryBinary(MirReturnTryBinaryStmt),
     StringTryAppend(MirStringTryAppendStmt),
@@ -1327,6 +1355,14 @@ impl MirLetArrayGetStmt {
 impl MirLetExprStmt {
     fn deinit(self: MirLetExprStmt) -> void {
         self.expr_insts.deinit();
+        return;
+    }
+}
+
+impl MirScalarSelectAssignStmt {
+    fn deinit(self: MirScalarSelectAssignStmt) -> void {
+        self.cond_insts.deinit();
+        self.value_insts.deinit();
         return;
     }
 }
@@ -1588,6 +1624,7 @@ impl MirWhileStmt {
         self.body_stmts.deinit();
         self.latch_stmts.deinit();
         self.secondary_inductions.deinit();
+        self.carried_scalars.deinit();
         self.init_insts.deinit();
         return;
     }
@@ -1600,6 +1637,7 @@ impl MirStmt {
             LetStruct(payload) => payload.deinit(),
             LetArenaAdd(payload) => payload.deinit(),
             LetExpr(payload) => payload.deinit(),
+            ScalarSelectAssign(payload) => payload.deinit(),
             LetTryCall(payload) => payload.deinit(),
             ReturnTryBinary(payload) => payload.deinit(),
             StringTryAppend(payload) => payload.deinit(),
@@ -2409,6 +2447,125 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
     };
 }
 
+pub fn copy_call_arg(arg: &MirCallArg) -> MirCallArg {
+    return MirCallArg {
+        ty: arg.ty,
+        kind: arg.kind,
+        value: arg.value,
+        bool_value: arg.bool_value,
+        string_index: arg.string_index,
+        int_value: arg.int_value,
+        source_type: arg.source_type,
+        source_field_index: arg.source_field_index,
+        nested_source_type: arg.nested_source_type,
+        nested_field_index: arg.nested_field_index,
+        slice_start_base: arg.slice_start_base,
+        slice_start_offset: arg.slice_start_offset,
+        slice_end_base: arg.slice_end_base,
+        slice_end_offset: arg.slice_end_offset
+    };
+}
+
+pub fn copy_call_args(args: &std::array::Array<MirCallArg>) -> !std::array::Array<MirCallArg> {
+    var copied = std::array::Array<MirCallArg>(std::mem::page_allocator());
+    var index = 0;
+    while index < args.len() {
+        let arg = try args.at(index);
+        try copied.append(copy_call_arg(arg));
+        index = index + 1;
+    }
+    return copied;
+}
+
+pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
+    return match inst {
+        Var(payload) => MirExprInst::Var(MirVarExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            value: payload.value
+        }),
+        ConstString(payload) => MirExprInst::ConstString(MirConstStringExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            value: payload.value,
+            string_index: payload.string_index
+        }),
+        ConstBool(payload) => MirExprInst::ConstBool(MirConstBoolExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            bool_value: payload.bool_value
+        }),
+        ConstInt(payload) => MirExprInst::ConstInt(MirConstIntExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            int_value: payload.int_value
+        }),
+        ConstEnumTag(payload) => MirExprInst::ConstEnumTag(MirConstEnumTagExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            int_value: payload.int_value
+        }),
+        PrefixNot(payload) => MirExprInst::PrefixNot(MirPrefixNotExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            operand: payload.operand
+        }),
+        Binary(payload) => MirExprInst::Binary(MirBinaryExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            op: payload.op,
+            left: payload.left,
+            right: payload.right
+        }),
+        FieldAccess(payload) => MirExprInst::FieldAccess(MirFieldAccessExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            value: payload.value,
+            left: payload.left,
+            source_type: payload.source_type,
+            source_field_index: payload.source_field_index
+        }),
+        IndexLoad(payload) => MirExprInst::IndexLoad(MirIndexLoadExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            target: payload.target,
+            index: payload.index
+        }),
+        Slice(payload) => MirExprInst::Slice(MirSliceExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            target: payload.target,
+            start: payload.start,
+            end: payload.end
+        }),
+        Call(payload) => MirExprInst::Call(MirCallExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            call_module_prefix: payload.call_module_prefix,
+            call_callee_name: payload.call_callee_name,
+            call_args: try copy_call_args(&payload.call_args)
+        }),
+        ArrayLen(payload) => MirExprInst::ArrayLen(MirArrayLenExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            receiver_name: payload.receiver_name
+        }),
+    };
+}
+
+pub fn copy_expr_insts(
+    insts: &std::array::Array<MirExprInst>
+) -> !std::array::Array<MirExprInst> {
+    var copied = std::array::Array<MirExprInst>(std::mem::page_allocator());
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        try copied.append(try copy_expr_inst(inst));
+        index = index + 1;
+    }
+    return copied;
+}
+
 pub fn let_call_stmt(
     name: []u8,
     llvm_type: []u8,
@@ -2474,6 +2631,28 @@ pub fn let_expr_stmt(
         string_index: string_index,
         expr_result_id: result_id,
         expr_insts: insts
+    });
+}
+
+pub fn scalar_select_assign_stmt(
+    source_name: []u8,
+    input_name: []u8,
+    output_name: []u8,
+    llvm_type: []u8,
+    cond_result_id: i64,
+    cond_insts: std::array::Array<MirExprInst>,
+    value_result_id: i64,
+    value_insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt::ScalarSelectAssign(MirScalarSelectAssignStmt {
+        source_name: source_name,
+        input_name: input_name,
+        output_name: output_name,
+        llvm_type: llvm_type,
+        cond_result_id: cond_result_id,
+        cond_insts: cond_insts,
+        value_result_id: value_result_id,
+        value_insts: value_insts
     });
 }
 
@@ -3354,6 +3533,7 @@ pub fn while_stmt(
     latch_stmts: std::array::Array<MirStmt>,
     latch_copy_var: []u8,
     secondary_inductions: std::array::Array<MirSecondaryInduction>,
+    carried_scalars: std::array::Array<MirCarriedScalar>,
     init_insts: std::array::Array<MirExprInst>,
     init_result_id: i64
 ) -> MirStmt {
@@ -3374,6 +3554,7 @@ pub fn while_stmt(
         latch_stmts: latch_stmts,
         latch_copy_var: latch_copy_var,
         secondary_inductions: secondary_inductions,
+        carried_scalars: carried_scalars,
         init_insts: init_insts,
         init_result_id: init_result_id
     });
@@ -3391,6 +3572,22 @@ pub fn secondary_induction(
         init_var: init_var,
         init_offset: init_offset,
         step: step
+    };
+}
+
+pub fn carried_scalar(
+    var_name: []u8,
+    init_literal: i64,
+    init_var: []u8,
+    init_offset: i64,
+    latch_var: []u8
+) -> MirCarriedScalar {
+    return MirCarriedScalar {
+        var_name: var_name,
+        init_literal: init_literal,
+        init_var: init_var,
+        init_offset: init_offset,
+        latch_var: latch_var
     };
 }
 

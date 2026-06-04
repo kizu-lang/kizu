@@ -3385,6 +3385,234 @@ pub struct MultiExprLowerResult {
     pub try_counter: i64,
 }
 
+pub struct CarriedScalarState {
+    pub source_name: []u8,
+    pub current_name: []u8,
+    pub init_literal: i64,
+    pub init_var: []u8,
+    pub init_offset: i64,
+}
+
+fn carried_scalar_alias_name(source_name: []u8, loop_index: i64, slot: i64) -> ![]u8 {
+    if slot == 0 {
+        return "carried.scalar.0";
+    }
+    if slot == 1 {
+        return "carried.scalar.1";
+    }
+    if slot == 2 {
+        return "carried.scalar.2";
+    }
+    if slot == 3 {
+        return "carried.scalar.3";
+    }
+    if slot == 4 {
+        return "carried.scalar.4";
+    }
+    if slot == 5 {
+        return "carried.scalar.5";
+    }
+    if slot == 6 {
+        return "carried.scalar.6";
+    }
+    if slot == 7 {
+        return "carried.scalar.7";
+    }
+    if slot == 8 {
+        return "carried.scalar.8";
+    }
+    if slot == 9 {
+        return "carried.scalar.9";
+    }
+    return error("compiled mir: too many carried scalar assignments");
+}
+
+fn carried_scalar_index(
+    states: &std::array::Array<CarriedScalarState>,
+    source_name: []u8
+) -> !i64 {
+    var index = 0;
+    while index < states.len() {
+        let state = try states.at(index);
+        if std::mem::equal_bytes(state.source_name, source_name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn rename_carried_scalars_in_insts(
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    states: &std::array::Array<CarriedScalarState>
+) -> !void {
+    var index = 0;
+    while index < states.len() {
+        let state = try states.at(index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try rename_induction_in_insts(insts, state.source_name, state.current_name);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn lower_expr_with_carried_renames(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    states: &std::array::Array<CarriedScalarState>,
+    bs: i64
+) -> !i64 {
+    let result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        node,
+        string_counter,
+        temp_counter,
+        insts,
+        bs
+    );
+    try rename_carried_scalars_in_insts(insts, states);
+    return result;
+}
+
+fn scalar_assign_target_or_empty(
+    ir_bytes: []u8,
+    function_name: []u8,
+    assign_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let assign_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, assign_node, bs);
+    if !std::mem::equal_bytes(assign_kind, "Assign") {
+        return "";
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return "";
+    }
+    let target_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
+    if try assign_is_self_scalar_arith(ir_bytes, function_name, assign_node, target_name, bs) {
+        return target_name;
+    }
+    return "";
+}
+
+fn assign_is_self_scalar_arith(
+    ir_bytes: []u8,
+    function_name: []u8,
+    assign_node: i64,
+    var_name: []u8,
+    bs: i64
+) -> !bool {
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "value", 0, bs
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if !std::mem::equal_bytes(value_kind, "Binary") {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, value, bs
+    );
+    if !std::mem::equal_bytes(op, "add") and !std::mem::equal_bytes(op, "sub") {
+        return false;
+    }
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "left", 0, bs
+    );
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "right", 0, bs
+    );
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right_node, bs);
+    if !std::mem::equal_bytes(left_kind, "Var") or !std::mem::equal_bytes(right_kind, "Int") {
+        return false;
+    }
+    let left_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, left_node, bs);
+    if !std::mem::equal_bytes(left_name, var_name) {
+        return false;
+    }
+    let offset = try ir_contract::body_int_value_from(ir_bytes, function_name, right_node, bs);
+    return offset >= 1;
+}
+
+fn if_scalar_assign_node_or_minus_one(
+    ir_bytes: []u8,
+    function_name: []u8,
+    if_node: i64,
+    bs: i64
+) -> !i64 {
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "then", 0, bs
+    );
+    let then_count = try while_body_statement_count(ir_bytes, function_name, then_node, bs);
+    if then_count == 1 {
+        let only_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, then_node, "statement", 0, bs
+        );
+        let target = try scalar_assign_target_or_empty(ir_bytes, function_name, only_stmt, bs);
+        if std::mem::len(target) > 0 {
+            return only_stmt;
+        }
+    }
+    if then_count == 2 {
+        let second_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, then_node, "statement", 1, bs
+        );
+        let target = try scalar_assign_target_or_empty(ir_bytes, function_name, second_stmt, bs);
+        if std::mem::len(target) > 0 {
+            return second_stmt;
+        }
+    }
+    return -1;
+}
+
+fn while_carries_scalar_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    name: []u8,
+    bs: i64
+) -> !bool {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_node, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var body_index = 0;
+    while body_index < body_count {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "If") {
+            let assign_node = try if_scalar_assign_node_or_minus_one(
+                ir_bytes, function_name, body_stmt, bs
+            );
+            if assign_node >= 0 {
+                let target = try scalar_assign_target_or_empty(
+                    ir_bytes, function_name, assign_node, bs
+                );
+                if std::mem::equal_bytes(target, name) {
+                    return true;
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    return false;
+}
+
 // lower_multi_expr_statement lowers a bare 'try <receiver>.<method>(<arg>);' expression
 // statement that mutates a std::string::String value (issue 1165 slice 1). String lowers to
 // the runtime-owned handle %kizu.owned, so out.append_bytes(bytes) / out.append_byte(byte)
@@ -4146,10 +4374,29 @@ fn while_condition_value_eager_safe(
 ) -> !bool {
     let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
     if std::mem::equal_bytes(kind, "Var") or std::mem::equal_bytes(kind, "Int") or
-        std::mem::equal_bytes(kind, "Bool") or std::mem::equal_bytes(kind, "FieldExpr") {
+        std::mem::equal_bytes(kind, "Bool") or std::mem::equal_bytes(kind, "String") or
+        std::mem::equal_bytes(kind, "FieldExpr") {
         return true;
     }
     if std::mem::equal_bytes(kind, "Call") {
+        let callee_name = try ir_contract::body_call_callee_or_empty_from(
+            ir_bytes, function_name, node, bs
+        );
+        if std::mem::equal_bytes(callee_name, "std::mem::equal_bytes") {
+            if (try compiled_mir_types::count_call_args(ir_bytes, function_name, node, bs)) != 2 {
+                return false;
+            }
+            let left_arg = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, node, "arg", 0, bs
+            );
+            let right_arg = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, node, "arg", 1, bs
+            );
+            if !(try while_condition_value_eager_safe(ir_bytes, function_name, left_arg, bs)) {
+                return false;
+            }
+            return try while_condition_value_eager_safe(ir_bytes, function_name, right_arg, bs);
+        }
         if !(try callee_is_field_expr(ir_bytes, function_name, node, bs)) {
             return false;
         }
@@ -4858,7 +5105,10 @@ fn while_carries_induction_var(
         let decrement_name = try ir_contract::body_token_or_empty_from(
             ir_bytes, function_name, decrement_target, bs
         );
-        return std::mem::equal_bytes(decrement_name, name);
+        if std::mem::equal_bytes(decrement_name, name) {
+            return true;
+        }
+        return try while_carries_scalar_var(ir_bytes, function_name, while_node, name, bs);
     }
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
     let latch_count = try while_trailing_increment_count(
@@ -5601,6 +5851,7 @@ fn lower_multi_while_statement(
         latch_stmts,
         latch_copy_var,
         secondary_inductions,
+        std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         -1
     ));
@@ -5704,6 +5955,496 @@ fn while_is_leading_decrement(
     }
     return true;
 }
+
+fn append_leading_decrement_carried_scalar(
+    ir_bytes: []u8,
+    function_name: []u8,
+    target_name: []u8,
+    loop_index: i64,
+    states: &var std::array::Array<CarriedScalarState>,
+    bs: i64
+) -> !void {
+    if (try carried_scalar_index(states, target_name)) >= 0 {
+        return;
+    }
+    if states.len() > 0 {
+        return error("compiled mir: only one carried scalar per leading-decrement loop is supported");
+    }
+    let init = try find_induction_init(ir_bytes, function_name, target_name, loop_index, bs);
+    try states.append(CarriedScalarState {
+        source_name: target_name,
+        current_name: target_name,
+        init_literal: init.literal,
+        init_var: init.var_name,
+        init_offset: init.offset
+    });
+    return;
+}
+
+fn collect_leading_decrement_carried_scalars(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    loop_index: i64,
+    bs: i64
+) -> !std::array::Array<CarriedScalarState> {
+    var states = std::array::Array<CarriedScalarState>(std::mem::page_allocator());
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var body_index = 0;
+    while body_index < body_count {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "If") {
+            let assign_node = try if_scalar_assign_node_or_minus_one(
+                ir_bytes, function_name, body_stmt, bs
+            );
+            if assign_node >= 0 {
+                let target = try scalar_assign_target_or_empty(
+                    ir_bytes, function_name, assign_node, bs
+                );
+                if std::mem::len(target) > 0 {
+                    try append_leading_decrement_carried_scalar(
+                        ir_bytes, function_name, target, loop_index, &var states, bs
+                    );
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    return states;
+}
+
+fn materialize_carried_scalars(
+    states: &std::array::Array<CarriedScalarState>
+) -> !std::array::Array<compiled_mir::MirCarriedScalar> {
+    var carried = std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator());
+    var index = 0;
+    while index < states.len() {
+        let state = try states.at(index);
+        try carried.append(compiled_mir::carried_scalar(
+            state.source_name,
+            state.init_literal,
+            state.init_var,
+            state.init_offset,
+            state.current_name
+        ));
+        index = index + 1;
+    }
+    return carried;
+}
+
+fn lower_scalar_select_assign_from_if(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    if_node: i64,
+    assign_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    loop_index: i64,
+    body_index: i64,
+    states: &var std::array::Array<CarriedScalarState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let target_name = try scalar_assign_target_or_empty(ir_bytes, function_name, assign_node, bs);
+    if std::mem::len(target_name) == 0 {
+        return error("compiled mir: scalar select assignment must be a self add/sub");
+    }
+    let state_index = try carried_scalar_index(states, target_name);
+    if state_index < 0 {
+        return error("compiled mir: scalar select assignment target is not loop-carried");
+    }
+    let state = try states.at(state_index);
+    let state_source_name = state.source_name;
+    let state_current_name = state.current_name;
+    let state_init_literal = state.init_literal;
+    let state_init_var = state.init_var;
+    let state_init_offset = state.init_offset;
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "condition", 0, bs
+    );
+    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_kind != 0 {
+        return error("compiled mir: scalar select assignment condition must be a single expression");
+    }
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_with_carried_renames(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        states,
+        bs
+    );
+    let cond_strings = try count_strings_in_insts(&cond_insts);
+    let value_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign_node, "value", 0, bs
+    );
+    var value_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let value_result = try lower_expr_with_carried_renames(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        value_node,
+        string_counter + cond_strings,
+        temp_counter + cond_insts.len(),
+        &var value_insts,
+        states,
+        bs
+    );
+    let value_strings = try count_strings_in_insts(&value_insts);
+    let cond_len = cond_insts.len();
+    let value_len = value_insts.len();
+    let output_name = try carried_scalar_alias_name(target_name, loop_index, body_index);
+    try stmts.append(compiled_mir::scalar_select_assign_stmt(
+        target_name,
+        state_current_name,
+        output_name,
+        "i64",
+        cond_result,
+        cond_insts,
+        value_result,
+        value_insts
+    ));
+    try states.set(state_index, CarriedScalarState {
+        source_name: state_source_name,
+        current_name: output_name,
+        init_literal: state_init_literal,
+        init_var: state_init_var,
+        init_offset: state_init_offset
+    });
+    return MultiIfLowerResult {
+        temp_counter: temp_counter + cond_len + value_len,
+        string_counter: string_counter + cond_strings + value_strings
+    };
+}
+
+fn lower_carried_return_if_from_cond(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    return_statement: i64,
+    if_index: i64,
+    string_counter: i64,
+    cond_result: i64,
+    cond_insts: std::array::Array<compiled_mir::MirExprInst>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let then_string_base = string_counter + try count_strings_in_insts(&cond_insts);
+    let then_base = cond_result + 1;
+    let ret_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_statement, "value", 0, bs
+    );
+    var ret_node = ret_value;
+    var ret_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, ret_node, bs);
+    if std::mem::equal_bytes(ret_kind, "TryExpr") {
+        ret_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, ret_node, "value", 0, bs
+        );
+        ret_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, ret_node, bs);
+    }
+    if std::mem::equal_bytes(ret_kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, ret_node, bs
+        );
+        let bool_value = std::mem::equal_bytes(token, "true");
+        try stmts.append(compiled_mir::if_stmt(
+            if_index,
+            string_counter,
+            cond_result,
+            try compiled_mir::copy_expr_insts(&cond_insts),
+            0,
+            -1,
+            std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+            std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
+            compiled_mir::MirIfThenKind::ReturnBool,
+            bool_value,
+            llvm_return_type,
+            "",
+            "",
+            std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator()),
+            -1,
+            std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+            std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
+            then_string_base
+        ));
+        return MultiIfLowerResult {
+            temp_counter: then_base,
+            string_counter: then_string_base
+        };
+    }
+
+    if std::mem::equal_bytes(ret_kind, "Call") {
+        let call_type = try compiled_mir_types::lower_call_return_type(
+            ir_bytes, function_name, module_prefix, ret_node, bs
+        );
+        if !std::mem::equal_bytes(call_type, llvm_return_type) {
+            return error("compiled mir: carried return call must return this function's error union");
+        }
+        let callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, ret_node, bs
+        );
+        let call_args = try compiled_mir_lower_call::lower_call_args(
+            ir_bytes, function_name, module_prefix, locals_spec, ret_node, then_string_base, bs
+        );
+        let call_arg_strings = try compiled_mir_lower_call::count_string_args(&call_args);
+        let then_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, ret_node, bs
+        );
+        try stmts.append(compiled_mir::if_stmt(
+            if_index,
+            string_counter,
+            cond_result,
+            try compiled_mir::copy_expr_insts(&cond_insts),
+            0,
+            -1,
+            std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+            std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
+            compiled_mir::MirIfThenKind::ReturnCall,
+            false,
+            call_type,
+            then_module_prefix,
+            callee_name,
+            call_args,
+            -1,
+            std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+            std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
+            then_string_base
+        ));
+        return MultiIfLowerResult {
+            temp_counter: then_base + 1,
+            string_counter: then_string_base + call_arg_strings
+        };
+    }
+
+    var then_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let then_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        ret_node,
+        then_string_base,
+        then_base,
+        &var then_insts,
+        bs
+    );
+    let then_strings = try count_strings_in_insts(&then_insts);
+    try stmts.append(compiled_mir::if_stmt(
+        if_index,
+        string_counter,
+        cond_result,
+        cond_insts,
+        0,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
+        compiled_mir::MirIfThenKind::ReturnExpr,
+        false,
+        llvm_return_type,
+        "",
+        "",
+        std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator()),
+        then_result,
+        then_insts,
+        std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
+        then_string_base
+    ));
+    return MultiIfLowerResult {
+        temp_counter: then_result + 1,
+        string_counter: then_string_base + then_strings
+    };
+}
+
+fn lower_carried_return_if_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    if_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    if_index: i64,
+    states: &std::array::Array<CarriedScalarState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "condition", 0, bs
+    );
+    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_kind == 2 {
+        return error("compiled mir: carried return-if or condition is unsupported");
+    }
+    if cond_kind == 1 and !(try while_and_condition_eager_safe(ir_bytes, function_name, cond_node, bs)) {
+        return error("compiled mir: carried return-if condition is not eager-safe");
+    }
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_with_carried_renames(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        states,
+        bs
+    );
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "then", 0, bs
+    );
+    let then_count = try while_body_statement_count(ir_bytes, function_name, then_node, bs);
+    if then_count != 1 {
+        return error("compiled mir: carried return-if then-block must be a single return");
+    }
+    let return_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    let return_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, return_statement, bs
+    );
+    if !std::mem::equal_bytes(return_kind, "Return") {
+        return error("compiled mir: carried return-if then-block must return");
+    }
+    return try lower_carried_return_if_from_cond(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        locals_spec,
+        return_statement,
+        if_index,
+        string_counter,
+        cond_result,
+        cond_insts,
+        stmts,
+        bs
+    );
+}
+
+fn lower_guarded_return_then_scalar_assign(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    if_node: i64,
+    assign_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    if_index: i64,
+    loop_index: i64,
+    body_index: i64,
+    states: &var std::array::Array<CarriedScalarState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "then", 0, bs
+    );
+    let nested_if = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    let nested_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, nested_if, bs);
+    if !std::mem::equal_bytes(nested_kind, "If") {
+        return error("compiled mir: guarded scalar assignment must begin with a return-if");
+    }
+    let outer_cond = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "condition", 0, bs
+    );
+    let nested_cond = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, nested_if, "condition", 0, bs
+    );
+    let outer_kind = try short_circuit_kind(ir_bytes, function_name, outer_cond, bs);
+    let nested_cond_kind = try short_circuit_kind(ir_bytes, function_name, nested_cond, bs);
+    if outer_kind != 0 or nested_cond_kind != 0 {
+        return error("compiled mir: guarded scalar return condition must be simple");
+    }
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let outer_result = try lower_expr_with_carried_renames(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        outer_cond,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        states,
+        bs
+    );
+    let outer_strings = try count_strings_in_insts(&cond_insts);
+    let outer_len = cond_insts.len();
+    let nested_result = try lower_expr_with_carried_renames(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        nested_cond,
+        string_counter + outer_strings,
+        temp_counter + outer_len,
+        &var cond_insts,
+        states,
+        bs
+    );
+    let and_id = nested_result + 1;
+    try cond_insts.append(compiled_mir::binary_expr_inst(and_id, "and", outer_result, nested_result));
+    let nested_then = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, nested_if, "then", 0, bs
+    );
+    let nested_then_count = try while_body_statement_count(ir_bytes, function_name, nested_then, bs);
+    if nested_then_count != 1 {
+        return error("compiled mir: guarded scalar nested then-block must return");
+    }
+    let return_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, nested_then, "statement", 0, bs
+    );
+    let return_result = try lower_carried_return_if_from_cond(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        locals_spec,
+        return_statement,
+        if_index,
+        string_counter,
+        and_id,
+        cond_insts,
+        stmts,
+        bs
+    );
+    let assign_result = try lower_scalar_select_assign_from_if(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        if_node,
+        assign_node,
+        return_result.string_counter,
+        return_result.temp_counter,
+        loop_index,
+        body_index,
+        states,
+        stmts,
+        bs
+    );
+    return assign_result;
+}
 // lower_multi_while_leading_decrement lowers a bounded loop whose induction variable is advanced by a
 // leading self-decrement '<var> = <var> - <int>' (issue 1165 / 1162). The decrement reassigns the
 // counter at the top of the body, so every later body read of <var> means the decremented value. To
@@ -5758,6 +6499,9 @@ fn lower_multi_while_leading_decrement(
         ir_bytes, function_name, statement, "body", 0, bs
     );
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var carried_states = try collect_leading_decrement_carried_scalars(
+        ir_bytes, function_name, body_node, loop_index, bs
+    );
     let decrement_stmt = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, body_node, "statement", 0, bs
     );
@@ -5852,27 +6596,102 @@ fn lower_multi_while_leading_decrement(
         } else {
             if std::mem::equal_bytes(body_kind, "If") {
                 let body_if_index = loop_index * 1000 + body_index + 1;
-                let if_result = try lower_multi_if_statement(
-                    ir_bytes,
-                    function_name,
-                    module_prefix,
-                    llvm_return_type,
-                    locals_spec,
-                    body_stmt,
-                    body_string_counter,
-                    body_temp_counter,
-                    body_if_index,
-                    &var body_stmts,
-                    bs
-                );
-                body_temp_counter = if_result.temp_counter;
-                body_string_counter = if_result.string_counter;
+                if carried_states.len() > 0 {
+                    let assign_node = try if_scalar_assign_node_or_minus_one(
+                        ir_bytes, function_name, body_stmt, bs
+                    );
+                    var carried_result = MultiIfLowerResult {
+                        temp_counter: body_temp_counter,
+                        string_counter: body_string_counter
+                    };
+                    if assign_node >= 0 {
+                        let then_node = try ir_contract::body_child_sequence_from(
+                            ir_bytes, function_name, body_stmt, "then", 0, bs
+                        );
+                        let then_count = try while_body_statement_count(
+                            ir_bytes, function_name, then_node, bs
+                        );
+                        if then_count == 1 {
+                            carried_result = try lower_scalar_select_assign_from_if(
+                                ir_bytes,
+                                function_name,
+                                module_prefix,
+                                locals_spec,
+                                body_stmt,
+                                assign_node,
+                                body_string_counter,
+                                body_temp_counter,
+                                loop_index,
+                                body_index,
+                                &var carried_states,
+                                &var body_stmts,
+                                bs
+                            );
+                        } else {
+                            if then_count == 2 {
+                                carried_result = try lower_guarded_return_then_scalar_assign(
+                                    ir_bytes,
+                                    function_name,
+                                    module_prefix,
+                                    llvm_return_type,
+                                    locals_spec,
+                                    body_stmt,
+                                    assign_node,
+                                    body_string_counter,
+                                    body_temp_counter,
+                                    body_if_index,
+                                    loop_index,
+                                    body_index,
+                                    &var carried_states,
+                                    &var body_stmts,
+                                    bs
+                                );
+                            } else {
+                                return error("compiled mir: unsupported carried scalar if shape");
+                            }
+                        }
+                    } else {
+                        carried_result = try lower_carried_return_if_statement(
+                            ir_bytes,
+                            function_name,
+                            module_prefix,
+                            llvm_return_type,
+                            locals_spec,
+                            body_stmt,
+                            body_string_counter,
+                            body_temp_counter,
+                            body_if_index,
+                            &carried_states,
+                            &var body_stmts,
+                            bs
+                        );
+                    }
+                    body_temp_counter = carried_result.temp_counter;
+                    body_string_counter = carried_result.string_counter;
+                } else {
+                    let if_result = try lower_multi_if_statement(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        llvm_return_type,
+                        locals_spec,
+                        body_stmt,
+                        body_string_counter,
+                        body_temp_counter,
+                        body_if_index,
+                        &var body_stmts,
+                        bs
+                    );
+                    body_temp_counter = if_result.temp_counter;
+                    body_string_counter = if_result.string_counter;
+                }
             } else {
                 return error("compiled mir: unsupported leading-decrement while body statement");
             }
         }
         body_index = body_index + 1;
     }
+    let carried_scalars = try materialize_carried_scalars(&carried_states);
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
         head_var,
@@ -5890,6 +6709,7 @@ fn lower_multi_while_leading_decrement(
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         induction_var,
         std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
+        carried_scalars,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         -1
     ));
@@ -6345,6 +7165,7 @@ fn lower_multi_while_continue_latch(
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         latch_copy_var,
         std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
         init_insts,
         init_result_id
     ));
