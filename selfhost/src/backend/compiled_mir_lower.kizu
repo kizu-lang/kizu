@@ -4076,13 +4076,17 @@ fn try_call_success_type(
     return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, success_kizu);
 }
 // prefix_not_try_call_inner_or_minus_one recognizes a '!(try <callee>(<args>))' expression: a
-// prefix 'not' whose operand is a 'try <call>' over a free function (a try-call in sub-expression
-// position, issue 1165 / 1162). It returns the inner Call node so the caller can lower it as a
-// hoisted try-call whose unwrapped success bool is negated, or -1 when the shape does not match.
-// A field-mode method call is rejected (returns -1) so only free-function try-calls take this path.
+// prefix 'not' whose operand is a 'try <call>' over a free function returning an error-union bool
+// (a try-call in sub-expression position, issue 1165 / 1162). It returns the inner Call node so the
+// caller can lower it as a hoisted try-call whose unwrapped bool success is negated, or -1 when the
+// shape does not match. A field-mode method call is rejected (returns -1) so only free-function
+// try-calls take this path, and a callee whose unwrapped success type is not 'i1' is rejected too:
+// the renderer negates the success with 'xor i1' and wraps an 'i1' field, so a non-bool callee (e.g.
+// a '!i64') must fall through to the generic path rather than be silently mis-lowered.
 fn prefix_not_try_call_inner_or_minus_one(
     ir_bytes: []u8,
     function_name: []u8,
+    module_prefix: []u8,
     node: i64,
     bs: i64
 ) -> !i64 {
@@ -4113,6 +4117,12 @@ fn prefix_not_try_call_inner_or_minus_one(
     if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
         return -1;
     }
+    let success_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, inner, bs
+    );
+    if !std::mem::equal_bytes(success_type, "i1") {
+        return -1;
+    }
     return inner;
 }
 
@@ -4135,7 +4145,7 @@ fn lower_multi_return_statement(
     // call, propagates a failure as this function's own error union, and negates the unwrapped bool
     // success before wrapping it as the error-union success (issue 1165 / 1162).
     let return_not_try = try prefix_not_try_call_inner_or_minus_one(
-        ir_bytes, function_name, value, bs
+        ir_bytes, function_name, module_prefix, value, bs
     );
     if return_not_try >= 0 {
         let called_error_union = try compiled_mir_types::lower_call_return_type(
@@ -4556,7 +4566,7 @@ fn lower_multi_if_statement(
     // function's own error union, negates the unwrapped bool, and branches on the negation into the
     // bool-return then-block or a fall-through join the next statement renders into.
     let guard_not_try = try prefix_not_try_call_inner_or_minus_one(
-        ir_bytes, function_name, cond_node, bs
+        ir_bytes, function_name, module_prefix, cond_node, bs
     );
     if guard_not_try >= 0 {
         let guard_then_extra = try ir_contract::body_child_sequence_or_minus_one_from(
