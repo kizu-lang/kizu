@@ -2339,6 +2339,34 @@ fn append_lexer_closure_helper_body(
     return;
 }
 
+// append_runtime_stdlib_symbol_preamble emits the codegen-facts-path stdlib-symbol grouping --
+// the std::mem slice helpers (equal_bytes, len) and the std::string::String value constructor --
+// routing each to its LLVM runtime symbol. This is the exact set that was inline in
+// append_codegen_function_facts; other stdlib-symbol facts (e.g. std::mem::starts_with) belong
+// to their own emitter (append_mem_function_facts) and are deliberately not pulled in here. It is
+// the single source of truth for this grouping: append_codegen_function_facts supplies it into the
+// production selfhost.ir, and the format driver lowering gate supplies the identical grouping so it
+// lowers format_source over the same stdlib-symbol surface the production backend carries
+// (issue 1165 / 1162).
+pub fn append_runtime_stdlib_symbol_preamble(out: &var std::string::String) -> !void {
+    try append_stdlib_symbol_fact(out, "std::mem::equal_bytes", "kizu_selfhost__slice_equal", "bool");
+    try append_stdlib_symbol_fact(out, "std::mem::len", "kizu_selfhost__slice_len", "i64");
+    // The std::string::String value constructor lowers to the runtime-owned byte-buffer
+    // handle: std::string::String(allocator) calls @kizu_rt_string_new, taking the Allocator
+    // capability (%kizu.owned) and returning a String, which the compiled type lowering maps
+    // to %kizu.owned (issue 1165 slice 1). Routing the constructor through the stdlib-symbol
+    // fact lets the existing call lowering bind 'var out = std::string::String(allocator)' as a
+    // %kizu.owned local without a dedicated constructor node.
+    try append_stdlib_symbol_fact_arg(
+        out,
+        "std::string::String",
+        "kizu_rt_string_new",
+        "std::string::String",
+        "%kizu.owned"
+    );
+    return;
+}
+
 fn append_codegen_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
@@ -2500,22 +2528,7 @@ fn append_codegen_function_facts(
     try append_type_llvm_fact(out, "selfhost::ir::codegen::PayloadSpan", "%kizu.selfhost.codegen.payload_span");
     try append_type_llvm_fact(out, "std::kizu::ast::ChildRange", "%kizu.kizu.ast.child_range");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::IntEnv", "%kizu.selfhost.codegen.int_env");
-    try append_stdlib_symbol_fact(out, "std::mem::equal_bytes", "kizu_selfhost__slice_equal", "bool");
-    try append_stdlib_symbol_fact(out, "std::mem::len", "kizu_selfhost__slice_len", "i64");
-    // The std::string::String value constructor lowers to the runtime-owned
-    // byte-buffer handle: std::string::String(allocator) calls @kizu_rt_string_new,
-    // taking the Allocator capability (%kizu.owned) and returning a String, which
-    // the compiled type lowering maps to %kizu.owned (issue 1165 slice 1). Routing
-    // the constructor through the stdlib-symbol fact lets the existing call lowering
-    // bind 'var out = std::string::String(allocator)' as a %kizu.owned local without
-    // a dedicated constructor node.
-    try append_stdlib_symbol_fact_arg(
-        out,
-        "std::string::String",
-        "kizu_rt_string_new",
-        "std::string::String",
-        "%kizu.owned"
-    );
+    try append_runtime_stdlib_symbol_preamble(out);
     try append_codegen_reachable_helper_bodies(
         out,
         file.text,

@@ -51,6 +51,11 @@ func TestSelfhostCodegenClosureUsesComponentCatalog(t *testing.T) {
 		executableFunctions,
 		"fn append_codegen_closure_helper_body(",
 	)
+	preambleBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"pub fn append_runtime_stdlib_symbol_preamble(",
+	)
 	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn codegen_closure_role(")
 	policyBody := selfhostKizuFunctionBody(
 		t,
@@ -64,6 +69,7 @@ func TestSelfhostCodegenClosureUsesComponentCatalog(t *testing.T) {
 	)
 
 	assertCodegenClosureFactsPath(t, factsBody)
+	assertRuntimeStdlibSymbolPreamble(t, preambleBody)
 	assertCodegenClosureSeeds(t, closureBody)
 	assertCodegenClosureSharedBody(t, helperBody)
 	assertCodegenClosureRoles(t, roleBody)
@@ -82,7 +88,7 @@ func assertCodegenClosureFactsPath(t *testing.T, factsBody string) {
 		"append_selected_enum_variant_facts(",
 		"append_selected_struct_field_facts(",
 		"append_type_llvm_fact(",
-		"append_stdlib_symbol_fact(",
+		"append_runtime_stdlib_symbol_preamble(out)",
 		"\"FsReadBinding\"",
 	} {
 		if !strings.Contains(factsBody, fragment) {
@@ -95,6 +101,26 @@ func assertCodegenClosureFactsPath(t *testing.T, factsBody string) {
 	} {
 		if strings.Contains(factsBody, fragment) {
 			t.Fatalf("codegen function facts keep hand-written body selection %q", fragment)
+		}
+	}
+}
+
+// assertRuntimeStdlibSymbolPreamble pins the shared stdlib-symbol preamble helper as the single
+// source of truth both the production codegen facts path and the format driver lowering gate use:
+// it must still emit the std::mem slice helpers and the std::string::String value constructor that
+// routes through @kizu_rt_string_new (issue 1165 / 1162).
+func assertRuntimeStdlibSymbolPreamble(t *testing.T, preambleBody string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"append_stdlib_symbol_fact(out, \"std::mem::equal_bytes\"",
+		"append_stdlib_symbol_fact(out, \"std::mem::len\"",
+		"append_stdlib_symbol_fact_arg(",
+		"\"std::string::String\"",
+		"\"kizu_rt_string_new\"",
+		"\"%kizu.owned\"",
+	} {
+		if !strings.Contains(preambleBody, fragment) {
+			t.Fatalf("runtime stdlib-symbol preamble missing %q", fragment)
 		}
 	}
 }

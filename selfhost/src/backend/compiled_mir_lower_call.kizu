@@ -70,6 +70,28 @@ pub fn lower_single_call_arg(
             ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, bs
         );
     }
+    if std::mem::equal_bytes(arg_kind, "Prefix") {
+        // A '&'/'&var' borrow argument (e.g. '&format_tokens' at the leading_import_indices
+        // call, issue 1165) shares its pointee's ABI representation: lower_call_arg_type maps
+        // the parameter's '&std::array::Array<...>' through kizu_type_to_llvm, which strips the
+        // borrow marker, so the resolved arg_type is already the pointee's LLVM type and a
+        // borrowed value is passed exactly like the value it borrows. Unwrap the borrow to its
+        // operand and lower that operand with the same arg_type; the borrow contributes no
+        // inline descriptor of its own. Non-borrow prefixes ('not'/'neg') have no call-arg
+        // representation here and fall through to the unsupported-kind error.
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-prefix ", function_name, arg_node, bs
+        );
+        if std::mem::equal_bytes(op, "borrow") or std::mem::equal_bytes(op, "mut-borrow") {
+            let operand_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, arg_node, "right", 0, bs
+            );
+            return try lower_single_call_arg(
+                ir_bytes, function_name, module_prefix, params_spec, arg_type, operand_node,
+                string_index, bs
+            );
+        }
+    }
     return error("compiled mir: unsupported call arg kind");
 }
 
