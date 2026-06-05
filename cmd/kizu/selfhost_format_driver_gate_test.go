@@ -61,34 +61,43 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     leading_import_indices call now lowers through the borrow-prefix call-arg path
 //     (compiled_mir_lower_call::lower_single_call_arg) -- a borrow shares its pointee's ABI
 //     representation, so the operand lowers with the resolved arg type.
+//   - "compiled mir: unsupported then block": the first top-level 'if leading_imports.len() > 1
+//     { ... }' carries a no-else void multi-statement then-block, not a single Return. The
+//     if-lowering now recognizes that shape and descends through lower_void_then_body, dispatching
+//     each then-body statement by kind through the same per-kind lowering the top-level body loop
+//     uses. The leading 'let next_index = try index_after_leading_imports(&format_tokens);' binding
+//     lowers through that descent, so lowering advances into the then-body rather than stopping at
+//     the Return-only then-kind path.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
 	"compiled mir: unsupported call arg kind",
+	"compiled mir: unsupported then block",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. With
-// format_source's first statements lowered -- the cross-module 'lexer::tokenize' tokenizer, the
-// 'var out = std::string::String(allocator)' constructor (stdlib-symbol preamble), and the
-// 'leading_import_indices(allocator, source, &format_tokens)' sibling call with its
-// '&format_tokens' borrow argument -- lowering advances to format_source's first top-level 'if'
-// statement 'if leading_imports.len() > 1 { ... }' (selfhost/src/parser/format.kizu:28). Its
-// then-block is a void multi-statement body (let bindings, a nested if, sibling/method call
-// statements, and several assignments to outer vars), but the compiled if-lowering only supports a
-// continue-latch then-block or a single-Return then-block
-// (selfhost/src/backend/compiled_mir_lower.kizu:4900), so it raises
-// "compiled mir: unsupported then block". Lowering a general void multi-statement if-then block is
-// the next capability -- a multi-part blocker (statement-list branch bodies, nested if, call
-// statements, multi-assign) -- so the gate stops here and pins the measured next blocker as a
-// behavior assertion rather than a comment (issue 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: unsupported then block"
+// the no-else void multi-statement then-block descending through lower_void_then_body, lowering now
+// reaches the then-block's second statement
+// 'let last_import = try format_tokens.get(next_index - 1);'
+// (selfhost/src/parser/format.kizu:30). Lowering that 'format_tokens.get(...)' binding resolves the
+// '.get()' value receiver's kizu type, but 'format_tokens' is bound at the top level by
+// 'var format_tokens = try lexer::tokenize(allocator, source);'
+// (selfhost/src/parser/format.kizu:13), a cross-module try-call. The IR-scan local-type resolver
+// (compiled_mir_types::resolve_let_value_kizu_type's TryExpr branch) looks up 'lexer::tokenize's
+// return type under the format module prefix and misses the sibling-module symbol, so it raises
+// "compiled mir: local type not found". Resolving a local bound by a cross-module try-call --
+// mirroring the generic cross-module callee resolution lower_call_return_type already performs --
+// is the next capability, so the gate stops here and pins the measured next blocker as a behavior
+// assertion rather than a comment (issue 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled mir: local type not found"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
-// shared stdlib-symbol preamble, the full component signature set, and the borrow-prefix call-arg
-// lowering now carry format_source past the std::string::String constructor and the
-// leading_import_indices sibling call (with its '&format_tokens' borrow argument), so lowering
-// advances into the first top-level 'if' statement, where the void multi-statement then-block is
+// no-else void multi-statement then-block of the first top-level 'if' now descends through
+// lower_void_then_body, lowering its leading 'let next_index = try
+// index_after_leading_imports(&format_tokens);' binding, so lowering advances into the then-body to
+// its second statement 'let last_import = try format_tokens.get(next_index - 1);', where resolving
+// the '.get()' receiver 'format_tokens' (bound by the cross-module 'try lexer::tokenize(...)') is
 // the next pinned blocker (issue 1165 / 1162).
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
