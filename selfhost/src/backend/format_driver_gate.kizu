@@ -1,0 +1,103 @@
+import selfhost::parser;
+import selfhost::ir::component_function_catalog;
+import selfhost::ir::executable_body;
+import selfhost::ir::function_signature;
+import selfhost::backend::compiled_abi_params;
+import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_llvm;
+
+// format_driver_lowering_gate drives the production compiled LLVM lowering over the real
+// selfhost::parser::format::format_source body and reports the measured next blocker, instead of
+// pinning the blocker in a comment (issue 1165 / 1162). It reads the on-disk format.kizu, parses
+// it, builds the production ComponentFunctionCatalog for the 'selfhost::parser::format' component,
+// finds format_source, and emits its real signature + body IR facts the same way the IR fact
+// catalog does. It then derives the compiled params_spec / llvm_symbol from those facts and calls
+// compiled_llvm::append_compiled_function_auto -- the production single-member lowering driver --
+// over them. The driver's call surface is accepted by the facts layer (proven by
+// format_driver_facts_gate), so lowering proceeds into the generic multi-statement machinery and
+// stops at the format_source loop's terminal branch-merge induction latch: its while body ends with
+// an if/else that advances 'index' on both arms (a loop-terminating 'index = format_tokens.len()'
+// on the eof arm and an 'index = index + 1' on the else arm) rather than a trailing increment, so
+// while_induction_var raises "compiled mir: while body must end with the induction increment". The
+// gate is expected to fail with that error; the backend test asserts it, pinning the measured
+// blocker as a behavior gate. When the branch-merge induction latch lands, lowering advances and
+// the asserted blocker moves to the next unsupported construct.
+pub fn format_driver_lowering_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    let path = "selfhost/src/parser/format.kizu";
+    let text = try std::fs::read_file(io, path);
+    var parsed = try parser::parse_checked_file(allocator, path, text);
+    defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator, text, parsed.ast, parsed.root, "selfhost::parser::format"
+    );
+    defer catalog.deinit();
+
+    let format_index = try component_function_catalog::find_local_function_index(
+        &catalog, "format_source"
+    );
+    let format_node = try component_function_catalog::function_node_id(&catalog, format_index);
+    let body = try format_driver_body_node(parsed.ast, format_node);
+
+    var facts = std::string::String(allocator);
+    defer facts.deinit();
+    try function_signature::append_catalog(
+        &var facts, text, parsed.ast, format_node, &catalog, format_index
+    );
+    try executable_body::append_catalog_helper_body_ir(
+        &var facts, text, parsed.ast, &catalog, format_index, "checked-format-driver", body
+    );
+
+    // Round-trip the facts through a file so ir_bytes is a freshly-read owned []u8 with external
+    // provenance, exactly like the production backend which reads target/selfhost/selfhost.ir back
+    // before lowering. A String.as_bytes() borrow cannot escape into the params_spec / LLVM-text
+    // builders the lowering writes into, so the file boundary is what makes the slices ownable.
+    let facts_path = "target/selfhost/format_driver_gate.ir";
+    if !(try std::fs::exists(io, "target")) {
+        try std::fs::create_dir(io, "target");
+    }
+    if !(try std::fs::exists(io, "target/selfhost")) {
+        try std::fs::create_dir(io, "target/selfhost");
+    }
+    let facts_bytes = facts.as_bytes();
+    try std::fs::write_file(io, &facts_path, &facts_bytes);
+    let ir_bytes = try std::fs::read_file(io, &facts_path);
+
+    try format_driver_lower(allocator, ir_bytes);
+    return;
+}
+
+fn format_driver_lower(allocator: Allocator, ir_bytes: []u8) -> !void {
+    let function_name = "selfhost::parser::format::format_source";
+    var params_spec = std::string::String(allocator);
+    defer params_spec.deinit();
+    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name);
+    let params_spec_bytes = params_spec.as_bytes();
+    var llvm_symbol = std::string::String(allocator);
+    defer llvm_symbol.deinit();
+    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, function_name);
+    let llvm_symbol_bytes = llvm_symbol.as_bytes();
+
+    var out = std::string::String(allocator);
+    defer out.deinit();
+    try compiled_llvm::append_compiled_function_auto(
+        &var out, ir_bytes, function_name, &llvm_symbol_bytes, &params_spec_bytes
+    );
+
+    // Reached only if format_source lowers without error; with the branch-merge induction latch
+    // still pending this print is unreachable and the gate fails at the lowering blocker instead.
+    print("format-driver-lowering-ok");
+    return;
+}
+
+fn format_driver_body_node(
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return fn_decl.body;,
+        _ => return error("format driver gate: missing format_source body");,
+    }
+}

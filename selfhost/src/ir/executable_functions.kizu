@@ -1993,8 +1993,14 @@ fn collect_catalog_closure_call_callee(
 // element-size-generic array runtime ABI, not a component function, so the closure does
 // not walk it (issue 1165); the std::string::String mutators out.append_bytes(...) /
 // out.append_byte(...) lower inline through the @kizu_rt_string_append_* ABI the same way.
-// Any other value-method callee is an explicit error. A namespace-mode FieldExpr is a
-// qualified callee resolved against the component prefix.
+// '.deinit()' is the owned-handle destructor shared by std::array::Array<T> and
+// std::string::String: both lower it inline through their runtime free ABI, so it is a generic
+// owned-handle builtin rather than a component member (it carries no resolved receiver type at
+// this pre-resolution AST layer, so it is admitted at the same generic value-method level as the
+// element / append builtins, not narrowed by receiver). Its necessity is exercised on the real
+// format_source walk by format_driver_facts_gate, whose driver frees format_tokens / leading_imports
+// through '.deinit()' (issue 1165 / 1162). Any other value-method callee is an explicit error. A
+// namespace-mode FieldExpr is a qualified callee resolved against the component prefix.
 fn collect_catalog_closure_field_callee(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -3574,4 +3580,74 @@ fn ast_node_text(
     let node = ast.get(node_id);
     let span = &node.span;
     return std::mem::trim_ascii(text[span.start..span.end]);
+}
+
+// format_driver_facts_gate drives the real component catalog + closure collector over the
+// actual selfhost::parser::format::format_source body, instead of asserting on the emitted
+// source text (issue 1165 / 1162). It reads the on-disk format.kizu, parses it, builds the
+// production ComponentFunctionCatalog for the 'selfhost::parser::format' component, finds
+// format_source, and runs collect_catalog_closure_direct_callees -- the same closure walk the
+// IR fact catalog drives -- over its body with the format component prefix. The walk classifies
+// every call form in the driver's body: the std::string::String(allocator) value constructor and
+// the lexer::tokenize(...) tokenizer entry as inline / cross-module runtime builtins, the
+// '.deinit()' owned-handle destructor as a value-method builtin, and the format helper calls as
+// walked component members appended to pending. If any of the three driver call-surface
+// capabilities regressed, the walk would raise "format closure: unsupported call form" /
+// "unsupported qualified callee" and the gate would fail with that error -- so the gate exercises
+// the classifications on the real walk rather than pinning their source text. It then pins the
+// tokenize external-callee allowance is scoped to the format component (not a global crossing)
+// through the production predicate. With the driver call surface accepted, the next blocker is the
+// LLVM lowering (measured by format_driver_lowering_gate in the backend), so emitting format_source
+// onto the compiled path stays gated on the branch-merge induction latch rather than the facts.
+pub fn format_driver_facts_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    let path = "selfhost/src/parser/format.kizu";
+    let text = try std::fs::read_file(io, path);
+    var parsed = try parser::parse_checked_file(allocator, path, text);
+    defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator, text, parsed.ast, parsed.root, "selfhost::parser::format"
+    );
+    defer catalog.deinit();
+
+    let format_index = try component_function_catalog::find_local_function_index(
+        &catalog, "format_source"
+    );
+    let format_node = try component_function_catalog::function_node_id(&catalog, format_index);
+    let body = try function_body_from_node(parsed.ast, format_node);
+
+    var pending = std::array::Array<i64>(allocator);
+    defer pending.deinit();
+    try collect_catalog_closure_direct_callees(
+        text,
+        parsed.ast,
+        body,
+        &catalog,
+        &var pending,
+        "selfhost::parser::format::",
+        "format closure: unsupported call form",
+        "format closure: unsupported qualified callee"
+    );
+
+    // The driver body calls real format component members (leading_import_indices,
+    // append_preserved_line_comments, token_text, ...), so a successful walk must have appended
+    // walked-member work items; an empty queue would mean the closure no longer recognises the
+    // driver's component calls.
+    std::testing::expect(pending.len() > 0);
+
+    // The lexer::tokenize crossing is scoped to the format component prefix, not a global
+    // allowance: the std::kizu::parser closure (a different component) must still reject it.
+    std::testing::expect(collect_catalog_closure_external_callee_allowed(
+        "lexer::tokenize", "selfhost::parser::format::"
+    ));
+    std::testing::expect(!collect_catalog_closure_external_callee_allowed(
+        "lexer::tokenize", "std::kizu::parser::"
+    ));
+    std::testing::expect(collect_catalog_closure_external_callee_allowed(
+        "lexer::is_eof", "selfhost::parser::format::"
+    ));
+
+    print("format-driver-walk-ok");
+    return;
 }

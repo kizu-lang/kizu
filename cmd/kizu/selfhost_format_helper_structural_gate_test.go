@@ -178,7 +178,6 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertFormatClosureCatalogDriven(t, irEmission, backendEmission)
 	assertFormatClosureSeeds(t, irEmission, backendEmission)
 	assertFormatClosureExcludesHandPath(t, irEmission, backendEmission)
-	assertFormatDriverCallSurfacePrepared(t, irEmission)
 	assertParseFormatAllocNotExtended(t, parseLLVM)
 	assertImportSortShapeValidated(t)
 	assertLeadingImportShapeValidated(t)
@@ -539,13 +538,19 @@ func assertFormatClosureSeeds(t *testing.T, irEmission, backendEmission string) 
 
 // assertFormatClosureExcludesHandPath keeps the indentation / import-sort / whole-formatter
 // helpers out of the compiled closure so the migration cannot smuggle parse_format_alloc's
-// logic in as a seed instead of lowering a real read-only component.
+// logic in as a seed instead of lowering a real read-only component. The IR-side check is scoped
+// to the production seed emitter append_format_function_facts (where the format closure appends
+// its members to the BFS pending queue) so the behavior gates may still name format_source when
+// they drive the real catalog / closure / lowering over it -- naming it in a gate is not seeding
+// it into the compiled closure. The backend BFS (cli_llvm.kizu) seeds no format_source, and the
+// lowering gate lives in a separate backend file, so the backend check stays a bare presence check.
 func assertFormatClosureExcludesHandPath(t *testing.T, irEmission, backendEmission string) {
 	t.Helper()
+	seedEmitter := formatClosureSeedEmitter(t, irEmission)
 	for _, helper := range formatHandPathOnlyHelpers {
 		quoted := `"` + helper + `"`
-		if strings.Contains(irEmission, quoted) {
-			t.Errorf("executable_functions.kizu format closure seeds hand-path helper %q", helper)
+		if strings.Contains(seedEmitter, quoted) {
+			t.Errorf("append_format_function_facts seeds hand-path helper %q", helper)
 		}
 		if strings.Contains(backendEmission, quoted) {
 			t.Errorf("cli_llvm.kizu format closure seeds hand-path helper %q", helper)
@@ -553,46 +558,41 @@ func assertFormatClosureExcludesHandPath(t *testing.T, irEmission, backendEmissi
 	}
 }
 
-// formatDriverCallSurfaceFacts pins the generic facts-collection capabilities that the shared
-// component-closure callee collector needs for the format_source driver's call surface (issue
-// 1165 / 1162). format_source seeds its token stream through lexer::tokenize, constructs its
-// '%kizu.owned' String accumulator through the std::string::String(allocator) value constructor,
-// and frees its owned Array handles through '.deinit()'. The collector classifies each as an
-// inline runtime builtin / allowed cross-module callee rather than a walked component member, so
-// emitting format_source's IR facts no longer raises "format closure: unsupported call form" /
-// "unsupported qualified callee". These are the precisely-measured first blockers of the
-// format_source connection: with them the facts layer accepts the driver call surface, and the
-// next blocker is the LLVM lowering -- the generic while machinery's induction-latch detection
-// (while_induction_var / while_carries_induction_var) requires a trailing-Assign latch, but
-// format_source advances its scan inside a terminal if/else branch-merge (a loop-terminating
-// 'index = format_tokens.len()' on the eof arm and an 'index = index + 1' advance on the else
-// arm), so it stays on the hand-written parse_format_alloc path until the branch-merge induction
-// latch lands. Pinning these keeps the driver-call-surface capabilities from regressing.
-//
-// format_source is not in the closure BFS seed list yet (assertFormatClosureExcludesHandPath keeps
-// it off the compiled closure), so these three classifications are not exercised by the current
-// walk -- they are the forward-declared facts layer that the next connection PR's BFS walk reaches
-// once format_source is seeded. The lexer::tokenize allowance is scoped to the
-// 'selfhost::parser::format::' prefix; std::string::String / deinit are shared generic builtins,
-// and no currently seeded closure member calls them, so adding them changes no existing walk.
-var formatDriverCallSurfaceFacts = []string{
-	`std::mem::equal_bytes(callee_text, "std::string::String")`,
-	`std::mem::equal_bytes(callee_text, "lexer::tokenize")`,
-	`std::mem::equal_bytes(method, "deinit")`,
-}
-
-// assertFormatDriverCallSurfacePrepared pins that the shared closure callee collector keeps the
-// generic capabilities the format_source driver call surface needs (the std::string::String
-// constructor, the lexer::tokenize tokenizer entry, and the owned-handle '.deinit()'), so the
-// facts layer of the format_source connection cannot regress to rejecting them.
-func assertFormatDriverCallSurfacePrepared(t *testing.T, irEmission string) {
+// formatClosureSeedEmitter returns the body of append_format_function_facts, the function that
+// seeds the selfhost::parser::format compiled closure into the BFS pending queue. Scoping the
+// hand-path exclusion to this function lets the behavior gates reference format_source by name
+// (to drive the real catalog / closure / lowering over it) without tripping the seed check.
+func formatClosureSeedEmitter(t *testing.T, irEmission string) string {
 	t.Helper()
-	for _, fact := range formatDriverCallSurfaceFacts {
-		if !strings.Contains(irEmission, fact) {
-			t.Errorf("executable_functions.kizu missing format driver call-surface capability: %q", fact)
+	lines := strings.Split(irEmission, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "fn append_format_function_facts") {
+			start = i
+			break
 		}
 	}
+	if start < 0 {
+		t.Fatalf("append_format_function_facts not found in executable_functions.kizu")
+	}
+	for i := start; i < len(lines); i++ {
+		if lines[i] == "}" {
+			return strings.Join(lines[start:i+1], "\n")
+		}
+	}
+	t.Fatalf("append_format_function_facts has no closing brace")
+	return ""
 }
+
+// The format_source driver call surface (the std::string::String(allocator) constructor, the
+// lexer::tokenize tokenizer entry, and the owned-handle '.deinit()') is no longer pinned here as a
+// source-text presence check (issue 1165 / 1162). It is exercised directly by
+// TestSelfhostFormatDriverFactsGate, which runs the production component catalog + closure
+// collector over the real selfhost::parser::format::format_source body and fails if any of the
+// three classifications regress, and by TestSelfhostFormatDriverLoweringGate, which drives the
+// compiled lowering over format_source's real IR facts and pins the measured next blocker (the
+// terminal branch-merge induction latch). Those behavior gates supersede the former string-presence
+// assertion.
 
 // assertParseFormatAllocNotExtended pins that the hand-written parse_format_alloc emitter is
 // not grown and does not start calling the compiled formatter helpers.
