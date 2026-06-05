@@ -4063,8 +4063,21 @@ fn try_call_success_type(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
+    // A 'try lexer::tokenize(...)' crosses a module boundary through an import alias, so its
+    // '!T' signature-return fact is keyed under the callee's real owning module rather than
+    // the caller's module prefix. Resolve the fully-qualified name generically (the same
+    // resolver lower_call_return_type uses) and read the fact with an empty prefix.
+    let qualified = compiled_mir_types::cross_module_callee_qualified_name_or_empty(
+        ir_bytes, callee_name
+    );
+    var lookup_prefix = module_prefix;
+    var lookup_name = callee_name;
+    if std::mem::len(qualified) > 0 {
+        lookup_prefix = ir_bytes[0..0];
+        lookup_name = qualified;
+    }
     let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, "function-signature-return ", module_prefix, callee_name
+        ir_bytes, "function-signature-return ", lookup_prefix, lookup_name
     );
     if std::mem::len(ret_kizu) == 0 {
         return error("compiled mir: try-call callee return type not found");
@@ -4073,7 +4086,7 @@ fn try_call_success_type(
         return error("compiled mir: try-call callee must return an error union");
     }
     let success_kizu = ret_kizu[1..std::mem::len(ret_kizu)];
-    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, success_kizu);
+    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, lookup_prefix, success_kizu);
 }
 // prefix_not_try_call_inner_or_minus_one recognizes a '!(try <callee>(<args>))' expression: a
 // prefix 'not' whose operand is a 'try <call>' over a free function returning an error-union bool
