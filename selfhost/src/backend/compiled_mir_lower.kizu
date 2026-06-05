@@ -5235,6 +5235,162 @@ fn while_continue_induction_var(
     }
     return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
 }
+// branch_arm_last_assign_or_minus_one returns the closing statement of a branch-merge arm block
+// when it is an Assign, or -1 otherwise. A branch-merge induction latch advances the loop counter
+// with the Assign that closes each terminal-if arm, so the arm classifiers key on this last
+// statement (issue 1165 / 1162).
+fn branch_arm_last_assign_or_minus_one(
+    ir_bytes: []u8,
+    function_name: []u8,
+    block_node: i64,
+    bs: i64
+) -> !i64 {
+    let count = try while_body_statement_count(ir_bytes, function_name, block_node, bs);
+    if count < 1 {
+        return -1;
+    }
+    let last_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, block_node, "statement", count - 1, bs
+    );
+    let last_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, last_stmt, bs);
+    if !std::mem::equal_bytes(last_kind, "Assign") {
+        return -1;
+    }
+    return last_stmt;
+}
+// branch_arm_assign_target_or_empty returns the Var name a branch-merge arm assigns in its closing
+// Assign, or "" when the arm does not end in an Assign to a Var (issue 1165 / 1162).
+fn branch_arm_assign_target_or_empty(
+    ir_bytes: []u8,
+    function_name: []u8,
+    block_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let assign = try branch_arm_last_assign_or_minus_one(ir_bytes, function_name, block_node, bs);
+    if assign < 0 {
+        return "";
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, assign, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return "";
+    }
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
+}
+// branch_arm_is_constant_step reports whether a branch-merge arm closes with a constant-step
+// '<var> = <var> + <int>' increment (the advance arm) rather than a loop-terminating jump such as
+// 'index = format_tokens.len()' (issue 1165 / 1162).
+fn branch_arm_is_constant_step(
+    ir_bytes: []u8,
+    function_name: []u8,
+    block_node: i64,
+    bs: i64
+) -> !bool {
+    let assign = try branch_arm_last_assign_or_minus_one(ir_bytes, function_name, block_node, bs);
+    if assign < 0 {
+        return false;
+    }
+    return try while_assign_is_constant_step(ir_bytes, function_name, assign, bs);
+}
+// while_branch_merge_terminal_if_or_minus_one returns the terminal branch-merge If node at the end
+// of a while body, or -1 when the last body statement is not one. A branch-merge induction latch
+// advances the loop counter inside a terminal if/else whose then- and else-blocks each END in an
+// Assign to the same Var: one arm a constant-step '<var> = <var> + <int>' advance, the other a
+// loop-terminating '<var> = <expr>' jump (e.g. 'index = format_tokens.len()' on format_source's eof
+// arm) that drives the counter to the bound so the header comparison fails on the next test. Only
+// this exact shape returns the If; every near miss -- last statement not an If, a missing/Empty
+// else, an else that is an else-if (another If) rather than a block, an arm not ending in an Assign
+// to a Var, the two arms targeting different vars, or neither/both arms being the constant-step
+// advance -- returns -1 so callers classify without erroring. The dedicated lowering re-validates
+// the shape with explicit errors before it lowers (issue 1165 / 1162).
+fn while_branch_merge_terminal_if_or_minus_one(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> !i64 {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_node, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 1 {
+        return -1;
+    }
+    let last_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let last_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, last_stmt, bs);
+    if !std::mem::equal_bytes(last_kind, "If") {
+        return -1;
+    }
+    let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, last_stmt, "else", 0, bs
+    );
+    if else_node < 0 {
+        return -1;
+    }
+    let else_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, else_node, bs);
+    // A missing else is emitted as an Empty node; an else-if chains another If here. Neither is a
+    // two-block branch merge.
+    if std::mem::equal_bytes(else_kind, "Empty") or std::mem::equal_bytes(else_kind, "If") {
+        return -1;
+    }
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, last_stmt, "then", 0, bs
+    );
+    let then_target = try branch_arm_assign_target_or_empty(ir_bytes, function_name, then_node, bs);
+    if std::mem::len(then_target) == 0 {
+        return -1;
+    }
+    let else_target = try branch_arm_assign_target_or_empty(ir_bytes, function_name, else_node, bs);
+    if std::mem::len(else_target) == 0 {
+        return -1;
+    }
+    if !std::mem::equal_bytes(then_target, else_target) {
+        return -1;
+    }
+    // Exactly one arm must advance by a constant step; the other is the loop-terminating jump.
+    let then_step = try branch_arm_is_constant_step(ir_bytes, function_name, then_node, bs);
+    let else_step = try branch_arm_is_constant_step(ir_bytes, function_name, else_node, bs);
+    if then_step == else_step {
+        return -1;
+    }
+    return last_stmt;
+}
+// while_is_branch_merge_latch reports whether a while loop advances its induction counter through a
+// terminal branch-merge if/else (issue 1165 / 1162).
+fn while_is_branch_merge_latch(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> !bool {
+    let if_node = try while_branch_merge_terminal_if_or_minus_one(
+        ir_bytes, function_name, while_node, bs
+    );
+    return if_node >= 0;
+}
+// while_branch_merge_induction_var returns the induction variable a branch-merge latch advances:
+// the common Assign target both terminal-if arms close on (issue 1165 / 1162).
+fn while_branch_merge_induction_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let if_node = try while_branch_merge_terminal_if_or_minus_one(
+        ir_bytes, function_name, while_node, bs
+    );
+    if if_node < 0 {
+        return error("compiled mir: while body is not a branch-merge induction latch");
+    }
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "then", 0, bs
+    );
+    return try branch_arm_assign_target_or_empty(ir_bytes, function_name, then_node, bs);
+}
 fn while_carries_induction_var(
     ir_bytes: []u8,
     function_name: []u8,
@@ -5247,6 +5403,15 @@ fn while_carries_induction_var(
     if try while_is_continue_latch(ir_bytes, function_name, while_node, bs) {
         let continue_var = try while_continue_induction_var(ir_bytes, function_name, while_node, bs);
         return std::mem::equal_bytes(continue_var, name);
+    }
+    // A branch-merge latch loop has no trailing increment run either; its induction variable is the
+    // common Assign target both arms of the terminal if/else close on (one arm a constant-step
+    // advance, the other a loop-terminating jump to the bound). Recognizing it here keeps the
+    // trailing-increment count below from erroring on the non-Assign (terminal If) tail (issue
+    // 1165 / 1162).
+    if try while_is_branch_merge_latch(ir_bytes, function_name, while_node, bs) {
+        let merge_var = try while_branch_merge_induction_var(ir_bytes, function_name, while_node, bs);
+        return std::mem::equal_bytes(merge_var, name);
     }
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, while_node, "body", 0, bs
