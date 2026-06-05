@@ -568,6 +568,13 @@ func assertFormatClosureExcludesHandPath(t *testing.T, irEmission, backendEmissi
 // 'index = format_tokens.len()' on the eof arm and an 'index = index + 1' advance on the else
 // arm), so it stays on the hand-written parse_format_alloc path until the branch-merge induction
 // latch lands. Pinning these keeps the driver-call-surface capabilities from regressing.
+//
+// format_source is not in the closure BFS seed list yet (assertFormatClosureExcludesHandPath keeps
+// it off the compiled closure), so these three classifications are not exercised by the current
+// walk -- they are the forward-declared facts layer that the next connection PR's BFS walk reaches
+// once format_source is seeded. The lexer::tokenize allowance is scoped to the
+// 'selfhost::parser::format::' prefix; std::string::String / deinit are shared generic builtins,
+// and no currently seeded closure member calls them, so adding them changes no existing walk.
 var formatDriverCallSurfaceFacts = []string{
 	`std::mem::equal_bytes(callee_text, "std::string::String")`,
 	`std::mem::equal_bytes(callee_text, "lexer::tokenize")`,
