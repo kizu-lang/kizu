@@ -186,6 +186,7 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertAppendIndentShapeValidated(t)
 	assertCommentPreserveShapeValidated(t)
 	assertIfNotTryGuardShapeValidated(t)
+	assertVoidThenBlockShapeValidated(t)
 }
 
 // ifNotTryGuardShapeValidationErrors pins the explicit shape-validation diagnostic that the
@@ -207,6 +208,29 @@ func assertIfNotTryGuardShapeValidated(t *testing.T) {
 	t.Helper()
 	mirLower := readSelfhostSrc(t, filepath.Join("backend", "compiled_mir_lower.kizu"))
 	for _, diagnostic := range ifNotTryGuardShapeValidationErrors {
+		if !strings.Contains(mirLower, diagnostic) {
+			t.Errorf("compiled_mir_lower.kizu missing shape-validation diagnostic: %q", diagnostic)
+		}
+	}
+}
+
+// voidThenBlockShapeValidationErrors pins the explicit shape-validation diagnostic the no-else void
+// multi-statement then-block lowering raises when the then-block carries an else arm. The void body
+// is rendered (once the renderer lands) as a then-only conditional branch into a fall-through join,
+// so an else arm with a real body would be silently dropped -- it must be an explicit error rather
+// than a silent mis-lower. An absent or 'Empty' else child is accepted. Pinning the string keeps
+// the else-absence check from being quietly removed before the renderer exists to honor it.
+var voidThenBlockShapeValidationErrors = []string{
+	"compiled mir: void then block must not carry an else arm",
+}
+
+// assertVoidThenBlockShapeValidated pins that the no-else void multi-statement then-block lowering
+// keeps its explicit else-absence diagnostic, so a then-block that carries a real else arm is
+// rejected with an error rather than descended into with the else arm silently dropped.
+func assertVoidThenBlockShapeValidated(t *testing.T) {
+	t.Helper()
+	mirLower := readSelfhostSrc(t, filepath.Join("backend", "compiled_mir_lower.kizu"))
+	for _, diagnostic := range voidThenBlockShapeValidationErrors {
 		if !strings.Contains(mirLower, diagnostic) {
 			t.Errorf("compiled_mir_lower.kizu missing shape-validation diagnostic: %q", diagnostic)
 		}

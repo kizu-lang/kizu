@@ -4165,6 +4165,32 @@ fn require_if_not_try_guard_no_else(
     return;
 }
 
+// require_void_then_block_no_else rejects a no-else void multi-statement if-then block that also
+// carries an else arm (issue 1165 / 1162). The void then-block is rendered (once the renderer lands)
+// as a then-only conditional branch into a fall-through join the following statements render into,
+// so an else block with a real body would be silently dropped. It is an explicit error instead of a
+// silent mis-lower. A missing else child reads as either an absent child or an 'Empty' node
+// depending on how the body facts were emitted; both are accepted. Mirrors
+// require_if_not_try_guard_no_else, which pins the same then-only-render invariant for the guard.
+fn require_void_then_block_no_else(
+    ir_bytes: []u8,
+    function_name: []u8,
+    if_node: i64,
+    bs: i64
+) -> !void {
+    let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, if_node, "else", 0, bs
+    );
+    if else_node < 0 {
+        return;
+    }
+    let else_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, else_node, bs);
+    if !std::mem::equal_bytes(else_kind, "Empty") {
+        return error("compiled mir: void then block must not carry an else arm");
+    }
+    return;
+}
+
 fn lower_multi_return_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4968,7 +4994,17 @@ fn lower_multi_if_statement(
             // capability blocker rather than stopping at the Return-only then-kind machinery (issue
             // 1165 / 1162). Rendering the lowered void body is the capability that follows, so until
             // it lands the descent always surfaces a blocker.
+            //
+            // A void then-block is rendered (once the renderer lands) as a then-only conditional
+            // branch into a fall-through join, so an else arm with a real body would be silently
+            // dropped. Reject it explicitly now so the future renderer can never drop it -- an
+            // absent or 'Empty' else child is accepted (issue 1165 / 1162).
+            try require_void_then_block_no_else(ir_bytes, function_name, statement, bs);
+            // then_body_stmts is not moved into an if_stmt on this path (the void body is not yet
+            // renderable), so its appended MirStmts -- and any inner arrays they own -- are released
+            // on every exit, including the descent's error propagation, rather than leaking.
             var then_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+            defer then_body_stmts.deinit();
             let _then_body = try lower_void_then_body(
                 ir_bytes,
                 function_name,
