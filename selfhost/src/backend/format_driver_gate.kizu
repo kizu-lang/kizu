@@ -14,14 +14,18 @@ import selfhost::backend::compiled_llvm;
 // catalog does. It then derives the compiled params_spec / llvm_symbol from those facts and calls
 // compiled_llvm::append_compiled_function_auto -- the production single-member lowering driver --
 // over them. The driver's call surface is accepted by the facts layer (proven by
-// format_driver_facts_gate), so lowering proceeds into the generic multi-statement machinery and
-// stops at the format_source loop's terminal branch-merge induction latch: its while body ends with
-// an if/else that advances 'index' on both arms (a loop-terminating 'index = format_tokens.len()'
-// on the eof arm and an 'index = index + 1' on the else arm) rather than a trailing increment, so
-// while_induction_var raises "compiled mir: while body must end with the induction increment". The
-// gate is expected to fail with that error; the backend test asserts it, pinning the measured
-// blocker as a behavior gate. When the branch-merge induction latch lands, lowering advances and
-// the asserted blocker moves to the next unsupported construct.
+// format_driver_facts_gate), so lowering proceeds into the generic multi-statement machinery
+// (lower_multi_statement_function). The first thing it does for each top-level 'var' is probe
+// whether the var seeds a loop induction counter (statement_is_induction_init ->
+// while_carries_induction_var -> while_trailing_increment_count), and that probe requires the scan
+// loop's body to end in a trailing-increment Assign. format_source's scan loop instead advances
+// 'index' inside a terminal if/else branch-merge (a loop-terminating 'index = format_tokens.len()'
+// on the eof arm and an 'index = index + 1' on the else arm), so while_trailing_increment_count
+// raises "compiled mir: while body must end with the induction increment"
+// (selfhost/src/backend/compiled_mir_lower.kizu:5543) on the very first 'var'. The gate is expected
+// to fail with that error; the backend test asserts it, pinning the measured blocker as a behavior
+// gate. When the branch-merge induction latch lands, the probe accepts the loop and the asserted
+// blocker moves to the next unsupported construct.
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();

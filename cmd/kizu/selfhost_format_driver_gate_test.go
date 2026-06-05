@@ -45,16 +45,19 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 	return out.String(), err
 }
 
-// formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering raises when it
-// reaches the format_source driver's terminal branch-merge induction latch. The lowering gate
-// drives the real lowering over format_source's emitted IR facts and must stop here; this pins
-// the measured next blocker as a behavior assertion rather than a comment (issue 1165 / 1162).
+// formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering raises when its
+// induction-init probe (statement_is_induction_init -> while_carries_induction_var ->
+// while_trailing_increment_count, compiled_mir_lower.kizu:5543) reaches the format_source scan
+// loop, whose terminal if/else branch-merge advances 'index' on both arms instead of ending in a
+// trailing-increment Assign. The lowering gate drives the real lowering over format_source's
+// emitted IR facts and must stop here; this pins the measured next blocker as a behavior assertion
+// rather than a comment (issue 1165 / 1162).
 const formatDriverLoweringBlocker = "compiled mir: while body must end with the induction increment"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker --
-// the terminal branch-merge induction latch -- so the facts layer is proven complete and the
-// remaining work is pinned to the LLVM lowering (issue 1165 / 1162).
+// the terminal branch-merge induction latch the induction-init probe rejects -- so the facts layer
+// is proven complete and the remaining work is pinned to the LLVM lowering (issue 1165 / 1162).
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
