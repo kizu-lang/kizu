@@ -45,48 +45,63 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 	return out.String(), err
 }
 
-// formatDriverPriorLoweringBlocker is the blocker the cross-module callee resolution now crosses.
-// format_source's first statement 'var format_tokens = try lexer::tokenize(allocator, source)'
-// reaches the tokenizer through the 'import selfhost::lexer' alias; the compiled signature lowering
-// used to look up 'lexer::tokenize' under the caller's module prefix
-// (selfhost::parser::format::lexer::tokenize), found no function-signature-return fact, and raised
-// "compiled signature: call return type not found". The generic cross-module resolver
-// (cross_module_callee_qualified_name_or_empty ->
-// compiled_fact_lookup::lookup_qualified_function_name_by_callee_suffix) now resolves the
-// alias-qualified callee to the emitted '*::lexer::tokenize' signature (std::kizu::lexer::tokenize,
-// the real tokenizer entry the selfhost::lexer wrapper forwards to) over real facts, and the
-// try-call success-type + Allocator arg-type lowering carry the rest of the statement. If this old
-// blocker resurfaces the resolution regressed, so the gate must fail (issue 1165 / 1162).
-const formatDriverPriorLoweringBlocker = "compiled signature: call return type not found"
+// formatDriverCrossedLoweringBlockers are the lowering blockers this gate has already driven the
+// real format_source lowering past. If any resurfaces, the lowering regressed and the gate must
+// fail (issue 1165 / 1162):
+//   - "compiled signature: call return type not found": the cross-module 'lexer::tokenize' callee
+//     (resolved to its emitted '*::lexer::tokenize' signature via the generic cross-module
+//     resolver) and the sibling component helpers (leading_import_indices, ...) now resolve their
+//     return types from the emitted function-signature-return facts -- the gate emits every local
+//     component signature, the same set the production IR carries.
+//   - "compiled function: stdlib return not found": the std::string::String value constructor
+//     ('var out = std::string::String(allocator)') now resolves through the shared stdlib-symbol
+//     preamble (executable_functions::append_runtime_stdlib_symbol_preamble), the single source of
+//     truth the production IR fact emission and this gate both supply.
+//   - "compiled mir: unsupported call arg kind": the '&format_tokens' borrow argument at the
+//     leading_import_indices call now lowers through the borrow-prefix call-arg path
+//     (compiled_mir_lower_call::lower_single_call_arg) -- a borrow shares its pointee's ABI
+//     representation, so the operand lowers with the resolved arg type.
+var formatDriverCrossedLoweringBlockers = []string{
+	"compiled signature: call return type not found",
+	"compiled function: stdlib return not found",
+	"compiled mir: unsupported call arg kind",
+}
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. With
-// format_source's first statement fully lowered (the cross-module 'lexer::tokenize' tokenizer
-// crossing), lowering advances to the second top-level statement
-// 'var out = std::string::String(allocator)' (selfhost/src/parser/format.kizu:14). The String value
-// constructor is a stdlib callee lowered through the stdlib-symbol path
-// (lookup_stdlib_return, compiled_fact_lookup.kizu:335), but the gate emits format_source's own
-// signature/body plus the tokenizer signature only -- not the global stdlib-symbol preamble the
-// production IR carries -- so the constructor's 'stdlib-symbol std::string::String' fact is absent
-// and lowering raises "compiled function: stdlib return not found". The lowering gate drives the
-// real lowering over format_source's emitted IR facts and must stop here; this pins the measured
-// next blocker as a behavior assertion rather than a comment (issue 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled function: stdlib return not found"
+// format_source's first statements lowered -- the cross-module 'lexer::tokenize' tokenizer, the
+// 'var out = std::string::String(allocator)' constructor (stdlib-symbol preamble), and the
+// 'leading_import_indices(allocator, source, &format_tokens)' sibling call with its
+// '&format_tokens' borrow argument -- lowering advances to format_source's first top-level 'if'
+// statement 'if leading_imports.len() > 1 { ... }' (selfhost/src/parser/format.kizu:28). Its
+// then-block is a void multi-statement body (let bindings, a nested if, sibling/method call
+// statements, and several assignments to outer vars), but the compiled if-lowering only supports a
+// continue-latch then-block or a single-Return then-block
+// (selfhost/src/backend/compiled_mir_lower.kizu:4900), so it raises
+// "compiled mir: unsupported then block". Lowering a general void multi-statement if-then block is
+// the next capability -- a multi-part blocker (statement-list branch bodies, nested if, call
+// statements, multi-assign) -- so the gate stops here and pins the measured next blocker as a
+// behavior assertion rather than a comment (issue 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled mir: unsupported then block"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
-// generic cross-module callee resolution now carries format_source's first statement past the
-// former "call return type not found" stop -- the alias-qualified 'lexer::tokenize' resolves to its
-// real emitted signature, its try-call success type unwraps the !Array<Token> error union, and the
-// Allocator argument type lowers -- so lowering advances into the second statement, where the
-// std::string::String value constructor's missing stdlib-symbol fact is the next pinned blocker
-// (issue 1165 / 1162).
+// shared stdlib-symbol preamble, the full component signature set, and the borrow-prefix call-arg
+// lowering now carry format_source past the std::string::String constructor and the
+// leading_import_indices sibling call (with its '&format_tokens' borrow argument), so lowering
+// advances into the first top-level 'if' statement, where the void multi-statement then-block is
+// the next pinned blocker (issue 1165 / 1162).
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
 		t.Fatalf("format driver lowering gate unexpectedly succeeded\n%s", out)
 	}
-	if strings.Contains(err.Error(), formatDriverPriorLoweringBlocker) {
-		t.Fatalf("format driver lowering gate regressed to the prior blocker: %v\n%s", err, out)
+	for _, blocker := range formatDriverCrossedLoweringBlockers {
+		if strings.Contains(err.Error(), blocker) {
+			t.Fatalf(
+				"format driver lowering gate regressed to a crossed blocker %q: %v\n%s",
+				blocker, err, out,
+			)
+		}
 	}
 	if !strings.Contains(err.Error(), formatDriverLoweringBlocker) {
 		t.Fatalf("format driver lowering gate stopped at an unexpected blocker: %v\n%s", err, out)

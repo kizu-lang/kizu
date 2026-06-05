@@ -1,6 +1,7 @@
 import selfhost::parser;
 import selfhost::ir::component_function_catalog;
 import selfhost::ir::executable_body;
+import selfhost::ir::executable_functions;
 import selfhost::ir::function_signature;
 import selfhost::backend::compiled_abi_params;
 import selfhost::backend::compiled_signature;
@@ -24,17 +25,28 @@ import selfhost::backend::compiled_llvm;
 // (while_is_branch_merge_latch) and classifies 'index' without erroring, so the probe no longer
 // stops at "compiled mir: while body must end with the induction increment" and lowering advances
 // into the real statement lowering. The first top-level statement
-// 'var format_tokens = try lexer::tokenize(allocator, source)' now lowers fully: the generic
+// 'var format_tokens = try lexer::tokenize(allocator, source)' lowers fully: the generic
 // cross-module resolver (cross_module_callee_qualified_name_or_empty ->
 // lookup_qualified_function_name_by_callee_suffix) resolves the alias-qualified 'lexer::tokenize'
 // to the emitted '*::lexer::tokenize' signature this gate supplies below, the try-call success type
-// unwraps its !Array<Token> error union, and the Allocator argument type lowers. Lowering then
-// advances to the second statement 'var out = std::string::String(allocator)', whose stdlib value
-// constructor resolves through the stdlib-symbol path (lookup_stdlib_return,
-// selfhost/src/backend/compiled_fact_lookup.kizu:335). The gate emits format_source's own
-// signature + body plus the tokenizer signature only -- not the global stdlib-symbol preamble the
-// production IR carries -- so the 'stdlib-symbol std::string::String' fact is absent and lowering
-// raises "compiled function: stdlib return not found". The gate is expected to fail with that
+// unwraps its !Array<Token> error union, and the Allocator argument type lowers. The second
+// statement 'var out = std::string::String(allocator)' lowers its stdlib value constructor through
+// the stdlib-symbol path (lookup_stdlib_return): the gate supplies the same global stdlib-symbol
+// preamble the production IR carries via the shared
+// executable_functions::append_runtime_stdlib_symbol_preamble helper, so the
+// 'stdlib-symbol std::string::String' fact is present and the constructor binds a %kizu.owned
+// local. The leading_import_indices sibling call then resolves its return type from the emitted
+// component signatures (this gate emits every local function-signature-return fact below), and its
+// '&format_tokens' borrow argument lowers through the borrow-prefix call-arg path
+// (compiled_mir_lower_call::lower_single_call_arg). Lowering now advances to format_source's first
+// top-level 'if' statement 'if leading_imports.len() > 1 { ... }'
+// (selfhost/src/parser/format.kizu:28). Its then-block is a void multi-statement body (let
+// bindings, a nested if, sibling/method call statements, and several assignments to outer vars),
+// but the compiled if-lowering only supports a continue-latch then-block or a single-Return
+// then-block (selfhost/src/backend/compiled_mir_lower.kizu:4900), so it raises
+// "compiled mir: unsupported then block". Lowering a general void multi-statement if-then block is
+// the next capability -- a multi-part blocker (statement-list branch bodies, nested if, call
+// statements, multi-assign) -- so the gate stops here. The gate is expected to fail with that
 // error; the backend test asserts it, pinning the measured blocker as a behavior gate.
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
@@ -56,9 +68,24 @@ pub fn format_driver_lowering_gate() -> !void {
 
     var facts = std::string::String(allocator);
     defer facts.deinit();
-    try function_signature::append_catalog(
-        &var facts, text, parsed.ast, format_node, &catalog, format_index
-    );
+    // Emit the full component's local function signatures, the same way the production IR
+    // carries every selfhost::parser::format function-signature-return fact. format_source's
+    // body calls sibling helpers (leading_import_indices, index_after_leading_imports, ...) and
+    // the compiled lowering resolves each call's return type from its function-signature-return
+    // fact (compiled_signature::resolve_call_return_type); supplying only format_source's own
+    // signature left those sibling facts absent and lowering raised
+    // "compiled signature: call return type not found" at the first such sibling call
+    // (selfhost/src/parser/format.kizu:23, 'try leading_import_indices(...)'). Iterating the
+    // catalog is generic component-signature emission, not format_source-specific dispatch
+    // (issue 1165 / 1162).
+    var sig_index = 0;
+    while sig_index < component_function_catalog::len(&catalog) {
+        let sig_node = try component_function_catalog::function_node_id(&catalog, sig_index);
+        try function_signature::append_catalog(
+            &var facts, text, parsed.ast, sig_node, &catalog, sig_index
+        );
+        sig_index = sig_index + 1;
+    }
     try executable_body::append_catalog_helper_body_ir(
         &var facts, text, parsed.ast, &catalog, format_index, "checked-format-driver", body
     );
@@ -75,6 +102,16 @@ pub fn format_driver_lowering_gate() -> !void {
     try append_external_callee_signature(
         &var facts, allocator, "std/src/kizu/lexer.kizu", "std::kizu::lexer", "tokenize"
     );
+
+    // Supply the global stdlib-symbol preamble the production IR carries, via the same shared
+    // helper append_codegen_function_facts uses. format_source's second statement
+    // 'var out = std::string::String(allocator)' lowers the String value constructor through
+    // the stdlib-symbol path (lookup_stdlib_return), and without this preamble the
+    // 'stdlib-symbol std::string::String' fact is absent and lowering raised
+    // "compiled function: stdlib return not found". Routing the gate through the same source of
+    // truth as production means the gate exercises the real stdlib-symbol surface rather than a
+    // gate-local fabrication (issue 1165 / 1162).
+    try executable_functions::append_runtime_stdlib_symbol_preamble(&var facts);
 
     // Round-trip the facts through a file so ir_bytes is a freshly-read owned []u8 with external
     // provenance, exactly like the production backend which reads target/selfhost/selfhost.ir back
