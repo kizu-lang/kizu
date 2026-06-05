@@ -23,13 +23,19 @@ import selfhost::backend::compiled_llvm;
 // while_carries_induction_var now recognizes that branch-merge induction latch
 // (while_is_branch_merge_latch) and classifies 'index' without erroring, so the probe no longer
 // stops at "compiled mir: while body must end with the induction increment" and lowering advances
-// into the real statement lowering. There the first top-level statement
-// 'var format_tokens = try lexer::tokenize(allocator, source)' resolves the cross-module callee
-// 'lexer::tokenize' return type (resolve_call_return_type,
-// selfhost/src/backend/compiled_signature.kizu:180), but the gate's IR facts carry only
-// format_source's own signature + body -- not the called function's function-signature-return fact
-// -- so it raises "compiled signature: call return type not found". The gate is expected to fail
-// with that error; the backend test asserts it, pinning the measured blocker as a behavior gate.
+// into the real statement lowering. The first top-level statement
+// 'var format_tokens = try lexer::tokenize(allocator, source)' now lowers fully: the generic
+// cross-module resolver (cross_module_callee_qualified_name_or_empty ->
+// lookup_qualified_function_name_by_callee_suffix) resolves the alias-qualified 'lexer::tokenize'
+// to the emitted '*::lexer::tokenize' signature this gate supplies below, the try-call success type
+// unwraps its !Array<Token> error union, and the Allocator argument type lowers. Lowering then
+// advances to the second statement 'var out = std::string::String(allocator)', whose stdlib value
+// constructor resolves through the stdlib-symbol path (lookup_stdlib_return,
+// selfhost/src/backend/compiled_fact_lookup.kizu:335). The gate emits format_source's own
+// signature + body plus the tokenizer signature only -- not the global stdlib-symbol preamble the
+// production IR carries -- so the 'stdlib-symbol std::string::String' fact is absent and lowering
+// raises "compiled function: stdlib return not found". The gate is expected to fail with that
+// error; the backend test asserts it, pinning the measured blocker as a behavior gate.
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
@@ -55,6 +61,19 @@ pub fn format_driver_lowering_gate() -> !void {
     );
     try executable_body::append_catalog_helper_body_ir(
         &var facts, text, parsed.ast, &catalog, format_index, "checked-format-driver", body
+    );
+
+    // Supply the cross-module callee signature the lowering resolves for the driver's first
+    // statement 'var format_tokens = try lexer::tokenize(allocator, source)'. format_source
+    // reaches the tokenizer through the 'import selfhost::lexer' alias; the compiled backend
+    // emits the real tokenizer entry under std::kizu::lexer::tokenize (the selfhost::lexer
+    // wrapper forwards to it and is not separately compiled), exactly the signature fact the
+    // production IR carries (function-signature-return std::kizu::lexer::tokenize ...). Emit
+    // that real signature from the std kizu lexer's own AST so the generic cross-module
+    // resolver (lookup_qualified_function_name_by_callee_suffix) matches '*::lexer::tokenize'
+    // over real facts rather than a fabricated return-type string (issue 1165 / 1162).
+    try append_external_callee_signature(
+        &var facts, allocator, "std/src/kizu/lexer.kizu", "std::kizu::lexer", "tokenize"
     );
 
     // Round-trip the facts through a file so ir_bytes is a freshly-read owned []u8 with external
@@ -96,6 +115,34 @@ fn format_driver_lower(allocator: Allocator, ir_bytes: []u8) -> !void {
     // Reached only if format_source lowers without error; with the cross-module call-return-type
     // fact still missing this print is unreachable and the gate fails at the lowering blocker instead.
     print("format-driver-lowering-ok");
+    return;
+}
+
+// append_external_callee_signature emits the real function-signature-return / -param facts
+// for a cross-module callee by running the production component catalog + function_signature
+// emission over the callee's own on-disk source, instead of fabricating a metadata table.
+// The signature is keyed under <component_prefix>::<function_name>, the same name the owning
+// compiled closure emits, so the generic cross-module resolver matches it by suffix.
+fn append_external_callee_signature(
+    facts: &var std::string::String,
+    allocator: Allocator,
+    path: []u8,
+    component_prefix: []u8,
+    function_name: []u8
+) -> !void {
+    let io = std::io::blocking();
+    let text = try std::fs::read_file(io, path);
+    var parsed = try parser::parse_checked_file(allocator, path, text);
+    defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator, text, parsed.ast, parsed.root, component_prefix
+    );
+    defer catalog.deinit();
+    let index = try component_function_catalog::find_local_function_index(
+        &catalog, function_name
+    );
+    let node = try component_function_catalog::function_node_id(&catalog, index);
+    try function_signature::append_catalog(facts, text, parsed.ast, node, &catalog, index);
     return;
 }
 

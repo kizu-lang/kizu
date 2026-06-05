@@ -68,15 +68,30 @@ pub fn count_call_args(ir_bytes: []u8, function_name: []u8, call_node: i64, bs: 
     return count;
 }
 
-// cross_module_callee_qualified_name_or_empty maps an allowed cross-module callee alias
-// to its fully-qualified Kizu name (issue 1165), so its signature facts (emitted by the
-// owning component's compiled closure) resolve with an empty module prefix. lexer::is_eof
-// resolves to selfhost::lexer::is_eof. Anything outside this exact allowlist returns "".
-pub fn cross_module_callee_qualified_name_or_empty(callee_name: []u8) -> []u8 {
-    if std::mem::equal_bytes(callee_name, "lexer::is_eof") {
-        return "selfhost::lexer::is_eof";
+// cross_module_callee_qualified_name_or_empty resolves an alias-qualified cross-module
+// callee to its fully-qualified Kizu name by matching the real signature facts the
+// compiled closures emit, so its signature resolves with an empty module prefix (issue
+// 1165 / 1162). A call written through an import alias carries an embedded '::' but is not
+// a std:: stdlib call; lookup_qualified_function_name_by_callee_suffix then finds the
+// emitted function whose name ends with '::' + callee_name -- lexer::is_eof resolves to
+// selfhost::lexer::is_eof and lexer::tokenize resolves to std::kizu::lexer::tokenize, each
+// to whichever module actually carries it. Same-module calls (bare names, no '::') and
+// stdlib calls return "" so they keep their normal resolution path; nothing is admitted by
+// a handwritten alias table.
+pub fn cross_module_callee_qualified_name_or_empty(
+    ir_bytes: []u8,
+    callee_name: []u8
+) -> []u8 {
+    if compiled_fact_lookup::is_stdlib_callee(callee_name) {
+        return ir_bytes[0..0];
     }
-    return "";
+    let colon = compiled_util::find_byte(callee_name, cast<u8>(58), 0);
+    if colon >= std::mem::len(callee_name) {
+        return ir_bytes[0..0];
+    }
+    return compiled_fact_lookup::lookup_qualified_function_name_by_callee_suffix(
+        ir_bytes, callee_name
+    );
 }
 
 pub fn lower_call_return_type(
@@ -89,7 +104,7 @@ pub fn lower_call_return_type(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
-    let qualified = cross_module_callee_qualified_name_or_empty(callee_name);
+    let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
     if std::mem::len(qualified) > 0 {
         let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
             ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified
@@ -110,21 +125,6 @@ pub fn lower_call_return_type(
     );
 }
 
-// cross_module_callee_symbol_or_empty maps the exact set of cross-module callees a
-// compiled closure is allowed to reference (through an import alias) to their LLVM
-// symbols (issue 1165). lexer::is_eof is the selfhost::lexer Token EOF predicate,
-// emitted by the selfhost lexer compiled closure; the formatter helpers call it through
-// the 'lexer' import alias (import selfhost::lexer) as 'lexer::is_eof'. The symbol
-// follows the append_function_llvm_symbol mangling of selfhost::lexer::is_eof. Anything
-// outside this exact allowlist returns "" and resolves through the normal
-// module-prefixed path, so nothing is admitted by fallback.
-pub fn cross_module_callee_symbol_or_empty(callee_name: []u8) -> []u8 {
-    if std::mem::equal_bytes(callee_name, "lexer::is_eof") {
-        return "kizu_selfhost__lexer_is_eof";
-    }
-    return "";
-}
-
 pub fn lower_call_module_prefix(
     ir_bytes: []u8,
     function_name: []u8,
@@ -135,10 +135,13 @@ pub fn lower_call_module_prefix(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
-    if std::mem::len(cross_module_callee_symbol_or_empty(callee_name)) > 0 {
-        // The resolved symbol is final, so the renderer must emit it verbatim with no
-        // module-prefix mangling.
-        return ir_bytes[0..0];
+    // A resolved cross-module callee carries its own fully-qualified module path, so the
+    // renderer mangles it from that module prefix (append_callee_symbol ->
+    // derive_callee_llvm_symbol handles both selfhost:: and std::kizu:: owners) rather
+    // than the caller's module prefix.
+    let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
+    if std::mem::len(qualified) > 0 {
+        return compiled_util::module_prefix_of(qualified);
     }
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         return ir_bytes[0..0];
@@ -156,9 +159,12 @@ pub fn lower_call_callee_name(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
-    let cross_module_symbol = cross_module_callee_symbol_or_empty(callee_name);
-    if std::mem::len(cross_module_symbol) > 0 {
-        return cross_module_symbol;
+    // Pair the resolved cross-module module prefix (above) with the callee's short name so
+    // the renderer mangles the same fully-qualified symbol the owning closure emits.
+    let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
+    if std::mem::len(qualified) > 0 {
+        let qualified_prefix = compiled_util::module_prefix_of(qualified);
+        return qualified[std::mem::len(qualified_prefix)..std::mem::len(qualified)];
     }
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         return try compiled_fact_lookup::lookup_stdlib_symbol(ir_bytes, callee_name);
@@ -172,7 +178,7 @@ pub fn lower_call_arg_type(
     callee_name: []u8,
     arg_index: i64
 ) -> ![]u8 {
-    let qualified = cross_module_callee_qualified_name_or_empty(callee_name);
+    let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
     if std::mem::len(qualified) > 0 {
         return try compiled_signature::resolve_call_arg_type(
             ir_bytes, ir_bytes[0..0], qualified, arg_index

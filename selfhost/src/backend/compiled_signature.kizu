@@ -245,27 +245,45 @@ pub fn resolve_call_arg_type(
     return error("compiled function: call arg type not found");
 }
 
+// derive_callee_llvm_symbol mangles a call target from its (module_prefix, callee_name)
+// pieces, where module_prefix + callee_name is the callee's fully-qualified Kizu name. It
+// applies the same scheme as append_function_llvm_symbol so a cross-module callee resolves
+// to the exact symbol its owning closure emits, whether owned by a selfhost module
+// (selfhost::lexer::is_eof -> kizu_selfhost__lexer_is_eof) or the std kizu re-export
+// (std::kizu::lexer::tokenize -> kizu_kizu__lexer_tokenize, mangled from the bare
+// kizu::lexer path). callee_name carries no '::', so every module separator lives in
+// module_prefix (which ends with '::'): the first '::' lowers to '__' and the rest to '_'.
 pub fn derive_callee_llvm_symbol(
     out: &var std::string::String,
     module_prefix: []u8,
     callee_name: []u8
 ) -> !void {
-    try out.append_bytes("kizu_selfhost__");
-    let prefix_len = std::mem::len(module_prefix);
-    if prefix_len > 10 and std::mem::equal_bytes(module_prefix[0..10], "selfhost::") {
-        var pos = 10;
-        while pos < prefix_len {
-            let byte = module_prefix[pos];
-            if byte == cast<u8>(58) {
-                try out.append_byte(cast<u8>(95));
-                pos = pos + 2;
+    var prefix = module_prefix;
+    if std::mem::starts_with(module_prefix, "std::kizu::") {
+        let std_prefix = "std::";
+        prefix = module_prefix[std::mem::len(std_prefix)..std::mem::len(module_prefix)];
+    }
+    try out.append_bytes("kizu_");
+    let colon = cast<u8>(58);
+    let underscore = cast<u8>(95);
+    let prefix_len = std::mem::len(prefix);
+    var index = 0;
+    var first_separator = true;
+    while index < prefix_len {
+        let byte = prefix[index];
+        if byte == colon and index + 1 < prefix_len and prefix[index + 1] == colon {
+            if first_separator {
+                try out.append_byte(underscore);
+                try out.append_byte(underscore);
+                first_separator = false;
             } else {
-                try out.append_byte(byte);
-                pos = pos + 1;
+                try out.append_byte(underscore);
             }
+            index = index + 2;
+        } else {
+            try out.append_byte(byte);
+            index = index + 1;
         }
-    } else {
-        try out.append_bytes(module_prefix);
     }
     try out.append_bytes(callee_name);
     return;

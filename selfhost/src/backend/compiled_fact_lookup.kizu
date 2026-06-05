@@ -228,6 +228,43 @@ pub fn lookup_fact_value_by_prefix_or_empty(
     return ir_bytes[0..0];
 }
 
+// lookup_qualified_function_name_by_callee_suffix resolves an alias-qualified callee
+// (a call written through an import alias such as 'lexer::tokenize', reached via
+// 'import selfhost::lexer') to the fully-qualified name of the emitted function whose
+// function-signature-return fact name ends with '::' + callee_name. The compiled backend
+// emits each function's signature under its real owning module, so the alias-qualified
+// call matches whichever module actually carries it: lexer::is_eof resolves to
+// selfhost::lexer::is_eof (the compiled selfhost predicate) and lexer::tokenize resolves
+// to std::kizu::lexer::tokenize (the compiled tokenizer entry the selfhost::lexer wrapper
+// forwards to). This derives the qualified name from real signature facts rather than a
+// handwritten alias table, so any allowed cross-module callee resolves generically (issue
+// 1165 / 1162). Returns "" when no signature fact's tail matches.
+pub fn lookup_qualified_function_name_by_callee_suffix(
+    ir_bytes: []u8,
+    callee_name: []u8
+) -> []u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "function-signature-return ";
+    let prefix_len = std::mem::len(prefix);
+    var index = 0;
+    while index + prefix_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), name_start);
+            if name_end < byte_len {
+                let name = ir_bytes[name_start..name_end];
+                if !std::mem::equal_bytes(name, callee_name) and
+                    type_matches_suffix(name, callee_name) {
+                    return name;
+                }
+            }
+        }
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return ir_bytes[0..0];
+}
+
 pub fn lookup_stdlib_symbol(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "stdlib-symbol ";
