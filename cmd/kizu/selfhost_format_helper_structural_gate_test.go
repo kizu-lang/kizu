@@ -178,6 +178,7 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	assertFormatClosureCatalogDriven(t, irEmission, backendEmission)
 	assertFormatClosureSeeds(t, irEmission, backendEmission)
 	assertFormatClosureExcludesHandPath(t, irEmission, backendEmission)
+	assertFormatDriverCallSurfacePrepared(t, irEmission)
 	assertParseFormatAllocNotExtended(t, parseLLVM)
 	assertImportSortShapeValidated(t)
 	assertLeadingImportShapeValidated(t)
@@ -548,6 +549,40 @@ func assertFormatClosureExcludesHandPath(t *testing.T, irEmission, backendEmissi
 		}
 		if strings.Contains(backendEmission, quoted) {
 			t.Errorf("cli_llvm.kizu format closure seeds hand-path helper %q", helper)
+		}
+	}
+}
+
+// formatDriverCallSurfaceFacts pins the generic facts-collection capabilities that the shared
+// component-closure callee collector needs for the format_source driver's call surface (issue
+// 1165 / 1162). format_source seeds its token stream through lexer::tokenize, constructs its
+// '%kizu.owned' String accumulator through the std::string::String(allocator) value constructor,
+// and frees its owned Array handles through '.deinit()'. The collector classifies each as an
+// inline runtime builtin / allowed cross-module callee rather than a walked component member, so
+// emitting format_source's IR facts no longer raises "format closure: unsupported call form" /
+// "unsupported qualified callee". These are the precisely-measured first blockers of the
+// format_source connection: with them the facts layer accepts the driver call surface, and the
+// next blocker is the LLVM lowering -- the generic while machinery's induction-latch detection
+// (while_induction_var / while_carries_induction_var) requires a trailing-Assign latch, but
+// format_source advances its scan inside a terminal if/else branch-merge (a loop-terminating
+// 'index = format_tokens.len()' on the eof arm and an 'index = index + 1' advance on the else
+// arm), so it stays on the hand-written parse_format_alloc path until the branch-merge induction
+// latch lands. Pinning these keeps the driver-call-surface capabilities from regressing.
+var formatDriverCallSurfaceFacts = []string{
+	`std::mem::equal_bytes(callee_text, "std::string::String")`,
+	`std::mem::equal_bytes(callee_text, "lexer::tokenize")`,
+	`std::mem::equal_bytes(method, "deinit")`,
+}
+
+// assertFormatDriverCallSurfacePrepared pins that the shared closure callee collector keeps the
+// generic capabilities the format_source driver call surface needs (the std::string::String
+// constructor, the lexer::tokenize tokenizer entry, and the owned-handle '.deinit()'), so the
+// facts layer of the format_source connection cannot regress to rejecting them.
+func assertFormatDriverCallSurfacePrepared(t *testing.T, irEmission string) {
+	t.Helper()
+	for _, fact := range formatDriverCallSurfaceFacts {
+		if !strings.Contains(irEmission, fact) {
+			t.Errorf("executable_functions.kizu missing format driver call-surface capability: %q", fact)
 		}
 	}
 }

@@ -1965,6 +1965,13 @@ fn collect_catalog_closure_call_callee(
     if std::mem::starts_with(callee_text, "std::array::Array") {
         return;
     }
+    // The 'std::string::String(<allocator>)' value constructor is the runtime-owned
+    // byte-buffer handle lowered inline through the @kizu_rt_string_new ABI (routed via the
+    // std::string::String stdlib-symbol fact), not a component function, so the closure does
+    // not walk it -- mirroring the std::array::Array constructor handling (issue 1165 / 1162).
+    if std::mem::equal_bytes(callee_text, "std::string::String") {
+        return;
+    }
     if collect_catalog_closure_external_callee_allowed(callee_text, qualified_prefix) {
         return;
     }
@@ -2005,7 +2012,8 @@ fn collect_catalog_closure_field_callee(
         if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "get") or
             std::mem::equal_bytes(method, "set") or std::mem::equal_bytes(method, "append") or
             std::mem::equal_bytes(method, "append_bytes") or
-            std::mem::equal_bytes(method, "append_byte") {
+            std::mem::equal_bytes(method, "append_byte") or
+            std::mem::equal_bytes(method, "deinit") {
             return;
         }
         return error(unsupported_call_form_error);
@@ -2023,8 +2031,12 @@ fn collect_catalog_closure_external_callee_allowed(
         // The formatter's token-array predicates call lexer::is_eof (the std::kizu::lexer
         // Token EOF predicate) through the 'lexer' import alias. It is emitted by the std
         // lexer compiled closure, so the format closure references it as an external
-        // callee instead of walking it (issue 1165).
-        return std::mem::equal_bytes(callee_text, "lexer::is_eof");
+        // callee instead of walking it (issue 1165). format_source additionally seeds its
+        // token stream through lexer::tokenize (the selfhost::lexer tokenizer entry), another
+        // cross-module callee emitted by the lexer closure, so it is allowed the same way
+        // (issue 1165 / 1162).
+        return std::mem::equal_bytes(callee_text, "lexer::is_eof") or
+            std::mem::equal_bytes(callee_text, "lexer::tokenize");
     }
     if std::mem::equal_bytes(qualified_prefix, "std::kizu::parser::") {
         return std::mem::equal_bytes(callee_text, "ast.get");
