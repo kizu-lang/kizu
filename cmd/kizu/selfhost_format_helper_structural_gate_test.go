@@ -590,9 +590,11 @@ func formatClosureSeedEmitter(t *testing.T, irEmission string) string {
 // TestSelfhostFormatDriverFactsGate, which runs the production component catalog + closure
 // collector over the real selfhost::parser::format::format_source body and fails if any of the
 // three classifications regress, and by TestSelfhostFormatDriverLoweringGate, which drives the
-// compiled lowering over format_source's real IR facts and pins the measured next blocker (the
-// terminal branch-merge induction latch). Those behavior gates supersede the former string-presence
-// assertion.
+// compiled lowering over format_source's real IR facts and pins the measured next blocker. The
+// terminal branch-merge induction latch is now recognized by the induction-init probe
+// (while_is_branch_merge_latch), so that gate has advanced past it to the cross-module
+// 'lexer::tokenize' call-return-type lookup. Those behavior gates supersede the former
+// string-presence assertion.
 
 // assertParseFormatAllocNotExtended pins that the hand-written parse_format_alloc emitter is
 // not grown and does not start calling the compiled formatter helpers.
