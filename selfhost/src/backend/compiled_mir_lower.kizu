@@ -4581,6 +4581,71 @@ fn flatten_or_operands(
     try operands.append(node);
     return;
 }
+// lower_void_then_body lowers the statement list of a no-else void multi-statement if-then block
+// into then_body_stmts, dispatching each statement by kind through the same per-kind lowering the
+// top-level body loop uses. It is shape-driven, not name-driven: a then-block whose controlling
+// statement is not a single Return is a side-effecting body (let bindings, and -- as later
+// capabilities land -- nested ifs and call statements), so it descends into the statement list
+// rather than the Return-only then-kind machinery. The first statement kind it cannot lower
+// surfaces the next capability blocker (issue 1165 / 1162). Only the Let dispatch is exercised
+// today: the leading_imports sort branch at selfhost/src/parser/format.kizu:28 opens with two 'let'
+// bindings, and lowering blocks inside the second before any further statement kind is reached, so
+// the dispatch carries only the kind format_source drives and rejects the rest explicitly.
+fn lower_void_then_body(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    then_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    then_body_stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiLowerResult {
+    var body_locals = locals_spec;
+    var body_strings = string_counter;
+    var body_temps = temp_counter;
+    var body_tries = try_counter;
+    var body_index = 0;
+    while true {
+        let statement = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, then_node, "statement", body_index, bs
+        );
+        if statement < 0 {
+            break;
+        }
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if !std::mem::equal_bytes(stmt_kind, "Let") {
+            return error("compiled mir: unsupported then-body statement kind");
+        }
+        let let_result = try lower_multi_let_statement(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            body_locals,
+            statement,
+            body_strings,
+            body_temps,
+            body_tries,
+            then_body_stmts,
+            bs
+        );
+        body_locals = let_result.locals_spec;
+        body_strings = let_result.string_counter;
+        body_temps = let_result.temp_counter;
+        body_tries = let_result.try_counter;
+        body_index = body_index + 1;
+    }
+    return MultiLowerResult {
+        locals_spec: body_locals,
+        string_counter: body_strings,
+        temp_counter: body_temps,
+        try_counter: body_tries
+    };
+}
 fn lower_multi_if_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4897,7 +4962,27 @@ fn lower_multi_if_statement(
     var new_string_counter = then_string_base;
     if !is_continue_latch_then {
         if !std::mem::equal_bytes(then_stmt_kind, "Return") {
-            return error("compiled mir: unsupported then block");
+            // The then-block's controlling statement is not a single Return, so it is a no-else
+            // void multi-statement body (let bindings, nested ifs, call statements, assignments).
+            // Descend through lower_void_then_body to lower the statement list, reaching the next
+            // capability blocker rather than stopping at the Return-only then-kind machinery (issue
+            // 1165 / 1162). Rendering the lowered void body is the capability that follows, so until
+            // it lands the descent always surfaces a blocker.
+            var then_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+            let _then_body = try lower_void_then_body(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                locals_spec,
+                then_node,
+                then_string_base,
+                then_base,
+                0,
+                &var then_body_stmts,
+                bs
+            );
+            return error("compiled mir: void then-block rendering not yet supported");
         }
         let ret_value = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, then_stmt, "value", 0, bs
