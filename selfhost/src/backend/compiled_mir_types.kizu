@@ -608,6 +608,38 @@ fn resolve_local_in_block_or_empty(
                 return nested;
             }
         }
+        // An if-then (and its else) block can bind body-locals that later statements in the same
+        // block read, the same way a while body can. The leading_imports sort branch at
+        // selfhost/src/parser/format.kizu:28 opens 'if leading_imports.len() > 1 { let next_index
+        // = ...; let last_import = try format_tokens.get(...); ... }', and the 'last_import.end'
+        // field read resolves last_import's kizu type by re-scanning the body. Descend into the
+        // then/else blocks (skipping an absent else) so those bindings resolve like while-body
+        // ones; an else that is itself a nested 'if' or an empty block simply contributes no
+        // statement to scan (issue 1199).
+        if std::mem::equal_bytes(stmt_kind, "If") {
+            let then_node = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, statement, "then", 0, bs
+            );
+            if then_node >= 0 {
+                let then_nested = try resolve_local_in_block_or_empty(
+                    ir_bytes, function_name, module_prefix, name, then_node, bs
+                );
+                if std::mem::len(then_nested) > 0 {
+                    return then_nested;
+                }
+            }
+            let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, statement, "else", 0, bs
+            );
+            if else_node >= 0 {
+                let else_nested = try resolve_local_in_block_or_empty(
+                    ir_bytes, function_name, module_prefix, name, else_node, bs
+                );
+                if std::mem::len(else_nested) > 0 {
+                    return else_nested;
+                }
+            }
+        }
         stmt_index = stmt_index + 1;
     }
     return "";
