@@ -138,6 +138,12 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     condition. The lowerer validates the TryExpr(Call(...)) shape, rejects field/method callees
 //     and non-bool successes, renders failure propagation as the current function's own error
 //     union, and descends into the no-else void then-body through the existing alias-merge path.
+//   - "compiled function: struct field not found": the loop body's
+//     'let state = try append_preserved_line_comments(...)' binds a CommentFormatState success
+//     value and the following 'state.last' / 'state.at_line_start' / 'state.after_comment' reads
+//     now resolve through AST-derived struct-field facts emitted from the callee's declared
+//     '!CommentFormatState' return payload. Lowering reaches the EOF branch after those scalar
+//     state assignments (issue 1215).
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -152,6 +158,7 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: unsupported expression statement",
 	"compiled mir: while body must end with the induction increment",
 	"compiled mir: unsupported expression kind",
+	"compiled function: struct field not found",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The
@@ -162,15 +169,17 @@ var formatDriverCrossedLoweringBlockers = []string{
 // 'index = index + 1;' (format.kizu:144). lower_multi_while_branch_merge_latch validates that
 // generic shape and descends into the loop body. The nested positive try-call condition
 // 'if try rbrace_closes_enum_decl(source, &format_tokens, index) {' at format.kizu:46 now lowers
-// and descends through its void then-body. The next measured blocker is the first
-// CommentFormatState field read after 'let state = try append_preserved_line_comments(...)':
-// 'last = state.last;' at format.kizu:65 raises "compiled function: struct field not found" from
-// selfhost/src/backend/compiled_mir_types.kizu:339 because the local try-call success binds a
-// CommentFormatState value, but the compiled facts/lowering path does not yet carry the local
-// struct field facts needed to resolve state.last / state.at_line_start / state.after_comment.
-// Lowering local-struct success field reads after free-function let-try calls is the next
-// capability (refs 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled function: struct field not found"
+// and descends through its void then-body. The following 'let state = try
+// append_preserved_line_comments(...)' (format.kizu:56) now binds a CommentFormatState success
+// value whose field reads at format.kizu:65-67 resolve from real struct-field facts. The next
+// measured blocker is the EOF branch immediately after those reads:
+// 'if lexer::is_eof(token) { ... } else { ... }' at format.kizu:68 raises "compiled mir: void
+// then block must not carry an else arm" from selfhost/src/backend/compiled_mir_lower.kizu:4590
+// because the current void then-block lowering only renders no-else fall-through joins, while this
+// branch has real then and else bodies that must merge reassigned locals before following loop
+// statements continue. Lowering a generic void if/else branch is the next capability (issue 1216,
+// refs 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled mir: void then block must not carry an else arm"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -187,8 +196,9 @@ const formatDriverLoweringBlocker = "compiled function: struct field not found"
 // both void then-bodies render through the fall-through join. The following non-try expression
 // statement 'leading_imports.deinit();' lowers through OwnedDeinit. The main formatter while's
 // terminal branch-merge latch is validated. The nested positive try-call condition in the loop body
-// also lowers and descends through the same void-body path. Lowering now stops at the following
-// CommentFormatState field read, 'last = state.last;' (format.kizu:65).
+// also lowers and descends through the same void-body path. The CommentFormatState field reads
+// after append_preserved_line_comments now resolve. Lowering stops at the following EOF
+// if/else branch, 'if lexer::is_eof(token) { ... } else { ... }' (format.kizu:68).
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
