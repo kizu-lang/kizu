@@ -117,6 +117,14 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     through store/load metadata on the if. lower_multi_if_statement threads try_counter so the
 //     nested void try-call does not reuse a sibling try label. The real format_source lowering now
 //     reaches the statement after the leading-import if.
+//   - "compiled mir: unsupported expression statement": the statement after the leading-import if,
+//     'leading_imports.deinit();' (selfhost/src/parser/format.kizu:41), is a non-try method call
+//     expression statement. lower_multi_expr_statement now validates the generic deinit shape
+//     ExprStmt(Call(FieldExpr(method="deinit", receiver=Var), args=0)), resolves the receiver's
+//     Kizu and LLVM types from facts/locals, requires a std::array::Array<T> receiver lowering to
+//     %kizu.owned, and emits an OwnedDeinit MIR statement rendered as
+//     @kizu_rt_owned_deinit(%kizu.owned %receiver). Lowering now reaches the main formatter loop
+//     (issue 1209).
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -128,16 +136,19 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: try call statement must be a method call",
 	"compiled mir: void then-body assignment statement not yet supported",
 	"compiled mir: void then-block rendering not yet supported",
+	"compiled mir: unsupported expression statement",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The
-// leading-import no-else void if at selfhost/src/parser/format.kizu:28 and its nested void if at
-// format.kizu:31 both lower and render. The next statement in format_source is
-// 'leading_imports.deinit();' (format.kizu:41), a non-try expression statement. The current
-// expression-statement lowering only accepts try-call statements, so it raises this blocker at
-// selfhost/src/backend/compiled_mir_lower.kizu:3823. Lowering non-try side-effect statements such
-// as deinit is the next capability (issue 1207, refs 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: unsupported expression statement"
+// leading-import no-else void if at selfhost/src/parser/format.kizu:28, its nested void if at
+// format.kizu:31, and the following 'leading_imports.deinit();' (format.kizu:41) all lower and
+// render. The next statement in format_source is the main formatter loop
+// 'while index < format_tokens.len() { ... }' (format.kizu:42). Its induction update
+// 'index = index + 1;' is nested inside the loop's non-EOF else branch at format.kizu:144, not a
+// trailing loop-body assignment, so while_trailing_increment_count raises this blocker at
+// selfhost/src/backend/compiled_mir_lower.kizu:6624. Lowering this nested/control-flow-carried
+// formatter while shape is the next capability (refs 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled mir: while body must end with the induction increment"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -151,8 +162,9 @@ const formatDriverLoweringBlocker = "compiled mir: unsupported expression statem
 // append_sorted_imports(out, source, &format_tokens, &leading_imports);' followed by six scalar
 // reassignments ('index = next_index;' .. 'at_line_start = true;'). The try-call lowers through
 // lower_void_free_try_call_statement and the reassignments through lower_void_then_body_assign, and
-// both void then-bodies render through the fall-through join. The next pinned blocker is the
-// following non-try expression statement, 'leading_imports.deinit();' (issue 1207).
+// both void then-bodies render through the fall-through join. The following non-try expression
+// statement 'leading_imports.deinit();' lowers through OwnedDeinit. The next pinned blocker is the
+// main formatter while whose induction increment is nested in the non-EOF branch.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
