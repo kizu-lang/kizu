@@ -4629,11 +4629,12 @@ fn require_void_then_block_no_else(
     return;
 }
 
-// lower_positive_try_call_void_if lowers 'if try <free !bool callee>(<args>) { <void body> }':
-// the condition call is hoisted into a basic-block branch with failure propagation, and the
-// then-body is lowered through the same no-else void-body path as ordinary bool conditions so
-// assignments merge through the fall-through join.
-fn lower_positive_try_call_void_if(
+// lower_try_call_void_if lowers 'if try <free !bool callee>(<args>) { <void body> }' and
+// 'if !(try <free !bool callee>(<args>)) { <void body> }': the condition call is hoisted into a
+// basic-block branch with failure propagation, and the then-body is lowered through the same
+// no-else void-body path as ordinary bool conditions so assignments merge through the fall-through
+// join. then_on_success records the condition polarity.
+fn lower_try_call_void_if(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
@@ -4647,6 +4648,7 @@ fn lower_positive_try_call_void_if(
     try_counter: i64,
     alias_counter: i64,
     if_index: i64,
+    then_on_success: bool,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
@@ -4731,6 +4733,7 @@ fn lower_positive_try_call_void_if(
         callee_module_prefix,
         callee_name,
         call_args,
+        then_on_success,
         then_body_stmts,
         merge_vars
     ));
@@ -5899,10 +5902,10 @@ fn lower_multi_if_statement(
     let then_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "then", 0, bs
     );
-    // 'if !(try <callee>(<args>)) { return <bool>; }' hoists the sub-expression try-call in the
-    // guard condition (issue 1165 / 1162): the renderer emits the call, propagates a failure as this
-    // function's own error union, negates the unwrapped bool, and branches on the negation into the
-    // bool-return then-block or a fall-through join the next statement renders into.
+    // Prefix-not try-call conditions hoist the sub-expression try-call (issue 1165 / 1162). The
+    // existing return-bool guard keeps its dedicated renderer; void then-bodies share the positive
+    // try-call if lowering with inverted branch polarity, so failure propagation and alias merging
+    // stay on the same path.
     let guard_not_try = try prefix_not_try_call_inner_or_minus_one(
         ir_bytes, function_name, module_prefix, cond_node, bs
     );
@@ -5960,13 +5963,31 @@ fn lower_multi_if_statement(
                 }
             }
         }
-        return error("compiled mir: prefix-not try-call void condition not yet supported");
+        return try lower_try_call_void_if(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            statement,
+            then_node,
+            guard_not_try,
+            string_counter,
+            temp_counter,
+            try_counter,
+            alias_counter,
+            if_index,
+            false,
+            aliases,
+            stmts,
+            bs
+        );
     }
     let positive_try = try positive_try_call_condition_inner_or_minus_one(
         ir_bytes, function_name, module_prefix, cond_node, bs
     );
     if positive_try >= 0 {
-        return try lower_positive_try_call_void_if(
+        return try lower_try_call_void_if(
             ir_bytes,
             function_name,
             module_prefix,
@@ -5980,6 +6001,7 @@ fn lower_multi_if_statement(
             try_counter,
             alias_counter,
             if_index,
+            true,
             aliases,
             stmts,
             bs
