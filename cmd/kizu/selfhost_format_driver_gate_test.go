@@ -132,6 +132,12 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     induction var, exactly one arm is a constant-step advance, and the exit arm assigns the while
 //     header bound expression. Lowering now descends into the loop body instead of failing the old
 //     suffix check.
+//   - "compiled mir: unsupported expression kind": the loop body's nested positive try-call
+//     condition 'if try rbrace_closes_enum_decl(source, &format_tokens, index) { ... }'
+//     (selfhost/src/parser/format.kizu:46) now lowers as a hoisted free-function !bool try-call
+//     condition. The lowerer validates the TryExpr(Call(...)) shape, rejects field/method callees
+//     and non-bool successes, renders failure propagation as the current function's own error
+//     union, and descends into the no-else void then-body through the existing alias-merge path.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -145,6 +151,7 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: void then-block rendering not yet supported",
 	"compiled mir: unsupported expression statement",
 	"compiled mir: while body must end with the induction increment",
+	"compiled mir: unsupported expression kind",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The
@@ -153,12 +160,17 @@ var formatDriverCrossedLoweringBlockers = []string{
 // render. The main formatter loop at format.kizu:42 is now recognized as a branch-merge latch: its
 // EOF arm sets 'index = format_tokens.len();' (format.kizu:69), and its non-EOF arm ends with
 // 'index = index + 1;' (format.kizu:144). lower_multi_while_branch_merge_latch validates that
-// generic shape and descends into the loop body. The next measured blocker is the nested
-// 'if try rbrace_closes_enum_decl(source, &format_tokens, index) {' at format.kizu:46: its positive
-// try-call condition reaches lower_expr_into_local_aliases, which has no TryExpr expression case
-// and raises at selfhost/src/backend/compiled_mir_lower.kizu:10105. Lowering positive try-call
-// conditions in side-effecting if bodies is the next capability (refs 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: unsupported expression kind"
+// generic shape and descends into the loop body. The nested positive try-call condition
+// 'if try rbrace_closes_enum_decl(source, &format_tokens, index) {' at format.kizu:46 now lowers
+// and descends through its void then-body. The next measured blocker is the first
+// CommentFormatState field read after 'let state = try append_preserved_line_comments(...)':
+// 'last = state.last;' at format.kizu:65 raises "compiled function: struct field not found" from
+// selfhost/src/backend/compiled_mir_types.kizu:339 because the local try-call success binds a
+// CommentFormatState value, but the compiled facts/lowering path does not yet carry the local
+// struct field facts needed to resolve state.last / state.at_line_start / state.after_comment.
+// Lowering local-struct success field reads after free-function let-try calls is the next
+// capability (refs 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled function: struct field not found"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -174,8 +186,9 @@ const formatDriverLoweringBlocker = "compiled mir: unsupported expression kind"
 // lower_void_free_try_call_statement and the reassignments through lower_void_then_body_assign, and
 // both void then-bodies render through the fall-through join. The following non-try expression
 // statement 'leading_imports.deinit();' lowers through OwnedDeinit. The main formatter while's
-// terminal branch-merge latch is validated, and lowering now stops at the nested positive try-call
-// condition in the loop body.
+// terminal branch-merge latch is validated. The nested positive try-call condition in the loop body
+// also lowers and descends through the same void-body path. Lowering now stops at the following
+// CommentFormatState field read, 'last = state.last;' (format.kizu:65).
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {

@@ -4505,6 +4505,41 @@ fn prefix_not_try_call_inner_or_minus_one(
     return inner;
 }
 
+// positive_try_call_condition_inner_or_minus_one recognizes an if condition of the form
+// 'try <free !bool callee>(<args>)'. It is a side-effecting condition, so it cannot be lowered as a
+// straight-line MirExprInst: the rendered call must branch on the error-union ok flag, propagate a
+// failure as this function's own error union, and branch on the unwrapped bool success. Near-miss
+// TryExpr shapes are explicit errors instead of falling through to the generic expression path.
+fn positive_try_call_condition_inner_or_minus_one(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    node: i64,
+    bs: i64
+) -> !i64 {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
+    if !std::mem::equal_bytes(kind, "TryExpr") {
+        return -1;
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node, "value", 0, bs
+    );
+    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+    if !std::mem::equal_bytes(inner_kind, "Call") {
+        return error("compiled mir: positive try-call condition must wrap a call");
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+        return error("compiled mir: positive try-call condition must be a free function");
+    }
+    let success_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, inner, bs
+    );
+    if !std::mem::equal_bytes(success_type, "i1") {
+        return error("compiled mir: positive try-call condition callee must return !bool");
+    }
+    return inner;
+}
+
 // require_if_not_try_guard_no_else rejects an 'if !(try <call>) { return <bool>; }' guard that also
 // carries an else arm (issue 1165 / 1162). The if-not-try-call-return-bool statement is rendered as
 // a then-only conditional branch -- the negation either returns the bool or falls through to the
@@ -4555,6 +4590,119 @@ fn require_void_then_block_no_else(
         return error("compiled mir: void then block must not carry an else arm");
     }
     return;
+}
+
+// lower_positive_try_call_void_if lowers 'if try <free !bool callee>(<args>) { <void body> }':
+// the condition call is hoisted into a basic-block branch with failure propagation, and the
+// then-body is lowered through the same no-else void-body path as ordinary bool conditions so
+// assignments merge through the fall-through join.
+fn lower_positive_try_call_void_if(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    then_node: i64,
+    call_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    alias_counter: i64,
+    if_index: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let then_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    let then_stmt_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, then_stmt, bs
+    );
+    if std::mem::equal_bytes(then_stmt_kind, "Return") {
+        return error("compiled mir: positive try-call condition return body not yet supported");
+    }
+    try require_void_then_block_no_else(ir_bytes, function_name, statement, bs);
+
+    let called_error_union = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let call_args = try lower_call_args_with_local_aliases(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs
+    );
+    let call_arg_strings = try compiled_mir_lower_call::count_string_args(&call_args);
+
+    var then_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var merge_vars = std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator());
+    var branch_aliases = try copy_local_aliases(aliases);
+    defer branch_aliases.deinit();
+    let then_body = try lower_void_then_body(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        locals_spec,
+        then_node,
+        string_counter + call_arg_strings,
+        temp_counter,
+        try_counter,
+        alias_counter,
+        if_index,
+        &var branch_aliases,
+        &var then_body_stmts,
+        bs
+    );
+    var branch_alias_index = 0;
+    var merge_alias_counter = then_body.alias_counter;
+    while branch_alias_index < branch_aliases.len() {
+        let branch_state = try branch_aliases.at(branch_alias_index);
+        let input_name = try local_alias_current_name(aliases, branch_state.source_name);
+        if !std::mem::equal_bytes(input_name, branch_state.current_name) {
+            let output_name = try void_then_alias_name(merge_alias_counter);
+            let merge_type = try compiled_mir_types::resolve_value_llvm_type(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                branch_state.source_name,
+                bs
+            );
+            try merge_vars.append(compiled_mir::if_merge_var(
+                branch_state.source_name,
+                input_name,
+                branch_state.current_name,
+                output_name,
+                merge_type
+            ));
+            try set_local_alias(aliases, branch_state.source_name, output_name);
+            merge_alias_counter = merge_alias_counter + 1;
+        }
+        branch_alias_index = branch_alias_index + 1;
+    }
+    try stmts.append(compiled_mir::if_try_call_void_body_stmt(
+        if_index,
+        string_counter,
+        called_error_union,
+        llvm_return_type,
+        callee_module_prefix,
+        callee_name,
+        call_args,
+        then_body_stmts,
+        merge_vars
+    ));
+    return MultiIfLowerResult {
+        temp_counter: then_body.temp_counter,
+        string_counter: then_body.string_counter,
+        try_counter: then_body.try_counter,
+        alias_counter: merge_alias_counter
+    };
 }
 
 fn lower_multi_return_statement(
@@ -5361,6 +5509,29 @@ fn lower_multi_if_statement(
                 }
             }
         }
+    }
+    let positive_try = try positive_try_call_condition_inner_or_minus_one(
+        ir_bytes, function_name, module_prefix, cond_node, bs
+    );
+    if positive_try >= 0 {
+        return try lower_positive_try_call_void_if(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            statement,
+            then_node,
+            positive_try,
+            string_counter,
+            temp_counter,
+            try_counter,
+            alias_counter,
+            if_index,
+            aliases,
+            stmts,
+            bs
+        );
     }
     let cond_short_circuit = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
