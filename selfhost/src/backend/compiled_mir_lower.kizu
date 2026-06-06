@@ -4670,9 +4670,18 @@ fn flatten_or_operands(
 // value must be one of the scalar/slice expression kinds the generic expr lowering handles (Var /
 // FieldExpr / String / CastExpr / Bool), and the value's lowered LLVM type must match the target's
 // resolved type. The lowered value rides the same MirLetExpr carrier the let path emits -- a
-// reassignment and a let bind compute an identical RHS, differing only in whether the LHS name is a
-// fresh SSA def, which the void then-block renderer (the next capability) resolves; today the
-// then_body_stmts are discarded, so no def is emitted.
+// reassignment and a let bind compute an identical RHS, so the carrier captures the lowered value
+// without a dedicated MirStmt variant whose render arm no rendered path would yet exercise.
+//
+// CARRIER IS NOT THE FINAL ASSIGNMENT SHAPE: a MirLetExpr renders as '%<target> = select i1 true,
+// ...', a fresh SSA def of <target>. For a reassignment <target> is already defined before the
+// then-body, so emitting that as-is would redefine an SSA name (invalid LLVM). Today this never
+// renders -- lower_multi_if_statement raises the void then-block rendering blocker before any
+// then_body_stmt is emitted, and the lowered body is discarded -- so the carrier only proves the
+// value lowers and type-checks. When the void then-block renderer (the next capability, the pinned
+// blocker) lands it must render a reassignment as an SSA-correct store (a select/phi merge into the
+// fall-through join, like ScalarSelectAssign), NOT as a LetExpr def; the MirLetExpr carrier here is
+// interim and must be revisited then.
 fn lower_void_then_body_assign(
     ir_bytes: []u8,
     function_name: []u8,
