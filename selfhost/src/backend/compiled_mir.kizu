@@ -207,6 +207,15 @@ pub struct MirArrayLenExpr {
     pub receiver_name: []u8,
 }
 
+// MirStringLenExpr backs a local/param std::string::String.len() read in expression context.
+// The String value lowers to the same runtime-owned %kizu.owned handle as Array<T>, but it calls
+// the string runtime length helper instead of the array length helper.
+pub struct MirStringLenExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub receiver_name: []u8,
+}
+
 pub union MirExprInst {
     Var(MirVarExpr),
     ConstString(MirConstStringExpr),
@@ -220,6 +229,7 @@ pub union MirExprInst {
     Slice(MirSliceExpr),
     Call(MirCallExpr),
     ArrayLen(MirArrayLenExpr),
+    StringLen(MirStringLenExpr),
 }
 
 pub enum MirIfThenKind {
@@ -1416,6 +1426,7 @@ impl MirExprInst {
             Slice(payload) => return;,
             Call(payload) => payload.deinit(),
             ArrayLen(payload) => return;,
+            StringLen(payload) => return;,
         }
     }
 }
@@ -2572,6 +2583,16 @@ pub fn array_len_expr_inst(id: i64, receiver_name: []u8) -> MirExprInst {
     });
 }
 
+// string_len_expr_inst builds a local/param std::string::String.len() expression instruction.
+// The renderer reads the owned String handle and calls @kizu_rt_string_len -> i64.
+pub fn string_len_expr_inst(id: i64, receiver_name: []u8) -> MirExprInst {
+    return MirExprInst::StringLen(MirStringLenExpr {
+        id: id,
+        llvm_type: "i64",
+        receiver_name: receiver_name
+    });
+}
+
 // expr_inst_id and expr_inst_llvm_type read the result id and LLVM type that
 // every expr-inst variant carries, so result wiring (type-by-id lookups) does
 // not depend on the active variant.
@@ -2589,6 +2610,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         Slice(payload) => payload.id,
         Call(payload) => payload.id,
         ArrayLen(payload) => payload.id,
+        StringLen(payload) => payload.id,
     };
 }
 
@@ -2606,6 +2628,7 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         Slice(payload) => payload.llvm_type,
         Call(payload) => payload.llvm_type,
         ArrayLen(payload) => payload.llvm_type,
+        StringLen(payload) => payload.llvm_type,
     };
 }
 
@@ -2708,6 +2731,11 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
             call_args: try copy_call_args(&payload.call_args)
         }),
         ArrayLen(payload) => MirExprInst::ArrayLen(MirArrayLenExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            receiver_name: payload.receiver_name
+        }),
+        StringLen(payload) => MirExprInst::StringLen(MirStringLenExpr {
             id: payload.id,
             llvm_type: payload.llvm_type,
             receiver_name: payload.receiver_name
