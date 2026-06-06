@@ -161,6 +161,10 @@ fn is_array_field_type(field_type: []u8) -> bool {
     return std::mem::starts_with(field_type, "std::array::Array<");
 }
 
+fn is_string_value_type(kizu_type: []u8) -> bool {
+    return std::mem::equal_bytes(kizu_type, "std::string::String");
+}
+
 // array_element_kizu_type strips the std::array::Array<...> wrapper off a recorded
 // field type token and returns the element type token (tracker 961). It backs the
 // Array<T>.get accessor, which needs the element type to lower the by-value load.
@@ -5956,6 +5960,7 @@ fn lower_multi_if_statement(
                 }
             }
         }
+        return error("compiled mir: prefix-not try-call void condition not yet supported");
     }
     let positive_try = try positive_try_call_condition_inner_or_minus_one(
         ir_bytes, function_name, module_prefix, cond_node, bs
@@ -9314,6 +9319,13 @@ fn expr_inst_array_len_receiver_or_empty(inst: &compiled_mir::MirExprInst) -> []
     };
 }
 
+fn expr_inst_string_len_receiver_or_empty(inst: &compiled_mir::MirExprInst) -> []u8 {
+    return match inst {
+        StringLen(payload) => payload.receiver_name,
+        _ => "",
+    };
+}
+
 fn rename_var_in_insts(
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
     from: []u8,
@@ -9332,6 +9344,7 @@ fn rename_var_in_insts(
         let index_target = expr_inst_index_target_or_empty(inst);
         let index_operand = expr_inst_index_operand_or_zero(inst);
         let array_len_receiver = expr_inst_array_len_receiver_or_empty(inst);
+        let string_len_receiver = expr_inst_string_len_receiver_or_empty(inst);
         if std::mem::len(var_name) > 0 and std::mem::equal_bytes(var_name, from) {
             try insts.set(index, compiled_mir::var_expr_inst(inst_id, inst_type, to));
         } else {
@@ -9359,6 +9372,14 @@ fn rename_var_in_insts(
                             inst_id,
                             to
                         ));
+                    } else {
+                        if std::mem::len(string_len_receiver) > 0 and
+                            std::mem::equal_bytes(string_len_receiver, from) {
+                            try insts.set(index, compiled_mir::string_len_expr_inst(
+                                inst_id,
+                                to
+                            ));
+                        }
                     }
                 }
             }
@@ -10151,12 +10172,11 @@ fn call_has_hoisted_arg(
     return false;
 }
 
-// lower_expr_array_len lowers a value-receiver 'tokens.len()' into an ArrayLen expr
-// inst (issue 1165). The receiver is a std::array::Array<T> (or &Array<T>) param/local
-// that lowers to the runtime-owned %kizu.owned handle, so the element type T does not
-// affect the call. Only len() is supported in expression position; get() returns !T and
-// is handled in let-try position. An unsupported method/receiver fails explicitly.
-fn lower_expr_array_len(
+// lower_expr_value_len lowers value-receiver len() calls in expression context.
+// Array<T>.len() and std::string::String.len() both read a local/param %kizu.owned handle and
+// return i64, but they dispatch to different runtime helpers, so the receiver Kizu type chooses
+// the MIR instruction. get() returns !T and remains let-try-only.
+fn lower_expr_value_len(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
@@ -10173,13 +10193,13 @@ fn lower_expr_array_len(
         ir_bytes, function_name, callee_node, "field", bs
     );
     if !std::mem::equal_bytes(method_name, "len") {
-        return error("compiled mir: only Array.len is supported on a value receiver in expression position");
+        return error("compiled mir: only value-receiver len is supported in expression position");
     }
     let arg_count = try compiled_mir_types::count_call_args(
         ir_bytes, function_name, call_node, bs
     );
     if arg_count != 0 {
-        return error("compiled mir: Array.len accessor takes no arguments");
+        return error("compiled mir: value-receiver len takes no arguments");
     }
     let receiver_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, callee_node, "receiver", 0, bs
@@ -10188,7 +10208,7 @@ fn lower_expr_array_len(
         ir_bytes, function_name, receiver_node, bs
     );
     if !std::mem::equal_bytes(receiver_kind, "Var") {
-        return error("compiled mir: Array.len value receiver must be a local or parameter");
+        return error("compiled mir: value-receiver len receiver must be a local or parameter");
     }
     let receiver_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, receiver_node, bs
@@ -10197,12 +10217,17 @@ fn lower_expr_array_len(
         ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
     );
     let lookup = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
-    if !is_array_field_type(lookup) {
-        return error("compiled mir: Array.len receiver is not a std::array::Array");
+    if is_array_field_type(lookup) {
+        let id = id_base + insts.len();
+        try insts.append(compiled_mir::array_len_expr_inst(id, receiver_name));
+        return id;
     }
-    let id = id_base + insts.len();
-    try insts.append(compiled_mir::array_len_expr_inst(id, receiver_name));
-    return id;
+    if is_string_value_type(lookup) {
+        let id = id_base + insts.len();
+        try insts.append(compiled_mir::string_len_expr_inst(id, receiver_name));
+        return id;
+    }
+    return error("compiled mir: value-receiver len receiver type is unsupported");
 }
 
 // lower_expr_call_with_nested_args lowers a Call whose argument list contains an argument
@@ -10382,7 +10407,7 @@ fn lower_expr_call_with_local_aliases(
 ) -> !i64 {
     let id = id_base + insts.len();
     if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
-        let result = try lower_expr_array_len(
+        let result = try lower_expr_value_len(
             ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
         );
         try rename_local_aliases_in_insts(insts, aliases);
@@ -10936,12 +10961,11 @@ fn lower_expr_into(
         return result_id;
     }
     if std::mem::equal_bytes(kind, "Call") {
-        // A field-mode method call on a value receiver (tokens.len()) reads a
-        // std::array::Array<T> param/local; len() lowers to the array_len builtin
-        // directly off the %kizu.owned handle (issue 1165). get() returns !T and only
-        // appears in let-try position, so it is rejected here.
+        // A field-mode len() call on a value receiver reads a supported %kizu.owned
+        // param/local (Array<T> or std::string::String) through its matching runtime helper.
+        // get() returns !T and only appears in let-try position, so it is rejected here.
         if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
-            return try lower_expr_array_len(
+            return try lower_expr_value_len(
                 ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
             );
         }

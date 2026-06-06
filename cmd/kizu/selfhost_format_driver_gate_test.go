@@ -170,6 +170,11 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     expression lowerer resolves the local callee's return type from function-signature facts,
 //     lowers its scalar arg through the existing call-arg path, checks the resulting i8 against
 //     the target local's resolved i8 type, and stores the call result in a fresh assignment alias.
+//   - "compiled mir: Array.len receiver is not a std::array::Array": the compound condition
+//     'if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 ...'
+//     (selfhost/src/parser/format.kizu:99) now lowers the std::string::String value receiver
+//     through the same type-driven '.len()' expression path as Array<T>.len(), but emits a
+//     StringLen MIR expression rendered as @kizu_rt_string_len instead of @kizu_rt_array_len.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -189,6 +194,7 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: void then-body assignment value kind not yet supported: Binary",
 	"compiled mir: unsupported string method argument",
 	"compiled mir: void then-body assignment value kind not yet supported: Call",
+	"compiled mir: Array.len receiver is not a std::array::Array",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The EOF
@@ -196,14 +202,17 @@ var formatDriverCrossedLoweringBlockers = []string{
 // nested rbrace branch, accepts 'depth = depth - 1;' (format.kizu:75), lowers the nested else-path
 // append 'try out.append_byte(cast<u8>(10));' (format.kizu:81), and lowers the following
 // reassignment 'last = last_byte(text);' (format.kizu:86) through typed Call-valued alias
-// assignment. Lowering then reaches the compound condition
+// assignment. Lowering then crosses the compound condition
 // 'if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 ...'
-// (format.kizu:99). The current value-receiver '.len()' expression lowering handles
-// std::array::Array<T> receivers only, so the std::string::String receiver 'out' raises
-// "compiled mir: Array.len receiver is not a std::array::Array" from
-// selfhost/src/backend/compiled_mir_lower.kizu:10201. Lowering String.len value-receiver
-// expressions in compiled conditions is the next capability (refs 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: Array.len receiver is not a std::array::Array"
+// (format.kizu:99), including the std::string::String receiver 'out.len()'. It now reaches the
+// later void if condition 'if !(try next_token_text_equals(source, &format_tokens, index, "}"))'
+// (format.kizu:130). The current prefix-not try-call lowering only handles return-bool guard
+// clauses, so lower_multi_if_statement raises
+// "compiled mir: prefix-not try-call void condition not yet supported" from
+// selfhost/src/backend/compiled_mir_lower.kizu:5963. Lowering prefix-not try-call conditions with
+// void then-bodies is the next capability (refs 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled mir: " +
+	"prefix-not try-call void condition not yet supported"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -226,8 +235,9 @@ const formatDriverLoweringBlocker = "compiled mir: Array.len receiver is not a s
 // 'depth = depth - 1;' now lowers as a Binary value assignment, and the following nested else-path
 // string append 'try out.append_byte(cast<u8>(10));' lowers its CastExpr byte argument. The next
 // reassignment, 'last = last_byte(text);' (format.kizu:86), now lowers as a Call-valued alias
-// assignment. Lowering stops at the later condition 'out.len() > 0' (format.kizu:99), whose
-// std::string::String value receiver is not yet accepted by the Array-only len expression path.
+// assignment. The later condition 'out.len() > 0' (format.kizu:99) now lowers through the
+// StringLen expression renderer, and lowering stops at the later prefix-not try-call void
+// condition at format.kizu:130.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
