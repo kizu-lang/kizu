@@ -412,6 +412,7 @@ fn append_multi_stmt(
         ReturnNotTryCall(payload) => try append_multi_return_not_try_call(out, function, payload, local_prefix);,
         IfNotTryCallReturnBool(payload) => try append_multi_if_not_try_call_return_bool(out, function, payload, local_prefix);,
         StringTryAppend(payload) => try append_multi_string_try_append(out, function, payload, local_prefix);,
+        VoidTryCall(payload) => try append_multi_void_try_call(out, function, payload, local_prefix);,
         CountRange(payload) => try append_multi_count_range(out, payload);,
         TrimAscii(payload) => try append_multi_trim_ascii(out, payload);,
         AdvancePosition(payload) => try append_multi_advance_position(out, payload);,
@@ -634,38 +635,110 @@ fn append_multi_string_try_append(
 }
 
 // append_string_try_fail_return emits the failure-propagation tail of a StringTryAppend: it
-// wraps the extracted runtime message into this function's own error union and returns it.
-// The message field index depends on the own error-union shape -- %kizu.error.void carries it
-// at field 1, while the 3-field unions (%kizu.error.owned / %kizu.error.slice.u8) carry it at
-// field 2 with the success value left zero-initialized (issue 1165 slice 1).
+// wraps the extracted runtime message into this function's own error union and returns it,
+// sharing append_error_void_try_fail_return with the VoidTryCall path (both call a
+// %kizu.error.void-returning helper whose message temp is %append<N>_msg, issue 1165 slice 1).
 fn append_string_try_fail_return(
     out: &var std::string::String,
     stmt: &compiled_mir::MirStringTryAppendStmt
 ) -> !void {
-    try out.append_bytes("  %append");
-    try std::fmt::append_i64(out, stmt.try_index);
+    try append_error_void_try_fail_return(out, "%append", stmt.try_index, stmt.own_error_union);
+    return;
+}
+
+// append_error_void_try_fail_return emits the shared failure-propagation tail of a try-call over
+// a %kizu.error.void-returning callee (StringTryAppend / VoidTryCall, issue 1165 / 1201). The
+// already-extracted message temp %<ssa_prefix><try_index>_msg is wrapped into own_error_union and
+// returned. The message field index depends on the own error-union shape -- %kizu.error.void
+// carries it at field 1, while the 3-field unions (%kizu.error.owned / %kizu.error.slice.u8) carry
+// it at field 2 with the success value left zero-initialized.
+fn append_error_void_try_fail_return(
+    out: &var std::string::String,
+    ssa_prefix: []u8,
+    try_index: i64,
+    own_error_union: []u8
+) -> !void {
+    try out.append_bytes("  ");
+    try out.append_bytes(ssa_prefix);
+    try std::fmt::append_i64(out, try_index);
     try out.append_bytes("_fail_flag = insertvalue ");
-    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(own_error_union);
     try append_ll_line(out, " zeroinitializer, i1 false, 0");
-    try out.append_bytes("  %append");
-    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("  ");
+    try out.append_bytes(ssa_prefix);
+    try std::fmt::append_i64(out, try_index);
     try out.append_bytes("_fail_val = insertvalue ");
-    try out.append_bytes(stmt.own_error_union);
-    try out.append_bytes(" %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_fail_flag, %kizu.slice.u8 %append");
-    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes(own_error_union);
+    try out.append_bytes(" ");
+    try out.append_bytes(ssa_prefix);
+    try std::fmt::append_i64(out, try_index);
+    try out.append_bytes("_fail_flag, %kizu.slice.u8 ");
+    try out.append_bytes(ssa_prefix);
+    try std::fmt::append_i64(out, try_index);
     try out.append_bytes("_msg, ");
-    if std::mem::equal_bytes(stmt.own_error_union, "%kizu.error.void") {
+    if std::mem::equal_bytes(own_error_union, "%kizu.error.void") {
         try append_ll_line(out, "1");
     } else {
         try append_ll_line(out, "2");
     }
     try out.append_bytes("  ret ");
-    try out.append_bytes(stmt.own_error_union);
-    try out.append_bytes(" %append");
-    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes(own_error_union);
+    try out.append_bytes(" ");
+    try out.append_bytes(ssa_prefix);
+    try std::fmt::append_i64(out, try_index);
     try append_ll_line(out, "_fail_val");
+    return;
+}
+
+// append_multi_void_try_call renders a bare 'try <callee>(<args>);' statement whose callee is a
+// free function returning a %kizu.error.void success (issue 1201). It composes the LetTryCall
+// free-function call shape with StringTryAppend's value-less continuation: it sets up the call
+// args, calls the module-prefixed callee into %voidtry<N>_call, extracts the ok flag (field 0),
+// and branches on a try_index-suffixed label pair -- try<N>_fail extracts the message (field 1)
+// and propagates it as this function's own error union; try<N>_cont continues with no bound value
+// because the success type is void.
+fn append_multi_void_try_call(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirVoidTryCallStmt,
+    local_prefix: i64
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function.name, &stmt.call_args, local_prefix
+    );
+    try out.append_bytes("  %voidtry");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_call = call %kizu.error.void @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, stmt.call_module_prefix, stmt.call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %voidtry");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_ok = extractvalue %kizu.error.void %voidtry");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_call, 0");
+    try out.append_bytes("  br i1 %voidtry");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_ok, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_cont, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail");
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail:");
+    try out.append_bytes("  %voidtry");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_msg = extractvalue %kizu.error.void %voidtry");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_call, 1");
+    try append_error_void_try_fail_return(out, "%voidtry", stmt.try_index, stmt.own_error_union);
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_cont:");
     return;
 }
 
@@ -4407,6 +4480,7 @@ fn append_stmt_globals(
         ReturnNotTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         IfNotTryCallReturnBool(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         StringTryAppend(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        VoidTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         CountRange(payload) => try append_count_range_globals(payload);,
         TrimAscii(payload) => try append_trim_ascii_globals(payload);,
         AdvancePosition(payload) => try append_advance_position_globals(payload);,

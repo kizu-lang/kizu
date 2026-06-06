@@ -93,6 +93,16 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     so the nested 'if' lowers through lower_multi_if_statement, which recognizes its void
 //     then-block shape and descends back into lower_void_then_body for the inner statement list.
 //     Lowering advances into the nested then-body rather than stopping at the outer dispatch.
+//   - "compiled mir: try call statement must be a method call": the nested then-body's first
+//     statement 'try append_sorted_imports(out, source, &format_tokens, &leading_imports);'
+//     (selfhost/src/parser/format.kizu:32) is a free-function try-call statement, not a
+//     'receiver.append_bytes/append_byte' method call. lower_multi_expr_statement now dispatches a
+//     non-field callee to lower_void_free_try_call_statement, which validates the callee returns
+//     '!void' (an error-union void success) and lowers it to a VoidTryCall statement -- the call
+//     propagates a runtime failure as this function's own error union and binds no value, mirroring
+//     LetTryCall's failure propagation without a fake local. The '&var std::string::String' arg
+//     'out' resolves through kizu_type_to_llvm's new 'var_' mutable-borrow strip (a borrow shares
+//     its pointee's ABI), so the call args lower and lowering advances past the try-call.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -101,20 +111,21 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: local type not found",
 	"compiled function: type-llvm mapping not found",
 	"compiled mir: unsupported then-body statement kind",
+	"compiled mir: try call statement must be a method call",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. With
-// the nested 'if' at selfhost/src/parser/format.kizu:31 dispatching through
-// lower_multi_if_statement and descending into its void then-body, lowering reaches the nested
-// then-body's first statement -- the try-call statement
-// 'try append_sorted_imports(out, source, &format_tokens, &leading_imports);'
-// (selfhost/src/parser/format.kizu:32). lower_multi_expr_statement only lowers method-call try
-// statements (a 'receiver.append_bytes/append_byte' call), but 'append_sorted_imports(...)' is a
-// free-function call, so it raises "compiled mir: try call statement must be a method call" at
-// selfhost/src/backend/compiled_mir_lower.kizu:3651. Lowering a free-function try-call statement in
-// a void then-body is the next capability, so the gate pins this measured blocker as a behavior
-// assertion (issue 1201).
-const formatDriverLoweringBlocker = "compiled mir: try call statement must be a method call"
+// the free-function try-call statement 'try append_sorted_imports(...)' at
+// selfhost/src/parser/format.kizu:32 lowered through lower_void_free_try_call_statement (a
+// VoidTryCall statement), lowering advances to the nested then-body's next statement --
+// 'index = next_index;' (selfhost/src/parser/format.kizu:33), an assignment to a local bound
+// outside the then-body. lower_void_then_body dispatches Let / If / ExprStmt but not Assign, so it
+// raises "compiled mir: void then-body assignment statement not yet supported" at
+// selfhost/src/backend/compiled_mir_lower.kizu:4757. Lowering an assignment statement in a void
+// then-body is the next capability, so the gate pins this measured blocker as a behavior assertion
+// (issue 1201).
+const formatDriverLoweringBlocker = "compiled mir: void then-body assignment " +
+	"statement not yet supported"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
