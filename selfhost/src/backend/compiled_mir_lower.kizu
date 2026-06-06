@@ -3310,6 +3310,7 @@ pub fn lower_multi_statement_function(
                 string_counter,
                 temp_counter,
                 try_counter,
+                &aliases,
                 &var stmts,
                 bs
             );
@@ -3328,6 +3329,7 @@ pub fn lower_multi_statement_function(
                     statement,
                     string_counter,
                     temp_counter,
+                    alias_counter,
                     stmt_index,
                     &var aliases,
                     &var stmts,
@@ -3335,6 +3337,7 @@ pub fn lower_multi_statement_function(
                 );
                 temp_counter = while_result.temp_counter;
                 string_counter = while_result.string_counter;
+                alias_counter = while_result.alias_counter;
             } else {
             if std::mem::equal_bytes(stmt_kind, "Return") {
                 try stmts.append(try lower_multi_return_statement(
@@ -3346,6 +3349,7 @@ pub fn lower_multi_statement_function(
                     statement,
                     string_counter,
                     temp_counter,
+                    &aliases,
                     bs
                 ));
             } else {
@@ -3381,6 +3385,7 @@ pub fn lower_multi_statement_function(
                             statement,
                             string_counter,
                             try_counter,
+                            &aliases,
                             &var stmts,
                             bs
                         );
@@ -3576,6 +3581,42 @@ fn copy_local_aliases(
         index = index + 1;
     }
     return copied;
+}
+
+fn lower_call_args_with_local_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    call_node: i64,
+    first_string_index: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64
+) -> !std::array::Array<compiled_mir::MirCallArg> {
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    var index = 0;
+    while index < aliases.len() {
+        let state = try aliases.at(index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try alias_sources.append(state.source_name);
+            try alias_currents.append(state.current_name);
+        }
+        index = index + 1;
+    }
+    return try compiled_mir_lower_call::lower_call_args_with_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        call_node,
+        first_string_index,
+        &alias_sources,
+        &alias_currents,
+        bs
+    );
 }
 
 fn carried_scalar_alias_name(source_name: []u8, loop_index: i64, slot: i64) -> ![]u8 {
@@ -3816,6 +3857,7 @@ fn lower_multi_expr_statement(
     statement: i64,
     string_counter: i64,
     try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiExprLowerResult {
@@ -3836,7 +3878,7 @@ fn lower_multi_expr_statement(
     if !try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
         return try lower_void_free_try_call_statement(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-            inner, string_counter, try_counter, stmts, bs
+            inner, string_counter, try_counter, aliases, stmts, bs
         );
     }
     let callee_node = try ir_contract::body_child_sequence_from(
@@ -3857,6 +3899,7 @@ fn lower_multi_expr_statement(
     let receiver_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, receiver_node, bs
     );
+    let receiver_alias = try local_alias_current_name(aliases, receiver_name);
     let arg_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, inner, "arg", 0, bs
     );
@@ -3864,19 +3907,19 @@ fn lower_multi_expr_statement(
     var consumed_string = 0;
     if std::mem::equal_bytes(method_name, "append_bytes") {
         consumed_string = try lower_string_method_arg(
-            ir_bytes, function_name, "%kizu.slice.u8", arg_node, string_counter, &var args, bs
+            ir_bytes, function_name, "%kizu.slice.u8", arg_node, string_counter, aliases, &var args, bs
         );
         try stmts.append(compiled_mir::string_try_append_stmt(
-            receiver_name, "kizu_rt_string_append_bytes", llvm_return_type,
+            receiver_alias, "kizu_rt_string_append_bytes", llvm_return_type,
             string_counter, try_counter, args
         ));
     } else {
         if std::mem::equal_bytes(method_name, "append_byte") {
             consumed_string = try lower_string_method_arg(
-                ir_bytes, function_name, "i8", arg_node, string_counter, &var args, bs
+                ir_bytes, function_name, "i8", arg_node, string_counter, aliases, &var args, bs
             );
             try stmts.append(compiled_mir::string_try_append_stmt(
-                receiver_name, "kizu_rt_string_append_byte", llvm_return_type,
+                receiver_alias, "kizu_rt_string_append_byte", llvm_return_type,
                 string_counter, try_counter, args
             ));
         } else {
@@ -3908,6 +3951,7 @@ fn lower_void_free_try_call_statement(
     call_node: i64,
     string_counter: i64,
     try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiExprLowerResult {
@@ -3923,8 +3967,8 @@ fn lower_void_free_try_call_statement(
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let args = try compiled_mir_lower_call::lower_call_args(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, bs
+    let args = try lower_call_args_with_local_aliases(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs
     );
     let new_counter = string_counter + try compiled_mir_lower_call::count_string_args(&args);
     try stmts.append(compiled_mir::void_try_call_stmt(
@@ -3947,6 +3991,7 @@ fn lower_string_method_arg(
     arg_type: []u8,
     arg_node: i64,
     string_index: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     args: &var std::array::Array<compiled_mir::MirCallArg>,
     bs: i64
 ) -> !i64 {
@@ -3955,7 +4000,9 @@ fn lower_string_method_arg(
         let var_name = try ir_contract::body_token_or_empty_from(
             ir_bytes, function_name, arg_node, bs
         );
-        try args.append(compiled_mir::var_call_arg(arg_type, var_name));
+        try args.append(compiled_mir::var_call_arg(
+            arg_type, try local_alias_current_name(aliases, var_name)
+        ));
         return 0;
     }
     if std::mem::equal_bytes(arg_kind, "String") {
@@ -3981,6 +4028,7 @@ fn lower_multi_let_statement(
     string_counter: i64,
     temp_counter: i64,
     try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiLowerResult {
@@ -4013,12 +4061,12 @@ fn lower_multi_let_statement(
         if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
             return try lower_multi_let_array_get(
                 ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-                let_name, inner, string_counter, temp_counter, try_counter, stmts, bs
+                let_name, inner, string_counter, temp_counter, try_counter, aliases, stmts, bs
             );
         }
         return try lower_multi_let_try_call(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-            let_name, inner, string_counter, temp_counter, try_counter, stmts, bs
+            let_name, inner, string_counter, temp_counter, try_counter, aliases, stmts, bs
         );
     }
     if std::mem::equal_bytes(let_value_kind, "Call") {
@@ -4040,7 +4088,7 @@ fn lower_multi_let_statement(
         // return-statement nested-call handling (issue 1165 / 1162).
         if try call_has_call_arg(ir_bytes, function_name, let_value, bs) {
             var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-            let nested_result_id = try lower_expr_into(
+            let nested_result_id = try lower_expr_with_local_aliases(
                 ir_bytes,
                 function_name,
                 module_prefix,
@@ -4049,6 +4097,7 @@ fn lower_multi_let_statement(
                 string_counter,
                 temp_counter,
                 &var nested_insts,
+                aliases,
                 bs
             );
             let nested_strings = try count_strings_in_insts(&nested_insts);
@@ -4078,8 +4127,8 @@ fn lower_multi_let_statement(
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
             ir_bytes, function_name, module_prefix, let_value, bs
         );
-        let args = try compiled_mir_lower_call::lower_call_args(
-            ir_bytes, function_name, module_prefix, locals_spec, let_value, string_counter, bs
+        let args = try lower_call_args_with_local_aliases(
+            ir_bytes, function_name, module_prefix, locals_spec, let_value, string_counter, aliases, bs
         );
         let new_locals = try compiled_signature::extend_locals_spec(
             ir_bytes, locals_spec, let_name, call_type
@@ -4117,7 +4166,7 @@ fn lower_multi_let_statement(
         };
     }
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let result_id = try lower_expr_into(
+    let result_id = try lower_expr_with_local_aliases(
         ir_bytes,
         function_name,
         module_prefix,
@@ -4126,6 +4175,7 @@ fn lower_multi_let_statement(
         string_counter,
         temp_counter,
         &var insts,
+        aliases,
         bs
     );
     let expr_strings = try count_strings_in_insts(&insts);
@@ -4157,6 +4207,7 @@ fn lower_multi_let_try_call(
     string_counter: i64,
     temp_counter: i64,
     try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiLowerResult {
@@ -4172,8 +4223,8 @@ fn lower_multi_let_try_call(
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let args = try compiled_mir_lower_call::lower_call_args(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, bs
+    let args = try lower_call_args_with_local_aliases(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs
     );
     let new_locals = try compiled_signature::extend_locals_spec(
         ir_bytes, locals_spec, let_name, success_type
@@ -4209,6 +4260,7 @@ fn lower_multi_let_array_get(
     string_counter: i64,
     temp_counter: i64,
     try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
 ) -> !MultiLowerResult {
@@ -4239,6 +4291,7 @@ fn lower_multi_let_array_get(
     let receiver_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, receiver_node, bs
     );
+    let receiver_alias = try local_alias_current_name(aliases, receiver_name);
     let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
         ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs
     );
@@ -4254,7 +4307,7 @@ fn lower_multi_let_array_get(
         ir_bytes, function_name, call_node, "arg", 0, bs
     );
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let index_result_id = try lower_expr_into(
+    let index_result_id = try lower_expr_with_local_aliases(
         ir_bytes,
         function_name,
         module_prefix,
@@ -4263,13 +4316,14 @@ fn lower_multi_let_array_get(
         string_counter,
         temp_counter,
         &var insts,
+        aliases,
         bs
     );
     let expr_strings = try count_strings_in_insts(&insts);
     let next_temp = temp_counter + insts.len();
     try stmts.append(compiled_mir::let_array_get_stmt(
         let_name,
-        receiver_name,
+        receiver_alias,
         element_llvm_type,
         llvm_return_type,
         index_result_id,
@@ -4437,6 +4491,7 @@ fn lower_multi_return_statement(
     statement: i64,
     string_counter: i64,
     temp_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     bs: i64
 ) -> !compiled_mir::MirStmt {
     let value = try ir_contract::body_child_sequence_from(
@@ -4459,8 +4514,9 @@ fn lower_multi_return_statement(
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
             ir_bytes, function_name, module_prefix, return_not_try, bs
         );
-        let args = try compiled_mir_lower_call::lower_call_args(
-            ir_bytes, function_name, module_prefix, locals_spec, return_not_try, string_counter, bs
+        let args = try lower_call_args_with_local_aliases(
+            ir_bytes, function_name, module_prefix, locals_spec, return_not_try,
+            string_counter, aliases, bs
         );
         return compiled_mir::return_not_try_call_stmt(
             called_error_union, llvm_return_type, callee_module_prefix, callee_name,
@@ -4473,7 +4529,7 @@ fn lower_multi_return_statement(
                 ir_bytes, function_name, value, "arg", 0, bs
             );
             var message_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-            let message_result = try lower_expr_into(
+            let message_result = try lower_expr_with_local_aliases(
                 ir_bytes,
                 function_name,
                 module_prefix,
@@ -4482,6 +4538,7 @@ fn lower_multi_return_statement(
                 string_counter,
                 temp_counter,
                 &var message_insts,
+                aliases,
                 bs
             );
             return compiled_mir::return_error_stmt(
@@ -4492,10 +4549,10 @@ fn lower_multi_return_statement(
         // supported multi-statement method return is the checked Array<T>.get
         // accessor (self.<field>.get(<expr>) -> !T), backing Ast.child_at (tracker 961).
         if try callee_is_field_expr(ir_bytes, function_name, value, bs) {
-            return try lower_multi_return_array_get(
-                ir_bytes, function_name, module_prefix, llvm_return_type,
-                locals_spec, value, string_counter, temp_counter, bs
-            );
+                return try lower_multi_return_array_get(
+                    ir_bytes, function_name, module_prefix, llvm_return_type,
+                    locals_spec, value, string_counter, temp_counter, aliases, bs
+                );
         }
         // 'return equal_bytes(token_text(...), expected);' carries a nested call argument and
         // 'return is_line_break(source[cursor]);' carries a single-element byte index load --
@@ -4505,7 +4562,7 @@ fn lower_multi_return_statement(
         // 1162).
         if try call_has_hoisted_arg(ir_bytes, function_name, value, bs) {
             var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-            let nested_result_id = try lower_expr_into(
+            let nested_result_id = try lower_expr_with_local_aliases(
                 ir_bytes,
                 function_name,
                 module_prefix,
@@ -4514,6 +4571,7 @@ fn lower_multi_return_statement(
                 string_counter,
                 temp_counter,
                 &var nested_insts,
+                aliases,
                 bs
             );
             return compiled_mir::return_expr_stmt(string_counter, nested_result_id, nested_insts);
@@ -4527,8 +4585,8 @@ fn lower_multi_return_statement(
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
             ir_bytes, function_name, module_prefix, value, bs
         );
-        let args = try compiled_mir_lower_call::lower_call_args(
-            ir_bytes, function_name, module_prefix, locals_spec, value, string_counter, bs
+        let args = try lower_call_args_with_local_aliases(
+            ir_bytes, function_name, module_prefix, locals_spec, value, string_counter, aliases, bs
         );
         return compiled_mir::return_call_stmt(
             call_type, string_counter, callee_module_prefix, callee_name, args
@@ -4541,7 +4599,7 @@ fn lower_multi_return_statement(
         return compiled_mir::return_struct_stmt(string_counter, fields);
     }
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let result_id = try lower_expr_into(
+    let result_id = try lower_expr_with_local_aliases(
         ir_bytes,
         function_name,
         module_prefix,
@@ -4550,6 +4608,7 @@ fn lower_multi_return_statement(
         string_counter,
         temp_counter,
         &var insts,
+        aliases,
         bs
     );
     return compiled_mir::return_expr_stmt(string_counter, result_id, insts);
@@ -4569,6 +4628,7 @@ fn lower_multi_return_array_get(
     call_node: i64,
     string_counter: i64,
     temp_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     bs: i64
 ) -> !compiled_mir::MirStmt {
     let callee_node = try ir_contract::body_child_sequence_from(
@@ -4635,7 +4695,7 @@ fn lower_multi_return_array_get(
         ir_bytes, function_name, call_node, "arg", 0, bs
     );
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let index_result_id = try lower_expr_into(
+    let index_result_id = try lower_expr_with_local_aliases(
         ir_bytes,
         function_name,
         module_prefix,
@@ -4644,6 +4704,7 @@ fn lower_multi_return_array_get(
         string_counter,
         temp_counter,
         &var insts,
+        aliases,
         bs
     );
     return compiled_mir::return_array_get_stmt(
@@ -5052,6 +5113,7 @@ fn lower_void_then_body(
                 body_strings,
                 body_temps,
                 body_tries,
+                aliases,
                 then_body_stmts,
                 bs
             );
@@ -5092,6 +5154,7 @@ fn lower_void_then_body(
                         statement,
                         body_strings,
                         body_tries,
+                        aliases,
                         then_body_stmts,
                         bs
                     );
@@ -5205,9 +5268,9 @@ fn lower_multi_if_statement(
                     let guard_module_prefix = try compiled_mir_types::lower_call_module_prefix(
                         ir_bytes, function_name, module_prefix, guard_not_try, bs
                     );
-                    let guard_args = try compiled_mir_lower_call::lower_call_args(
+                    let guard_args = try lower_call_args_with_local_aliases(
                         ir_bytes, function_name, module_prefix, locals_spec, guard_not_try,
-                        string_counter, bs
+                        string_counter, aliases, bs
                     );
                     let guard_arg_strings = try compiled_mir_lower_call::count_string_args(&guard_args);
                     try stmts.append(compiled_mir::if_not_try_call_return_bool_stmt(
@@ -5566,8 +5629,9 @@ fn lower_multi_if_statement(
                 callee_name = try compiled_mir_types::lower_call_callee_name(
                     ir_bytes, function_name, module_prefix, ret_value, bs
                 );
-                call_args = try compiled_mir_lower_call::lower_call_args(
-                    ir_bytes, function_name, module_prefix, locals_spec, ret_value, then_string_base, bs
+                call_args = try lower_call_args_with_local_aliases(
+                    ir_bytes, function_name, module_prefix, locals_spec, ret_value, then_string_base,
+                    aliases, bs
                 );
                 then_kind = compiled_mir::MirIfThenKind::ReturnCall;
                 then_module_prefix = try compiled_mir_types::lower_call_module_prefix(
@@ -6604,6 +6668,7 @@ fn lower_multi_while_statement(
     statement: i64,
     string_counter: i64,
     temp_counter: i64,
+    alias_counter: i64,
     loop_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
@@ -6645,6 +6710,7 @@ fn lower_multi_while_statement(
             statement,
             string_counter,
             temp_counter,
+            alias_counter,
             loop_index,
             "",
             "",
@@ -6670,6 +6736,7 @@ fn lower_multi_while_statement(
             statement,
             string_counter,
             temp_counter,
+            alias_counter,
             loop_index,
             stmts,
             bs
@@ -6786,6 +6853,7 @@ fn lower_multi_while_statement(
         body_temp_counter = temp_counter + cond_insts.len();
     }
     var body_try_counter = loop_index * 1000;
+    var body_alias_counter = alias_counter;
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
     // The body ends with a latch suffix: one statement (a constant-step 'index = index +
     // <int>' increment or a loop-carried 'index = try <callee>(.., index);' try-call), or a
@@ -6817,6 +6885,7 @@ fn lower_multi_while_statement(
                 body_string_counter,
                 body_temp_counter,
                 body_try_counter,
+                &body_aliases,
                 &var body_stmts,
                 bs
             );
@@ -6836,7 +6905,7 @@ fn lower_multi_while_statement(
                     body_string_counter,
                     body_temp_counter,
                     body_try_counter,
-                    0,
+                    body_alias_counter,
                     body_if_index,
                     &var body_aliases,
                     &var body_stmts,
@@ -6845,6 +6914,7 @@ fn lower_multi_while_statement(
                 body_temp_counter = if_result.temp_counter;
                 body_string_counter = if_result.string_counter;
                 body_try_counter = if_result.try_counter;
+                body_alias_counter = if_result.alias_counter;
             } else {
                 return error("compiled mir: unsupported while body statement");
             }
@@ -6978,7 +7048,7 @@ fn lower_multi_while_statement(
         temp_counter: body_temp_counter,
         string_counter: body_string_counter,
         try_counter: 0,
-        alias_counter: 0
+        alias_counter: body_alias_counter
     };
 }
 // assign_is_self_decrement reports whether a body Assign is a constant-step self-decrement
@@ -7601,6 +7671,7 @@ fn lower_multi_while_leading_decrement(
     statement: i64,
     string_counter: i64,
     temp_counter: i64,
+    alias_counter: i64,
     loop_index: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64
@@ -7707,6 +7778,7 @@ fn lower_multi_while_leading_decrement(
     // synthesized decrement occupies body_stmts[0] at the same statement_index 0 as the source
     // decrement, so later statement indices line up with their body_stmts slots.
     var body_try_counter = loop_index * 1000;
+    var body_alias_counter = alias_counter;
     var body_index = 1;
     while body_index < body_count {
         let body_stmt = try ir_contract::body_child_sequence_from(
@@ -7724,6 +7796,7 @@ fn lower_multi_while_leading_decrement(
                 body_string_counter,
                 body_temp_counter,
                 body_try_counter,
+                &body_aliases,
                 &var body_stmts,
                 bs
             );
@@ -7817,8 +7890,8 @@ fn lower_multi_while_leading_decrement(
                         body_stmt,
                         body_string_counter,
                         body_temp_counter,
-                        0,
-                        0,
+                        body_try_counter,
+                        body_alias_counter,
                         body_if_index,
                         &var body_aliases,
                         &var body_stmts,
@@ -7826,6 +7899,8 @@ fn lower_multi_while_leading_decrement(
                     );
                     body_temp_counter = if_result.temp_counter;
                     body_string_counter = if_result.string_counter;
+                    body_try_counter = if_result.try_counter;
+                    body_alias_counter = if_result.alias_counter;
                 }
             } else {
                 return error("compiled mir: unsupported leading-decrement while body statement");
@@ -7859,7 +7934,7 @@ fn lower_multi_while_leading_decrement(
         temp_counter: body_temp_counter,
         string_counter: body_string_counter,
         try_counter: 0,
-        alias_counter: 0
+        alias_counter: body_alias_counter
     };
 }
 // return_expr_advance returns the counters past an expression-return statement's instructions: the
@@ -7926,6 +8001,62 @@ fn rename_induction_in_insts(
     return;
 }
 
+fn expr_inst_var_name_or_empty(inst: &compiled_mir::MirExprInst) -> []u8 {
+    return match inst {
+        Var(payload) => payload.value,
+        _ => "",
+    };
+}
+
+fn expr_inst_field_base_or_empty(inst: &compiled_mir::MirExprInst) -> []u8 {
+    return match inst {
+        FieldAccess(payload) => payload.value,
+        _ => "",
+    };
+}
+
+fn expr_inst_field_left_or_zero(inst: &compiled_mir::MirExprInst) -> i64 {
+    return match inst {
+        FieldAccess(payload) => payload.left,
+        _ => 0,
+    };
+}
+
+fn expr_inst_field_source_type_or_empty(inst: &compiled_mir::MirExprInst) -> []u8 {
+    return match inst {
+        FieldAccess(payload) => payload.source_type,
+        _ => "",
+    };
+}
+
+fn expr_inst_field_source_index_or_zero(inst: &compiled_mir::MirExprInst) -> i64 {
+    return match inst {
+        FieldAccess(payload) => payload.source_field_index,
+        _ => 0,
+    };
+}
+
+fn expr_inst_index_target_or_empty(inst: &compiled_mir::MirExprInst) -> []u8 {
+    return match inst {
+        IndexLoad(payload) => payload.target,
+        _ => "",
+    };
+}
+
+fn expr_inst_index_operand_or_zero(inst: &compiled_mir::MirExprInst) -> i64 {
+    return match inst {
+        IndexLoad(payload) => payload.index,
+        _ => 0,
+    };
+}
+
+fn expr_inst_array_len_receiver_or_empty(inst: &compiled_mir::MirExprInst) -> []u8 {
+    return match inst {
+        ArrayLen(payload) => payload.receiver_name,
+        _ => "",
+    };
+}
+
 fn rename_var_in_insts(
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
     from: []u8,
@@ -7934,24 +8065,46 @@ fn rename_var_in_insts(
     var index = 0;
     while index < insts.len() {
         let inst = try insts.at(index);
-        let name = match inst {
-            Var(payload) => payload.value,
-            _ => "",
-        };
-        let inst_type = match inst {
-            Var(payload) => payload.llvm_type,
-            _ => "",
-        };
-        var do_rename = false;
-        var hold_id = 0;
-        var hold_type = "";
-        if std::mem::len(name) > 0 and std::mem::equal_bytes(name, from) {
-            do_rename = true;
-            hold_id = compiled_mir::expr_inst_id(inst);
-            hold_type = inst_type;
-        }
-        if do_rename {
-            try insts.set(index, compiled_mir::var_expr_inst(hold_id, hold_type, to));
+        let inst_id = compiled_mir::expr_inst_id(inst);
+        let inst_type = compiled_mir::expr_inst_llvm_type(inst);
+        let var_name = expr_inst_var_name_or_empty(inst);
+        let field_base = expr_inst_field_base_or_empty(inst);
+        let field_left = expr_inst_field_left_or_zero(inst);
+        let field_source_type = expr_inst_field_source_type_or_empty(inst);
+        let field_source_index = expr_inst_field_source_index_or_zero(inst);
+        let index_target = expr_inst_index_target_or_empty(inst);
+        let index_operand = expr_inst_index_operand_or_zero(inst);
+        let array_len_receiver = expr_inst_array_len_receiver_or_empty(inst);
+        if std::mem::len(var_name) > 0 and std::mem::equal_bytes(var_name, from) {
+            try insts.set(index, compiled_mir::var_expr_inst(inst_id, inst_type, to));
+        } else {
+            if field_left < 0 and
+                std::mem::len(field_base) > 0 and
+                std::mem::equal_bytes(field_base, from) {
+                try insts.set(index, compiled_mir::field_access_expr_inst(
+                    inst_id,
+                    inst_type,
+                    to,
+                    field_source_type,
+                    field_source_index
+                ));
+            } else {
+                if std::mem::len(index_target) > 0 and std::mem::equal_bytes(index_target, from) {
+                    try insts.set(index, compiled_mir::index_load_expr_inst(
+                        inst_id,
+                        to,
+                        index_operand
+                    ));
+                } else {
+                    if std::mem::len(array_len_receiver) > 0 and
+                        std::mem::equal_bytes(array_len_receiver, from) {
+                        try insts.set(index, compiled_mir::array_len_expr_inst(
+                            inst_id,
+                            to
+                        ));
+                    }
+                }
+            }
         }
         index = index + 1;
     }
@@ -7985,7 +8138,7 @@ fn lower_expr_with_local_aliases(
     aliases: &std::array::Array<LocalAliasState>,
     bs: i64
 ) -> !i64 {
-    let result = try lower_expr_into(
+    return try lower_expr_into_local_aliases(
         ir_bytes,
         function_name,
         module_prefix,
@@ -7994,10 +8147,9 @@ fn lower_expr_with_local_aliases(
         string_counter,
         temp_counter,
         insts,
+        aliases,
         bs
     );
-    try rename_local_aliases_in_insts(insts, aliases);
-    return result;
 }
 // insts_reference_var reports whether an expression instruction array reads a Var named 'name'.
 // A renamed nested continue-latch body lowers its if / return statements through the shared
@@ -8103,6 +8255,7 @@ fn lower_multi_while_continue_latch(
     statement: i64,
     string_counter: i64,
     temp_counter: i64,
+    alias_counter: i64,
     loop_index: i64,
     explicit_seed_var: []u8,
     rename_to: []u8,
@@ -8220,6 +8373,7 @@ fn lower_multi_while_continue_latch(
     // scan -- a '<induction> = <local>' re-seed assign is consumed (it emits no instruction) and
     // its following nested while lowers through a recursive continue-latch call.
     var body_try_counter = loop_index * 1000;
+    var body_alias_counter = alias_counter;
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer body_aliases.deinit();
@@ -8249,6 +8403,7 @@ fn lower_multi_while_continue_latch(
                     body_string_counter,
                     body_temp_counter,
                     body_try_counter,
+                    &body_aliases,
                     &var body_stmts,
                     bs
                 );
@@ -8269,7 +8424,7 @@ fn lower_multi_while_continue_latch(
                     body_string_counter,
                     body_temp_counter,
                     body_try_counter,
-                    0,
+                    body_alias_counter,
                     body_if_index,
                     &var body_aliases,
                     &var body_stmts,
@@ -8278,6 +8433,7 @@ fn lower_multi_while_continue_latch(
                 body_temp_counter = if_result.temp_counter;
                 body_string_counter = if_result.string_counter;
                 body_try_counter = if_result.try_counter;
+                body_alias_counter = if_result.alias_counter;
                 // A renamed nested body lowers its ifs through the shared path without a rename, so
                 // an induction reference in the if condition would be an unrenamed phi reference.
                 if std::mem::len(rename_to) > 0 {
@@ -8297,6 +8453,7 @@ fn lower_multi_while_continue_latch(
                         body_stmt,
                         body_string_counter,
                         body_temp_counter,
+                        &body_aliases,
                         bs
                     ));
                     // A renamed nested body lowers its return through the shared path without a
@@ -8353,6 +8510,7 @@ fn lower_multi_while_continue_latch(
                                 body_stmt,
                                 body_string_counter,
                                 body_temp_counter,
+                                body_alias_counter,
                                 inner_loop_index,
                                 seed_var,
                                 "nested.loop.induction",
@@ -8361,6 +8519,7 @@ fn lower_multi_while_continue_latch(
                             );
                             body_string_counter = inner_result.string_counter;
                             body_temp_counter = inner_result.temp_counter;
+                            body_alias_counter = inner_result.alias_counter;
                         } else {
                             return error("compiled mir: unsupported continue-latch body statement");
                         }
@@ -8399,7 +8558,7 @@ fn lower_multi_while_continue_latch(
         temp_counter: body_temp_counter,
         string_counter: body_string_counter,
         try_counter: 0,
-        alias_counter: 0
+        alias_counter: body_alias_counter
     };
 }
 // lower_renamed_continue_latch_let lowers a nested continue-latch body's 'let <name> = <expr>' with
@@ -8859,6 +9018,417 @@ fn lower_expr_call_with_nested_args(
     return id;
 }
 
+fn lower_expr_call_with_nested_args_with_local_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64
+) -> !i64 {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
+    );
+    let call_type = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    var alias_index = 0;
+    while alias_index < aliases.len() {
+        let state = try aliases.at(alias_index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try alias_sources.append(state.source_name);
+            try alias_currents.append(state.current_name);
+        }
+        alias_index = alias_index + 1;
+    }
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    var arg_index = 0;
+    var string_idx = string_index;
+    while arg_index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", arg_index, bs
+        );
+        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        let arg_type = try compiled_mir_types::lower_call_arg_type(
+            ir_bytes, module_prefix, callee_name, arg_index
+        );
+        let hoist_arg = std::mem::equal_bytes(arg_kind, "Call") or
+            (try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs));
+        if hoist_arg {
+            let before = insts.len();
+            let temp_id = try lower_expr_with_local_aliases(
+                ir_bytes, function_name, module_prefix, params_spec, arg_node,
+                string_idx, id_base, insts, aliases, bs
+            );
+            string_idx = string_idx + try count_strings_in_insts_from(insts, before);
+            try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+        } else {
+            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                params_spec,
+                arg_type,
+                arg_node,
+                string_idx,
+                &alias_sources,
+                &alias_currents,
+                bs
+            );
+            let is_string_arg = scalar_arg.kind == compiled_mir::MirCallArgKind::String;
+            try args.append(scalar_arg);
+            if is_string_arg {
+                string_idx = string_idx + 1;
+            }
+        }
+        arg_index = arg_index + 1;
+    }
+    let id = id_base + insts.len();
+    try insts.append(compiled_mir::call_expr_inst(
+        id, call_type, callee_module_prefix, lowered_callee_name, args
+    ));
+    return id;
+}
+
+fn lower_expr_call_with_local_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64
+) -> !i64 {
+    let id = id_base + insts.len();
+    if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
+        let result = try lower_expr_array_len(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+        );
+        try rename_local_aliases_in_insts(insts, aliases);
+        return result;
+    }
+    if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, bs) {
+        return try lower_expr_call_with_nested_args_with_local_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node,
+            string_index, id_base, insts, aliases, bs
+        );
+    }
+    let call_type = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, expr_node, bs
+    );
+    let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, expr_node, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, expr_node, bs
+    );
+    let args = try lower_call_args_with_local_aliases(
+        ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, aliases, bs
+    );
+    try insts.append(compiled_mir::call_expr_inst(
+        id,
+        call_type,
+        callee_module_prefix,
+        lowered_callee_name,
+        args
+    ));
+    return id;
+}
+
+fn lower_expr_into_local_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64
+) -> !i64 {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr_node, bs);
+    let id = id_base + insts.len();
+    if std::mem::equal_bytes(kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            bs
+        );
+        let var_type = try compiled_mir_types::resolve_value_llvm_type(
+            ir_bytes, function_name, module_prefix, params_spec, var_name, bs
+        );
+        try insts.append(compiled_mir::var_expr_inst(
+            id, var_type, try local_alias_current_name(aliases, var_name)
+        ));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            bs
+        );
+        try insts.append(compiled_mir::bool_expr_inst(
+            id,
+            std::mem::equal_bytes(token, "true")
+        ));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "Int") {
+        let int_value = try ir_contract::body_int_value_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            bs
+        );
+        try insts.append(compiled_mir::int_expr_inst(id, int_value));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "String") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            bs
+        );
+        let _payload_len = try compiled_util::string_token_decoded_len(
+            token,
+            "compiled mir: invalid expression string token"
+        );
+        try insts.append(compiled_mir::string_expr_inst(
+            id,
+            token,
+            string_index
+        ));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "Prefix") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-prefix ", function_name, expr_node, bs
+        );
+        let right_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "right", 0, bs
+        );
+        if std::mem::equal_bytes(op, "neg") {
+            let right_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, right_node, bs
+            );
+            if !std::mem::equal_bytes(right_kind, "Int") {
+                return error("compiled mir: unsupported neg operand");
+            }
+            let int_value = try ir_contract::body_int_value_from(
+                ir_bytes, function_name, right_node, bs
+            );
+            try insts.append(compiled_mir::int_expr_inst(id, 0 - int_value));
+            return id;
+        }
+        if !std::mem::equal_bytes(op, "not") {
+            return error("compiled mir: unsupported prefix op");
+        }
+        let operand = try lower_expr_into_local_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            right_node,
+            string_index,
+            id_base,
+            insts,
+            aliases,
+            bs
+        );
+        let result_id = id_base + insts.len();
+        try insts.append(compiled_mir::prefix_not_expr_inst(result_id, operand));
+        return result_id;
+    }
+    if std::mem::equal_bytes(kind, "Binary") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-binary ", function_name, expr_node, bs
+        );
+        let left_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "left", 0, bs
+        );
+        let right_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "right", 0, bs
+        );
+        let before_left = insts.len();
+        let left = try lower_expr_into_local_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, left_node,
+            string_index, id_base, insts, aliases, bs
+        );
+        let right_string_index = string_index + try count_strings_in_insts_from(insts, before_left);
+        let right = try lower_expr_into_local_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, right_node,
+            right_string_index, id_base, insts, aliases, bs
+        );
+        let result_id = id_base + insts.len();
+        try insts.append(compiled_mir::binary_expr_inst(result_id, op, left, right));
+        return result_id;
+    }
+    if std::mem::equal_bytes(kind, "CastExpr") {
+        let type_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "type", 0, bs
+        );
+        let type_text = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, type_node, bs
+        );
+        let target_llvm = try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, module_prefix, type_text
+        );
+        let value_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "value", 0, bs
+        );
+        let value_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, value_node, bs
+        );
+        if !std::mem::equal_bytes(value_kind, "Int") {
+            return error("compiled mir: unsupported cast operand");
+        }
+        let int_value = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, value_node, bs
+        );
+        try insts.append(compiled_mir::typed_int_expr_inst(id, int_value, target_llvm));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "FieldExpr") {
+        return try lower_expr_field_with_local_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            expr_node,
+            string_index,
+            id_base,
+            insts,
+            aliases,
+            bs
+        );
+    }
+    if std::mem::equal_bytes(kind, "IndexExpr") {
+        let end_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "end", 0, bs
+        );
+        let end_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, end_node, bs
+        );
+        let target_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "target", 0, bs
+        );
+        let index_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "start", 0, bs
+        );
+        if !std::mem::equal_bytes(end_kind, "Empty") {
+            let target_id = try lower_expr_into_local_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                params_spec,
+                target_node,
+                string_index,
+                id_base,
+                insts,
+                aliases,
+                bs
+            );
+            let start_id = try lower_expr_into_local_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                params_spec,
+                index_node,
+                string_index,
+                id_base,
+                insts,
+                aliases,
+                bs
+            );
+            let end_id = try lower_expr_into_local_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                params_spec,
+                end_node,
+                string_index,
+                id_base,
+                insts,
+                aliases,
+                bs
+            );
+            let result_id = id_base + insts.len();
+            try insts.append(compiled_mir::slice_expr_inst(
+                result_id, target_id, start_id, end_id
+            ));
+            return result_id;
+        }
+        let target_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, target_node, bs
+        );
+        if !std::mem::equal_bytes(target_kind, "Var") {
+            return error("compiled mir: index target must be a var");
+        }
+        let target_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, target_node, bs
+        );
+        let index_id = try lower_expr_into_local_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            index_node,
+            string_index,
+            id_base,
+            insts,
+            aliases,
+            bs
+        );
+        let result_id = id_base + insts.len();
+        try insts.append(compiled_mir::index_load_expr_inst(
+            result_id,
+            try local_alias_current_name(aliases, target_name),
+            index_id
+        ));
+        return result_id;
+    }
+    if std::mem::equal_bytes(kind, "Call") {
+        return try lower_expr_call_with_local_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            expr_node,
+            string_index,
+            id_base,
+            insts,
+            aliases,
+            bs
+        );
+    }
+    return error("compiled mir: unsupported expression kind");
+}
+
 fn lower_expr_into(
     ir_bytes: []u8,
     function_name: []u8,
@@ -9236,6 +9806,82 @@ fn lower_expr_field(
         0,
         id_base,
         insts,
+        bs
+    );
+    let field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+    );
+    let id = id_base + insts.len();
+    try insts.append(compiled_mir::field_access_temp_expr_inst(
+        id,
+        field.field_llvm_type,
+        receiver_id,
+        field.receiver_llvm_type,
+        field.field_index
+    ));
+    return id;
+}
+
+fn lower_expr_field_with_local_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64
+) -> !i64 {
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, expr_node, bs
+    );
+    if std::mem::equal_bytes(mode, "namespace") {
+        return try lower_expr_field(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+        );
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    if std::mem::equal_bytes(receiver_kind, "Var") {
+        let receiver_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            receiver,
+            bs
+        );
+        let field = try compiled_mir_types::resolve_field_expr(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+        );
+        let id = id_base + insts.len();
+        try insts.append(compiled_mir::field_access_expr_inst(
+            id,
+            field.field_llvm_type,
+            try local_alias_current_name(aliases, receiver_name),
+            field.receiver_llvm_type,
+            field.field_index
+        ));
+        return id;
+    }
+    if !std::mem::equal_bytes(receiver_kind, "FieldExpr") and
+        !std::mem::equal_bytes(receiver_kind, "Call") {
+        return error("compiled mir: unsupported field expr receiver");
+    }
+    let receiver_id = try lower_expr_into_local_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        params_spec,
+        receiver,
+        string_index,
+        id_base,
+        insts,
+        aliases,
         bs
     );
     let field = try compiled_mir_types::resolve_field_expr(
