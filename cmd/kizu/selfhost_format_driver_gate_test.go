@@ -144,6 +144,13 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     now resolve through AST-derived struct-field facts emitted from the callee's declared
 //     '!CommentFormatState' return payload. Lowering reaches the EOF branch after those scalar
 //     state assignments (issue 1215).
+//   - "compiled mir: void then block must not carry an else arm": the EOF branch
+//     'if lexer::is_eof(token) { index = format_tokens.len(); } else { ... }'
+//     (selfhost/src/parser/format.kizu:68) now lowers as a generic void if/else. The lowerer
+//     descends through both branch-local bodies, preserves the else arm's let-try binding
+//     'let trailing_comma = try is_trailing_comma(...)', and merges locals reassigned by either
+//     arm through the existing alias store/load join metadata. The renderer emits real then/else
+//     blocks and a shared continuation instead of dropping the else arm (issue 1216).
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -159,27 +166,22 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: while body must end with the induction increment",
 	"compiled mir: unsupported expression kind",
 	"compiled function: struct field not found",
+	"compiled mir: void then block must not carry an else arm",
 }
 
-// formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The
-// leading-import no-else void if at selfhost/src/parser/format.kizu:28, its nested void if at
-// format.kizu:31, and the following 'leading_imports.deinit();' (format.kizu:41) all lower and
-// render. The main formatter loop at format.kizu:42 is now recognized as a branch-merge latch: its
-// EOF arm sets 'index = format_tokens.len();' (format.kizu:69), and its non-EOF arm ends with
-// 'index = index + 1;' (format.kizu:144). lower_multi_while_branch_merge_latch validates that
-// generic shape and descends into the loop body. The nested positive try-call condition
-// 'if try rbrace_closes_enum_decl(source, &format_tokens, index) {' at format.kizu:46 now lowers
-// and descends through its void then-body. The following 'let state = try
-// append_preserved_line_comments(...)' (format.kizu:56) now binds a CommentFormatState success
-// value whose field reads at format.kizu:65-67 resolve from real struct-field facts. The next
-// measured blocker is the EOF branch immediately after those reads:
-// 'if lexer::is_eof(token) { ... } else { ... }' at format.kizu:68 raises "compiled mir: void
-// then block must not carry an else arm" from selfhost/src/backend/compiled_mir_lower.kizu:4590
-// because the current void then-block lowering only renders no-else fall-through joins, while this
-// branch has real then and else bodies that must merge reassigned locals before following loop
-// statements continue. Lowering a generic void if/else branch is the next capability (issue 1216,
-// refs 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: void then block must not carry an else arm"
+// formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The EOF
+// branch at selfhost/src/parser/format.kizu:68 now lowers as a real void if/else: the then arm
+// assigns 'index = format_tokens.len();' (format.kizu:69), the else arm lowers its leading let-try
+// 'let trailing_comma = try is_trailing_comma(...)' (format.kizu:71), and reassigned locals merge
+// through the shared continuation. Lowering then descends into the else arm's nested rbrace branch
+// and reaches 'depth = depth - 1;' (format.kizu:75). lower_void_then_body_assign currently accepts
+// only Var / FieldExpr / String / CastExpr / Bool assignment values, so the Binary subtraction
+// raises "compiled mir: void then-body assignment value kind not yet supported" from
+// selfhost/src/backend/compiled_mir_lower.kizu:5182. Lowering a generic scalar Binary assignment
+// value through the same type-checked alias assignment path is the next capability (refs 1165 /
+// 1162).
+const formatDriverLoweringBlocker = "compiled mir: void then-body assignment value kind " +
+	"not yet supported"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -197,8 +199,10 @@ const formatDriverLoweringBlocker = "compiled mir: void then block must not carr
 // statement 'leading_imports.deinit();' lowers through OwnedDeinit. The main formatter while's
 // terminal branch-merge latch is validated. The nested positive try-call condition in the loop body
 // also lowers and descends through the same void-body path. The CommentFormatState field reads
-// after append_preserved_line_comments now resolve. Lowering stops at the following EOF
-// if/else branch, 'if lexer::is_eof(token) { ... } else { ... }' (format.kizu:68).
+// after append_preserved_line_comments now resolve. The following EOF if/else branch lowers and
+// renders with a real else body and alias merge. Lowering stops at the nested rbrace branch
+// assignment 'depth = depth - 1;' (format.kizu:75), whose Binary value is not yet accepted by the
+// void-body assignment lowering.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
