@@ -173,8 +173,16 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //   - "compiled mir: Array.len receiver is not a std::array::Array": the compound condition
 //     'if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 ...'
 //     (selfhost/src/parser/format.kizu:99) now lowers the std::string::String value receiver
-//     through the same type-driven '.len()' expression path as Array<T>.len(), but emits a
-//     StringLen MIR expression rendered as @kizu_rt_string_len instead of @kizu_rt_array_len.
+//     through the same type-driven '.len()' expression path as Array<T>.len(), emitting a
+//     StringLen MIR expression instead of an ArrayLen expression. Full-function LLVM rendering for
+//     this path remains blocked until later lowering blockers are crossed.
+//   - "compiled mir: prefix-not try-call void condition not yet supported": the later branch
+//     'if !(try next_token_text_equals(source, &format_tokens, index, "}")) { ... }'
+//     (selfhost/src/parser/format.kizu:130) now lowers through the same hoisted !bool try-call
+//     void-if machinery as positive try-call conditions, but records inverted branch polarity so
+//     the void then-body runs only when the try-call succeeds with false. Try-call failure still
+//     propagates through the current function error union, and reassigned locals enter the existing
+//     void-body alias merge path.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -195,6 +203,7 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: unsupported string method argument",
 	"compiled mir: void then-body assignment value kind not yet supported: Call",
 	"compiled mir: Array.len receiver is not a std::array::Array",
+	"compiled mir: prefix-not try-call void condition not yet supported",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The EOF
@@ -206,13 +215,15 @@ var formatDriverCrossedLoweringBlockers = []string{
 // 'if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 ...'
 // (format.kizu:99), including the std::string::String receiver 'out.len()'. It now reaches the
 // later void if condition 'if !(try next_token_text_equals(source, &format_tokens, index, "}"))'
-// (format.kizu:130). The current prefix-not try-call lowering only handles return-bool guard
-// clauses, so lower_multi_if_statement raises
-// "compiled mir: prefix-not try-call void condition not yet supported" from
-// selfhost/src/backend/compiled_mir_lower.kizu:5963. Lowering prefix-not try-call conditions with
-// void then-bodies is the next capability (refs 1165 / 1162).
+// (format.kizu:130), lowers its hoisted !bool try-call with inverted branch polarity, and descends
+// into the void then-body newline append plus scalar reassignments (format.kizu:131-133). The
+// current alias allocator has a fixed table of void-then alias names and the formatter path now
+// exhausts it, so void_then_alias_name raises
+// "compiled mir: too many void then aliases" from
+// selfhost/src/backend/compiled_mir_lower.kizu:3524. Dynamic or otherwise unbounded void-body alias
+// naming is the next capability (refs 1165 / 1162).
 const formatDriverLoweringBlocker = "compiled mir: " +
-	"prefix-not try-call void condition not yet supported"
+	"too many void then aliases"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -236,8 +247,9 @@ const formatDriverLoweringBlocker = "compiled mir: " +
 // string append 'try out.append_byte(cast<u8>(10));' lowers its CastExpr byte argument. The next
 // reassignment, 'last = last_byte(text);' (format.kizu:86), now lowers as a Call-valued alias
 // assignment. The later condition 'out.len() > 0' (format.kizu:99) now lowers through the
-// StringLen expression renderer, and lowering stops at the later prefix-not try-call void
-// condition at format.kizu:130.
+// StringLen expression path. The later prefix-not try-call void condition at format.kizu:130
+// now lowers with inverted branch polarity and reaches its newline then-body; lowering stops when
+// the fixed void-body alias-name table is exhausted by aliases created through the real path.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
