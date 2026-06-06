@@ -74,30 +74,21 @@ pub fn format_driver_lowering_gate() -> !void {
         &var facts, text, parsed.ast, &catalog, format_index, "checked-format-driver", body
     );
 
-    // Supply the cross-module callee signature the lowering resolves for the driver's first
-    // statement 'var format_tokens = try lexer::tokenize(allocator, source)'. format_source
-    // reaches the tokenizer through the 'import selfhost::lexer' alias; the compiled backend
-    // emits the real tokenizer entry under std::kizu::lexer::tokenize (the selfhost::lexer
-    // wrapper forwards to it and is not separately compiled), exactly the signature fact the
-    // production IR carries (function-signature-return std::kizu::lexer::tokenize ...). Emit
-    // that real signature from the std kizu lexer's own AST so the generic cross-module
-    // resolver (lookup_qualified_function_name_by_callee_suffix) matches '*::lexer::tokenize'
-    // over real facts rather than a fabricated return-type string (issue 1165 / 1162).
-    try append_external_callee_signature(
-        &var facts, allocator, "std/src/kizu/lexer.kizu", "std::kizu::lexer", "tokenize"
-    );
-
-    // Supply the cross-module return payload type facts the lowering resolves for the driver's
-    // first then-body Array.get 'let last_import = try format_tokens.get(next_index - 1)'.
-    // 'format_tokens' is bound by 'try lexer::tokenize(allocator, source)', whose payload is
-    // 'std::array::Array<std::kizu::lexer::Token>'; lowering the Array.get extracts the element
-    // type 'std::kizu::lexer::Token' and resolves its LLVM type + field layout through the
-    // type-llvm / struct-field facts (compiled_mir_lower::lower_multi_let_array_get, then the
-    // 'last_import.end' field read). Deriving the payload struct from the real tokenize signature
-    // and the lexer AST -- the same source of truth the production IR fact emission carries for
-    // std::kizu::lexer::Token -- keeps this generic, with no payload-type table or hand-written
-    // type string (issue 1199).
-    try append_external_return_payload_type_facts(
+    // Supply the cross-module callee facts the lowering resolves for the driver's first statement
+    // 'var format_tokens = try lexer::tokenize(allocator, source)' and the if-then-body Array.get
+    // 'let last_import = try format_tokens.get(next_index - 1)' it feeds. format_source reaches the
+    // tokenizer through the 'import selfhost::lexer' alias; the compiled backend emits the real
+    // tokenizer entry under std::kizu::lexer::tokenize (the selfhost::lexer wrapper forwards to it
+    // and is not separately compiled). From the std kizu lexer's own AST this emits both the real
+    // signature fact (function-signature-return std::kizu::lexer::tokenize ...), so the generic
+    // cross-module resolver matches '*::lexer::tokenize' over real facts rather than a fabricated
+    // return type, and the return payload type facts for the 'std::array::Array<std::kizu::lexer::
+    // Token>' element: the Array.get extracts the element type 'std::kizu::lexer::Token' and
+    // resolves its LLVM type + field layout (for the 'last_import.end' read) from the derived
+    // type-llvm + struct-field facts. Both come from the same source of truth the production IR
+    // fact emission carries for the lexer, with no payload-type table or hand-written type string
+    // (issue 1165 / 1162, issue 1199).
+    try append_external_callee_facts(
         &var facts, allocator, "std/src/kizu/lexer.kizu", "std::kizu::lexer", "tokenize"
     );
 
@@ -153,12 +144,17 @@ fn format_driver_lower(allocator: Allocator, ir_bytes: []u8) -> !void {
     return;
 }
 
-// append_external_callee_signature emits the real function-signature-return / -param facts
-// for a cross-module callee by running the production component catalog + function_signature
-// emission over the callee's own on-disk source, instead of fabricating a metadata table.
-// The signature is keyed under <component_prefix>::<function_name>, the same name the owning
-// compiled closure emits, so the generic cross-module resolver matches it by suffix.
-fn append_external_callee_signature(
+// append_external_callee_facts emits the cross-module facts for a callee from the callee's own
+// on-disk source, instead of fabricating a metadata table, parsing the source once and emitting
+// both fact families the lowering resolves for a cross-module call:
+//   - the real function-signature-return / -param facts (keyed under
+//     <component_prefix>::<function_name>, the same name the owning compiled closure emits, so the
+//     generic cross-module resolver matches it by suffix), and
+//   - the return payload type facts: append_return_payload_struct_type_facts unwraps the callee's
+//     '!std::array::Array<T>' return type to the element struct and emits T's type-llvm +
+//     struct-field facts from the same AST the production IR fact emission reads.
+// Both come from one parse of the callee module's AST (issue 1165 / 1162, issue 1199).
+fn append_external_callee_facts(
     facts: &var std::string::String,
     allocator: Allocator,
     path: []u8,
@@ -178,35 +174,6 @@ fn append_external_callee_signature(
     );
     let node = try component_function_catalog::function_node_id(&catalog, index);
     try function_signature::append_catalog(facts, text, parsed.ast, node, &catalog, index);
-    return;
-}
-
-// append_external_return_payload_type_facts emits the cross-module return payload type facts for a
-// callee by reading its declared return type from its own on-disk source and emitting the payload
-// struct's type-llvm + struct-field facts from that module's AST, instead of fabricating a type
-// table. It runs the production component catalog over the callee source, finds the function, and
-// delegates to executable_functions::append_return_payload_struct_type_facts, which unwraps the
-// '!std::array::Array<T>' return type to the element struct and emits T's facts from the same AST
-// the production IR fact emission reads (issue 1199).
-fn append_external_return_payload_type_facts(
-    facts: &var std::string::String,
-    allocator: Allocator,
-    path: []u8,
-    component_prefix: []u8,
-    function_name: []u8
-) -> !void {
-    let io = std::io::blocking();
-    let text = try std::fs::read_file(io, path);
-    var parsed = try parser::parse_checked_file(allocator, path, text);
-    defer parsed.deinit();
-    var catalog = try component_function_catalog::collect_from_ast(
-        allocator, text, parsed.ast, parsed.root, component_prefix
-    );
-    defer catalog.deinit();
-    let index = try component_function_catalog::find_local_function_index(
-        &catalog, function_name
-    );
-    let node = try component_function_catalog::function_node_id(&catalog, index);
     try executable_functions::append_return_payload_struct_type_facts(
         facts, text, parsed.ast, parsed.root, node
     );
