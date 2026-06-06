@@ -3839,15 +3839,11 @@ fn while_carries_scalar_var(
     return false;
 }
 
-// lower_multi_expr_statement lowers a bare 'try <receiver>.<method>(<arg>);' expression
-// statement that mutates a std::string::String value (issue 1165 slice 1). String lowers to
-// the runtime-owned handle %kizu.owned, so out.append_bytes(bytes) / out.append_byte(byte)
-// forward to the @kizu_rt_string_append_bytes / @kizu_rt_string_append_byte runtime helpers
-// (each returning %kizu.error.void). The method is recognized by name -- append_bytes and
-// append_byte are String-only in the selfhost source -- and lowers to a StringTryAppend
-// statement that propagates a runtime failure as this function's own error union and binds no
-// success value. The argument is a local ([]u8 or u8) or a string literal; a nested call
-// argument is not yet supported.
+// lower_multi_expr_statement lowers side-effecting expression statements. Try-call statements keep
+// the existing error-propagating paths for String append methods and free-function '!void' calls.
+// Non-try calls are accepted only for the validated owned-handle destructor shape
+// '<local-or-param>.deinit();': the receiver type must resolve to a supported runtime-owned
+// resource and its LLVM representation must be %kizu.owned before the cleanup call is emitted.
 fn lower_multi_expr_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -3865,6 +3861,12 @@ fn lower_multi_expr_statement(
         ir_bytes, function_name, statement, "expr", 0, bs
     );
     let expr_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr, bs);
+    if std::mem::equal_bytes(expr_kind, "Call") {
+        return try lower_owned_deinit_expr_statement(
+            ir_bytes, function_name, module_prefix, locals_spec, expr,
+            string_counter, try_counter, aliases, stmts, bs
+        );
+    }
     if !std::mem::equal_bytes(expr_kind, "TryExpr") {
         return error("compiled mir: unsupported expression statement");
     }
@@ -3929,6 +3931,79 @@ fn lower_multi_expr_statement(
     return MultiExprLowerResult {
         string_counter: string_counter + consumed_string,
         try_counter: try_counter + 1
+    };
+}
+
+fn owned_deinit_receiver_type_supported(kizu_type: []u8) -> bool {
+    if std::mem::starts_with(kizu_type, "std::array::Array<") {
+        return true;
+    }
+    return false;
+}
+
+// lower_owned_deinit_expr_statement lowers a non-try '<receiver>.deinit();' expression statement.
+// This is the owned-resource cleanup twin of the try-call expression-statement paths: it validates
+// the AST method shape and receiver type, then emits a side-effect-only MIR statement with no value
+// binding and no error propagation.
+fn lower_owned_deinit_expr_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    call_node: i64,
+    string_counter: i64,
+    try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiExprLowerResult {
+    if !try callee_is_field_expr(ir_bytes, function_name, call_node, bs) {
+        return error("compiled mir: non-try expression statement must be a method call");
+    }
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "deinit") {
+        return error("compiled mir: unsupported non-try method statement");
+    }
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 0 {
+        return error("compiled mir: deinit expression statement takes no arguments");
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: deinit receiver must be a local or parameter");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
+        ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs
+    );
+    if !owned_deinit_receiver_type_supported(receiver_kizu) {
+        return error("compiled mir: deinit receiver is not a supported owned resource");
+    }
+    let receiver_llvm = try compiled_mir_types::resolve_value_llvm_type(
+        ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs
+    );
+    if !std::mem::equal_bytes(receiver_llvm, "%kizu.owned") {
+        return error("compiled mir: deinit receiver must lower to %kizu.owned");
+    }
+    let receiver_alias = try local_alias_current_name(aliases, receiver_name);
+    try stmts.append(compiled_mir::owned_deinit_stmt(receiver_alias));
+    return MultiExprLowerResult {
+        string_counter: string_counter,
+        try_counter: try_counter
     };
 }
 
