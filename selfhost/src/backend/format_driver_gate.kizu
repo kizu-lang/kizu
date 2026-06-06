@@ -9,45 +9,27 @@ import selfhost::backend::compiled_llvm;
 
 // format_driver_lowering_gate drives the production compiled LLVM lowering over the real
 // selfhost::parser::format::format_source body and reports the measured next blocker, instead of
-// pinning the blocker in a comment (issue 1165 / 1162). It reads the on-disk format.kizu, parses
-// it, builds the production ComponentFunctionCatalog for the 'selfhost::parser::format' component,
-// finds format_source, and emits its real signature + body IR facts the same way the IR fact
-// catalog does. It then derives the compiled params_spec / llvm_symbol from those facts and calls
+// pinning the blocker in a comment. It reads the on-disk format.kizu, parses it, builds the
+// production ComponentFunctionCatalog for the 'selfhost::parser::format' component, finds
+// format_source, and emits its real signature + body IR facts the same way the IR fact catalog
+// does. It then derives the compiled params_spec / llvm_symbol from those facts and calls
 // compiled_llvm::append_compiled_function_auto -- the production single-member lowering driver --
-// over them. The driver's call surface is accepted by the facts layer (proven by
-// format_driver_facts_gate), so lowering proceeds into the generic multi-statement machinery
-// (lower_multi_statement_function). The first thing it does for each top-level 'var' is probe
-// whether the var seeds a loop induction counter (statement_is_induction_init ->
-// while_carries_induction_var). format_source's scan loop advances 'index' inside a terminal
-// if/else branch-merge (a loop-terminating 'index = format_tokens.len()' on the eof arm and an
-// 'index = index + 1' on the else arm) rather than a trailing-increment Assign;
-// while_carries_induction_var now recognizes that branch-merge induction latch
-// (while_is_branch_merge_latch) and classifies 'index' without erroring, so the probe no longer
-// stops at "compiled mir: while body must end with the induction increment" and lowering advances
-// into the real statement lowering. The first top-level statement
-// 'var format_tokens = try lexer::tokenize(allocator, source)' lowers fully: the generic
-// cross-module resolver (cross_module_callee_qualified_name_or_empty ->
-// lookup_qualified_function_name_by_callee_suffix) resolves the alias-qualified 'lexer::tokenize'
-// to the emitted '*::lexer::tokenize' signature this gate supplies below, the try-call success type
-// unwraps its !Array<Token> error union, and the Allocator argument type lowers. The second
-// statement 'var out = std::string::String(allocator)' lowers its stdlib value constructor through
-// the stdlib-symbol path (lookup_stdlib_return): the gate supplies the same global stdlib-symbol
-// preamble the production IR carries via the shared
-// executable_functions::append_runtime_stdlib_symbol_preamble helper, so the
-// 'stdlib-symbol std::string::String' fact is present and the constructor binds a %kizu.owned
-// local. The leading_import_indices sibling call then resolves its return type from the emitted
-// component signatures (this gate emits every local function-signature-return fact below), and its
-// '&format_tokens' borrow argument lowers through the borrow-prefix call-arg path
-// (compiled_mir_lower_call::lower_single_call_arg). Lowering now advances to format_source's first
-// top-level 'if' statement 'if leading_imports.len() > 1 { ... }'
-// (selfhost/src/parser/format.kizu:28). Its then-block is a void multi-statement body (let
-// bindings, a nested if, sibling/method call statements, and several assignments to outer vars),
-// but the compiled if-lowering only supports a continue-latch then-block or a single-Return
-// then-block (selfhost/src/backend/compiled_mir_lower.kizu:4900), so it raises
-// "compiled mir: unsupported then block". Lowering a general void multi-statement if-then block is
-// the next capability -- a multi-part blocker (statement-list branch bodies, nested if, call
-// statements, multi-assign) -- so the gate stops here. The gate is expected to fail with that
-// error; the backend test asserts it, pinning the measured blocker as a behavior gate.
+// over them.
+//
+// Lowering now reaches the first then-body Array.get binding:
+// 'let last_import = try format_tokens.get(next_index - 1);'
+// (selfhost/src/parser/format.kizu:30). The receiver local 'format_tokens' is bound by
+// 'var format_tokens = try lexer::tokenize(allocator, source)' (format.kizu:13), and the local
+// Kizu-type resolver now uses the generic cross-module suffix resolver to unwrap the real
+// 'std::kizu::lexer::tokenize -> !std::array::Array<std::kizu::lexer::Token>' signature fact.
+// Lowering therefore advances into lower_multi_let_array_get, extracts the element type
+// 'std::kizu::lexer::Token', and asks compiled_fact_lookup::lookup_type_llvm_by_prefix for the
+// element LLVM type (selfhost/src/backend/compiled_mir_lower.kizu:4013). The gate currently stops
+// at "compiled function: type-llvm mapping not found", raised by lookup_type_llvm_by_prefix
+// (selfhost/src/backend/compiled_fact_lookup.kizu:40), because the lowering facts supplied here do
+// not yet carry the real cross-module type-llvm/struct facts for std::kizu::lexer::Token. The next
+// capability is to make cross-module return payload type facts available to this real lowering path
+// without format_source-specific dispatch or hand-written type strings (issue 1197).
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
@@ -149,8 +131,8 @@ fn format_driver_lower(allocator: Allocator, ir_bytes: []u8) -> !void {
         &var out, ir_bytes, function_name, &llvm_symbol_bytes, &params_spec_bytes
     );
 
-    // Reached only if format_source lowers without error; with the cross-module call-return-type
-    // fact still missing this print is unreachable and the gate fails at the lowering blocker instead.
+    // Reached only if format_source lowers without error; while a measured blocker remains,
+    // this print is unreachable and the backend test asserts the exact blocker instead.
     print("format-driver-lowering-ok");
     return;
 }
