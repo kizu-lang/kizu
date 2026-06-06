@@ -433,6 +433,10 @@ pub struct MirIfMergeVar {
 //   0 = single condition (cond_insts / cond_result_id only)
 //   1 = lhs and rhs short-circuit; rhs is only evaluated when lhs is true
 //   2 = lhs or rhs short-circuit; rhs is only evaluated when lhs is false
+// cond_try_call selects a hoisted positive 'try <free !bool call>' condition that propagates the
+// call failure as this function's own error union and branches on the unwrapped success bool. It is
+// currently exercised only with a no-else void then-body, so the regular cond_insts fields stay
+// empty and the body/merge fields below are reused.
 // When short-circuit is active cond_insts/cond_result_id hold the lhs (the first
 // operand) and cond_rhs_insts/cond_rhs_result_id hold the second operand, lowered in
 // the guarded block so a trapping/loading operand (e.g. a byte index) never runs unless
@@ -454,6 +458,12 @@ pub struct MirIfStmt {
     pub cond_rhs_result_id: i64,
     pub cond_rhs_insts: std::array::Array<MirExprInst>,
     pub cond_extra_operands: std::array::Array<MirCondOperand>,
+    pub cond_try_call: bool,
+    pub cond_called_error_union: []u8,
+    pub cond_own_error_union: []u8,
+    pub cond_call_module_prefix: []u8,
+    pub cond_call_callee_name: []u8,
+    pub cond_call_args: std::array::Array<MirCallArg>,
     pub if_then_kind: MirIfThenKind,
     pub bool_value: bool,
     pub then_call_module_prefix: []u8,
@@ -1744,6 +1754,7 @@ impl MirIfStmt {
         self.cond_insts.deinit();
         self.cond_rhs_insts.deinit();
         self.cond_extra_operands.deinit();
+        self.cond_call_args.deinit();
         self.then_call_args.deinit();
         self.then_expr_insts.deinit();
         self.then_struct_fields.deinit();
@@ -3883,6 +3894,12 @@ pub fn if_stmt(
         cond_rhs_result_id: cond_rhs_result_id,
         cond_rhs_insts: cond_rhs_insts,
         cond_extra_operands: cond_extra_operands,
+        cond_try_call: false,
+        cond_called_error_union: "",
+        cond_own_error_union: "",
+        cond_call_module_prefix: "",
+        cond_call_callee_name: "",
+        cond_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
         if_then_kind: then_kind,
         bool_value: bool_value,
         then_call_module_prefix: module_prefix,
@@ -3892,6 +3909,47 @@ pub fn if_stmt(
         then_expr_insts: then_insts,
         then_struct_fields: then_struct_fields,
         then_struct_string_index: then_struct_string_index,
+        then_body_stmts: then_body_stmts,
+        merge_vars: merge_vars
+    });
+}
+
+pub fn if_try_call_void_body_stmt(
+    if_index: i64,
+    string_index: i64,
+    called_error_union: []u8,
+    own_error_union: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    call_args: std::array::Array<MirCallArg>,
+    then_body_stmts: std::array::Array<MirStmt>,
+    merge_vars: std::array::Array<MirIfMergeVar>
+) -> MirStmt {
+    return MirStmt::If(MirIfStmt {
+        if_index: if_index,
+        string_index: string_index,
+        llvm_type: own_error_union,
+        cond_result_id: -1,
+        cond_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        cond_short_circuit: 0,
+        cond_rhs_result_id: -1,
+        cond_rhs_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        cond_extra_operands: std::array::Array<MirCondOperand>(std::mem::page_allocator()),
+        cond_try_call: true,
+        cond_called_error_union: called_error_union,
+        cond_own_error_union: own_error_union,
+        cond_call_module_prefix: module_prefix,
+        cond_call_callee_name: callee_name,
+        cond_call_args: call_args,
+        if_then_kind: MirIfThenKind::VoidBody,
+        bool_value: false,
+        then_call_module_prefix: "",
+        then_call_callee_name: "",
+        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        then_expr_result_id: -1,
+        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        then_struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
+        then_struct_string_index: string_index,
         then_body_stmts: then_body_stmts,
         merge_vars: merge_vars
     });

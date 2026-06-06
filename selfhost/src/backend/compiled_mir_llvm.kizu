@@ -833,6 +833,81 @@ fn append_nottry_label(out: &var std::string::String, local_prefix: i64, suffix:
     try out.append_bytes(suffix);
     return;
 }
+
+fn append_tryif_ref(out: &var std::string::String, local_prefix: i64, suffix: []u8) -> !void {
+    try out.append_bytes("%tryif");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes(suffix);
+    return;
+}
+fn append_tryif_label(out: &var std::string::String, local_prefix: i64, suffix: []u8) -> !void {
+    try out.append_bytes("tryif");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes(suffix);
+    return;
+}
+
+// append_try_bool_call_eval renders a positive 'try <callee>(<args>)' bool condition. It shares
+// the not-try hoist's call / ok-branch shape, but branches on the unwrapped success directly
+// instead of negating it. Failure propagates as this function's own error union.
+fn append_try_bool_call_eval(
+    out: &var std::string::String,
+    function_name: []u8,
+    called_error_union: []u8,
+    own_error_union: []u8,
+    call_module_prefix: []u8,
+    call_callee_name: []u8,
+    call_args: &std::array::Array<compiled_mir::MirCallArg>,
+    local_prefix: i64
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function_name, call_args, local_prefix
+    );
+    try out.append_bytes("  ");
+    try append_tryif_ref(out, local_prefix, "_call");
+    try out.append_bytes(" = call ");
+    try out.append_bytes(called_error_union);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(out, call_module_prefix, call_callee_name);
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, call_args, local_prefix);
+    try append_ll_line(out, ")");
+    try out.append_bytes("  ");
+    try append_tryif_ref(out, local_prefix, "_ok");
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(called_error_union);
+    try out.append_bytes(" ");
+    try append_tryif_ref(out, local_prefix, "_call");
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  br i1 ");
+    try append_tryif_ref(out, local_prefix, "_ok");
+    try out.append_bytes(", label %");
+    try append_tryif_label(out, local_prefix, "_cont");
+    try out.append_bytes(", label %");
+    try append_tryif_label(out, local_prefix, "_fail");
+    try out.append_byte(cast<u8>(10));
+    try append_tryif_label(out, local_prefix, "_fail");
+    try append_ll_line(out, ":");
+    try out.append_bytes("  ");
+    try append_tryif_ref(out, local_prefix, "_msg");
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(called_error_union);
+    try out.append_bytes(" ");
+    try append_tryif_ref(out, local_prefix, "_call");
+    try append_ll_line(out, ", 2");
+    try append_error_void_try_fail_return(out, "%tryif", local_prefix, own_error_union);
+    try append_tryif_label(out, local_prefix, "_cont");
+    try append_ll_line(out, ":");
+    try out.append_bytes("  ");
+    try append_tryif_ref(out, local_prefix, "_success");
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(called_error_union);
+    try out.append_bytes(" ");
+    try append_tryif_ref(out, local_prefix, "_call");
+    try append_ll_line(out, ", 1");
+    return;
+}
+
 // append_not_try_call_eval renders the shared head of a '!(try <callee>(<args>))' hoist: the call,
 // the ok-flag branch, the failure propagation as own_error_union (never 'unreachable'), the success
 // unwrap, and the boolean negation. It leaves the negated i1 in '%nottry<P>_neg' and control in the
@@ -4606,6 +4681,9 @@ fn append_if_globals(
     llvm_symbol: []u8,
     stmt: &compiled_mir::MirIfStmt
 ) -> !void {
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &stmt.cond_call_args
+    );
     try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
     try append_expr_globals(out, llvm_symbol, &stmt.cond_rhs_insts);
     let extra_operands = &stmt.cond_extra_operands;
@@ -5109,13 +5187,23 @@ fn append_multi_if(
     stmt: &compiled_mir::MirIfStmt,
     local_prefix: i64
 ) -> !void {
-    try append_expr_insts(out, function.name, &stmt.cond_insts);
-    if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
+    if stmt.cond_try_call {
+        if stmt.if_then_kind != compiled_mir::MirIfThenKind::VoidBody {
+            return error("compiled mir llvm: try-call if condition requires a void then-body");
+        }
+        try append_try_bool_call_eval(
+            out,
+            function.name,
+            stmt.cond_called_error_union,
+            stmt.cond_own_error_union,
+            stmt.cond_call_module_prefix,
+            stmt.cond_call_callee_name,
+            &stmt.cond_call_args,
+            local_prefix
+        );
         try append_if_merge_allocas(out, stmt);
-    }
-    if stmt.cond_short_circuit == 0 {
         try out.append_bytes("  br i1 ");
-        try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+        try append_tryif_ref(out, local_prefix, "_success");
         try out.append_bytes(", label %if");
         try std::fmt::append_i64(out, stmt.if_index);
         try out.append_bytes("_then, label %if");
@@ -5123,7 +5211,22 @@ fn append_multi_if(
         try out.append_bytes("_cont");
         try out.append_byte(cast<u8>(10));
     } else {
-        try append_short_circuit_branches(out, function.name, stmt);
+        try append_expr_insts(out, function.name, &stmt.cond_insts);
+        if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
+            try append_if_merge_allocas(out, stmt);
+        }
+        if stmt.cond_short_circuit == 0 {
+            try out.append_bytes("  br i1 ");
+            try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+            try out.append_bytes(", label %if");
+            try std::fmt::append_i64(out, stmt.if_index);
+            try out.append_bytes("_then, label %if");
+            try std::fmt::append_i64(out, stmt.if_index);
+            try out.append_bytes("_cont");
+            try out.append_byte(cast<u8>(10));
+        } else {
+            try append_short_circuit_branches(out, function.name, stmt);
+        }
     }
     try out.append_bytes("if");
     try std::fmt::append_i64(out, stmt.if_index);
