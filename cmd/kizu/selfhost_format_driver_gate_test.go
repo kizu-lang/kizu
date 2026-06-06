@@ -151,12 +151,19 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     'let trailing_comma = try is_trailing_comma(...)', and merges locals reassigned by either
 //     arm through the existing alias store/load join metadata. The renderer emits real then/else
 //     blocks and a shared continuation instead of dropping the else arm (issue 1216).
-//   - "compiled mir: void then-body assignment value kind not yet supported": the nested rbrace
+//   - "compiled mir: void then-body assignment value kind not yet supported: Binary": the nested
+//     rbrace
 //     branch assignment 'depth = depth - 1;' (selfhost/src/parser/format.kizu:75) now lowers its
 //     Binary subtraction value through the same type-checked alias-assignment path as Var /
 //     FieldExpr / String / CastExpr / Bool reassignment values. The value is lowered by the generic
 //     expression lowerer, its result type is checked against the target local's resolved LLVM type,
 //     and the reassigned local is still merged through the void if alias metadata.
+//   - "compiled mir: unsupported string method argument": the nested else-path append
+//     'try out.append_byte(cast<u8>(10));' (selfhost/src/parser/format.kizu:81) now lowers through
+//     lower_string_method_arg's CastExpr path. The cast target type is lowered and checked against
+//     the method's expected LLVM argument type ('i8' for append_byte) before the integer literal is
+//     passed through the existing IntLiteral call-arg renderer, so the implementation is not tied
+//     to the formatter source line or literal value.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -173,21 +180,22 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: unsupported expression kind",
 	"compiled function: struct field not found",
 	"compiled mir: void then block must not carry an else arm",
-	"compiled mir: void then-body assignment value kind not yet supported",
+	"compiled mir: void then-body assignment value kind not yet supported: Binary",
+	"compiled mir: unsupported string method argument",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The EOF
-// branch at selfhost/src/parser/format.kizu:68 now lowers as a real void if/else: the then arm
-// assigns 'index = format_tokens.len();' (format.kizu:69), the else arm lowers its leading let-try
-// 'let trailing_comma = try is_trailing_comma(...)' (format.kizu:71), and reassigned locals merge
-// through the shared continuation. Lowering then descends into the else arm's nested rbrace branch,
-// accepts 'depth = depth - 1;' (format.kizu:75), and reaches the following nested else path
-// 'try out.append_byte(cast<u8>(10));' (format.kizu:81). lower_string_method_arg currently accepts
-// only Var / String method arguments, so the CastExpr byte argument raises "compiled mir:
-// unsupported string method argument" from selfhost/src/backend/compiled_mir_lower.kizu:4094.
-// Lowering cast scalar arguments for String append_byte method calls is the next capability (refs
-// 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: unsupported string method argument"
+// branch at selfhost/src/parser/format.kizu:68 now lowers as a real void if/else, descends into the
+// nested rbrace branch, accepts 'depth = depth - 1;' (format.kizu:75), and lowers the nested
+// else-path append 'try out.append_byte(cast<u8>(10));' (format.kizu:81) through the typed scalar
+// cast argument path. Lowering then reaches the following reassignment 'last = last_byte(text);'
+// (format.kizu:86). lower_void_then_body_assign currently accepts Var / FieldExpr / String /
+// CastExpr / Bool / non-short-circuit Binary assignment values, so the Call-valued scalar helper
+// result raises "compiled mir: void then-body assignment value kind not yet supported: Call" from
+// selfhost/src/backend/compiled_mir_lower.kizu:5249. Lowering Call-valued void then-body assignment
+// values with type-checked alias assignment is the next capability (refs 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled mir: void then-body assignment value kind not yet " +
+	"supported: Call"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -207,9 +215,10 @@ const formatDriverLoweringBlocker = "compiled mir: unsupported string method arg
 // also lowers and descends through the same void-body path. The CommentFormatState field reads
 // after append_preserved_line_comments now resolve. The following EOF if/else branch lowers and
 // renders with a real else body and alias merge. The nested rbrace branch assignment
-// 'depth = depth - 1;' now lowers as a Binary value assignment. Lowering stops at the following
-// nested else-path string append 'try out.append_byte(cast<u8>(10));' (format.kizu:81), whose
-// CastExpr argument is not yet accepted by String method argument lowering.
+// 'depth = depth - 1;' now lowers as a Binary value assignment, and the following nested else-path
+// string append 'try out.append_byte(cast<u8>(10));' lowers its CastExpr byte argument. Lowering
+// stops at the next reassignment, 'last = last_byte(text);' (format.kizu:86), whose value is a Call
+// expression not yet accepted by void then-body assignment lowering.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
