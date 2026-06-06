@@ -3909,7 +3909,8 @@ fn lower_multi_expr_statement(
     var consumed_string = 0;
     if std::mem::equal_bytes(method_name, "append_bytes") {
         consumed_string = try lower_string_method_arg(
-            ir_bytes, function_name, "%kizu.slice.u8", arg_node, string_counter, aliases, &var args, bs
+            ir_bytes, function_name, module_prefix, "%kizu.slice.u8",
+            arg_node, string_counter, aliases, &var args, bs
         );
         try stmts.append(compiled_mir::string_try_append_stmt(
             receiver_alias, "kizu_rt_string_append_bytes", llvm_return_type,
@@ -3918,7 +3919,8 @@ fn lower_multi_expr_statement(
     } else {
         if std::mem::equal_bytes(method_name, "append_byte") {
             consumed_string = try lower_string_method_arg(
-                ir_bytes, function_name, "i8", arg_node, string_counter, aliases, &var args, bs
+                ir_bytes, function_name, module_prefix, "i8",
+                arg_node, string_counter, aliases, &var args, bs
             );
             try stmts.append(compiled_mir::string_try_append_stmt(
                 receiver_alias, "kizu_rt_string_append_byte", llvm_return_type,
@@ -4058,11 +4060,14 @@ fn lower_void_free_try_call_statement(
 
 // lower_string_method_arg lowers the single argument of a String append method into the call
 // argument array, returning the number of string-literal global slots it consumed (issue 1165
-// slice 1). A local argument resolves to a Var call arg of the method's fixed LLVM type; a
-// string literal resolves to a String call arg seeded at string_index.
+// slice 1). A local argument resolves to a Var call arg of the method's fixed LLVM type, a
+// string literal resolves to a String call arg seeded at string_index, and a scalar cast over an
+// integer literal resolves to an IntLiteral only after the cast target lowers to the method's
+// expected LLVM argument type.
 fn lower_string_method_arg(
     ir_bytes: []u8,
     function_name: []u8,
+    module_prefix: []u8,
     arg_type: []u8,
     arg_node: i64,
     string_index: i64,
@@ -4090,6 +4095,34 @@ fn lower_string_method_arg(
         );
         try args.append(compiled_mir::string_call_arg(arg_type, token, string_index));
         return 1;
+    }
+    if std::mem::equal_bytes(arg_kind, "CastExpr") {
+        let type_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arg_node, "type", 0, bs
+        );
+        let type_text = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, type_node, bs
+        );
+        let target_llvm = try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, module_prefix, type_text
+        );
+        if !std::mem::equal_bytes(target_llvm, arg_type) {
+            return error("compiled mir: string method cast argument type mismatch");
+        }
+        let value_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arg_node, "value", 0, bs
+        );
+        let value_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, value_node, bs
+        );
+        if !std::mem::equal_bytes(value_kind, "Int") {
+            return error("compiled mir: unsupported string method cast operand");
+        }
+        let literal = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, value_node, bs
+        );
+        try args.append(compiled_mir::int_literal_call_arg(arg_type, literal));
+        return 0;
     }
     return error("compiled mir: unsupported string method argument");
 }
@@ -5209,6 +5242,12 @@ fn lower_void_then_body_assign(
     if !(try void_then_assignment_value_supported(
         ir_bytes, function_name, value, value_kind, bs
     )) {
+        if std::mem::equal_bytes(value_kind, "Binary") {
+            return error("compiled mir: void then-body assignment value kind not yet supported: Binary");
+        }
+        if std::mem::equal_bytes(value_kind, "Call") {
+            return error("compiled mir: void then-body assignment value kind not yet supported: Call");
+        }
         return error("compiled mir: void then-body assignment value kind not yet supported");
     }
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
