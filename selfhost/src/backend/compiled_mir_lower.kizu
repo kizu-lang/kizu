@@ -4660,6 +4660,95 @@ fn flatten_or_operands(
     try operands.append(node);
     return;
 }
+// lower_void_then_body_assign lowers a '<target> = <value>;' reassignment statement inside a no-else
+// void then-body (issue 1201). The formatter's leading-import sort branch reassigns six scalar carry
+// locals after its try-call -- 'index = next_index;', 'cursor = last_import.end;', 'previous = ";";',
+// 'last_top_level_decl = "import";', 'last = cast<u8>(10);', 'at_line_start = true;'
+// (selfhost/src/parser/format.kizu:33-38) -- each updating a local bound before the then-body, not a
+// fresh binding. It is shape-driven, not name-driven: the target must be a Var naming a local already
+// resolvable in this function (so locals_spec is left unchanged and no binding is fabricated), the
+// value must be one of the scalar/slice expression kinds the generic expr lowering handles (Var /
+// FieldExpr / String / CastExpr / Bool), and the value's lowered LLVM type must match the target's
+// resolved type. The lowered value rides the same MirLetExpr carrier the let path emits -- a
+// reassignment and a let bind compute an identical RHS, so the carrier captures the lowered value
+// without a dedicated MirStmt variant whose render arm no rendered path would yet exercise.
+//
+// CARRIER IS NOT THE FINAL ASSIGNMENT SHAPE: a MirLetExpr renders as '%<target> = select i1 true,
+// ...', a fresh SSA def of <target>. For a reassignment <target> is already defined before the
+// then-body, so emitting that as-is would redefine an SSA name (invalid LLVM). Today this never
+// renders -- lower_multi_if_statement raises the void then-block rendering blocker before any
+// then_body_stmt is emitted, and the lowered body is discarded -- so the carrier only proves the
+// value lowers and type-checks. When the void then-block renderer (the next capability, the pinned
+// blocker) lands it must render a reassignment as an SSA-correct store (a select/phi merge into the
+// fall-through join, like ScalarSelectAssign), NOT as a LetExpr def; the MirLetExpr carrier here is
+// interim and must be revisited then.
+fn lower_void_then_body_assign(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiLowerResult {
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, target, bs);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return error("compiled mir: void then-body assignment target must be a local");
+    }
+    let target_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, target, bs
+    );
+    // Resolving the target's LLVM type proves it is a local bound before the then-body (an unbound
+    // name surfaces 'local type not found' rather than being silently accepted) and yields the type
+    // the reassigned value must carry.
+    let target_type = try compiled_mir_types::resolve_value_llvm_type(
+        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs
+    );
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if !std::mem::equal_bytes(value_kind, "Var") and
+        !std::mem::equal_bytes(value_kind, "FieldExpr") and
+        !std::mem::equal_bytes(value_kind, "String") and
+        !std::mem::equal_bytes(value_kind, "CastExpr") and
+        !std::mem::equal_bytes(value_kind, "Bool") {
+        return error("compiled mir: void then-body assignment value kind not yet supported");
+    }
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let result_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        value,
+        string_counter,
+        temp_counter,
+        &var insts,
+        bs
+    );
+    let value_type = try expr_inst_llvm_type_by_id(&insts, result_id);
+    if !std::mem::equal_bytes(value_type, target_type) {
+        return error("compiled mir: void then-body assignment operand type mismatch");
+    }
+    let expr_strings = try count_strings_in_insts(&insts);
+    let next_temp = temp_counter + insts.len();
+    try stmts.append(compiled_mir::let_expr_stmt(
+        target_name, string_counter, result_id, insts
+    ));
+    return MultiLowerResult {
+        locals_spec: locals_spec,
+        string_counter: string_counter + expr_strings,
+        temp_counter: next_temp,
+        try_counter: try_counter
+    };
+}
 // lower_void_then_body lowers the statement list of a no-else void multi-statement if-then block
 // into then_body_stmts, dispatching each statement by kind through the same per-kind lowering the
 // top-level body loop uses. It is shape-driven, not name-driven: a then-block whose controlling
@@ -4761,16 +4850,31 @@ fn lower_void_then_body(
                     body_tries = expr_result.try_counter;
                 } else {
                     if std::mem::equal_bytes(stmt_kind, "Assign") {
-                        // The nested then-body's try-call statement is followed by
-                        // 'index = next_index;' (selfhost/src/parser/format.kizu:33), an
-                        // assignment to a local bound outside the then-body. Lowering an
-                        // assignment statement in a void then-body is the next capability beyond
-                        // the free-function try-call (issue 1201); pin it with a distinct
-                        // diagnostic so the gate can tell it apart from the generic unsupported
-                        // fallback below.
-                        return error("compiled mir: void then-body assignment statement not yet supported");
+                        // The nested then-body's try-call statement is followed by six scalar
+                        // reassignments ('index = next_index;' ..  'at_line_start = true;',
+                        // selfhost/src/parser/format.kizu:33-38), each updating a local bound
+                        // before the then-body. lower_void_then_body_assign lowers the value
+                        // through the generic expr lowering and rides the LetExpr carrier bound to
+                        // the existing target, advancing the string/temp counters (issue 1201).
+                        let assign_result = try lower_void_then_body_assign(
+                            ir_bytes,
+                            function_name,
+                            module_prefix,
+                            body_locals,
+                            statement,
+                            body_strings,
+                            body_temps,
+                            body_tries,
+                            then_body_stmts,
+                            bs
+                        );
+                        body_locals = assign_result.locals_spec;
+                        body_strings = assign_result.string_counter;
+                        body_temps = assign_result.temp_counter;
+                        body_tries = assign_result.try_counter;
+                    } else {
+                        return error("compiled mir: unsupported then-body statement kind");
                     }
-                    return error("compiled mir: unsupported then-body statement kind");
                 }
             }
         }
@@ -7972,6 +8076,24 @@ fn count_strings_in_inst(
         Call(payload) => return try compiled_mir_lower_call::count_string_args(&payload.call_args);,
         _ => return 0;,
     }
+}
+// expr_inst_llvm_type_by_id returns the LLVM type of the lowered expression instruction whose id is
+// result_id, so an assignment lowering can compare its value's type against the reassignment
+// target's resolved type (issue 1201). A missing id is an internal inconsistency rather than a
+// source-level near-miss, so it surfaces as an explicit error.
+fn expr_inst_llvm_type_by_id(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> ![]u8 {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            return compiled_mir::expr_inst_llvm_type(inst);
+        }
+        index = index + 1;
+    }
+    return error("compiled mir: assignment value expression result not found");
 }
 
 // call_has_call_arg reports whether any argument of a Call node is itself a Call.
