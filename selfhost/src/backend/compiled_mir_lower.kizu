@@ -6307,6 +6307,200 @@ fn while_branch_merge_induction_var(
     );
     return try branch_arm_assign_target_or_empty(ir_bytes, function_name, then_node, bs);
 }
+
+fn branch_merge_advance_block(
+    ir_bytes: []u8,
+    function_name: []u8,
+    if_node: i64,
+    bs: i64
+) -> !i64 {
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "then", 0, bs
+    );
+    let else_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "else", 0, bs
+    );
+    let then_step = try branch_arm_is_constant_step(ir_bytes, function_name, then_node, bs);
+    let else_step = try branch_arm_is_constant_step(ir_bytes, function_name, else_node, bs);
+    if then_step == else_step {
+        return error("compiled mir: branch-merge latch must have exactly one advance arm");
+    }
+    if then_step {
+        return then_node;
+    }
+    return else_node;
+}
+
+fn branch_merge_exit_block(
+    ir_bytes: []u8,
+    function_name: []u8,
+    if_node: i64,
+    bs: i64
+) -> !i64 {
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "then", 0, bs
+    );
+    let else_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, if_node, "else", 0, bs
+    );
+    let then_step = try branch_arm_is_constant_step(ir_bytes, function_name, then_node, bs);
+    let else_step = try branch_arm_is_constant_step(ir_bytes, function_name, else_node, bs);
+    if then_step == else_step {
+        return error("compiled mir: branch-merge latch must have exactly one exit arm");
+    }
+    if then_step {
+        return else_node;
+    }
+    return then_node;
+}
+
+fn branch_merge_last_assign(
+    ir_bytes: []u8,
+    function_name: []u8,
+    block_node: i64,
+    message: []u8,
+    bs: i64
+) -> !i64 {
+    let assign = try branch_arm_last_assign_or_minus_one(ir_bytes, function_name, block_node, bs);
+    if assign < 0 {
+        return error(message);
+    }
+    return assign;
+}
+
+fn branch_merge_values_match_bound(
+    ir_bytes: []u8,
+    function_name: []u8,
+    left_node: i64,
+    right_node: i64,
+    bs: i64
+) -> !bool {
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right_node, bs);
+    if !std::mem::equal_bytes(left_kind, right_kind) {
+        return false;
+    }
+    if std::mem::equal_bytes(left_kind, "Var") {
+        let left_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, left_node, bs
+        );
+        let right_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, right_node, bs
+        );
+        return std::mem::equal_bytes(left_name, right_name);
+    }
+    if std::mem::equal_bytes(left_kind, "Int") {
+        let left_value = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, left_node, bs
+        );
+        let right_value = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, right_node, bs
+        );
+        return left_value == right_value;
+    }
+    if std::mem::equal_bytes(left_kind, "Call") {
+        let left_callee = try ir_contract::body_call_callee_or_empty_from(
+            ir_bytes, function_name, left_node, bs
+        );
+        let right_callee = try ir_contract::body_call_callee_or_empty_from(
+            ir_bytes, function_name, right_node, bs
+        );
+        if !std::mem::equal_bytes(left_callee, right_callee) {
+            return false;
+        }
+        let left_args = try compiled_mir_types::count_call_args(
+            ir_bytes, function_name, left_node, bs
+        );
+        let right_args = try compiled_mir_types::count_call_args(
+            ir_bytes, function_name, right_node, bs
+        );
+        return left_args == 0 and right_args == 0;
+    }
+    return false;
+}
+
+fn validate_branch_merge_exit_assign(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    cond_node: i64,
+    exit_assign: i64,
+    induction_var: []u8,
+    string_counter: i64,
+    temp_counter: i64,
+    bs: i64
+) -> !void {
+    let target_type = try compiled_mir_types::resolve_value_llvm_type(
+        ir_bytes, function_name, module_prefix, locals_spec, induction_var, bs
+    );
+    if !std::mem::equal_bytes(target_type, "i64") {
+        return error("compiled mir: branch-merge induction target must be i64");
+    }
+    let cond_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, cond_node, bs);
+    if !std::mem::equal_bytes(cond_kind, "Binary") {
+        return error("compiled mir: branch-merge while header must compare the induction bound");
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, cond_node, bs
+    );
+    if !std::mem::equal_bytes(op, "lt") {
+        return error("compiled mir: branch-merge while header must use a less-than bound");
+    }
+    let header_left = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "left", 0, bs
+    );
+    if !try node_kind_is(ir_bytes, function_name, header_left, "Var", bs) {
+        return error("compiled mir: branch-merge while header must read the induction variable");
+    }
+    let header_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, header_left, bs
+    );
+    if !std::mem::equal_bytes(header_var, induction_var) {
+        return error("compiled mir: branch-merge while header must read the induction variable");
+    }
+    let header_bound = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "right", 0, bs
+    );
+    let exit_target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, exit_assign, "target", 0, bs
+    );
+    if !try node_kind_is(ir_bytes, function_name, exit_target, "Var", bs) {
+        return error("compiled mir: branch-merge exit assignment target must be a var");
+    }
+    let exit_target_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, exit_target, bs
+    );
+    if !std::mem::equal_bytes(exit_target_name, induction_var) {
+        return error("compiled mir: branch-merge exit assignment must target the induction variable");
+    }
+    let exit_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, exit_assign, "value", 0, bs
+    );
+    if !(try branch_merge_values_match_bound(
+        ir_bytes, function_name, exit_value, header_bound, bs
+    )) {
+        return error("compiled mir: branch-merge exit assignment must set the induction to the loop bound");
+    }
+    var exit_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let exit_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        exit_value,
+        string_counter,
+        temp_counter,
+        &var exit_insts,
+        bs
+    );
+    let exit_type = try expr_inst_llvm_type_by_id(&exit_insts, exit_result);
+    if !std::mem::equal_bytes(exit_type, target_type) {
+        return error("compiled mir: branch-merge exit assignment type mismatch");
+    }
+    exit_insts.deinit();
+    return;
+}
 fn while_carries_induction_var(
     ir_bytes: []u8,
     function_name: []u8,
@@ -6728,6 +6922,380 @@ fn validate_copy_latch_source(
     }
     return error("compiled mir: copy latch source local not found in the loop body");
 }
+
+fn lower_branch_merge_block_prefix(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    block_node: i64,
+    statement_limit: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    alias_counter: i64,
+    label_index: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !VoidBodyLowerResult {
+    var body_locals = locals_spec;
+    var body_strings = string_counter;
+    var body_temps = temp_counter;
+    var body_tries = try_counter;
+    var body_alias_counter = alias_counter;
+    var body_index = 0;
+    while body_index < statement_limit {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, block_node, "statement", body_index, bs
+        );
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(stmt_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                body_locals,
+                statement,
+                body_strings,
+                body_temps,
+                body_tries,
+                aliases,
+                stmts,
+                bs
+            );
+            body_locals = let_result.locals_spec;
+            body_strings = let_result.string_counter;
+            body_temps = let_result.temp_counter;
+            body_tries = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(stmt_kind, "If") {
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    body_locals,
+                    statement,
+                    body_strings,
+                    body_temps,
+                    body_tries,
+                    body_alias_counter,
+                    label_index * 1000 + body_index + 1,
+                    aliases,
+                    stmts,
+                    bs
+                );
+                body_strings = if_result.string_counter;
+                body_temps = if_result.temp_counter;
+                body_tries = if_result.try_counter;
+                body_alias_counter = if_result.alias_counter;
+            } else {
+                if std::mem::equal_bytes(stmt_kind, "ExprStmt") {
+                    let expr_result = try lower_multi_expr_statement(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        llvm_return_type,
+                        body_locals,
+                        statement,
+                        body_strings,
+                        body_tries,
+                        aliases,
+                        stmts,
+                        bs
+                    );
+                    body_strings = expr_result.string_counter;
+                    body_tries = expr_result.try_counter;
+                } else {
+                    if std::mem::equal_bytes(stmt_kind, "Assign") {
+                        let assign_result = try lower_void_then_body_assign(
+                            ir_bytes,
+                            function_name,
+                            module_prefix,
+                            body_locals,
+                            statement,
+                            body_strings,
+                            body_temps,
+                            body_tries,
+                            body_alias_counter,
+                            aliases,
+                            stmts,
+                            bs
+                        );
+                        body_strings = assign_result.string_counter;
+                        body_temps = assign_result.temp_counter;
+                        body_tries = assign_result.try_counter;
+                        body_alias_counter = assign_result.alias_counter;
+                    } else {
+                        return error("compiled mir: unsupported branch-merge while body statement");
+                    }
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    return VoidBodyLowerResult {
+        locals_spec: body_locals,
+        string_counter: body_strings,
+        temp_counter: body_temps,
+        try_counter: body_tries,
+        alias_counter: body_alias_counter
+    };
+}
+
+fn validate_branch_merge_no_unmodelled_aliases(
+    before: &std::array::Array<LocalAliasState>,
+    after: &std::array::Array<LocalAliasState>,
+    induction_var: []u8
+) -> !void {
+    var index = 0;
+    while index < after.len() {
+        let state = try after.at(index);
+        if !std::mem::equal_bytes(state.source_name, induction_var) {
+            let input_name = try local_alias_current_name(before, state.source_name);
+            if !std::mem::equal_bytes(input_name, state.current_name) {
+                return error("compiled mir: branch-merge carried scalar not yet supported");
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// lower_multi_while_branch_merge_latch lowers a bounded counter loop whose induction update is carried
+// by a terminal if/else instead of a trailing body Assign (issue 1165 / 1162):
+//   while index < bound {
+//       ...
+//       if done {
+//           index = bound;
+//       } else {
+//           ...
+//           index = index + 1;
+//       }
+//   }
+// The shape is generic: the terminal If must have two block arms that assign the same Var, exactly one
+// arm must close with a constant-step '<var> = <var> + <int>' advance, the other must be a single
+// '<var> = <bound>' exit assignment, and the target/value types must be i64.
+fn lower_multi_while_branch_merge_latch(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    alias_counter: i64,
+    loop_index: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_kind != 0 {
+        return error("compiled mir: branch-merge while header must be a single comparison");
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    let terminal_if = try while_branch_merge_terminal_if_or_minus_one(
+        ir_bytes, function_name, statement, bs
+    );
+    if terminal_if < 0 {
+        return error("compiled mir: branch-merge while body must end with a terminal if/else latch");
+    }
+    let induction_var = try while_branch_merge_induction_var(
+        ir_bytes, function_name, statement, bs
+    );
+    let induction_init = try find_induction_init(
+        ir_bytes, function_name, induction_var, loop_index, bs
+    );
+    var induction_init_literal = induction_init.literal;
+    var induction_init_var = induction_init.var_name;
+    var induction_init_offset = induction_init.offset;
+    let induction_alias = try local_alias_current_name(aliases, induction_var);
+    if !std::mem::equal_bytes(induction_alias, induction_var) {
+        induction_init_literal = 0;
+        induction_init_var = induction_alias;
+        induction_init_offset = 0;
+    }
+
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        bs
+    );
+    let body_string_start = string_counter + try count_strings_in_insts(&cond_insts);
+    let body_temp_start = temp_counter + cond_insts.len();
+
+    let advance_block = try branch_merge_advance_block(
+        ir_bytes, function_name, terminal_if, bs
+    );
+    let exit_block = try branch_merge_exit_block(
+        ir_bytes, function_name, terminal_if, bs
+    );
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, terminal_if, "then", 0, bs
+    );
+    let advance_assign = try branch_merge_last_assign(
+        ir_bytes,
+        function_name,
+        advance_block,
+        "compiled mir: branch-merge advance arm must end with the induction increment",
+        bs
+    );
+    let step = try parse_induction_step(
+        ir_bytes, function_name, advance_assign, induction_var, bs
+    );
+    let exit_assign = try branch_merge_last_assign(
+        ir_bytes,
+        function_name,
+        exit_block,
+        "compiled mir: branch-merge exit arm must end with a bound assignment",
+        bs
+    );
+    let exit_count = try while_body_statement_count(ir_bytes, function_name, exit_block, bs);
+    if exit_count != 1 {
+        return error("compiled mir: branch-merge exit arm must only set the induction bound");
+    }
+    var branch_latch_exit_on_true = false;
+    if then_node == exit_block {
+        branch_latch_exit_on_true = true;
+    } else {
+        if then_node != advance_block {
+            return error("compiled mir: branch-merge terminal arms could not be classified");
+        }
+    }
+    try validate_branch_merge_exit_assign(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        exit_assign,
+        induction_var,
+        body_string_start,
+        body_temp_start,
+        bs
+    );
+
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_aliases = try copy_local_aliases(aliases);
+    defer body_aliases.deinit();
+    let body_result = try lower_branch_merge_block_prefix(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        locals_spec,
+        body_node,
+        body_count - 1,
+        body_string_start,
+        body_temp_start,
+        loop_index * 1000,
+        alias_counter,
+        loop_index,
+        &var body_aliases,
+        &var body_stmts,
+        bs
+    );
+    var branch_cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let branch_cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, terminal_if, "condition", 0, bs
+    );
+    if (try short_circuit_kind(ir_bytes, function_name, branch_cond_node, bs)) != 0 {
+        return error("compiled mir: branch-merge terminal condition short-circuit unsupported");
+    }
+    let branch_cond_result = try lower_expr_with_local_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        body_result.locals_spec,
+        branch_cond_node,
+        body_result.string_counter,
+        body_result.temp_counter,
+        &var branch_cond_insts,
+        &body_aliases,
+        bs
+    );
+    let branch_cond_type = try expr_inst_llvm_type_by_id(&branch_cond_insts, branch_cond_result);
+    if !std::mem::equal_bytes(branch_cond_type, "i1") {
+        return error("compiled mir: branch-merge terminal condition must be bool");
+    }
+    let branch_cond_strings = try count_strings_in_insts(&branch_cond_insts);
+    let advance_count = try while_body_statement_count(ir_bytes, function_name, advance_block, bs);
+    var branch_advance_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var advance_aliases = try copy_local_aliases(&body_aliases);
+    defer advance_aliases.deinit();
+    let advance_result = try lower_branch_merge_block_prefix(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        body_result.locals_spec,
+        advance_block,
+        advance_count - 1,
+        body_result.string_counter + branch_cond_strings,
+        body_result.temp_counter + branch_cond_insts.len(),
+        body_result.try_counter,
+        body_result.alias_counter,
+        loop_index * 1000 + body_count,
+        &var advance_aliases,
+        &var branch_advance_stmts,
+        bs
+    );
+    try validate_branch_merge_no_unmodelled_aliases(
+        aliases, &body_aliases, induction_var
+    );
+    try validate_branch_merge_no_unmodelled_aliases(
+        &body_aliases, &advance_aliases, induction_var
+    );
+    try stmts.append(compiled_mir::while_stmt(
+        loop_index,
+        induction_var,
+        induction_init_literal,
+        induction_init_var,
+        induction_init_offset,
+        step,
+        cond_result,
+        cond_insts,
+        0,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
+        body_stmts,
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        "",
+        std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        -1,
+        branch_latch_exit_on_true,
+        branch_cond_result,
+        branch_cond_insts,
+        branch_advance_stmts
+    ));
+    return MultiIfLowerResult {
+        temp_counter: advance_result.temp_counter,
+        string_counter: advance_result.string_counter,
+        try_counter: 0,
+        alias_counter: advance_result.alias_counter
+    };
+}
 // lower_multi_while_statement lowers a restricted bounded counter loop: a single i64
 // induction variable, a non-short-circuit comparison condition that reads it, a body
 // of Let/If statements, and a trailing 'name = name + step' increment. The body
@@ -6813,6 +7381,27 @@ fn lower_multi_while_statement(
             temp_counter,
             alias_counter,
             loop_index,
+            stmts,
+            bs
+        );
+    }
+    // A branch-merge latch advances or exits through a terminal if/else, so it has no trailing
+    // increment Assign for while_induction_var to read. Dispatch it before the trailing-latch path
+    // so the shape is validated by the branch-merge lowering instead of failing the old suffix
+    // precondition (issue 1165 / 1162).
+    if try while_is_branch_merge_latch(ir_bytes, function_name, statement, bs) {
+        return try lower_multi_while_branch_merge_latch(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            statement,
+            string_counter,
+            temp_counter,
+            alias_counter,
+            loop_index,
+            aliases,
             stmts,
             bs
         );
@@ -7117,7 +7706,11 @@ fn lower_multi_while_statement(
         secondary_inductions,
         std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        -1
+        -1,
+        false,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
@@ -8003,7 +8596,11 @@ fn lower_multi_while_leading_decrement(
         std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
         carried_scalars,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        -1
+        -1,
+        false,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
@@ -8627,7 +9224,11 @@ fn lower_multi_while_continue_latch(
         std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
         init_insts,
-        init_result_id
+        init_result_id,
+        false,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,

@@ -125,6 +125,13 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     %kizu.owned, and emits an OwnedDeinit MIR statement rendered as
 //     @kizu_rt_owned_deinit(%kizu.owned %receiver). Lowering now reaches the main formatter loop
 //     (issue 1209).
+//   - "compiled mir: while body must end with the induction increment": the main formatter loop
+//     at selfhost/src/parser/format.kizu:42 advances 'index' through a terminal if/else, not a
+//     trailing Assign. lower_multi_while_statement now dispatches that generic branch-merge latch
+//     before the trailing-increment path: it validates both terminal arms assign the same i64
+//     induction var, exactly one arm is a constant-step advance, and the exit arm assigns the while
+//     header bound expression. Lowering now descends into the loop body instead of failing the old
+//     suffix check.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -137,18 +144,21 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: void then-body assignment statement not yet supported",
 	"compiled mir: void then-block rendering not yet supported",
 	"compiled mir: unsupported expression statement",
+	"compiled mir: while body must end with the induction increment",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The
 // leading-import no-else void if at selfhost/src/parser/format.kizu:28, its nested void if at
 // format.kizu:31, and the following 'leading_imports.deinit();' (format.kizu:41) all lower and
-// render. The next statement in format_source is the main formatter loop
-// 'while index < format_tokens.len() { ... }' (format.kizu:42). Its induction update
-// 'index = index + 1;' is nested inside the loop's non-EOF else branch at format.kizu:144, not a
-// trailing loop-body assignment, so while_trailing_increment_count raises this blocker at
-// selfhost/src/backend/compiled_mir_lower.kizu:6624. Lowering this nested/control-flow-carried
-// formatter while shape is the next capability (refs 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: while body must end with the induction increment"
+// render. The main formatter loop at format.kizu:42 is now recognized as a branch-merge latch: its
+// EOF arm sets 'index = format_tokens.len();' (format.kizu:69), and its non-EOF arm ends with
+// 'index = index + 1;' (format.kizu:144). lower_multi_while_branch_merge_latch validates that
+// generic shape and descends into the loop body. The next measured blocker is the nested
+// 'if try rbrace_closes_enum_decl(source, &format_tokens, index) {' at format.kizu:46: its positive
+// try-call condition reaches lower_expr_into_local_aliases, which has no TryExpr expression case
+// and raises at selfhost/src/backend/compiled_mir_lower.kizu:10105. Lowering positive try-call
+// conditions in side-effecting if bodies is the next capability (refs 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled mir: unsupported expression kind"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -163,8 +173,9 @@ const formatDriverLoweringBlocker = "compiled mir: while body must end with the 
 // reassignments ('index = next_index;' .. 'at_line_start = true;'). The try-call lowers through
 // lower_void_free_try_call_statement and the reassignments through lower_void_then_body_assign, and
 // both void then-bodies render through the fall-through join. The following non-try expression
-// statement 'leading_imports.deinit();' lowers through OwnedDeinit. The next pinned blocker is the
-// main formatter while whose induction increment is nested in the non-EOF branch.
+// statement 'leading_imports.deinit();' lowers through OwnedDeinit. The main formatter while's
+// terminal branch-merge latch is validated, and lowering now stops at the nested positive try-call
+// condition in the loop body.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
