@@ -5426,6 +5426,380 @@ fn lower_void_then_body(
         alias_counter: body_alias_counter
     };
 }
+
+fn append_void_if_else_merge_for_source(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    source_name: []u8,
+    alias_counter: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    then_aliases: &std::array::Array<LocalAliasState>,
+    else_aliases: &std::array::Array<LocalAliasState>,
+    merge_vars: &var std::array::Array<compiled_mir::MirIfMergeVar>,
+    bs: i64
+) -> !i64 {
+    let input_name = try local_alias_current_name(aliases, source_name);
+    let then_name = try local_alias_current_name(then_aliases, source_name);
+    let else_name = try local_alias_current_name(else_aliases, source_name);
+    if std::mem::equal_bytes(input_name, then_name) and
+        std::mem::equal_bytes(input_name, else_name) {
+        return alias_counter;
+    }
+    let output_name = try void_then_alias_name(alias_counter);
+    let merge_type = try compiled_mir_types::resolve_value_llvm_type(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        source_name,
+        bs
+    );
+    try merge_vars.append(compiled_mir::if_else_merge_var(
+        source_name,
+        input_name,
+        then_name,
+        else_name,
+        output_name,
+        merge_type
+    ));
+    try set_local_alias(aliases, source_name, output_name);
+    return alias_counter + 1;
+}
+
+fn append_void_if_else_merge_vars(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    alias_counter: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    then_aliases: &std::array::Array<LocalAliasState>,
+    else_aliases: &std::array::Array<LocalAliasState>,
+    merge_vars: &var std::array::Array<compiled_mir::MirIfMergeVar>,
+    bs: i64
+) -> !i64 {
+    var merge_alias_counter = alias_counter;
+    var then_index = 0;
+    while then_index < then_aliases.len() {
+        let state = try then_aliases.at(then_index);
+        merge_alias_counter = try append_void_if_else_merge_for_source(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            state.source_name,
+            merge_alias_counter,
+            aliases,
+            then_aliases,
+            else_aliases,
+            merge_vars,
+            bs
+        );
+        then_index = then_index + 1;
+    }
+    var else_index = 0;
+    while else_index < else_aliases.len() {
+        let state = try else_aliases.at(else_index);
+        if (try local_alias_index(then_aliases, state.source_name)) < 0 {
+            merge_alias_counter = try append_void_if_else_merge_for_source(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                state.source_name,
+                merge_alias_counter,
+                aliases,
+                then_aliases,
+                else_aliases,
+                merge_vars,
+                bs
+            );
+        }
+        else_index = else_index + 1;
+    }
+    return merge_alias_counter;
+}
+
+fn lower_void_if_else_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    string_counter: i64,
+    cond_result: i64,
+    cond_insts: &std::array::Array<compiled_mir::MirExprInst>,
+    then_node: i64,
+    else_node: i64,
+    then_string_base: i64,
+    then_base: i64,
+    try_counter: i64,
+    alias_counter: i64,
+    if_index: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    var then_body_stmts =
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var merge_vars =
+        std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator());
+    var then_aliases = try copy_local_aliases(aliases);
+    defer then_aliases.deinit();
+    let then_body = try lower_void_then_body(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        locals_spec,
+        then_node,
+        then_string_base,
+        then_base,
+        try_counter,
+        alias_counter,
+        if_index,
+        &var then_aliases,
+        &var then_body_stmts,
+        bs
+    );
+    var else_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var else_aliases = try copy_local_aliases(aliases);
+    defer else_aliases.deinit();
+    let else_body = try lower_void_then_body(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        locals_spec,
+        else_node,
+        then_body.string_counter,
+        then_body.temp_counter,
+        then_body.try_counter,
+        then_body.alias_counter,
+        if_index * 1000 + 500,
+        &var else_aliases,
+        &var else_body_stmts,
+        bs
+    );
+    let merge_alias_counter = try append_void_if_else_merge_vars(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        else_body.alias_counter,
+        aliases,
+        &then_aliases,
+        &else_aliases,
+        &var merge_vars,
+        bs
+    );
+    try stmts.append(compiled_mir::if_else_void_body_stmt(
+        if_index,
+        string_counter,
+        cond_result,
+        try compiled_mir::copy_expr_insts(cond_insts),
+        then_body_stmts,
+        else_body_stmts,
+        merge_vars
+    ));
+    return MultiIfLowerResult {
+        temp_counter: else_body.temp_counter,
+        string_counter: else_body.string_counter,
+        try_counter: else_body.try_counter,
+        alias_counter: merge_alias_counter
+    };
+}
+
+fn lower_void_if_no_else_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    cond_result: i64,
+    cond_insts: &std::array::Array<compiled_mir::MirExprInst>,
+    cond_short_circuit: i64,
+    cond_rhs_result: i64,
+    cond_rhs_insts: &std::array::Array<compiled_mir::MirExprInst>,
+    cond_extra_operands: &std::array::Array<compiled_mir::MirCondOperand>,
+    then_node: i64,
+    then_string_base: i64,
+    then_base: i64,
+    try_counter: i64,
+    alias_counter: i64,
+    if_index: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    try require_void_then_block_no_else(ir_bytes, function_name, statement, bs);
+    var then_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var merge_vars = std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator());
+    var branch_aliases = try copy_local_aliases(aliases);
+    defer branch_aliases.deinit();
+    let then_body = try lower_void_then_body(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        locals_spec,
+        then_node,
+        then_string_base,
+        then_base,
+        try_counter,
+        alias_counter,
+        if_index,
+        &var branch_aliases,
+        &var then_body_stmts,
+        bs
+    );
+    var branch_alias_index = 0;
+    var merge_alias_counter = then_body.alias_counter;
+    while branch_alias_index < branch_aliases.len() {
+        let branch_state = try branch_aliases.at(branch_alias_index);
+        let input_name = try local_alias_current_name(aliases, branch_state.source_name);
+        if !std::mem::equal_bytes(input_name, branch_state.current_name) {
+            let output_name = try void_then_alias_name(merge_alias_counter);
+            let merge_type = try compiled_mir_types::resolve_value_llvm_type(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                branch_state.source_name,
+                bs
+            );
+            try merge_vars.append(compiled_mir::if_merge_var(
+                branch_state.source_name,
+                input_name,
+                branch_state.current_name,
+                output_name,
+                merge_type
+            ));
+            try set_local_alias(aliases, branch_state.source_name, output_name);
+            merge_alias_counter = merge_alias_counter + 1;
+        }
+        branch_alias_index = branch_alias_index + 1;
+    }
+    try stmts.append(compiled_mir::if_stmt(
+        if_index,
+        string_counter,
+        cond_result,
+        try compiled_mir::copy_expr_insts(cond_insts),
+        cond_short_circuit,
+        cond_rhs_result,
+        try compiled_mir::copy_expr_insts(cond_rhs_insts),
+        try compiled_mir::copy_cond_operands(cond_extra_operands),
+        compiled_mir::MirIfThenKind::VoidBody,
+        false,
+        llvm_return_type,
+        "",
+        "",
+        std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator()),
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
+        then_string_base,
+        then_body_stmts,
+        merge_vars
+    ));
+    return MultiIfLowerResult {
+        temp_counter: then_body.temp_counter,
+        string_counter: then_body.string_counter,
+        try_counter: then_body.try_counter,
+        alias_counter: merge_alias_counter
+    };
+}
+
+fn lower_void_if_body_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    cond_result: i64,
+    cond_insts: &std::array::Array<compiled_mir::MirExprInst>,
+    cond_short_circuit: i64,
+    cond_rhs_result: i64,
+    cond_rhs_insts: &std::array::Array<compiled_mir::MirExprInst>,
+    cond_extra_operands: &std::array::Array<compiled_mir::MirCondOperand>,
+    then_node: i64,
+    then_string_base: i64,
+    then_base: i64,
+    try_counter: i64,
+    alias_counter: i64,
+    if_index: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, statement, "else", 0, bs
+    );
+    if else_node >= 0 {
+        let else_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, else_node, bs
+        );
+        if !std::mem::equal_bytes(else_kind, "Empty") {
+            if !std::mem::equal_bytes(else_kind, "Block") {
+                return error("compiled mir: void if/else else arm must be a block");
+            }
+            if cond_short_circuit != 0 {
+                return error("compiled mir: void if/else short-circuit condition not yet supported");
+            }
+            return try lower_void_if_else_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                locals_spec,
+                string_counter,
+                cond_result,
+                cond_insts,
+                then_node,
+                else_node,
+                then_string_base,
+                then_base,
+                try_counter,
+                alias_counter,
+                if_index,
+                aliases,
+                stmts,
+                bs
+            );
+        }
+    }
+    return try lower_void_if_no_else_statement(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        locals_spec,
+        statement,
+        string_counter,
+        cond_result,
+        cond_insts,
+        cond_short_circuit,
+        cond_rhs_result,
+        cond_rhs_insts,
+        cond_extra_operands,
+        then_node,
+        then_string_base,
+        then_base,
+        try_counter,
+        alias_counter,
+        if_index,
+        aliases,
+        stmts,
+        bs
+    );
+}
+
 fn lower_multi_if_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -5763,6 +6137,32 @@ fn lower_multi_if_statement(
             }
         }
     }
+    if !is_continue_latch_then and !std::mem::equal_bytes(then_stmt_kind, "Return") {
+        return try lower_void_if_body_statement(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            statement,
+            string_counter,
+            cond_result,
+            &cond_insts,
+            cond_short_circuit,
+            cond_rhs_result,
+            &cond_rhs_insts,
+            &cond_extra_operands,
+            then_node,
+            then_string_base,
+            then_base,
+            try_counter,
+            alias_counter,
+            if_index,
+            aliases,
+            stmts,
+            bs
+        );
+    }
     var then_kind = compiled_mir::MirIfThenKind::ContinueLatch;
     var bool_value = false;
     var call_type = llvm_return_type;
@@ -5780,64 +6180,6 @@ fn lower_multi_if_statement(
     var new_try_counter = try_counter;
     var new_alias_counter = alias_counter;
     if !is_continue_latch_then {
-        if !std::mem::equal_bytes(then_stmt_kind, "Return") {
-            // The then-block's controlling statement is not a single Return, so it is a no-else
-            // void multi-statement body (let bindings, nested ifs, call statements, assignments).
-            // It renders as a conditional branch to a fall-through join. Assignments bind fresh
-            // aliases inside the then-body, and merge_vars store/load those aliases across the join
-            // instead of redefining the original local SSA names (issue 1207, refs 1165 / 1162).
-            try require_void_then_block_no_else(ir_bytes, function_name, statement, bs);
-            var branch_aliases = try copy_local_aliases(aliases);
-            defer branch_aliases.deinit();
-            let then_body = try lower_void_then_body(
-                ir_bytes,
-                function_name,
-                module_prefix,
-                llvm_return_type,
-                locals_spec,
-                then_node,
-                then_string_base,
-                then_base,
-                try_counter,
-                alias_counter,
-                if_index,
-                &var branch_aliases,
-                &var then_body_stmts,
-                bs
-            );
-            var branch_alias_index = 0;
-            var merge_alias_counter = then_body.alias_counter;
-            then_kind = compiled_mir::MirIfThenKind::VoidBody;
-            while branch_alias_index < branch_aliases.len() {
-                let branch_state = try branch_aliases.at(branch_alias_index);
-                let input_name = try local_alias_current_name(aliases, branch_state.source_name);
-                if !std::mem::equal_bytes(input_name, branch_state.current_name) {
-                    let output_name = try void_then_alias_name(merge_alias_counter);
-                    let merge_type = try compiled_mir_types::resolve_value_llvm_type(
-                        ir_bytes,
-                        function_name,
-                        module_prefix,
-                        locals_spec,
-                        branch_state.source_name,
-                        bs
-                    );
-                    try merge_vars.append(compiled_mir::if_merge_var(
-                        branch_state.source_name,
-                        input_name,
-                        branch_state.current_name,
-                        output_name,
-                        merge_type
-                    ));
-                    try set_local_alias(aliases, branch_state.source_name, output_name);
-                    merge_alias_counter = merge_alias_counter + 1;
-                }
-                branch_alias_index = branch_alias_index + 1;
-            }
-            new_string_counter = then_body.string_counter;
-            next_temp = then_body.temp_counter;
-            new_try_counter = then_body.try_counter;
-            new_alias_counter = merge_alias_counter;
-        } else {
         let ret_value = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, then_stmt, "value", 0, bs
         );
@@ -5923,7 +6265,6 @@ fn lower_multi_if_statement(
         }
         if then_kind == compiled_mir::MirIfThenKind::ReturnError {
             next_temp = then_result + 1;
-        }
         }
     }
     try stmts.append(compiled_mir::if_stmt(

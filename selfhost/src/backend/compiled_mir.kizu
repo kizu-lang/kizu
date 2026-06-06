@@ -425,6 +425,7 @@ pub struct MirIfMergeVar {
     pub source_name: []u8,
     pub input_name: []u8,
     pub then_name: []u8,
+    pub else_name: []u8,
     pub output_name: []u8,
     pub llvm_type: []u8,
 }
@@ -478,6 +479,7 @@ pub struct MirIfStmt {
     pub then_struct_fields: std::array::Array<MirStructField>,
     pub then_struct_string_index: i64,
     pub then_body_stmts: std::array::Array<MirStmt>,
+    pub else_body_stmts: std::array::Array<MirStmt>,
     pub merge_vars: std::array::Array<MirIfMergeVar>,
 }
 
@@ -1759,6 +1761,7 @@ impl MirIfStmt {
         self.then_expr_insts.deinit();
         self.then_struct_fields.deinit();
         self.then_body_stmts.deinit();
+        self.else_body_stmts.deinit();
         self.merge_vars.deinit();
         return;
     }
@@ -2720,6 +2723,26 @@ pub fn copy_expr_insts(
     while index < insts.len() {
         let inst = try insts.at(index);
         try copied.append(try copy_expr_inst(inst));
+        index = index + 1;
+    }
+    return copied;
+}
+
+fn copy_cond_operand(operand: &MirCondOperand) -> !MirCondOperand {
+    return MirCondOperand {
+        result_id: operand.result_id,
+        insts: try copy_expr_insts(&operand.insts)
+    };
+}
+
+pub fn copy_cond_operands(
+    operands: &std::array::Array<MirCondOperand>
+) -> !std::array::Array<MirCondOperand> {
+    var copied = std::array::Array<MirCondOperand>(std::mem::page_allocator());
+    var index = 0;
+    while index < operands.len() {
+        let operand = try operands.at(index);
+        try copied.append(try copy_cond_operand(operand));
         index = index + 1;
     }
     return copied;
@@ -3857,6 +3880,25 @@ pub fn if_merge_var(
         source_name: source_name,
         input_name: input_name,
         then_name: then_name,
+        else_name: input_name,
+        output_name: output_name,
+        llvm_type: llvm_type
+    };
+}
+
+pub fn if_else_merge_var(
+    source_name: []u8,
+    input_name: []u8,
+    then_name: []u8,
+    else_name: []u8,
+    output_name: []u8,
+    llvm_type: []u8
+) -> MirIfMergeVar {
+    return MirIfMergeVar {
+        source_name: source_name,
+        input_name: input_name,
+        then_name: then_name,
+        else_name: else_name,
         output_name: output_name,
         llvm_type: llvm_type
     };
@@ -3910,6 +3952,47 @@ pub fn if_stmt(
         then_struct_fields: then_struct_fields,
         then_struct_string_index: then_struct_string_index,
         then_body_stmts: then_body_stmts,
+        else_body_stmts: std::array::Array<MirStmt>(std::mem::page_allocator()),
+        merge_vars: merge_vars
+    });
+}
+
+pub fn if_else_void_body_stmt(
+    if_index: i64,
+    string_index: i64,
+    cond_result_id: i64,
+    cond_insts: std::array::Array<MirExprInst>,
+    then_body_stmts: std::array::Array<MirStmt>,
+    else_body_stmts: std::array::Array<MirStmt>,
+    merge_vars: std::array::Array<MirIfMergeVar>
+) -> MirStmt {
+    return MirStmt::If(MirIfStmt {
+        if_index: if_index,
+        string_index: string_index,
+        llvm_type: "",
+        cond_result_id: cond_result_id,
+        cond_insts: cond_insts,
+        cond_short_circuit: 0,
+        cond_rhs_result_id: -1,
+        cond_rhs_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        cond_extra_operands: std::array::Array<MirCondOperand>(std::mem::page_allocator()),
+        cond_try_call: false,
+        cond_called_error_union: "",
+        cond_own_error_union: "",
+        cond_call_module_prefix: "",
+        cond_call_callee_name: "",
+        cond_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        if_then_kind: MirIfThenKind::VoidBody,
+        bool_value: false,
+        then_call_module_prefix: "",
+        then_call_callee_name: "",
+        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        then_expr_result_id: -1,
+        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        then_struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
+        then_struct_string_index: string_index,
+        then_body_stmts: then_body_stmts,
+        else_body_stmts: else_body_stmts,
         merge_vars: merge_vars
     });
 }
@@ -3951,6 +4034,7 @@ pub fn if_try_call_void_body_stmt(
         then_struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
         then_struct_string_index: string_index,
         then_body_stmts: then_body_stmts,
+        else_body_stmts: std::array::Array<MirStmt>(std::mem::page_allocator()),
         merge_vars: merge_vars
     });
 }

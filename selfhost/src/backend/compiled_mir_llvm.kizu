@@ -4707,6 +4707,13 @@ fn append_if_globals(
         try append_stmt_globals(out, llvm_symbol, body_stmt);
         body_index = body_index + 1;
     }
+    let else_body = &stmt.else_body_stmts;
+    var else_index = 0;
+    while else_index < else_body.len() {
+        let else_stmt = try else_body.at(else_index);
+        try append_stmt_globals(out, llvm_symbol, else_stmt);
+        else_index = else_index + 1;
+    }
     return;
 }
 fn append_expr_return_value(
@@ -5136,6 +5143,26 @@ fn append_if_merge_then_stores(
     return;
 }
 
+fn append_if_merge_else_stores(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    let merge_vars = &stmt.merge_vars;
+    var merge_index = 0;
+    while merge_index < merge_vars.len() {
+        let merge = try merge_vars.at(merge_index);
+        try out.append_bytes("  store ");
+        try out.append_bytes(merge.llvm_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(merge.else_name);
+        try out.append_bytes(", ptr ");
+        try append_if_merge_slot_ref(out, stmt.if_index, merge_index);
+        try out.append_byte(cast<u8>(10));
+        merge_index = merge_index + 1;
+    }
+    return;
+}
+
 fn append_if_merge_loads(
     out: &var std::string::String,
     stmt: &compiled_mir::MirIfStmt
@@ -5156,6 +5183,10 @@ fn append_if_merge_loads(
     return;
 }
 
+fn if_has_else_body(stmt: &compiled_mir::MirIfStmt) -> bool {
+    return stmt.else_body_stmts.len() > 0;
+}
+
 fn append_void_then_body(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -5174,6 +5205,31 @@ fn append_void_then_body(
         body_index = body_index + 1;
     }
     try append_if_merge_then_stores(out, stmt);
+    try out.append_bytes("  br label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_cont");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_void_else_body(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    let body = &stmt.else_body_stmts;
+    var body_index = 0;
+    while body_index < body.len() {
+        let body_stmt = try body.at(body_index);
+        try append_multi_stmt(
+            out,
+            function,
+            body_stmt,
+            stmt.if_index * 1000 + 500 + body_index + 1
+        );
+        body_index = body_index + 1;
+    }
+    try append_if_merge_else_stores(out, stmt);
     try out.append_bytes("  br label %if");
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_cont");
@@ -5208,7 +5264,11 @@ fn append_multi_if(
         try std::fmt::append_i64(out, stmt.if_index);
         try out.append_bytes("_then, label %if");
         try std::fmt::append_i64(out, stmt.if_index);
-        try out.append_bytes("_cont");
+        if if_has_else_body(stmt) {
+            try out.append_bytes("_else");
+        } else {
+            try out.append_bytes("_cont");
+        }
         try out.append_byte(cast<u8>(10));
     } else {
         try append_expr_insts(out, function.name, &stmt.cond_insts);
@@ -5222,9 +5282,16 @@ fn append_multi_if(
             try std::fmt::append_i64(out, stmt.if_index);
             try out.append_bytes("_then, label %if");
             try std::fmt::append_i64(out, stmt.if_index);
-            try out.append_bytes("_cont");
+            if if_has_else_body(stmt) {
+                try out.append_bytes("_else");
+            } else {
+                try out.append_bytes("_cont");
+            }
             try out.append_byte(cast<u8>(10));
         } else {
+            if if_has_else_body(stmt) {
+                return error("compiled mir llvm: void if/else short-circuit condition not yet supported");
+            }
             try append_short_circuit_branches(out, function.name, stmt);
         }
     }
@@ -5279,6 +5346,13 @@ fn append_multi_if(
             }
         }
     }
+    }
+    if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody and if_has_else_body(stmt) {
+        try out.append_bytes("if");
+        try std::fmt::append_i64(out, stmt.if_index);
+        try out.append_bytes("_else:");
+        try out.append_byte(cast<u8>(10));
+        try append_void_else_body(out, function, stmt);
     }
     try out.append_bytes("if");
     try std::fmt::append_i64(out, stmt.if_index);
