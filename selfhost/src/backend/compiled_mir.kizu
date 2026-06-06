@@ -228,6 +228,10 @@ pub enum MirIfThenKind {
     ReturnExpr,
     ReturnStruct,
     ReturnError,
+    // VoidBody backs a no-else side-effecting then-block. The then body is rendered as a
+    // conditional branch to a fall-through join, and mutated locals are merged through the
+    // MirIfStmt.merge_vars store/load metadata rather than redefining the original SSA names.
+    VoidBody,
     // ContinueLatch backs an 'if <cond> { <induction> = <induction> + <step>; continue; }'
     // body statement of a continue-latch while loop (line_comment_has_blank_after, issue 1165
     // / 1162). The then-block carries no return value: it branches straight back to the loop
@@ -310,6 +314,18 @@ pub struct MirReturnErrorStmt {
 pub struct MirLetExprStmt {
     pub name: []u8,
     pub string_index: i64,
+    pub expr_result_id: i64,
+    pub expr_insts: std::array::Array<MirExprInst>,
+}
+
+// MirAliasAssignStmt binds a lowered expression to a fresh backend alias name. It is used for
+// mutable local values that cannot reuse the source local's SSA name: skipped induction seeds and
+// assignment statements inside a no-else void then-block. The source_name records the Kizu local
+// being carried; output_name is the unique SSA alias that later Var reads may be rewritten to.
+pub struct MirAliasAssignStmt {
+    pub source_name: []u8,
+    pub output_name: []u8,
+    pub llvm_type: []u8,
     pub expr_result_id: i64,
     pub expr_insts: std::array::Array<MirExprInst>,
 }
@@ -402,6 +418,17 @@ pub struct MirCondOperand {
     pub insts: std::array::Array<MirExprInst>,
 }
 
+// MirIfMergeVar describes one mutable local crossing a no-else void if join. input_name is the
+// incoming SSA alias before the if, then_name is the alias after the then body, and output_name is
+// the alias loaded in the fall-through continuation.
+pub struct MirIfMergeVar {
+    pub source_name: []u8,
+    pub input_name: []u8,
+    pub then_name: []u8,
+    pub output_name: []u8,
+    pub llvm_type: []u8,
+}
+
 // cond_short_circuit selects how the condition drives the branch:
 //   0 = single condition (cond_insts / cond_result_id only)
 //   1 = lhs and rhs short-circuit; rhs is only evaluated when lhs is true
@@ -440,6 +467,8 @@ pub struct MirIfStmt {
     // so it must match between the body render and the globals render.
     pub then_struct_fields: std::array::Array<MirStructField>,
     pub then_struct_string_index: i64,
+    pub then_body_stmts: std::array::Array<MirStmt>,
+    pub merge_vars: std::array::Array<MirIfMergeVar>,
 }
 
 // MirWhileStmt backs a restricted bounded counter loop (tracker 961): one mutable
@@ -1160,6 +1189,7 @@ pub union MirStmt {
     LetStruct(MirLetStructStmt),
     LetArenaAdd(MirLetArenaAddStmt),
     LetExpr(MirLetExprStmt),
+    AliasAssign(MirAliasAssignStmt),
     ScalarSelectAssign(MirScalarSelectAssignStmt),
     LetTryCall(MirLetTryCallStmt),
     ReturnTryBinary(MirReturnTryBinaryStmt),
@@ -1409,6 +1439,13 @@ impl MirLetArrayGetStmt {
 
 impl MirLetExprStmt {
     fn deinit(self: MirLetExprStmt) -> void {
+        self.expr_insts.deinit();
+        return;
+    }
+}
+
+impl MirAliasAssignStmt {
+    fn deinit(self: MirAliasAssignStmt) -> void {
         self.expr_insts.deinit();
         return;
     }
@@ -1684,6 +1721,8 @@ impl MirIfStmt {
         self.then_call_args.deinit();
         self.then_expr_insts.deinit();
         self.then_struct_fields.deinit();
+        self.then_body_stmts.deinit();
+        self.merge_vars.deinit();
         return;
     }
 }
@@ -1713,6 +1752,7 @@ impl MirStmt {
             LetStruct(payload) => payload.deinit(),
             LetArenaAdd(payload) => payload.deinit(),
             LetExpr(payload) => payload.deinit(),
+            AliasAssign(payload) => payload.deinit(),
             ScalarSelectAssign(payload) => payload.deinit(),
             LetTryCall(payload) => payload.deinit(),
             ReturnTryBinary(payload) => payload.deinit(),
@@ -2708,6 +2748,22 @@ pub fn let_expr_stmt(
     return MirStmt::LetExpr(MirLetExprStmt {
         name: name,
         string_index: string_index,
+        expr_result_id: result_id,
+        expr_insts: insts
+    });
+}
+
+pub fn alias_assign_stmt(
+    source_name: []u8,
+    output_name: []u8,
+    llvm_type: []u8,
+    result_id: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt::AliasAssign(MirAliasAssignStmt {
+        source_name: source_name,
+        output_name: output_name,
+        llvm_type: llvm_type,
         expr_result_id: result_id,
         expr_insts: insts
     });
@@ -3736,6 +3792,22 @@ pub fn cond_operand(
     };
 }
 
+pub fn if_merge_var(
+    source_name: []u8,
+    input_name: []u8,
+    then_name: []u8,
+    output_name: []u8,
+    llvm_type: []u8
+) -> MirIfMergeVar {
+    return MirIfMergeVar {
+        source_name: source_name,
+        input_name: input_name,
+        then_name: then_name,
+        output_name: output_name,
+        llvm_type: llvm_type
+    };
+}
+
 pub fn if_stmt(
     if_index: i64,
     string_index: i64,
@@ -3754,7 +3826,9 @@ pub fn if_stmt(
     then_result_id: i64,
     then_insts: std::array::Array<MirExprInst>,
     then_struct_fields: std::array::Array<MirStructField>,
-    then_struct_string_index: i64
+    then_struct_string_index: i64,
+    then_body_stmts: std::array::Array<MirStmt>,
+    merge_vars: std::array::Array<MirIfMergeVar>
 ) -> MirStmt {
     return MirStmt::If(MirIfStmt {
         if_index: if_index,
@@ -3774,7 +3848,9 @@ pub fn if_stmt(
         then_expr_result_id: then_result_id,
         then_expr_insts: then_insts,
         then_struct_fields: then_struct_fields,
-        then_struct_string_index: then_struct_string_index
+        then_struct_string_index: then_struct_string_index,
+        then_body_stmts: then_body_stmts,
+        merge_vars: merge_vars
     });
 }
 

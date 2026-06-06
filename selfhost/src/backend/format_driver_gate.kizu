@@ -16,31 +16,18 @@ import selfhost::backend::compiled_llvm;
 // compiled_llvm::append_compiled_function_auto -- the production single-member lowering driver --
 // over them.
 //
-// Lowering now completes the if-then-body Array.get binding:
-// 'let last_import = try format_tokens.get(next_index - 1);'
-// (selfhost/src/parser/format.kizu:30). The receiver local 'format_tokens' is bound by
-// 'var format_tokens = try lexer::tokenize(allocator, source)' (format.kizu:13), and the local
-// Kizu-type resolver uses the generic cross-module suffix resolver to unwrap the real
-// 'std::kizu::lexer::tokenize -> !std::array::Array<std::kizu::lexer::Token>' signature fact.
-// lower_multi_let_array_get extracts the element type 'std::kizu::lexer::Token' and resolves its
-// element LLVM type, and the following 'last_import.end' field read resolves its struct layout,
-// because the gate now supplies the cross-module return payload type facts (the
-// std::kizu::lexer::Token type-llvm + struct-field facts) via append_external_return_payload_type_facts
-// below. Lowering therefore advances to the then-block's third statement, the nested
-// 'if !has_line_comment_between(source, 0, last_import.end) { ... }' (format.kizu:31).
-// lower_void_then_body now dispatches the 'If' and 'ExprStmt' kinds too, so the nested 'if' lowers
-// through lower_multi_if_statement and descends back into lower_void_then_body for its own void
-// then-body. The nested then-body's first statement,
-// 'try append_sorted_imports(out, source, &format_tokens, &leading_imports);' (format.kizu:32), is
-// a free-function try-call statement: lower_multi_expr_statement now dispatches its non-field
-// callee to lower_void_free_try_call_statement, which validates the '!void' error-union void
-// success and lowers a VoidTryCall statement (failure propagation, no bound value), with the
-// '&var std::string::String' arg resolving through kizu_type_to_llvm's 'var_' mutable-borrow strip.
-// The gate now stops at the nested then-body's next statement, 'index = next_index;'
-// (format.kizu:33): lower_void_then_body dispatches Let / If / ExprStmt but not Assign, so it
-// raises "compiled mir: void then-body assignment statement not yet supported"
-// (selfhost/src/backend/compiled_mir_lower.kizu:4757). Lowering an assignment statement in a void
-// then-body is the next capability (issue 1201).
+// Lowering now completes and renders the leading-import no-else void if:
+// 'if leading_imports.len() > 1 { ... }' (selfhost/src/parser/format.kizu:28), including its nested
+// no-else void if at format.kizu:31. lower_void_then_body lowers the nested free-function try-call
+// statement and the six scalar reassignments ('index = next_index;' .. 'at_line_start = true;',
+// format.kizu:33-38). lower_multi_if_statement carries the nested try_counter forward so the
+// VoidTryCall labels do not collide with sibling try-calls, and the compiled MIR if renderer merges
+// assignment aliases through the fall-through join instead of redefining the original SSA names.
+// The gate now stops at the statement after the leading-import if, 'leading_imports.deinit();'
+// (format.kizu:41): lower_multi_expr_statement only accepts try-call expression statements, so it
+// raises "compiled mir: unsupported expression statement"
+// (selfhost/src/backend/compiled_mir_lower.kizu:3823). Lowering non-try side-effect expression
+// statements such as deinit is the next capability (issue 1207, refs 1165 / 1162).
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
