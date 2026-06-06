@@ -197,8 +197,8 @@ fn append_kizu_lexer_function_facts(
         "std::kizu::lexer"
     );
     defer catalog.deinit();
-    try append_type_llvm_fact(
-        out, "std::kizu::lexer::Position", "%kizu.kizu.lexer.position"
+    try append_qualified_type_llvm_fact(
+        out, "std::kizu::lexer::Position"
     );
     // Position's field layout (line -> 0, column -> 1) lets advance_byte resolve
     // initial.line / initial.column as struct field accesses (tracker 961, scope 4
@@ -211,8 +211,8 @@ fn append_kizu_lexer_function_facts(
     // enum-variant facts (so TokenKind lowers to i64), and Token's field layout
     // (kind -> 0 .. doc_end -> 6) are the type/facts base the first_token / next_token /
     // token_at tokenizer cluster will consume (tracker 961, scope 4 prerequisite).
-    try append_type_llvm_fact(
-        out, "std::kizu::lexer::Token", "%kizu.kizu.lexer.token"
+    try append_qualified_type_llvm_fact(
+        out, "std::kizu::lexer::Token"
     );
     try append_selected_enum_variant_facts(
         out, file.text, parsed.ast, parsed.root,
@@ -2838,6 +2838,173 @@ fn append_type_llvm_fact(
     try out.append_bytes(llvm_type);
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+// append_qualified_type_llvm_fact emits a struct's 'type-llvm <qualified> <llvm>' fact, deriving
+// the runtime LLVM struct type name from the qualified Kizu type name alone. The name is the
+// '%kizu' runtime namespace prefix, then each module-path segment joined by '.', then the type
+// name converted CamelCase -> snake_case: std::kizu::lexer::Token -> %kizu.kizu.lexer.token, the
+// same shape emit_ast_node_type_llvm_fact hand-rolls for AstData variant payload structs. A
+// leading 'std' module segment is the stdlib root the '%kizu' prefix already names, so it is
+// dropped. Deriving the LLVM name generically lets any cross-module struct payload resolve its
+// type-llvm fact from its qualified name without a per-type hand-written mapping (issue 1199).
+pub fn append_qualified_type_llvm_fact(
+    out: &var std::string::String,
+    qualified_name: []u8
+) -> !void {
+    try out.append_bytes("type-llvm ");
+    try out.append_bytes(qualified_name);
+    try out.append_byte(cast<u8>(32));
+    try append_qualified_type_llvm_name(out, qualified_name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_qualified_type_llvm_name(
+    out: &var std::string::String,
+    qualified_name: []u8
+) -> !void {
+    try out.append_bytes("%kizu");
+    let len = std::mem::len(qualified_name);
+    let sep = last_double_colon_index(qualified_name);
+    if sep < 0 {
+        try out.append_byte(cast<u8>(46));
+        try append_camel_to_snake(out, qualified_name);
+        return;
+    }
+    try append_module_path_segments(out, qualified_name[0..sep]);
+    try out.append_byte(cast<u8>(46));
+    try append_camel_to_snake(out, qualified_name[sep + 2..len]);
+    return;
+}
+
+// last_double_colon_index returns the byte index of the first ':' of the final '::' separator in
+// a qualified name, or -1 when the name carries no '::' path.
+fn last_double_colon_index(name: []u8) -> i64 {
+    let len = std::mem::len(name);
+    var index = len - 1;
+    while index >= 1 {
+        if name[index] == cast<u8>(58) and name[index - 1] == cast<u8>(58) {
+            return index - 1;
+        }
+        index = index - 1;
+    }
+    return -1;
+}
+
+// append_module_path_segments appends each '::'-separated module segment of module_path as
+// '.<segment>', dropping a leading 'std' stdlib-root segment (the '%kizu' prefix already names
+// the runtime root).
+fn append_module_path_segments(
+    out: &var std::string::String,
+    module_path: []u8
+) -> !void {
+    let len = std::mem::len(module_path);
+    var seg_start = 0;
+    var is_first = true;
+    var index = 0;
+    while index <= len {
+        let at_end = index == len;
+        let at_sep = !at_end and index + 1 < len and
+            module_path[index] == cast<u8>(58) and module_path[index + 1] == cast<u8>(58);
+        if at_end or at_sep {
+            let segment = module_path[seg_start..index];
+            if !(is_first and std::mem::equal_bytes(segment, "std")) {
+                try out.append_byte(cast<u8>(46));
+                try out.append_bytes(segment);
+            }
+            is_first = false;
+            if at_sep {
+                index = index + 2;
+                seg_start = index;
+            } else {
+                index = index + 1;
+            }
+        } else {
+            index = index + 1;
+        }
+    }
+    return;
+}
+
+// append_qualified_struct_type_facts emits the AST-derived type facts for the struct declared as
+// local_name in the given module AST, keyed under qualified_name: its derived 'type-llvm' mapping
+// and its 'struct-field' layout facts. This is the cross-module return payload type-fact bundle a
+// real compiled lowering consumes when it resolves a value read out of a struct a callee returns
+// (issue 1199).
+pub fn append_qualified_struct_type_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    local_name: []u8,
+    qualified_name: []u8
+) -> !void {
+    try append_qualified_type_llvm_fact(out, qualified_name);
+    try append_selected_struct_field_facts(out, text, ast, root, local_name, qualified_name);
+    return;
+}
+
+// append_return_payload_struct_type_facts reads the declared return type of the FnDecl at
+// function_node, unwraps the cross-module return payload struct it carries, and emits that
+// struct's type facts from this module's AST. It strips the leading error-union '!' and a
+// 'std::array::Array<T>' element wrapper, so a callee returning '!std::array::Array<Pkg::Ty>'
+// supplies the type facts for 'Pkg::Ty'. The payload's local name is the segment after its final
+// '::', looked up as a StructDecl in this module's root (issue 1199).
+pub fn append_return_payload_struct_type_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    function_node: std::kizu::ast::NodeId
+) -> !void {
+    let return_type_node = try function_return_type_node(ast, function_node);
+    let return_text = ast_node_text(text, ast, return_type_node);
+    let payload = try return_payload_struct_type(return_text);
+    let local_name = qualified_type_local_name(payload);
+    try append_qualified_struct_type_facts(out, text, ast, root, local_name, payload);
+    return;
+}
+
+fn function_return_type_node(
+    ast: std::kizu::ast::Ast,
+    function_node: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(function_node);
+    match node.data {
+        FnDecl(fn_decl) => return fn_decl.return_type;,
+        _ => return error("missing selected executable function signature");,
+    }
+}
+
+// return_payload_struct_type unwraps a callee return-type spelling to the qualified struct type
+// its payload carries: it strips a leading error-union '!' and a 'std::array::Array<...>' element
+// wrapper. Returns an error when the return type is not an array-of-struct payload.
+fn return_payload_struct_type(return_type: []u8) -> ![]u8 {
+    var inner = return_type;
+    let len = std::mem::len(inner);
+    if len > 0 and inner[0] == cast<u8>(33) {
+        inner = inner[1..len];
+    }
+    let array_prefix = "std::array::Array<";
+    if !std::mem::starts_with(inner, array_prefix) {
+        return error("compiled function: return payload is not an array");
+    }
+    let prefix_len = std::mem::len(array_prefix);
+    let inner_len = std::mem::len(inner);
+    if inner_len <= prefix_len or inner[inner_len - 1] != cast<u8>(62) {
+        return error("compiled function: return payload is not a closed array");
+    }
+    return inner[prefix_len..inner_len - 1];
+}
+
+fn qualified_type_local_name(qualified_name: []u8) -> []u8 {
+    let sep = last_double_colon_index(qualified_name);
+    if sep < 0 {
+        return qualified_name;
+    }
+    let len = std::mem::len(qualified_name);
+    return qualified_name[sep + 2..len];
 }
 
 fn append_struct_field_fact(

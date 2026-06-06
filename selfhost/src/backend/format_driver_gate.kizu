@@ -16,20 +16,22 @@ import selfhost::backend::compiled_llvm;
 // compiled_llvm::append_compiled_function_auto -- the production single-member lowering driver --
 // over them.
 //
-// Lowering now reaches the first then-body Array.get binding:
+// Lowering now completes the if-then-body Array.get binding:
 // 'let last_import = try format_tokens.get(next_index - 1);'
 // (selfhost/src/parser/format.kizu:30). The receiver local 'format_tokens' is bound by
 // 'var format_tokens = try lexer::tokenize(allocator, source)' (format.kizu:13), and the local
-// Kizu-type resolver now uses the generic cross-module suffix resolver to unwrap the real
+// Kizu-type resolver uses the generic cross-module suffix resolver to unwrap the real
 // 'std::kizu::lexer::tokenize -> !std::array::Array<std::kizu::lexer::Token>' signature fact.
-// Lowering therefore advances into lower_multi_let_array_get, extracts the element type
-// 'std::kizu::lexer::Token', and asks compiled_fact_lookup::lookup_type_llvm_by_prefix for the
-// element LLVM type (selfhost/src/backend/compiled_mir_lower.kizu:4013). The gate currently stops
-// at "compiled function: type-llvm mapping not found", raised by lookup_type_llvm_by_prefix
-// (selfhost/src/backend/compiled_fact_lookup.kizu:40), because the lowering facts supplied here do
-// not yet carry the real cross-module type-llvm/struct facts for std::kizu::lexer::Token. The next
-// capability is to make cross-module return payload type facts available to this real lowering path
-// without format_source-specific dispatch or hand-written type strings (issue 1197).
+// lower_multi_let_array_get extracts the element type 'std::kizu::lexer::Token' and resolves its
+// element LLVM type, and the following 'last_import.end' field read resolves its struct layout,
+// because the gate now supplies the cross-module return payload type facts (the
+// std::kizu::lexer::Token type-llvm + struct-field facts) via append_external_return_payload_type_facts
+// below. Lowering therefore advances to the then-block's third statement, the nested
+// 'if !has_line_comment_between(source, 0, last_import.end) { ... }' (format.kizu:31). The gate now
+// stops at "compiled mir: unsupported then-body statement kind", raised by lower_void_then_body
+// (selfhost/src/backend/compiled_mir_lower.kizu:4647), because that descent only dispatches the
+// 'Let' statement kind and a nested 'if' is not yet lowered. Lowering a nested 'if' inside the
+// no-else void then-body is the next capability (issue 1199).
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
@@ -72,16 +74,21 @@ pub fn format_driver_lowering_gate() -> !void {
         &var facts, text, parsed.ast, &catalog, format_index, "checked-format-driver", body
     );
 
-    // Supply the cross-module callee signature the lowering resolves for the driver's first
-    // statement 'var format_tokens = try lexer::tokenize(allocator, source)'. format_source
-    // reaches the tokenizer through the 'import selfhost::lexer' alias; the compiled backend
-    // emits the real tokenizer entry under std::kizu::lexer::tokenize (the selfhost::lexer
-    // wrapper forwards to it and is not separately compiled), exactly the signature fact the
-    // production IR carries (function-signature-return std::kizu::lexer::tokenize ...). Emit
-    // that real signature from the std kizu lexer's own AST so the generic cross-module
-    // resolver (lookup_qualified_function_name_by_callee_suffix) matches '*::lexer::tokenize'
-    // over real facts rather than a fabricated return-type string (issue 1165 / 1162).
-    try append_external_callee_signature(
+    // Supply the cross-module callee facts the lowering resolves for the driver's first statement
+    // 'var format_tokens = try lexer::tokenize(allocator, source)' and the if-then-body Array.get
+    // 'let last_import = try format_tokens.get(next_index - 1)' it feeds. format_source reaches the
+    // tokenizer through the 'import selfhost::lexer' alias; the compiled backend emits the real
+    // tokenizer entry under std::kizu::lexer::tokenize (the selfhost::lexer wrapper forwards to it
+    // and is not separately compiled). From the std kizu lexer's own AST this emits both the real
+    // signature fact (function-signature-return std::kizu::lexer::tokenize ...), so the generic
+    // cross-module resolver matches '*::lexer::tokenize' over real facts rather than a fabricated
+    // return type, and the return payload type facts for the 'std::array::Array<std::kizu::lexer::
+    // Token>' element: the Array.get extracts the element type 'std::kizu::lexer::Token' and
+    // resolves its LLVM type + field layout (for the 'last_import.end' read) from the derived
+    // type-llvm + struct-field facts. Both come from the same source of truth the production IR
+    // fact emission carries for the lexer, with no payload-type table or hand-written type string
+    // (issue 1165 / 1162, issue 1199).
+    try append_external_callee_facts(
         &var facts, allocator, "std/src/kizu/lexer.kizu", "std::kizu::lexer", "tokenize"
     );
 
@@ -137,12 +144,17 @@ fn format_driver_lower(allocator: Allocator, ir_bytes: []u8) -> !void {
     return;
 }
 
-// append_external_callee_signature emits the real function-signature-return / -param facts
-// for a cross-module callee by running the production component catalog + function_signature
-// emission over the callee's own on-disk source, instead of fabricating a metadata table.
-// The signature is keyed under <component_prefix>::<function_name>, the same name the owning
-// compiled closure emits, so the generic cross-module resolver matches it by suffix.
-fn append_external_callee_signature(
+// append_external_callee_facts emits the cross-module facts for a callee from the callee's own
+// on-disk source, instead of fabricating a metadata table, parsing the source once and emitting
+// both fact families the lowering resolves for a cross-module call:
+//   - the real function-signature-return / -param facts (keyed under
+//     <component_prefix>::<function_name>, the same name the owning compiled closure emits, so the
+//     generic cross-module resolver matches it by suffix), and
+//   - the return payload type facts: append_return_payload_struct_type_facts unwraps the callee's
+//     '!std::array::Array<T>' return type to the element struct and emits T's type-llvm +
+//     struct-field facts from the same AST the production IR fact emission reads.
+// Both come from one parse of the callee module's AST (issue 1165 / 1162, issue 1199).
+fn append_external_callee_facts(
     facts: &var std::string::String,
     allocator: Allocator,
     path: []u8,
@@ -162,6 +174,9 @@ fn append_external_callee_signature(
     );
     let node = try component_function_catalog::function_node_id(&catalog, index);
     try function_signature::append_catalog(facts, text, parsed.ast, node, &catalog, index);
+    try executable_functions::append_return_payload_struct_type_facts(
+        facts, text, parsed.ast, parsed.root, node
+    );
     return;
 }
 
