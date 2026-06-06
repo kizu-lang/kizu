@@ -27,11 +27,16 @@ import selfhost::backend::compiled_llvm;
 // lowers through the generic OwnedDeinit path: it validates a zero-arg value-method deinit on a
 // local/parameter receiver, resolves the receiver's Kizu and LLVM types from facts, requires a
 // std::array::Array<T> lowering to %kizu.owned, and renders @kizu_rt_owned_deinit (issue 1209).
-// The gate now stops at the main formatter loop, 'while index < format_tokens.len() { ... }'
-// (format.kizu:42), because its induction update is nested in the non-EOF branch instead of ending
-// the while body, raising "compiled mir: while body must end with the induction increment"
-// (selfhost/src/backend/compiled_mir_lower.kizu:6624). Lowering that nested/control-flow-carried
-// formatter while shape is the next capability (refs 1165 / 1162).
+// The main formatter loop, 'while index < format_tokens.len() { ... }' (format.kizu:42), now
+// reaches the branch-merge latch lowering instead of the old trailing-increment suffix check. The
+// terminal if/else is validated structurally: the EOF arm assigns 'index = format_tokens.len();'
+// (format.kizu:69), the non-EOF arm ends with 'index = index + 1;' (format.kizu:144), both target
+// the same i64 induction var, and the exit value matches the while header bound. The gate now stops
+// inside the loop body at the nested positive try-call condition
+// 'if try rbrace_closes_enum_decl(source, &format_tokens, index) {' (format.kizu:46), raising
+// "compiled mir: unsupported expression kind" from
+// selfhost/src/backend/compiled_mir_lower.kizu:10105. Lowering positive try-call conditions in
+// side-effecting if bodies is the next capability (refs 1165 / 1162).
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
