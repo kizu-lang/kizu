@@ -406,6 +406,7 @@ fn append_multi_stmt(
         LetStruct(payload) => try append_multi_let_struct(out, function.name, payload);,
         LetArenaAdd(payload) => try append_multi_let_arena_add(out, function.name, payload);,
         LetExpr(payload) => try append_multi_let_expr(out, function, payload);,
+        AliasAssign(payload) => try append_alias_assign(out, function, payload);,
         ScalarSelectAssign(payload) => try append_scalar_select_assign(out, function.name, payload);,
         LetTryCall(payload) => try append_multi_let_try_call(out, function, payload, local_prefix);,
         ReturnTryBinary(payload) => try append_multi_return_try_binary(out, function, payload, local_prefix);,
@@ -4418,6 +4419,33 @@ fn append_multi_let_expr(
     return;
 }
 
+fn append_alias_assign(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirAliasAssignStmt
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    let result_type = try expr_inst_type_by_id(&stmt.expr_insts, stmt.expr_result_id);
+    if std::mem::len(result_type) == 0 {
+        return error("compiled mir llvm: alias assign result type not found");
+    }
+    if !std::mem::equal_bytes(result_type, stmt.llvm_type) {
+        return error("compiled mir llvm: alias assign result type mismatch");
+    }
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.output_name);
+    try out.append_bytes(" = select i1 true, ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, &stmt.expr_insts, stmt.expr_result_id);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, &stmt.expr_insts, stmt.expr_result_id);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 fn append_scalar_select_assign(
     out: &var std::string::String,
     llvm_symbol: []u8,
@@ -4474,6 +4502,7 @@ fn append_stmt_globals(
         LetStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         LetArenaAdd(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
         LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
+        AliasAssign(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ScalarSelectAssign(payload) => try append_scalar_select_assign_globals(out, llvm_symbol, payload);,
         LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
@@ -4570,6 +4599,13 @@ fn append_if_globals(
     try append_struct_globals_at(
         out, llvm_symbol, &stmt.then_struct_fields, stmt.then_struct_string_index
     );
+    let then_body = &stmt.then_body_stmts;
+    var body_index = 0;
+    while body_index < then_body.len() {
+        let body_stmt = try then_body.at(body_index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        body_index = body_index + 1;
+    }
     return;
 }
 fn append_expr_return_value(
@@ -4942,6 +4978,108 @@ fn then_temp_base(stmt: &compiled_mir::MirIfStmt) -> !i64 {
     }
     return stmt.cond_result_id + 1;
 }
+fn append_if_merge_slot_ref(
+    out: &var std::string::String,
+    if_index: i64,
+    merge_index: i64
+) -> !void {
+    try out.append_bytes("%if");
+    try std::fmt::append_i64(out, if_index);
+    try out.append_bytes("_merge");
+    try std::fmt::append_i64(out, merge_index);
+    return;
+}
+
+fn append_if_merge_allocas(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    let merge_vars = &stmt.merge_vars;
+    var merge_index = 0;
+    while merge_index < merge_vars.len() {
+        let merge = try merge_vars.at(merge_index);
+        try out.append_bytes("  ");
+        try append_if_merge_slot_ref(out, stmt.if_index, merge_index);
+        try out.append_bytes(" = alloca ");
+        try out.append_bytes(merge.llvm_type);
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  store ");
+        try out.append_bytes(merge.llvm_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(merge.input_name);
+        try out.append_bytes(", ptr ");
+        try append_if_merge_slot_ref(out, stmt.if_index, merge_index);
+        try out.append_byte(cast<u8>(10));
+        merge_index = merge_index + 1;
+    }
+    return;
+}
+
+fn append_if_merge_then_stores(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    let merge_vars = &stmt.merge_vars;
+    var merge_index = 0;
+    while merge_index < merge_vars.len() {
+        let merge = try merge_vars.at(merge_index);
+        try out.append_bytes("  store ");
+        try out.append_bytes(merge.llvm_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(merge.then_name);
+        try out.append_bytes(", ptr ");
+        try append_if_merge_slot_ref(out, stmt.if_index, merge_index);
+        try out.append_byte(cast<u8>(10));
+        merge_index = merge_index + 1;
+    }
+    return;
+}
+
+fn append_if_merge_loads(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    let merge_vars = &stmt.merge_vars;
+    var merge_index = 0;
+    while merge_index < merge_vars.len() {
+        let merge = try merge_vars.at(merge_index);
+        try out.append_bytes("  %");
+        try out.append_bytes(merge.output_name);
+        try out.append_bytes(" = load ");
+        try out.append_bytes(merge.llvm_type);
+        try out.append_bytes(", ptr ");
+        try append_if_merge_slot_ref(out, stmt.if_index, merge_index);
+        try out.append_byte(cast<u8>(10));
+        merge_index = merge_index + 1;
+    }
+    return;
+}
+
+fn append_void_then_body(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    let body = &stmt.then_body_stmts;
+    var body_index = 0;
+    while body_index < body.len() {
+        let body_stmt = try body.at(body_index);
+        try append_multi_stmt(
+            out,
+            function,
+            body_stmt,
+            stmt.if_index * 1000 + body_index + 1
+        );
+        body_index = body_index + 1;
+    }
+    try append_if_merge_then_stores(out, stmt);
+    try out.append_bytes("  br label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_cont");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 fn append_multi_if(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -4949,6 +5087,9 @@ fn append_multi_if(
     local_prefix: i64
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.cond_insts);
+    if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
+        try append_if_merge_allocas(out, stmt);
+    }
     if stmt.cond_short_circuit == 0 {
         try out.append_bytes("  br i1 ");
         try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
@@ -4965,6 +5106,9 @@ fn append_multi_if(
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_then:");
     try out.append_byte(cast<u8>(10));
+    if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
+        try append_void_then_body(out, function, stmt);
+    } else {
     if stmt.if_then_kind == compiled_mir::MirIfThenKind::ContinueLatch {
         // A continue-latch then-block branches straight back to the loop latch; the increment folds
         // into the shared constant-step latch add and the if-continuation block falls through to the
@@ -5009,10 +5153,14 @@ fn append_multi_if(
             }
         }
     }
+    }
     try out.append_bytes("if");
     try std::fmt::append_i64(out, stmt.if_index);
     try out.append_bytes("_cont:");
     try out.append_byte(cast<u8>(10));
+    if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
+        try append_if_merge_loads(out, stmt);
+    }
     return;
 }
 // append_multi_if_return_bool renders the then-block of a 'return <bool>;' early exit. A
