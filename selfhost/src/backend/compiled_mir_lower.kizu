@@ -5136,10 +5136,42 @@ fn flatten_or_operands(
 // fresh binding. It is shape-driven, not name-driven: the target must be a Var naming a local already
 // resolvable in this function (so locals_spec is left unchanged and no binding is fabricated), the
 // value must be one of the scalar/slice expression kinds the generic expr lowering handles (Var /
-// FieldExpr / String / CastExpr / Bool), and the value's lowered LLVM type must match the target's
-// resolved type. The lowered value binds to a fresh MirAliasAssign name, never to the target itself,
-// so rendering cannot redefine the original SSA name. The enclosing no-else void if later compares
-// incoming vs then-body aliases and emits merge metadata for the fall-through join.
+// FieldExpr / String / CastExpr / Bool / non-short-circuit Binary), and the value's lowered LLVM
+// type must match the target's resolved type. The lowered value binds to a fresh MirAliasAssign
+// name, never to the target itself, so rendering cannot redefine the original SSA name. The
+// enclosing no-else void if later compares incoming vs then-body aliases and emits merge metadata
+// for the fall-through join.
+fn void_then_assign_binary_op_supported(op: []u8) -> bool {
+    return std::mem::equal_bytes(op, "add") or std::mem::equal_bytes(op, "sub") or
+        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") or
+        std::mem::equal_bytes(op, "eq") or std::mem::equal_bytes(op, "not-eq") or
+        std::mem::equal_bytes(op, "lt") or std::mem::equal_bytes(op, "lte") or
+        std::mem::equal_bytes(op, "gt") or std::mem::equal_bytes(op, "gte");
+}
+
+fn void_then_assignment_value_supported(
+    ir_bytes: []u8,
+    function_name: []u8,
+    value: i64,
+    value_kind: []u8,
+    bs: i64
+) -> !bool {
+    if std::mem::equal_bytes(value_kind, "Var") or
+        std::mem::equal_bytes(value_kind, "FieldExpr") or
+        std::mem::equal_bytes(value_kind, "String") or
+        std::mem::equal_bytes(value_kind, "CastExpr") or
+        std::mem::equal_bytes(value_kind, "Bool") {
+        return true;
+    }
+    if std::mem::equal_bytes(value_kind, "Binary") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-binary ", function_name, value, bs
+        );
+        return void_then_assign_binary_op_supported(op);
+    }
+    return false;
+}
+
 fn lower_void_then_body_assign(
     ir_bytes: []u8,
     function_name: []u8,
@@ -5174,11 +5206,9 @@ fn lower_void_then_body_assign(
         ir_bytes, function_name, statement, "value", 0, bs
     );
     let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
-    if !std::mem::equal_bytes(value_kind, "Var") and
-        !std::mem::equal_bytes(value_kind, "FieldExpr") and
-        !std::mem::equal_bytes(value_kind, "String") and
-        !std::mem::equal_bytes(value_kind, "CastExpr") and
-        !std::mem::equal_bytes(value_kind, "Bool") {
+    if !(try void_then_assignment_value_supported(
+        ir_bytes, function_name, value, value_kind, bs
+    )) {
         return error("compiled mir: void then-body assignment value kind not yet supported");
     }
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
