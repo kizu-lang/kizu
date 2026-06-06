@@ -34,15 +34,16 @@ import selfhost::backend::compiled_llvm;
 // the same i64 induction var, and the exit value matches the while header bound. The nested
 // positive try-call condition
 // 'if try rbrace_closes_enum_decl(source, &format_tokens, index) {' (format.kizu:46) now lowers as
-// a hoisted free-function !bool condition and descends through its void then-body. The gate now
-// stops at the first CommentFormatState field read after
-// 'let state = try append_preserved_line_comments(...)': 'last = state.last;' (format.kizu:65),
-// raising "compiled function: struct field not found" from
-// selfhost/src/backend/compiled_mir_types.kizu:339 because the local try-call success binds a
-// CommentFormatState value, but the compiled facts/lowering path does not yet carry the local
-// struct field facts needed to resolve state.last / state.at_line_start / state.after_comment.
-// Lowering local-struct success field reads after free-function let-try calls is the next
-// capability (refs 1165 / 1162).
+// a hoisted free-function !bool condition and descends through its void then-body. The following
+// 'let state = try append_preserved_line_comments(...)' (format.kizu:56) now binds a
+// CommentFormatState success value whose field reads at format.kizu:65-67 resolve from real
+// struct-field facts emitted from the callee's declared '!CommentFormatState' return payload. The
+// gate now stops at the EOF branch immediately after those reads:
+// 'if lexer::is_eof(token) { ... } else { ... }' (format.kizu:68), raising "compiled mir: void
+// then block must not carry an else arm" from
+// selfhost/src/backend/compiled_mir_lower.kizu:4590 because the current void then-block lowering
+// only renders no-else fall-through joins. Lowering a generic void if/else branch that merges
+// reassigned locals is the next capability (issue 1216, refs 1165 / 1162).
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
@@ -81,26 +82,40 @@ pub fn format_driver_lowering_gate() -> !void {
         );
         sig_index = sig_index + 1;
     }
+    let comment_driver_index = try component_function_catalog::find_local_function_index(
+        &catalog, "append_preserved_line_comments"
+    );
+    let comment_driver_node = try component_function_catalog::function_node_id(
+        &catalog, comment_driver_index
+    );
+    try executable_functions::append_return_payload_struct_type_facts(
+        &var facts,
+        text,
+        parsed.ast,
+        parsed.root,
+        comment_driver_node,
+        "selfhost::parser::format::"
+    );
     try executable_body::append_catalog_helper_body_ir(
         &var facts, text, parsed.ast, &catalog, format_index, "checked-format-driver", body
     );
 
-    // Supply the cross-module callee facts the lowering resolves for the driver's first statement
-    // 'var format_tokens = try lexer::tokenize(allocator, source)' and the if-then-body Array.get
-    // 'let last_import = try format_tokens.get(next_index - 1)' it feeds. format_source reaches the
-    // tokenizer through the 'import selfhost::lexer' alias; the compiled backend emits the real
-    // tokenizer entry under std::kizu::lexer::tokenize (the selfhost::lexer wrapper forwards to it
-    // and is not separately compiled). From the std kizu lexer's own AST this emits both the real
-    // signature fact (function-signature-return std::kizu::lexer::tokenize ...), so the generic
-    // cross-module resolver matches '*::lexer::tokenize' over real facts rather than a fabricated
-    // return type, and the return payload type facts for the 'std::array::Array<std::kizu::lexer::
-    // Token>' element: the Array.get extracts the element type 'std::kizu::lexer::Token' and
-    // resolves its LLVM type + field layout (for the 'last_import.end' read) from the derived
-    // type-llvm + struct-field facts. Both come from the same source of truth the production IR
-    // fact emission carries for the lexer, with no payload-type table or hand-written type string
-    // (issue 1165 / 1162, issue 1199).
+    // Supply the cross-module callee facts the lowering resolves for the driver's lexer calls.
+    // format_source reaches the tokenizer through the 'import selfhost::lexer' alias; the compiled
+    // backend emits the real tokenizer entry under std::kizu::lexer::tokenize (the selfhost::lexer
+    // wrapper forwards to it and is not separately compiled). From the std kizu lexer's own AST
+    // append_external_callee_facts emits both the real signature fact and the return payload type
+    // facts for the 'std::array::Array<std::kizu::lexer::Token>' element, so Array.get can resolve
+    // the Token layout for 'last_import.end'. The later EOF branch calls selfhost::lexer::is_eof,
+    // which returns a scalar bool, so append_external_callee_signature supplies its real signature
+    // fact without trying to fabricate a payload layout. Both facts mirror production fact emission
+    // and avoid payload tables or hand-written return strings (issue 1165 / 1162, issue 1199,
+    // issue 1215).
     try append_external_callee_facts(
         &var facts, allocator, "std/src/kizu/lexer.kizu", "std::kizu::lexer", "tokenize"
+    );
+    try append_external_callee_signature(
+        &var facts, allocator, "selfhost/src/lexer.kizu", "selfhost::lexer", "is_eof"
     );
 
     // Supply the global stdlib-symbol preamble the production IR carries, via the same shared
@@ -186,8 +201,31 @@ fn append_external_callee_facts(
     let node = try component_function_catalog::function_node_id(&catalog, index);
     try function_signature::append_catalog(facts, text, parsed.ast, node, &catalog, index);
     try executable_functions::append_return_payload_struct_type_facts(
-        facts, text, parsed.ast, parsed.root, node
+        facts, text, parsed.ast, parsed.root, node, "std::kizu::lexer::"
     );
+    return;
+}
+
+fn append_external_callee_signature(
+    facts: &var std::string::String,
+    allocator: Allocator,
+    path: []u8,
+    component_prefix: []u8,
+    function_name: []u8
+) -> !void {
+    let io = std::io::blocking();
+    let text = try std::fs::read_file(io, path);
+    var parsed = try parser::parse_checked_file(allocator, path, text);
+    defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator, text, parsed.ast, parsed.root, component_prefix
+    );
+    defer catalog.deinit();
+    let index = try component_function_catalog::find_local_function_index(
+        &catalog, function_name
+    );
+    let node = try component_function_catalog::function_node_id(&catalog, index);
+    try function_signature::append_catalog(facts, text, parsed.ast, node, &catalog, index);
     return;
 }
 
