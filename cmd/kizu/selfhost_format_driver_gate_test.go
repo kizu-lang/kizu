@@ -164,6 +164,12 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     the method's expected LLVM argument type ('i8' for append_byte) before the integer literal is
 //     passed through the existing IntLiteral call-arg renderer, so the implementation is not tied
 //     to the formatter source line or literal value.
+//   - "compiled mir: void then-body assignment value kind not yet supported: Call": the rbrace
+//     branch assignment 'last = last_byte(text);' (selfhost/src/parser/format.kizu:86) now lowers
+//     a non-method Call value through the same type-checked alias-assignment path. The call
+//     expression lowerer resolves the local callee's return type from function-signature facts,
+//     lowers its scalar arg through the existing call-arg path, checks the resulting i8 against
+//     the target local's resolved i8 type, and stores the call result in a fresh assignment alias.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -182,20 +188,22 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: void then block must not carry an else arm",
 	"compiled mir: void then-body assignment value kind not yet supported: Binary",
 	"compiled mir: unsupported string method argument",
+	"compiled mir: void then-body assignment value kind not yet supported: Call",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The EOF
 // branch at selfhost/src/parser/format.kizu:68 now lowers as a real void if/else, descends into the
-// nested rbrace branch, accepts 'depth = depth - 1;' (format.kizu:75), and lowers the nested
-// else-path append 'try out.append_byte(cast<u8>(10));' (format.kizu:81) through the typed scalar
-// cast argument path. Lowering then reaches the following reassignment 'last = last_byte(text);'
-// (format.kizu:86). lower_void_then_body_assign currently accepts Var / FieldExpr / String /
-// CastExpr / Bool / non-short-circuit Binary assignment values, so the Call-valued scalar helper
-// result raises "compiled mir: void then-body assignment value kind not yet supported: Call" from
-// selfhost/src/backend/compiled_mir_lower.kizu:5249. Lowering Call-valued void then-body assignment
-// values with type-checked alias assignment is the next capability (refs 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: void then-body assignment value kind not yet " +
-	"supported: Call"
+// nested rbrace branch, accepts 'depth = depth - 1;' (format.kizu:75), lowers the nested else-path
+// append 'try out.append_byte(cast<u8>(10));' (format.kizu:81), and lowers the following
+// reassignment 'last = last_byte(text);' (format.kizu:86) through typed Call-valued alias
+// assignment. Lowering then reaches the compound condition
+// 'if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 ...'
+// (format.kizu:99). The current value-receiver '.len()' expression lowering handles
+// std::array::Array<T> receivers only, so the std::string::String receiver 'out' raises
+// "compiled mir: Array.len receiver is not a std::array::Array" from
+// selfhost/src/backend/compiled_mir_lower.kizu:10201. Lowering String.len value-receiver
+// expressions in compiled conditions is the next capability (refs 1165 / 1162).
+const formatDriverLoweringBlocker = "compiled mir: Array.len receiver is not a std::array::Array"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -216,9 +224,10 @@ const formatDriverLoweringBlocker = "compiled mir: void then-body assignment val
 // after append_preserved_line_comments now resolve. The following EOF if/else branch lowers and
 // renders with a real else body and alias merge. The nested rbrace branch assignment
 // 'depth = depth - 1;' now lowers as a Binary value assignment, and the following nested else-path
-// string append 'try out.append_byte(cast<u8>(10));' lowers its CastExpr byte argument. Lowering
-// stops at the next reassignment, 'last = last_byte(text);' (format.kizu:86), whose value is a Call
-// expression not yet accepted by void then-body assignment lowering.
+// string append 'try out.append_byte(cast<u8>(10));' lowers its CastExpr byte argument. The next
+// reassignment, 'last = last_byte(text);' (format.kizu:86), now lowers as a Call-valued alias
+// assignment. Lowering stops at the later condition 'out.len() > 0' (format.kizu:99), whose
+// std::string::String value receiver is not yet accepted by the Array-only len expression path.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
