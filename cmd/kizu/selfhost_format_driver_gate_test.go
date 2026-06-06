@@ -86,6 +86,13 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     std::kizu::lexer::Token type-llvm + struct-field facts -- by deriving the payload struct from
 //     the real lexer::tokenize signature and the lexer AST (the same source of truth the production
 //     IR fact emission carries), so both the element LLVM type and the field lookup resolve.
+//   - "compiled mir: unsupported then-body statement kind": the then-block's third statement
+//     'if !has_line_comment_between(source, 0, last_import.end) { ... }'
+//     (selfhost/src/parser/format.kizu:31) is a nested 'if'. lower_void_then_body now dispatches
+//     the 'If' and 'ExprStmt' kinds too -- mirroring the top-level body loop's per-kind dispatch --
+//     so the nested 'if' lowers through lower_multi_if_statement, which recognizes its void
+//     then-block shape and descends back into lower_void_then_body for the inner statement list.
+//     Lowering advances into the nested then-body rather than stopping at the outer dispatch.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -93,31 +100,33 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: unsupported then block",
 	"compiled mir: local type not found",
 	"compiled function: type-llvm mapping not found",
+	"compiled mir: unsupported then-body statement kind",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. With
-// the cross-module return payload type facts supplied and the if-then body local resolving its
-// Kizu type, lowering completes the then-block's two 'let' bindings ('next_index' and
-// 'last_import') and advances to the then-block's third statement
-// 'if !has_line_comment_between(source, 0, last_import.end) { ... }'
-// (selfhost/src/parser/format.kizu:31). That statement is a nested 'if', but lower_void_then_body
-// only dispatches the 'Let' statement kind, so it raises
-// "compiled mir: unsupported then-body statement kind" at
-// selfhost/src/backend/compiled_mir_lower.kizu:4647. Lowering a nested 'if' statement inside the
-// no-else void then-body is the next capability, so the gate pins this measured blocker as a
-// behavior assertion (issue 1199).
-const formatDriverLoweringBlocker = "compiled mir: unsupported then-body statement kind"
+// the nested 'if' at selfhost/src/parser/format.kizu:31 dispatching through
+// lower_multi_if_statement and descending into its void then-body, lowering reaches the nested
+// then-body's first statement -- the try-call statement
+// 'try append_sorted_imports(out, source, &format_tokens, &leading_imports);'
+// (selfhost/src/parser/format.kizu:32). lower_multi_expr_statement only lowers method-call try
+// statements (a 'receiver.append_bytes/append_byte' call), but 'append_sorted_imports(...)' is a
+// free-function call, so it raises "compiled mir: try call statement must be a method call" at
+// selfhost/src/backend/compiled_mir_lower.kizu:3651. Lowering a free-function try-call statement in
+// a void then-body is the next capability, so the gate pins this measured blocker as a behavior
+// assertion (issue 1201).
+const formatDriverLoweringBlocker = "compiled mir: try call statement must be a method call"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
 // no-else void multi-statement then-block of the first top-level 'if' descends through
 // lower_void_then_body, lowering its two 'let' bindings: 'let next_index = try
 // index_after_leading_imports(&format_tokens);' and 'let last_import = try
-// format_tokens.get(next_index - 1);'. The Array.get binding resolves the cross-module Token
-// element type from the supplied return payload type facts, and the if-then body local resolves its
-// Kizu type, so lowering advances to the then-block's third statement -- the nested
-// 'if !has_line_comment_between(source, 0, last_import.end) { ... }'. The next pinned blocker is
-// lowering that nested 'if' statement inside the void then-body (issue 1199).
+// format_tokens.get(next_index - 1);', then its nested 'if !has_line_comment_between(source, 0,
+// last_import.end) { ... }'. lower_void_then_body now dispatches the nested 'If' through
+// lower_multi_if_statement, which recognizes the nested void then-block and descends back into
+// lower_void_then_body, reaching that then-body's first statement -- the try-call statement
+// 'try append_sorted_imports(out, source, &format_tokens, &leading_imports);'. The next pinned
+// blocker is lowering that free-function try-call statement in a void then-body (issue 1201).
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
