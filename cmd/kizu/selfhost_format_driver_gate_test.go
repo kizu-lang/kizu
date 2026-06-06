@@ -183,6 +183,10 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     the void then-body runs only when the try-call succeeds with false. Try-call failure still
 //     propagates through the current function error union, and reassigned locals enter the existing
 //     void-body alias merge path.
+//   - "compiled mir: too many void then aliases": void-body alias names are now generated from
+//     the alias slot by the generic String/std::fmt decimal builder instead of a fixed table. The
+//     low-slot spelling stays 'void.then.alias.<slot>', and the generated names keep the existing
+//     prefix so LLVM rendering remains isolated from locals, temps, and try labels.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -204,6 +208,7 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: void then-body assignment value kind not yet supported: Call",
 	"compiled mir: Array.len receiver is not a std::array::Array",
 	"compiled mir: prefix-not try-call void condition not yet supported",
+	"compiled mir: too many void then aliases",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The EOF
@@ -216,14 +221,17 @@ var formatDriverCrossedLoweringBlockers = []string{
 // (format.kizu:99), including the std::string::String receiver 'out.len()'. It now reaches the
 // later void if condition 'if !(try next_token_text_equals(source, &format_tokens, index, "}"))'
 // (format.kizu:130), lowers its hoisted !bool try-call with inverted branch polarity, and descends
-// into the void then-body newline append plus scalar reassignments (format.kizu:131-133). The
-// current alias allocator has a fixed table of void-then alias names and the formatter path now
-// exhausts it, so void_then_alias_name raises
-// "compiled mir: too many void then aliases" from
-// selfhost/src/backend/compiled_mir_lower.kizu:3524. Dynamic or otherwise unbounded void-body alias
-// naming is the next capability (refs 1165 / 1162).
+// into the void then-body newline append plus scalar reassignments (format.kizu:131-133) without
+// exhausting alias names. Lowering now completes the branch-merge loop prefixes and reaches the
+// branch-merge latch validation for the main formatter loop (format.kizu:42). The loop body carries
+// non-induction scalar aliases, starting with the earlier assignment 'previous = ","'
+// (format.kizu:51), but validate_branch_merge_no_unmodelled_aliases currently permits only the
+// induction variable through the branch-merge latch and raises
+// "compiled mir: branch-merge carried scalar not yet supported" from
+// selfhost/src/backend/compiled_mir_lower.kizu:7620. Carrying scalar aliases through a
+// branch-merge latch is the next capability (refs 1165 / 1162).
 const formatDriverLoweringBlocker = "compiled mir: " +
-	"too many void then aliases"
+	"branch-merge carried scalar not yet supported"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
@@ -248,8 +256,9 @@ const formatDriverLoweringBlocker = "compiled mir: " +
 // reassignment, 'last = last_byte(text);' (format.kizu:86), now lowers as a Call-valued alias
 // assignment. The later condition 'out.len() > 0' (format.kizu:99) now lowers through the
 // StringLen expression path. The later prefix-not try-call void condition at format.kizu:130
-// now lowers with inverted branch polarity and reaches its newline then-body; lowering stops when
-// the fixed void-body alias-name table is exhausted by aliases created through the real path.
+// now lowers with inverted branch polarity and reaches its newline then-body; lowering then stops
+// when branch-merge latch validation sees the loop carrying the non-induction scalar alias
+// 'previous' first assigned in the rbrace enum-closing branch at format.kizu:51.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {
