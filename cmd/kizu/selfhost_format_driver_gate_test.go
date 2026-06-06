@@ -68,37 +68,43 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     uses. The leading 'let next_index = try index_after_leading_imports(&format_tokens);' binding
 //     lowers through that descent, so lowering advances into the then-body rather than stopping at
 //     the Return-only then-kind path.
+//   - "compiled mir: local type not found": the '.get()' receiver 'format_tokens' is bound by the
+//     top-level cross-module try-call 'var format_tokens = try lexer::tokenize(allocator, source)'.
+//     resolve_let_value_kizu_type now reuses the generic cross-module callee suffix resolver,
+//     reads the real std::kizu::lexer::tokenize function-signature-return fact, and unwraps
+//     '!std::array::Array<std::kizu::lexer::Token>' to the local's Kizu type.
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
 	"compiled mir: unsupported call arg kind",
 	"compiled mir: unsupported then block",
+	"compiled mir: local type not found",
 }
 
 // formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. With
-// the no-else void multi-statement then-block descending through lower_void_then_body, lowering now
-// reaches the then-block's second statement
+// the no-else void multi-statement then-block descending through lower_void_then_body, and with
+// cross-module try-call locals resolving their Kizu success type, lowering now reaches the
+// then-block's second statement
 // 'let last_import = try format_tokens.get(next_index - 1);'
-// (selfhost/src/parser/format.kizu:30). Lowering that 'format_tokens.get(...)' binding resolves the
-// '.get()' value receiver's kizu type, but 'format_tokens' is bound at the top level by
-// 'var format_tokens = try lexer::tokenize(allocator, source);'
-// (selfhost/src/parser/format.kizu:13), a cross-module try-call. The IR-scan local-type resolver
-// (compiled_mir_types::resolve_let_value_kizu_type's TryExpr branch) looks up 'lexer::tokenize's
-// return type under the format module prefix and misses the sibling-module symbol, so it raises
-// "compiled mir: local type not found". Resolving a local bound by a cross-module try-call --
-// mirroring the generic cross-module callee resolution lower_call_return_type already performs --
-// is the next capability, so the gate stops here and pins the measured next blocker as a behavior
-// assertion rather than a comment (issue 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: local type not found"
+// (selfhost/src/parser/format.kizu:30). lower_multi_let_array_get resolves the receiver local
+// 'format_tokens' to 'std::array::Array<std::kizu::lexer::Token>', extracts the element type
+// 'std::kizu::lexer::Token', and calls lookup_type_llvm_by_prefix at
+// selfhost/src/backend/compiled_mir_lower.kizu:4013. That lookup raises
+// "compiled function: type-llvm mapping not found" from
+// selfhost/src/backend/compiled_fact_lookup.kizu:40 because the format driver lowering facts do
+// not yet carry the cross-module Token type-llvm/struct facts reached through lexer::tokenize's
+// return payload. Making those real cross-module payload type facts available is the next
+// capability, so the gate pins this measured blocker as a behavior assertion (issue 1197).
+const formatDriverLoweringBlocker = "compiled function: type-llvm mapping not found"
 
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
 // production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
 // no-else void multi-statement then-block of the first top-level 'if' now descends through
 // lower_void_then_body, lowering its leading 'let next_index = try
 // index_after_leading_imports(&format_tokens);' binding, so lowering advances into the then-body to
-// its second statement 'let last_import = try format_tokens.get(next_index - 1);', where resolving
-// the '.get()' receiver 'format_tokens' (bound by the cross-module 'try lexer::tokenize(...)') is
-// the next pinned blocker (issue 1165 / 1162).
+// its second statement 'let last_import = try format_tokens.get(next_index - 1);'. The next pinned
+// blocker is resolving the LLVM type for the cross-module Token element read by that Array.get
+// (issue 1197).
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err == nil {

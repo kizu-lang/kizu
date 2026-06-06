@@ -125,6 +125,33 @@ pub fn lower_call_return_type(
     );
 }
 
+fn resolve_try_call_success_kizu_type(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    callee_name: []u8
+) -> ![]u8 {
+    let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
+    var lookup_prefix = module_prefix;
+    var lookup_name = callee_name;
+    if std::mem::len(qualified) > 0 {
+        lookup_prefix = ir_bytes[0..0];
+        lookup_name = qualified;
+    }
+    var ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+        ir_bytes, "function-signature-return ", lookup_prefix, lookup_name
+    );
+    if std::mem::len(ret_kizu) == 0 and compiled_fact_lookup::is_stdlib_callee(callee_name) {
+        ret_kizu = try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, callee_name);
+    }
+    if std::mem::len(ret_kizu) == 0 {
+        return error("compiled mir: local try-call return type not found");
+    }
+    if ret_kizu[0] != cast<u8>(33) {
+        return error("compiled mir: local try-call callee must return an error union");
+    }
+    return ret_kizu[1..std::mem::len(ret_kizu)];
+}
+
 pub fn lower_call_module_prefix(
     ir_bytes: []u8,
     function_name: []u8,
@@ -709,14 +736,9 @@ fn resolve_let_value_kizu_type(
             let try_callee = try ir_contract::body_call_callee_or_empty_from(
                 ir_bytes, function_name, inner, bs
             );
-            let try_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-                ir_bytes, "function-signature-return ", module_prefix, try_callee
+            return try resolve_try_call_success_kizu_type(
+                ir_bytes, module_prefix, try_callee
             );
-            let try_ret_len = std::mem::len(try_ret);
-            if try_ret_len > 0 and try_ret[0] == cast<u8>(33) {
-                return try_ret[1..try_ret_len];
-            }
-            return try_ret;
         }
     }
     return error("compiled mir: unsupported local type value");
