@@ -3212,10 +3212,20 @@ fn collect_component_compiled_callee(
     if compiled_callee_is_array_element_method(callee) {
         return;
     }
-    // A std::string::String mutator (out.append_bytes(...) / out.append_byte(...)) is a runtime
-    // builtin lowered inline through the @kizu_rt_string_append_* ABI, not a component function,
-    // so the BFS neither emits nor walks it (issue 1165).
+    // A std::string::String constructor / mutator (std::string::String(allocator),
+    // out.append_bytes(...) / out.append_byte(...)) is a runtime builtin lowered inline through
+    // the @kizu_rt_string_* ABI, not a component function, so the BFS neither emits nor walks it
+    // (issue 1165).
+    if std::mem::equal_bytes(callee, "std::string::String") {
+        return;
+    }
     if compiled_callee_is_string_mutator_method(callee) {
+        return;
+    }
+    // Owned container deinit calls lower inline through @kizu_rt_owned_deinit. They are value
+    // methods, not component functions; accepting the method shape keeps Array/String cleanup out
+    // of the BFS without tying the rule to one receiver name.
+    if compiled_callee_is_owned_deinit_method(callee) {
         return;
     }
     // The std::array::Array<T>(<allocator>) constructor is the element-size-generic
@@ -3260,8 +3270,11 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         // The formatter token-array predicates call lexer::is_eof (std::kizu::lexer Token
         // EOF predicate) through the 'lexer' import alias. It is emitted by the std lexer
         // compiled closure, so the format closure references it without re-emitting or
-        // walking it (issue 1165).
-        return std::mem::equal_bytes(callee, "lexer::is_eof");
+        // walking it (issue 1165). The formatter driver also tokenizes its input through
+        // lexer::tokenize; production emits the tokenizer as std::kizu::lexer::tokenize, so the
+        // format closure treats that alias as the same external boundary.
+        return std::mem::equal_bytes(callee, "lexer::is_eof") or
+            std::mem::equal_bytes(callee, "lexer::tokenize");
     }
     if std::mem::equal_bytes(prefix, "std::kizu::parser::") {
         if std::mem::equal_bytes(callee, "ast.get") {
@@ -3322,6 +3335,13 @@ fn compiled_callee_is_string_mutator_method(name: []u8) -> bool {
     }
     return compiled_name_ends_with(name, ".append_bytes") or
         compiled_name_ends_with(name, ".append_byte");
+}
+
+fn compiled_callee_is_owned_deinit_method(name: []u8) -> bool {
+    if compiled_callee_has_namespace(name) {
+        return false;
+    }
+    return compiled_name_ends_with(name, ".deinit");
 }
 
 fn compiled_name_ends_with(name: []u8, suffix: []u8) -> bool {
@@ -3520,8 +3540,8 @@ fn append_loader_reachable_compiled_functions(
 // comment-preservation scalar helpers, and finally the comment-preservation driver
 // append_preserved_line_comments itself (lowered through
 // compiled_struct_cf::append_comment_preserve_function via the CommentFormatState struct value +
-// error-union ABI). Only the whole-formatter entry format_source stays on the hand-written
-// parse_format_alloc path.
+// error-union ABI), and the whole-formatter entry format_source. The stage2 fmt command calls
+// that compiled entry directly and no longer routes formatting through parse_format_alloc.
 fn append_format_reachable_compiled_functions(
     out: &var std::string::String,
     ir_bytes: []u8
@@ -3739,6 +3759,11 @@ fn append_format_reachable_compiled_functions(
     // error union. It lowers through the generic multi-statement path; its BFS pulls in
     // next_token_text_equals and is_match_arm_trailing_comma (both seeded members).
     try pending.append("is_trailing_comma");
+    // format_source is the formatter driver now compiled into stage2 (issue 1165 / 1162). It
+    // allocates the String output handle, tokenizes the source, performs import sorting and
+    // comment-preserving spacing through the helper closure above, and returns the owned String
+    // to the hosted CLI fmt path.
+    try pending.append("format_source");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,

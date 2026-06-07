@@ -25,7 +25,8 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_parse_format_alloc_function(out);
     try append_parse_temp_path_function(out);
     try append_parse_format_write_function(out);
-    try append_parse_format_file_write_function(out);
+    try append_format_source_write_function(out);
+    try append_format_source_file_write_function(out);
     return;
 }
 
@@ -98,7 +99,7 @@ pub fn append_cli_fmt_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "  br i1 %fmt_assign_ok, label %exit_one, label %check_failed");
     try append_line(out, "fmt_format:");
     try append_line(out,
-        "  %fmt_format_ok = call i1 @kizu_selfhost__parse_format_write(%kizu.owned %fmt_io, %kizu.slice.u8 %fmt_bytes, i1 true)");
+        "  %fmt_format_ok = call i1 @kizu_selfhost__format_source_write(%kizu.owned %fmt_io, %kizu.slice.u8 %fmt_bytes, i1 true)");
     try append_line(out, "  br i1 %fmt_format_ok, label %exit_zero, label %check_failed");
     return;
 }
@@ -135,7 +136,7 @@ pub fn append_cli_fmt_write_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "  br i1 %fmt_write_assign_ok, label %exit_one, label %check_failed");
     try append_line(out, "fmt_write_format:");
     try append_line(out,
-        "  %fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write(%kizu.owned %fmt_write_io, %kizu.slice.u8 %fmt_write_target, %kizu.slice.u8 %fmt_write_bytes, i1 true)");
+        "  %fmt_write_format_ok = call i1 @kizu_selfhost__format_source_file_write(%kizu.owned %fmt_write_io, %kizu.slice.u8 %fmt_write_target, %kizu.slice.u8 %fmt_write_bytes, i1 true)");
     try append_line(out,
         "  br i1 %fmt_write_format_ok, label %exit_zero, label %check_failed");
     return;
@@ -840,6 +841,48 @@ fn append_parse_format_write_function(out: &var std::string::String) -> !void {
     return;
 }
 
+fn append_format_source_write_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define i1 @kizu_selfhost__format_source_write(");
+    try append_line(out, "  %kizu.owned %io,");
+    try append_line(out, "  %kizu.slice.u8 %source,");
+    try append_line(out, "  i1 %preserve_comments");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
+    try append_line(out,
+        "  %formatted = call %kizu.error.owned @kizu_selfhost__parser_format_format_source(%kizu.owned %allocator, %kizu.slice.u8 %source)");
+    try append_line(out, "  %formatted_ok = extractvalue %kizu.error.owned %formatted, 0");
+    try append_line(out, "  br i1 %formatted_ok, label %write, label %false");
+    try append_line(out, "write:");
+    try append_line(out, "  %formatted_owned = extractvalue %kizu.error.owned %formatted, 1");
+    try append_line(out,
+        "  %formatted_bytes = call %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %formatted_owned)");
+    try append_line(out,
+        "  %format_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %formatted_bytes)");
+    try append_line(out, "  %format_write_ok = extractvalue %kizu.error.void %format_write, 0");
+    try append_line(out, "  br i1 %format_write_ok, label %write_newline, label %cleanup_false");
+    try append_line(out, "write_newline:");
+    try append_global_slice(out, "format_write", "newline", "parse_newline", "1");
+    try append_line(out,
+        "  %format_newline = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %format_write_newline_slice)");
+    try append_line(out, "  %format_newline_ok = extractvalue %kizu.error.void %format_newline, 0");
+    try append_line(out, "  br label %cleanup");
+    try append_line(out, "cleanup_false:");
+    try append_line(out, "  br label %cleanup");
+    try append_line(out, "cleanup:");
+    try append_line(out,
+        "  %format_result = phi i1 [ %format_newline_ok, %write_newline ], [ false, %cleanup_false ]");
+    try append_line(out, "  call void @kizu_rt_owned_deinit(%kizu.owned %formatted_owned)");
+    try append_line(out, "  br i1 %format_result, label %true, label %false");
+    try append_line(out, "true:");
+    try append_line(out, "  ret i1 true");
+    try append_line(out, "false:");
+    try append_line(out, "  ret i1 false");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
 fn append_parse_temp_path_function(out: &var std::string::String) -> !void {
     try append_line(
         out,
@@ -885,20 +928,23 @@ fn append_parse_temp_path_function(out: &var std::string::String) -> !void {
     return;
 }
 
-fn append_parse_format_file_write_function(out: &var std::string::String) -> !void {
-    try append_line(out, "define i1 @kizu_selfhost__parse_format_file_write(");
+fn append_format_source_file_write_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define i1 @kizu_selfhost__format_source_file_write(");
     try append_line(out, "  %kizu.owned %io,");
     try append_line(out, "  %kizu.slice.u8 %path,");
     try append_line(out, "  %kizu.slice.u8 %source,");
     try append_line(out, "  i1 %preserve_comments");
     try append_line(out, ") {");
     try append_line(out, "entry:");
+    try append_line(out, "  %allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
     try append_line(out,
-        "  %formatted = call %kizu.error.slice.u8 @kizu_selfhost__parse_format_alloc(%kizu.slice.u8 %source, i1 %preserve_comments)");
-    try append_line(out, "  %formatted_ok = extractvalue %kizu.error.slice.u8 %formatted, 0");
+        "  %formatted = call %kizu.error.owned @kizu_selfhost__parser_format_format_source(%kizu.owned %allocator, %kizu.slice.u8 %source)");
+    try append_line(out, "  %formatted_ok = extractvalue %kizu.error.owned %formatted, 0");
     try append_line(out, "  br i1 %formatted_ok, label %write, label %false");
     try append_line(out, "write:");
-    try append_line(out, "  %formatted_bytes = extractvalue %kizu.error.slice.u8 %formatted, 1");
+    try append_line(out, "  %formatted_owned = extractvalue %kizu.error.owned %formatted, 1");
+    try append_line(out,
+        "  %formatted_bytes = call %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %formatted_owned)");
     try append_line(out,
         "  %temp = call %kizu.error.slice.u8 @kizu_selfhost__parse_temp_path(%kizu.slice.u8 %path)");
     try append_line(out, "  %temp_ok = extractvalue %kizu.error.slice.u8 %temp, 0");
@@ -919,19 +965,14 @@ fn append_parse_format_file_write_function(out: &var std::string::String) -> !vo
     try append_line(out, "cleanup_temp:");
     try append_line(out,
         "  %temp_result = phi i1 [ %format_rename_ok, %rename ], [ false, %cleanup_temp_false ]");
-    try append_line(out, "  %allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
-    try append_line(out, "  %allocator_ptr = extractvalue %kizu.owned %allocator, 0");
-    try append_line(out, "  %formatted_ptr = extractvalue %kizu.slice.u8 %formatted_bytes, 0");
+    try append_line(out, "  %temp_allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
+    try append_line(out, "  %temp_allocator_ptr = extractvalue %kizu.owned %temp_allocator, 0");
     try append_line(out, "  %temp_ptr = extractvalue %kizu.slice.u8 %temp_path, 0");
-    try append_line(out, "  call void @kizu_rt_free(ptr %allocator_ptr, ptr %formatted_ptr)");
-    try append_line(out, "  call void @kizu_rt_free(ptr %allocator_ptr, ptr %temp_ptr)");
+    try append_line(out, "  call void @kizu_rt_owned_deinit(%kizu.owned %formatted_owned)");
+    try append_line(out, "  call void @kizu_rt_free(ptr %temp_allocator_ptr, ptr %temp_ptr)");
     try append_line(out, "  br i1 %temp_result, label %true, label %false");
     try append_line(out, "cleanup_formatted_false:");
-    try append_line(out, "  %cleanup_allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
-    try append_line(out, "  %cleanup_allocator_ptr = extractvalue %kizu.owned %cleanup_allocator, 0");
-    try append_line(out, "  %cleanup_formatted_ptr = extractvalue %kizu.slice.u8 %formatted_bytes, 0");
-    try append_line(out,
-        "  call void @kizu_rt_free(ptr %cleanup_allocator_ptr, ptr %cleanup_formatted_ptr)");
+    try append_line(out, "  call void @kizu_rt_owned_deinit(%kizu.owned %formatted_owned)");
     try append_line(out, "  br label %false");
     try append_line(out, "true:");
     try append_line(out, "  ret i1 true");

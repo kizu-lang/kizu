@@ -156,13 +156,8 @@ var formatCompiledHelperSeeds = []string{
 	// error-union success or branches into the guard's bool return. Its BFS pulls in
 	// next_token_text_equals and is_match_arm_trailing_comma (both seeded members).
 	"is_trailing_comma",
-}
-
-// formatHandPathOnlyHelpers stay out of the compiled format closure: format_source is the
-// whole-formatter entry whose import-sort / indentation / spacing orchestration still lives in the
-// hand-written parse_format_alloc path. Seeding it would smuggle the legacy formatter driver into
-// the compiled closure instead of lowering it as a real component.
-var formatHandPathOnlyHelpers = []string{
+	// format_source is the whole-formatter entry now compiled into stage2. The hosted fmt
+	// command calls it directly and consumes the returned owned String handle.
 	"format_source",
 }
 
@@ -177,7 +172,7 @@ func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 
 	assertFormatClosureCatalogDriven(t, irEmission, backendEmission)
 	assertFormatClosureSeeds(t, irEmission, backendEmission)
-	assertFormatClosureExcludesHandPath(t, irEmission, backendEmission)
+	assertFormatClosureIncludesDriver(t, irEmission, backendEmission)
 	assertParseFormatAllocNotExtended(t, parseLLVM)
 	assertImportSortShapeValidated(t)
 	assertLeadingImportShapeValidated(t)
@@ -560,25 +555,18 @@ func assertFormatClosureSeeds(t *testing.T, irEmission, backendEmission string) 
 	}
 }
 
-// assertFormatClosureExcludesHandPath keeps the indentation / import-sort / whole-formatter
-// helpers out of the compiled closure so the migration cannot smuggle parse_format_alloc's
-// logic in as a seed instead of lowering a real read-only component. The IR-side check is scoped
-// to the production seed emitter append_format_function_facts (where the format closure appends
-// its members to the BFS pending queue) so the behavior gates may still name format_source when
-// they drive the real catalog / closure / lowering over it -- naming it in a gate is not seeding
-// it into the compiled closure. The backend BFS (cli_llvm.kizu) seeds no format_source, and the
-// lowering gate lives in a separate backend file, so the backend check stays a bare presence check.
-func assertFormatClosureExcludesHandPath(t *testing.T, irEmission, backendEmission string) {
+// assertFormatClosureIncludesDriver pins that the production format closure seeds format_source
+// itself, not only the helper frontier. The driver has its own lowering gate, so this structural
+// check only confirms it is wired into the artifact-producing facts and backend BFS.
+func assertFormatClosureIncludesDriver(t *testing.T, irEmission, backendEmission string) {
 	t.Helper()
 	seedEmitter := formatClosureSeedEmitter(t, irEmission)
-	for _, helper := range formatHandPathOnlyHelpers {
-		quoted := `"` + helper + `"`
-		if strings.Contains(seedEmitter, quoted) {
-			t.Errorf("append_format_function_facts seeds hand-path helper %q", helper)
-		}
-		if strings.Contains(backendEmission, quoted) {
-			t.Errorf("cli_llvm.kizu format closure seeds hand-path helper %q", helper)
-		}
+	quoted := `"format_source"`
+	if !strings.Contains(seedEmitter, quoted) {
+		t.Errorf("append_format_function_facts does not seed format_source")
+	}
+	if !strings.Contains(backendEmission, quoted) {
+		t.Errorf("cli_llvm.kizu format closure does not seed format_source")
 	}
 }
 
@@ -610,18 +598,15 @@ func formatClosureSeedEmitter(t *testing.T, irEmission string) string {
 
 // The format_source driver call surface (the std::string::String(allocator) constructor, the
 // lexer::tokenize tokenizer entry, and the owned-handle '.deinit()') is no longer pinned here as a
-// source-text presence check (issue 1165 / 1162). It is exercised directly by
-// TestSelfhostFormatDriverFactsGate, which runs the production component catalog + closure
-// collector over the real selfhost::parser::format::format_source body and fails if any of the
-// three classifications regress, and by TestSelfhostFormatDriverLoweringGate, which drives the
-// compiled lowering over format_source's real IR facts and pins the measured next blocker. The
-// terminal branch-merge induction latch is now recognized by the induction-init probe
-// (while_is_branch_merge_latch), so that gate has advanced past it to the cross-module
-// 'lexer::tokenize' call-return-type lookup. Those behavior gates supersede the former
+// source-text presence check (issue 1165 / 1162). TestSelfhostFormatDriverFactsGate exercises the
+// production component catalog + closure collector over the real
+// selfhost::parser::format::format_source body, TestSelfhostFormatDriverLoweringGate asserts that
+// body reaches full lowering/rendering success, and TestSelfhostBackendArtifactGate pins that
+// hosted fmt calls the compiled driver wrappers. Those behavior gates supersede the former
 // string-presence assertion.
 
-// assertParseFormatAllocNotExtended pins that the hand-written parse_format_alloc emitter is
-// not grown and does not start calling the compiled formatter helpers.
+// assertParseFormatAllocNotExtended pins that the old hand-written parse_format_alloc emitter is
+// not grown for the formatter path, and that hosted fmt now calls the compiled formatter driver.
 func assertParseFormatAllocNotExtended(t *testing.T, parseLLVM string) {
 	t.Helper()
 	lines := parseFormatAllocFunctionLineCount(t, parseLLVM)
@@ -630,9 +615,26 @@ func assertParseFormatAllocNotExtended(t *testing.T, parseLLVM string) {
 			"migration must not extend the hand-written indentation / import-sort / comment logic",
 			lines, parseFormatAllocMaxLines)
 	}
-	if strings.Contains(parseLLVM, "parser_format") {
-		t.Errorf("cli_parse_llvm.kizu references a compiled parser_format symbol -- the compiled " +
-			"formatter helpers must not be wired into the hand-written parse_format_alloc path")
+	if !strings.Contains(parseLLVM, "@kizu_selfhost__parser_format_format_source") {
+		t.Errorf("cli_parse_llvm.kizu does not call the compiled format_source driver")
+	}
+	if !strings.Contains(parseLLVM, "@kizu_selfhost__format_source_write") ||
+		!strings.Contains(parseLLVM, "@kizu_selfhost__format_source_file_write") {
+		t.Errorf("cli_parse_llvm.kizu does not route fmt through compiled format_source wrappers")
+	}
+	if strings.Contains(parseLLVM, "%fmt_format_ok = call i1 @kizu_selfhost__parse_format_write") ||
+		strings.Contains(
+			parseLLVM,
+			"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
+		) {
+		t.Errorf("cli_parse_llvm.kizu still routes fmt through parse_format_alloc wrappers")
+	}
+	if !strings.Contains(parseLLVM, "call void @kizu_rt_owned_deinit(%kizu.owned %formatted_owned)") {
+		t.Errorf("cli_parse_llvm.kizu does not clean up the compiled formatter String handle")
+	}
+	if !strings.Contains(parseLLVM, "%format_write_newline_slice") ||
+		!strings.Contains(parseLLVM, "%format_newline = call %kizu.error.void @kizu_rt_io_write_stdout") {
+		t.Errorf("cli_parse_llvm.kizu does not mirror write_parse_success stdout newline")
 	}
 }
 
