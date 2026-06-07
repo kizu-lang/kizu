@@ -713,6 +713,8 @@ func requiredLLVMConstI64RunCodegenFragments() []string {
 		"define %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_string_print_statement_program(",
 		"define %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_void_block_program(",
+		"define %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_let_if_program(",
 		"define %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_single_if_program(",
@@ -737,9 +739,14 @@ func requiredLLVMConstI64RunCodegenFragments() []string {
 		"%else_return_ast = call %kizu.selfhost.codegen.run_ast " +
 			"@kizu_selfhost__ir_codegen_return_void_run_ast(",
 		"%else_program = phi %kizu.selfhost.codegen.program " +
-			"[ %else_return_program, %else_return_void ], [ %else_print_program, %else_print ]",
+			"[ %else_return_program, %else_return_void ], [ %else_print_program, %else_print ], " +
+			"[ %else_void_program, %else_void_block ]",
 		"%else_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
 			"%kizu.selfhost.codegen.program %else_print_program)",
+		"%else_void_program = call %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_void_block_program(",
+		"%else_void_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
+			"%kizu.selfhost.codegen.program %else_void_program)",
 		"%single_if_program = call %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_single_if_program(",
 		"%if_else_empty = icmp eq i64 %else_tag, ",
