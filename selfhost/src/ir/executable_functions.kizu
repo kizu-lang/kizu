@@ -915,7 +915,7 @@ fn append_diagnostic_function_facts(
 // Ast.len method signature + body, which lowers to an array_len builtin call over
 // the children Array. It deliberately touches neither the AstNode/AstData union nor
 // any Arena.get / array_get / error-union accessor.
-fn append_ast_function_facts(
+pub fn append_ast_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
     file: &source::SourceFile
@@ -937,6 +937,48 @@ fn append_ast_function_facts(
         parsed.root,
         "BinaryOp",
         "std::kizu::ast::BinaryOp"
+    );
+    // The BinaryOp constant accessors back the run codegen tape lowering's operator
+    // mapping (code_binary_kind compares the matched Binary payload op against
+    // them). Each body is a single 'return BinaryOp::<Variant>;' enum-field return,
+    // compiled through the existing enum-field-return path, so the tape lowering
+    // resolves them as real compiled cross-module callees rather than a handwritten
+    // operator tag table.
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_add",
+        "std::kizu::ast::binary_add",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_sub",
+        "std::kizu::ast::binary_sub",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_mul",
+        "std::kizu::ast::binary_mul",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_div",
+        "std::kizu::ast::binary_div",
+        "checked-ast-readonly"
     );
     try append_selected_impl_method_body(
         out,
@@ -1348,7 +1390,7 @@ fn append_camel_to_snake(out: &var std::string::String, name: []u8) -> !void {
 // call binding an AstNode, a union tag dispatch on AstData, and the active arm's payload
 // field access. The AstData/ProgramNode/ChildRange struct, type-llvm, and union-variant
 // facts it consumes are emitted alongside std::kizu::ast above.
-fn append_selfhost_ast_function_facts(
+pub fn append_selfhost_ast_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
     file: &source::SourceFile
@@ -2385,7 +2427,7 @@ pub fn append_runtime_stdlib_symbol_preamble(out: &var std::string::String) -> !
     return;
 }
 
-fn append_codegen_function_facts(
+pub fn append_codegen_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
     file: &source::SourceFile
@@ -2534,6 +2576,16 @@ fn append_codegen_function_facts(
         "IntEnv",
         "selfhost::ir::codegen::IntEnv"
     );
+    // CodeEval threads the run codegen IR v1 tape lowering result (the SSA value
+    // counter plus the unified ok flag) through the recursive expression descent.
+    try append_selected_struct_field_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "CodeEval",
+        "selfhost::ir::codegen::CodeEval"
+    );
     try append_type_llvm_fact(out, "selfhost::ir::codegen::Value", "%kizu.selfhost.codegen.value");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::Instruction", "%kizu.selfhost.codegen.instruction");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::CodegenBlock", "%kizu.selfhost.codegen.block");
@@ -2546,6 +2598,7 @@ fn append_codegen_function_facts(
     try append_type_llvm_fact(out, "selfhost::ir::codegen::PayloadSpan", "%kizu.selfhost.codegen.payload_span");
     try append_type_llvm_fact(out, "std::kizu::ast::ChildRange", "%kizu.kizu.ast.child_range");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::IntEnv", "%kizu.selfhost.codegen.int_env");
+    try append_type_llvm_fact(out, "selfhost::ir::codegen::CodeEval", "%kizu.selfhost.codegen.code_eval");
     try append_runtime_stdlib_symbol_preamble(out);
     try append_codegen_reachable_helper_bodies(
         out,
@@ -2585,6 +2638,11 @@ fn append_codegen_reachable_helper_bodies(
     // std::kizu::ast::ChildRange value-type ABI coverage, while lower_run_int_program
     // itself stays outside the selected body-fact set.
     try append_codegen_closure_seed(&var pending, catalog, "empty_int_env");
+    // lower_code_expr is the run codegen IR v1 tape entry: the recursive checked
+    // expression descent that appends 'opcode dst operands...' records onto the
+    // runtime-owned Array<i64> tape. Seeding it pulls in the record builders and
+    // the CodeEval counter threading through the shared closure BFS.
+    try append_codegen_closure_seed(&var pending, catalog, "lower_code_expr");
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);

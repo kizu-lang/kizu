@@ -180,10 +180,15 @@ func buildAndRunStage(t *testing.T, clang string, stage string) (bootstrapStageR
 // linkBootstrapStage links a hosted selfhost compiler artifact for one stage.
 func linkBootstrapStage(clang string, stage string, exePath string) error {
 	stageDir := filepath.Join("target/selfhost", stage)
-	compile := exec.Command(
-		clang,
-		"-Wno-override-module",
-		"-fno-integrated-as",
+	compileArgs := append(
+		[]string{
+			"-Wno-override-module",
+			"-fno-integrated-as",
+		},
+		hostedLinkStackArgs()...,
+	)
+	compileArgs = append(
+		compileArgs,
 		filepath.Join(stageDir, "selfhost.ll"),
 		filepath.Join(stageDir, "selfhost.host.ll"),
 		"selfhost/runtime/selfhost.hosted.c",
@@ -191,6 +196,7 @@ func linkBootstrapStage(clang string, stage string, exePath string) error {
 		"-o",
 		exePath,
 	)
+	compile := exec.Command(clang, compileArgs...)
 	if out, err := compile.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w\n%s", err, out)
 	}

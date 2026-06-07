@@ -1,0 +1,157 @@
+import selfhost::parser;
+import selfhost::ir::executable_functions;
+import selfhost::backend::compiled_abi_params;
+import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_llvm;
+import selfhost::backend::llvm;
+import selfhost::source;
+
+// run_tape_lowering_gate drives the production compiled LLVM lowering over the
+// run codegen IR v1 tape cluster (selfhost::ir::codegen::lower_code_expr and its
+// record builders) and reports success only after the compiled MIR lowerer and
+// LLVM renderer cross the real recursive expression descent. It emits the full
+// production codegen component facts (append_codegen_function_facts) plus the
+// std::kizu::ast facts the component resolves its AST accessor calls against
+// (append_ast_function_facts), round-trips them through a file the same way the
+// production backend reads target/selfhost/selfhost.ir back, then lowers every
+// tape cluster member through compiled_llvm::append_compiled_function_auto --
+// the production single-member lowering driver. While a measured blocker
+// remains, the closing print is unreachable and the Go gate asserts the exact
+// blocker instead.
+pub fn run_tape_lowering_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+
+    var facts = std::string::String(allocator);
+    defer facts.deinit();
+
+    let ast_path = "std/src/kizu/ast.kizu";
+    let ast_text = try std::fs::read_file(io, ast_path);
+    let ast_file = gate_source_file(
+        0,
+        source::SourceKind::Std,
+        ast_path,
+        ast_text,
+        13
+    );
+    try executable_functions::append_ast_function_facts(allocator, &var facts, &ast_file);
+
+    let codegen_path = "selfhost/src/ir/codegen.kizu";
+    let codegen_text = try std::fs::read_file(io, codegen_path);
+    let codegen_file = gate_source_file(
+        1,
+        source::SourceKind::Selfhost,
+        codegen_path,
+        codegen_text,
+        13
+    );
+    try executable_functions::append_codegen_function_facts(allocator, &var facts, &codegen_file);
+
+    let selfhost_ast_path = "selfhost/src/ast.kizu";
+    let selfhost_ast_text = try std::fs::read_file(io, selfhost_ast_path);
+    let selfhost_ast_file = gate_source_file(
+        2,
+        source::SourceKind::Selfhost,
+        selfhost_ast_path,
+        selfhost_ast_text,
+        13
+    );
+    try executable_functions::append_selfhost_ast_function_facts(
+        allocator, &var facts, &selfhost_ast_file
+    );
+
+    // Round-trip the facts through a file so ir_bytes is a freshly-read owned []u8
+    // with external provenance, exactly like the production backend which reads
+    // target/selfhost/selfhost.ir back before lowering.
+    let facts_path = "target/selfhost/run_tape_gate.ir";
+    if !(try std::fs::exists(io, "target")) {
+        try std::fs::create_dir(io, "target");
+    }
+    if !(try std::fs::exists(io, "target/selfhost")) {
+        try std::fs::create_dir(io, "target/selfhost");
+    }
+    let facts_bytes = facts.as_bytes();
+    try std::fs::write_file(io, &facts_path, &facts_bytes);
+    let ir_bytes = try std::fs::read_file(io, &facts_path);
+
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ir::codegen::code_eval_unsupported");
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ir::codegen::code_op_const_int");
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ir::codegen::code_op_binary");
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ir::codegen::code_binary_kind");
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ir::codegen::lower_code_int");
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ir::codegen::lower_code_binary");
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ir::codegen::lower_code_expr");
+    // The generalized traversal lowering also serves the node_count cluster and the
+    // narrow declaration_count accessor; lowering them here guards the legacy arms.
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ast::node_count");
+    try run_tape_lower(allocator, ir_bytes, "selfhost::ast::declaration_count");
+    // The BinaryOp accessors are compiled std::kizu::ast members the tape's operator
+    // mapping calls cross-module; their own enum-field-return bodies lower here.
+    try run_tape_lower(allocator, ir_bytes, "std::kizu::ast::binary_add");
+    try run_tape_lower(allocator, ir_bytes, "std::kizu::ast::binary_sub");
+    try run_tape_lower(allocator, ir_bytes, "std::kizu::ast::binary_mul");
+    try run_tape_lower(allocator, ir_bytes, "std::kizu::ast::binary_div");
+
+    print("run-tape-lowering-ok");
+    return;
+}
+
+// run_stage_emit_gate drives the full production LLVM artifact emission over the
+// on-disk IR facts (the same call the stage CLI makes), surfacing the exact
+// blocker message through the interpreter when the hosted stage exits silently.
+pub fn run_stage_emit_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    let artifact = try llvm::emit_llvm_artifact(
+        allocator,
+        io,
+        "target/selfhost/selfhost.ir",
+        "target/selfhost/selfhost.ir.manifest"
+    );
+    std::testing::expect(artifact.bytes > 0);
+    print("stage-emit-ok");
+    return;
+}
+
+fn run_tape_lower(
+    allocator: Allocator,
+    ir_bytes: []u8,
+    function_name: []u8
+) -> !void {
+    var params_spec = std::string::String(allocator);
+    defer params_spec.deinit();
+    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, function_name);
+    let params_spec_bytes = params_spec.as_bytes();
+    var llvm_symbol = std::string::String(allocator);
+    defer llvm_symbol.deinit();
+    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, function_name);
+    let llvm_symbol_bytes = llvm_symbol.as_bytes();
+
+    var out = std::string::String(allocator);
+    defer out.deinit();
+    try compiled_llvm::append_compiled_function_auto(
+        &var out, ir_bytes, function_name, &llvm_symbol_bytes, &params_spec_bytes
+    );
+    return;
+}
+
+// gate_source_file builds the SourceFile record the production fact emitters
+// take, pointing the module span at the path segment after the source root
+// prefix (std/src/ or selfhost/src/) and before the .kizu suffix.
+fn gate_source_file(
+    id: i64,
+    kind: source::SourceKind,
+    path: []u8,
+    text: []u8,
+    module_start: i64
+) -> source::SourceFile {
+    return source::SourceFile {
+        id: id,
+        kind: kind,
+        package_name: "selfhost",
+        module_start: module_start,
+        module_end: std::mem::len(path) - 5,
+        path: path,
+        text: text
+    };
+}
