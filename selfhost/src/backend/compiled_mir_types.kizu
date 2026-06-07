@@ -40,6 +40,13 @@ pub fn resolve_value_kizu_type(
     if std::mem::len(param_type) > 0 {
         return try find_function_param_kizu_type(ir_bytes, function_name, name);
     }
+    // Callers without a threaded params_spec (struct-field reads in call-argument
+    // position) still resolve parameters from the signature facts before falling
+    // back to the let-binding scan.
+    let fact_param = try find_function_param_kizu_type_or_empty(ir_bytes, function_name, name);
+    if std::mem::len(fact_param) > 0 {
+        return fact_param;
+    }
     return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
 }
 
@@ -50,6 +57,11 @@ pub fn struct_lookup_kizu_type(kizu_type: []u8) -> []u8 {
     }
     if len > 0 and kizu_type[0] == cast<u8>(38) {
         return struct_lookup_kizu_type(kizu_type[1..len]);
+    }
+    // A '&var <T>' mutable borrow records its keyword as a 'var_' prefix once the
+    // leading '&' is stripped; a mutable borrow shares its pointee's lookup type.
+    if std::mem::starts_with(kizu_type, "var_") {
+        return struct_lookup_kizu_type(kizu_type[4..len]);
     }
     return kizu_type;
 }
@@ -693,9 +705,10 @@ fn resolve_let_value_kizu_type(
         if compiled_fact_lookup::is_stdlib_callee(callee_name) {
             return try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, callee_name);
         }
-        // A Call whose callee is a field-mode method is the Arena<T>.add lowering
-        // (self.<field>.add(...)); it binds the appended slot index, an i64 (tracker
-        // 961). Ast.add_node's 'let raw = self.nodes.add(...)' is its first consumer.
+        // A Call whose callee is a field-mode method binds by the method: Ast.get
+        // binds the AstNode element by value; .len() and Arena<T>.add bind an i64
+        // (the length / the appended slot index). Ast.add_node's
+        // 'let raw = self.nodes.add(...)' is the add consumer (tracker 961).
         let callee_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, value, "callee", 0, bs
         );
@@ -703,6 +716,30 @@ fn resolve_let_value_kizu_type(
             ir_bytes, function_name, callee_node, bs
         );
         if std::mem::equal_bytes(callee_kind, "FieldExpr") {
+            let method_name = try ir_contract::body_field_expr_name_from(
+                ir_bytes, function_name, callee_node, "field", bs
+            );
+            if std::mem::equal_bytes(method_name, "get") {
+                let get_receiver = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, callee_node, "receiver", 0, bs
+                );
+                let get_receiver_kind = try ir_contract::body_node_kind_from(
+                    ir_bytes, function_name, get_receiver, bs
+                );
+                if std::mem::equal_bytes(get_receiver_kind, "Var") {
+                    let get_receiver_name = try ir_contract::body_token_or_empty_from(
+                        ir_bytes, function_name, get_receiver, bs
+                    );
+                    let get_receiver_kizu = try resolve_receiver_value_kizu_type(
+                        ir_bytes, function_name, module_prefix, get_receiver_name, bs
+                    );
+                    if std::mem::equal_bytes(
+                        struct_lookup_kizu_type(get_receiver_kizu), "std::kizu::ast::Ast"
+                    ) {
+                        return "std::kizu::ast::AstNode";
+                    }
+                }
+            }
             return "i64";
         }
         let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(

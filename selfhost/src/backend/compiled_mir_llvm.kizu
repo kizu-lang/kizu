@@ -445,6 +445,7 @@ fn append_multi_stmt(
         LowerRunAst(payload) => try append_multi_lower_run_ast(out, payload);,
         ReturnCall(payload) => try append_multi_return_call(out, function, payload, local_prefix);,
         ReturnStruct(payload) => try append_multi_return_struct(out, function, payload);,
+        VoidReturnSuccess(payload) => try append_multi_if_return_void_success(out, function.return_type.llvm_name);,
         ReturnExpr(payload) => try append_multi_return_expr(out, function, payload);,
         ReturnError(payload) => try append_multi_return_error(out, function, payload);,
         ReturnArrayGet(payload) => try append_multi_return_array_get(out, function, payload);,
@@ -4235,6 +4236,16 @@ fn append_traversal_arm_block(
     try std::fmt::append_i64(out, arm_index);
     try append_ll_line(out, ":");
     if arm.is_literal {
+        // A plain (non-error-union) return type returns the literal directly; an
+        // error-union return wraps it as the success value.
+        if !is_error_union_type(stmt.own_error_union) {
+            try out.append_bytes("  ret ");
+            try out.append_bytes(stmt.own_error_union);
+            try out.append_bytes(" ");
+            try append_traversal_literal_text(out, arm);
+            try out.append_byte(cast<u8>(10));
+            return;
+        }
         try out.append_bytes("  %match_arm_");
         try std::fmt::append_i64(out, arm_index);
         try out.append_bytes("_flag = insertvalue ");
@@ -4246,8 +4257,10 @@ fn append_traversal_arm_block(
         try out.append_bytes(stmt.own_error_union);
         try out.append_bytes(" %match_arm_");
         try std::fmt::append_i64(out, arm_index);
-        try out.append_bytes("_flag, i64 ");
-        try std::fmt::append_i64(out, arm.literal_value);
+        try out.append_bytes("_flag, ");
+        try out.append_bytes(arm.literal_llvm);
+        try out.append_bytes(" ");
+        try append_traversal_literal_text(out, arm);
         try append_ll_line(out, ", 1");
         try out.append_bytes("  ret ");
         try out.append_bytes(stmt.own_error_union);
@@ -4264,7 +4277,7 @@ fn append_traversal_arm_block(
     var probe_index = 0;
     while probe_index < arg_count {
         let probe_arg = try args.at(probe_index);
-        if !probe_arg.is_param {
+        if !probe_arg.is_param and !probe_arg.is_literal {
             field_arg_count = field_arg_count + 1;
         }
         probe_index = probe_index + 1;
@@ -4292,7 +4305,7 @@ fn append_traversal_arm_block(
         var arg_index = 0;
         while arg_index < arg_count {
             let arg = try args.at(arg_index);
-            if !arg.is_param {
+            if !arg.is_param and !arg.is_literal {
                 try out.append_bytes("  %match_arm_");
                 try std::fmt::append_i64(out, arm_index);
                 try out.append_bytes("_a");
@@ -4325,14 +4338,19 @@ fn append_traversal_arm_block(
             try out.append_bytes(", ");
         }
         try out.append_bytes(arg.arg_llvm_type);
-        try out.append_bytes(" %");
-        if arg.is_param {
-            try out.append_bytes(arg.param_name);
+        try out.append_bytes(" ");
+        if arg.is_literal {
+            try std::fmt::append_i64(out, arg.literal_value);
         } else {
-            try out.append_bytes("match_arm_");
-            try std::fmt::append_i64(out, arm_index);
-            try out.append_bytes("_a");
-            try std::fmt::append_i64(out, call_arg_index);
+            try out.append_bytes("%");
+            if arg.is_param {
+                try out.append_bytes(arg.param_name);
+            } else {
+                try out.append_bytes("match_arm_");
+                try std::fmt::append_i64(out, arm_index);
+                try out.append_bytes("_a");
+                try std::fmt::append_i64(out, call_arg_index);
+            }
         }
         call_arg_index = call_arg_index + 1;
     }
@@ -4367,6 +4385,24 @@ fn append_traversal_arm_block(
     try out.append_bytes(" %match_arm_");
     try std::fmt::append_i64(out, arm_index);
     try append_ll_line(out, "_call");
+    return;
+}
+
+// append_traversal_literal_text renders a literal arm's value: bool literals print
+// true/false, integer literals their decimal value.
+fn append_traversal_literal_text(
+    out: &var std::string::String,
+    arm: &compiled_mir::MirTraversalArm
+) -> !void {
+    if std::mem::equal_bytes(arm.literal_llvm, "i1") {
+        if arm.literal_value != 0 {
+            try out.append_bytes("true");
+            return;
+        }
+        try out.append_bytes("false");
+        return;
+    }
+    try std::fmt::append_i64(out, arm.literal_value);
     return;
 }
 
@@ -4616,7 +4652,14 @@ fn append_multi_let_array_get(
     try out.append_bytes(stmt.name);
     try out.append_bytes("_fail_flag, %kizu.slice.u8 %");
     try out.append_bytes(stmt.name);
-    try append_ll_line(out, "_msg, 2");
+    try out.append_bytes("_msg, ");
+    // %kizu.error.void carries its message at field 1 (the 2-field union); the
+    // 3-field unions carry it at field 2 with a zero success value.
+    if std::mem::equal_bytes(stmt.own_error_union, "%kizu.error.void") {
+        try append_ll_line(out, "1");
+    } else {
+        try append_ll_line(out, "2");
+    }
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.own_error_union);
     try out.append_bytes(" %");
@@ -4827,6 +4870,7 @@ fn append_stmt_globals(
         LowerRunAst(payload) => try append_lower_run_ast_globals(payload);,
         ReturnCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnStruct(payload) => try append_struct_globals_at(out, llvm_symbol, &payload.struct_fields, payload.string_index);,
+        VoidReturnSuccess(payload) => try append_no_globals();,
         ReturnExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnError(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ReturnArrayGet(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
@@ -5524,6 +5568,9 @@ fn append_multi_if(
         try out.append_bytes("_latch");
         try out.append_byte(cast<u8>(10));
     } else {
+        if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidReturnSuccess {
+            try append_multi_if_return_void_success(out, function.return_type.llvm_name);
+        } else {
         if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnBool {
             try append_multi_if_return_bool(out, function.return_type.llvm_name, stmt);
         } else {
@@ -5552,6 +5599,7 @@ fn append_multi_if(
                 }
             }
         }
+    }
     }
     }
     if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody and if_has_else_body(stmt) {
@@ -5612,6 +5660,28 @@ fn append_multi_then_call_return(
     try out.append_bytes(" %t");
     try std::fmt::append_i64(out, temp_base);
     try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_no_globals is the no-op globals hook for statements that emit none.
+fn append_no_globals() -> !void {
+    return;
+}
+
+// append_multi_if_return_void_success returns a bare 'return;' then-block: a plain
+// void function rets void, and an error-union void function returns the wrapped
+// success value.
+fn append_multi_if_return_void_success(
+    out: &var std::string::String,
+    return_type: []u8
+) -> !void {
+    if std::mem::equal_bytes(return_type, "void") {
+        try append_ll_line(out, "  ret void");
+        return;
+    }
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try append_ll_line(out, " { i1 true, %kizu.slice.u8 zeroinitializer }");
     return;
 }
 

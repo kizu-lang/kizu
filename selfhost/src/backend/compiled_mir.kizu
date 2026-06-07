@@ -238,6 +238,10 @@ pub enum MirIfThenKind {
     ReturnExpr,
     ReturnStruct,
     ReturnError,
+    // VoidReturnSuccess backs a bare 'return;' then-block inside an error-union void
+    // function: the renderer returns the wrapped %kizu.error.void success (or a plain
+    // 'ret void' when the function returns void directly).
+    VoidReturnSuccess,
     // VoidBody backs a no-else side-effecting then-block. The then body is rendered as a
     // conditional branch to a fall-through join, and mutated locals are merged through the
     // MirIfStmt.merge_vars store/load metadata rather than redefining the original SSA names.
@@ -623,6 +627,8 @@ pub struct MirTraversalArg {
     pub arg_llvm_type: []u8,
     pub is_param: bool,
     pub param_name: []u8,
+    pub is_literal: bool,
+    pub literal_value: i64,
 }
 
 // MirTraversalArm is one arm of the node_count match-over-AstData traversal (tracker 961).
@@ -637,6 +643,7 @@ pub struct MirTraversalArm {
     pub tag: i64,
     pub is_literal: bool,
     pub literal_value: i64,
+    pub literal_llvm: []u8,
     pub payload_type: []u8,
     pub callee_module: []u8,
     pub callee_name: []u8,
@@ -1258,7 +1265,14 @@ pub struct MirMatchTraversalStmt {
     pub arms: std::array::Array<MirTraversalArm>,
 }
 
+// MirVoidReturnSuccessStmt backs a bare 'return;' statement: a plain void function
+// rets void, and an error-union void function returns the wrapped success value.
+pub struct MirVoidReturnSuccessStmt {
+    pub placeholder: i64,
+}
+
 pub union MirStmt {
+    VoidReturnSuccess(MirVoidReturnSuccessStmt),
     LetCall(MirLetCallStmt),
     LetStruct(MirLetStructStmt),
     LetArenaAdd(MirLetArenaAddStmt),
@@ -1885,6 +1899,7 @@ impl MirStmt {
             LowerRunAst(payload) => payload.deinit(),
             ReturnCall(payload) => payload.deinit(),
             ReturnStruct(payload) => payload.deinit(),
+            VoidReturnSuccess(payload) => void_return(),
             ReturnExpr(payload) => payload.deinit(),
             ReturnError(payload) => payload.deinit(),
             ReturnArrayGet(payload) => payload.deinit(),
@@ -3716,7 +3731,9 @@ pub fn traversal_arg(field_index: i64, arg_llvm_type: []u8) -> MirTraversalArg {
         field_index: field_index,
         arg_llvm_type: arg_llvm_type,
         is_param: false,
-        param_name: ""
+        param_name: "",
+        is_literal: false,
+        literal_value: 0
     };
 }
 
@@ -3727,7 +3744,21 @@ pub fn traversal_param_arg(param_name: []u8, arg_llvm_type: []u8) -> MirTraversa
         field_index: 0,
         arg_llvm_type: arg_llvm_type,
         is_param: true,
-        param_name: param_name
+        param_name: param_name,
+        is_literal: false,
+        literal_value: 0
+    };
+}
+
+// traversal_literal_arg passes an integer literal into a traversal arm call.
+pub fn traversal_literal_arg(literal_value: i64) -> MirTraversalArg {
+    return MirTraversalArg {
+        field_index: 0,
+        arg_llvm_type: "i64",
+        is_param: false,
+        param_name: "",
+        is_literal: true,
+        literal_value: literal_value
     };
 }
 
@@ -3742,6 +3773,7 @@ pub fn traversal_try_arm(
         tag: tag,
         is_literal: false,
         literal_value: 0,
+        literal_llvm: "",
         payload_type: payload_type,
         callee_module: callee_module,
         callee_name: callee_name,
@@ -3767,6 +3799,7 @@ pub fn traversal_plain_call_arm(
         tag: tag,
         is_literal: false,
         literal_value: 0,
+        literal_llvm: "",
         payload_type: payload_type,
         callee_module: callee_module,
         callee_name: callee_name,
@@ -3784,6 +3817,30 @@ pub fn traversal_literal_arm(
         tag: tag,
         is_literal: true,
         literal_value: literal_value,
+        literal_llvm: "i64",
+        payload_type: "",
+        callee_module: "",
+        callee_name: "",
+        is_plain_call: false,
+        success_llvm: "",
+        args: std::array::Array<MirTraversalArg>(std::mem::page_allocator())
+    };
+}
+
+// traversal_bool_literal_arm backs a 'Variant => true' / '_ => false' predicate arm.
+pub fn traversal_bool_literal_arm(
+    tag: i64,
+    bool_value: bool
+) -> MirTraversalArm {
+    var literal_value = 0;
+    if bool_value {
+        literal_value = 1;
+    }
+    return MirTraversalArm {
+        tag: tag,
+        is_literal: true,
+        literal_value: literal_value,
+        literal_llvm: "i1",
         payload_type: "",
         callee_module: "",
         callee_name: "",
@@ -3827,6 +3884,16 @@ pub fn return_call_stmt(
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
         call_args: args
+    });
+}
+
+fn void_return() -> void {
+    return;
+}
+
+pub fn return_void_success_stmt() -> MirStmt {
+    return MirStmt::VoidReturnSuccess(MirVoidReturnSuccessStmt {
+        placeholder: 0
     });
 }
 

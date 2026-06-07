@@ -16,26 +16,42 @@ pub fn lookup_type_llvm_by_prefix(
     let prefix_len = std::mem::len(prefix);
     let mp_len = std::mem::len(module_prefix);
     let name_len = std::mem::len(short_name);
+    var suffix_value = ir_bytes[0..0];
     var index = 0;
-    while index + prefix_len + mp_len + name_len < byte_len {
+    while index + prefix_len + name_len < byte_len {
         if compiled_util::is_line_start(ir_bytes, index) and
             std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let mp_start = index + prefix_len;
-            let mp_end = mp_start + mp_len;
+            let type_start = index + prefix_len;
+            let type_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), type_start);
+            let mp_end = type_start + mp_len;
             let name_end = mp_end + name_len;
-            if name_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) and
-                ir_bytes[name_end] == cast<u8>(32) {
-                var pos = name_end;
+            if name_end == type_end and
+                std::mem::equal_bytes(ir_bytes[type_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) {
+                var pos = type_end;
                 while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
                     pos = pos + 1;
                 }
                 let value_end = compiled_util::find_line_end(ir_bytes, pos);
                 return ir_bytes[pos..value_end];
             }
+            // A bare struct spelling recorded by another module's field facts (e.g.
+            // AstNode.span recording 'Span') resolves to whichever module actually
+            // carries the type, mirroring the struct-field suffix matching.
+            if std::mem::len(suffix_value) == 0 and
+                type_matches_suffix(ir_bytes[type_start..type_end], short_name) {
+                var spos = type_end;
+                while spos < byte_len and ir_bytes[spos] == cast<u8>(32) {
+                    spos = spos + 1;
+                }
+                let svalue_end = compiled_util::find_line_end(ir_bytes, spos);
+                suffix_value = ir_bytes[spos..svalue_end];
+            }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    if std::mem::len(suffix_value) > 0 {
+        return suffix_value;
     }
     return error("compiled function: type-llvm mapping not found");
 }
