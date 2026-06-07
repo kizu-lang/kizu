@@ -694,16 +694,33 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 func requiredLLVMConstI64RunCodegenFragments() []string {
 	return []string{
 		"define %kizu.error.i64 @kizu_selfhost__cli_codegen_eval_const_i64_expr(",
+		"define %kizu.error.i64 " +
+			"@kizu_selfhost__cli_codegen_eval_const_i64_operand_one_local(",
+		"define %kizu.error.bool " +
+			"@kizu_selfhost__cli_codegen_eval_const_bool_expr_one_local(",
 		"define %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_i64_print_program(",
+		"define %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_string_print_statement_program(",
+		"define %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_let_if_program(",
 		"define %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_i64_program(",
 		"@kizu_selfhost__cli_codegen_eval_const_i64_expr(%kizu.slice.u8 %text, " +
 			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %left)",
+		"@kizu_selfhost__cli_codegen_eval_const_bool_expr_one_local(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %condition, " +
+			"%kizu.slice.u8 %local_name, i64 %local_value)",
+		"%then_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
+			"%kizu.selfhost.codegen.program %then_program)",
+		"%else_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
+			"%kizu.selfhost.codegen.program %else_program)",
 		"%op = call i64 @kizu_selfhost__ir_codegen_run_binary_op(i64 %std_op)",
 		"%decimal_result = call %kizu.error.slice.u8 @kizu_selfhost__i64_decimal(i64 %value)",
 		"%program = call %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__ir_codegen_lowered_main_print_program(%kizu.slice.u8 %decimal)",
+		"%let_if_program = call %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_let_if_program(",
 	}
 }
 
