@@ -27,7 +27,7 @@ func codegenClosureSeeds() []string {
 		"metadata_for_program",
 		"metadata_line",
 		"empty_int_env",
-		"lower_code_expr",
+		"lower_code_module",
 	}
 }
 

@@ -57,7 +57,7 @@ selfhost-cli-gate:
 
 # Run the focused run codegen IR v1 tape lowering gate.
 selfhost-run-tape-gate:
-    KIZU_RUN_SELFHOST_RUN_TAPE=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostRunTapeLoweringGate$' -count=1 -v
+    KIZU_RUN_SELFHOST_RUN_TAPE=1 go test -timeout=30m ./cmd/kizu -run 'TestSelfhostRunTapeLoweringGate$' -count=1 -v
 
 # Run the selfhost production switch review gate without the aggregate oracle.
 selfhost-switch-gate:

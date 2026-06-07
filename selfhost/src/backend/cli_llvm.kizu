@@ -1321,25 +1321,6 @@ fn ast_data_tag(ir_bytes: []u8, name: []u8) -> !i64 {
     return variant.tag;
 }
 
-fn append_is_empty_node_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
-    let empty_tag = try ast_data_tag(ir_bytes, "Empty");
-    try append_line(out, "define i1 @kizu_selfhost__ir_codegen_is_empty_node(");
-    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
-    try append_line(out, "  %kizu.kizu.ast.node_id %node_id");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %node_id)");
-    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
-    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
-    try out.append_bytes("  %is_empty = icmp eq i64 %tag, ");
-    try std::fmt::append_i64(out, empty_tag);
-    try out.append_byte(cast<u8>(10));
-    try append_line(out, "  ret i1 %is_empty");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
 fn append_type_node_is_error_union_void_function(out: &var std::string::String) -> !void {
     try append_line(out, "define i1 @kizu_selfhost__ir_codegen_type_node_is_error_union_void(");
     try append_line(out, "  %kizu.slice.u8 %text,");
@@ -2637,16 +2618,14 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     // PayloadSpan / LocalBinding sentinel helpers (tracker 961). These return
     // structs whose fields use -1 sentinels (PayloadSpan { start: -1, end: -1 }),
     // unblocked by the compiled mini MIR now lowering Prefix(-Int) struct fields.
+    // empty_payload_span / is_payload_supported / string_literal_span are now reached
+    // by the codegen closure BFS (the run tape descent's lower_code_string chain), so
+    // they no longer need explicit registration here.
+    //
     // empty_local also reads text[0..0]; local_payload_span chains nested field
     // extraction (locals.first.payload_start) plus an empty_payload_span() fallback
     // call, both already supported. They land the run-AST local-binding lookup the
     // parser/AST migration still waits on for the interior nodes.
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::empty_payload_span",
-        "kizu_selfhost__ir_codegen_empty_payload_span",
-        ""
-    );
     try compiled_llvm::append_compiled_function_auto(
         out, ir_bytes,
         "selfhost::ir::codegen::empty_local",
@@ -2679,32 +2658,6 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "selfhost::ir::codegen::insert_local",
         "kizu_selfhost__ir_codegen_insert_local",
         "%kizu.slice.u8 text;%kizu.selfhost.codegen.local_table locals;%kizu.selfhost.codegen.local_binding binding"
-    );
-    // is_payload_supported is the first run-codegen leaf compiled through the
-    // restricted bounded-counter while lowering (tracker 961): one i64 induction
-    // variable, an index-less-than-std-mem-len comparison condition, sequential
-    // early-return byte-range checks in the body, and an index-plus-one increment.
-    // The generated LLVM is a single loop-carried phi over the preheader/head/body/
-    // latch/exit blocks, and the payload index uses the ADR-0053 checked index-load path.
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::is_payload_supported",
-        "kizu_selfhost__ir_codegen_is_payload_supported",
-        "%kizu.slice.u8 payload"
-    );
-    // string_literal_span is the first run-codegen AST traversal accessor that binds
-    // an AstNode and reads its Span to slice the source text (tracker 961, scope 4
-    // prerequisite). It binds the AstNode via Ast.get, reads the Span (AstNode field 0)
-    // start/end, rejects spans shorter than the two surrounding quotes, checks the
-    // leading/trailing double-quote bytes through the ADR-0053 checked index-load, and
-    // forwards the inner payload slice to is_payload_supported, returning the trimmed
-    // PayloadSpan on success or empty_payload_span() otherwise. Its callees (Ast.get,
-    // is_payload_supported, empty_payload_span) are already compiled so selfhost.ll links.
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::string_literal_span",
-        "kizu_selfhost__ir_codegen_string_literal_span",
-        "%kizu.slice.u8 text;%kizu.kizu.ast.ast ast;%kizu.kizu.ast.node_id node_id"
     );
     // print_payload is the run-codegen AST traversal accessor that dispatches a print
     // argument node on the AstData tag (tracker 961, scope 4 prerequisite): the String
@@ -2753,7 +2706,6 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "kizu_selfhost__ir_codegen_lower_let_binding",
         "%kizu.slice.u8 text;%kizu.kizu.ast.ast ast;%kizu.selfhost.codegen.local_table locals;%kizu.kizu.ast.node_id name;%kizu.kizu.ast.node_id value"
     );
-    try append_is_empty_node_function(out, ir_bytes);
     try append_type_node_is_error_union_void_function(out);
     try append_try_void_callee_functions(out, ir_bytes);
     try append_return_void_statement_ok_function(out, ir_bytes);
@@ -3307,6 +3259,12 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         return false;
     }
     if std::mem::equal_bytes(prefix, "selfhost::ir::codegen::") {
+        // The tape's recursive list walks bind children through the compiled external
+        // std::kizu::ast accessor (spelled ast.child_at), emitted separately as
+        // kizu_kizu__ast_ast_child_at; the BFS references it without re-emitting it.
+        if std::mem::equal_bytes(callee, "ast.child_at") {
+            return true;
+        }
         // parse_int_literal is still owned by the cli_run_i64_codegen_llvm handwritten
         // define: its accumulator loop carries a mid-body scalar assign the generic
         // while lowering does not model yet. The tape closure references that single
@@ -3504,7 +3462,7 @@ fn append_kizu_parser_reachable_compiled_functions(
 // cluster no longer needs a handwritten append_compiled_function_auto per helper.
 // allow_empty_params is set because the parameterless members metadata_line and
 // return_void_instruction derive an empty params_spec from their zero-arg signatures.
-fn append_codegen_reachable_compiled_functions(
+pub fn append_codegen_reachable_compiled_functions(
     out: &var std::string::String,
     ir_bytes: []u8
 ) -> !void {
@@ -3513,10 +3471,10 @@ fn append_codegen_reachable_compiled_functions(
     try pending.append("metadata_for_program");
     try pending.append("main_print_payload");
     try pending.append("unsupported_program");
-    // lower_code_expr is the run codegen IR v1 tape lowering root: the recursive
-    // expression descent compiled into stage2 so the hosted run path can lower
-    // checked expressions onto the flat instruction tape.
-    try pending.append("lower_code_expr");
+    // lower_code_module is the run codegen IR v1 tape lowering root: the
+    // whole-file walk compiled into stage2 so the hosted run path can lower a
+    // checked file onto the flat instruction tape.
+    try pending.append("lower_code_module");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,

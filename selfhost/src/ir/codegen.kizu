@@ -3307,26 +3307,40 @@ fn parse_int_literal(literal: []u8) -> !i64 {
 // ---------------------------------------------------------------------------
 // Run codegen IR v1: the flat function-block-instruction tape.
 //
-// The tape is a runtime-owned Array<i64> of fixed-prefix records
-// 'opcode dst operands...'; string operands are (start, end) spans into the
-// run source text, so the lowering needs no string allocation. lower_code_expr
-// is the recursive expression descent that replaces per-shape RunAst matching:
-// every checked expression lowers to tape records and a CodeEval result that
-// threads the SSA value counter. ok=false marks a construct the tape lowering
-// does not own yet, so callers report the single unified unsupported
-// diagnostic instead of dispatching to a shape-specific path.
+// The tape is a runtime-owned Array<i64> of records 'opcode dst operands...';
+// string operands are (start, end) spans into the run source text, so the
+// lowering needs no string allocation. lower_code_module walks the whole
+// checked file: every function lowers to FUNC_BEGIN/FUNC_END records framing
+// its statement records, and every expression lowers through the recursive
+// descent to a tape value id. CodeEval threads the SSA value counter; kinds
+// records every value id's kind (i64 or str) so print and call sites resolve
+// operand types without re-walking the AST. Locals bind name spans to value
+// ids in three parallel arrays scanned from each function's locals_base, and
+// args_scratch carries call-argument value ids between the argument walk and
+// the CALL record. ok=false marks a construct the tape lowering does not own
+// yet, so callers report the single unified unsupported diagnostic instead of
+// dispatching to a shape-specific path. List walks recurse instead of mutating
+// loop-carried scalars, matching the loop shapes the compiled MIR lowers.
 // ---------------------------------------------------------------------------
 
 struct CodeEval {
     ok: bool,
-    value: i64,
+    value_id: i64,
     next: i64,
 }
 
 fn code_eval_unsupported(next_value: i64) -> CodeEval {
     return CodeEval {
         ok: false,
-        value: 0,
+        value_id: 0,
+        next: next_value
+    };
+}
+
+fn code_eval_value(value: i64, next_value: i64) -> CodeEval {
+    return CodeEval {
+        ok: true,
+        value_id: value,
         next: next_value
     };
 }
@@ -3336,6 +3350,42 @@ fn code_op_const_int() -> i64 {
 }
 
 fn code_op_binary() -> i64 {
+    return 2;
+}
+
+fn code_op_const_str() -> i64 {
+    return 3;
+}
+
+fn code_op_call() -> i64 {
+    return 4;
+}
+
+fn code_op_func_begin() -> i64 {
+    return 10;
+}
+
+fn code_op_func_end() -> i64 {
+    return 11;
+}
+
+fn code_op_print() -> i64 {
+    return 20;
+}
+
+fn code_op_ret_void() -> i64 {
+    return 30;
+}
+
+fn code_op_ret_value() -> i64 {
+    return 31;
+}
+
+fn code_kind_i64() -> i64 {
+    return 1;
+}
+
+fn code_kind_str() -> i64 {
     return 2;
 }
 
@@ -3355,17 +3405,510 @@ fn code_binary_kind(op: std::kizu::ast::BinaryOp) -> i64 {
     return 0;
 }
 
+// code_return_kind classifies a function's declared return type for the tape:
+// 0 = void (empty or 'void'), 1 = i64, -1 = a type the tape does not own yet.
+fn code_return_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> i64 {
+    if is_empty_node(ast, type_node) {
+        return 0;
+    }
+    if type_node_is_i64(text, ast, type_node) {
+        return 1;
+    }
+    let type_text = ast_node_text(text, ast, type_node);
+    if std::mem::equal_bytes(type_text, "void") {
+        return 0;
+    }
+    return 0 - 1;
+}
+
+// code_node_span returns the trimmed (start, end) byte span of a node's source
+// text, so identifier operands land on the tape as exact spans.
+fn code_node_span(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> PayloadSpan {
+    let node = ast.get(node_id);
+    let span_start = node.span.start;
+    let span_end = node.span.end;
+    let start = code_span_trim_start(text, span_start, span_end);
+    let end = code_span_trim_end(text, start, span_end);
+    return PayloadSpan {
+        start: start,
+        end: end
+    };
+}
+
+fn code_span_trim_start(text: []u8, start: i64, end: i64) -> i64 {
+    if start >= end {
+        return start;
+    }
+    if !code_span_space(text[start]) {
+        return start;
+    }
+    let after = start + 1;
+    return code_span_trim_start(text, after, end);
+}
+
+fn code_span_trim_end(text: []u8, start: i64, end: i64) -> i64 {
+    if end <= start {
+        return end;
+    }
+    let last = end - 1;
+    if !code_span_space(text[last]) {
+        return end;
+    }
+    return code_span_trim_end(text, start, last);
+}
+
+fn code_span_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or
+        byte == cast<u8>(9) or
+        byte == cast<u8>(10) or
+        byte == cast<u8>(13);
+}
+
+// lower_code_module lowers the whole checked file onto the tape: every
+// top-level declaration must be a function the tape owns.
+fn lower_code_module(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>
+) -> !CodeEval {
+    let node = ast.get(root);
+    return match node.data {
+        Program(program) => try lower_code_declarations(text, ast, program.declarations, code, kinds, local_starts, local_ends, local_values, args_scratch, 0, 0),
+        _ => code_eval_unsupported(0),
+    };
+}
+
+fn lower_code_declarations(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= decls.len {
+        return code_eval_value(0, next_value);
+    }
+    let child = try ast.child_at(decls, index);
+    let eval = try lower_code_function(text, ast, decls, child, code, kinds, local_starts, local_ends, local_values, args_scratch, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try lower_code_declarations(text, ast, decls, code, kinds, local_starts, local_ends, local_values, args_scratch, after, eval.next);
+}
+
+fn lower_code_function(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    decl_id: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(decl_id);
+    return match node.data {
+        FnDecl(fn_decl) => try lower_code_fn_decl(text, ast, decls, fn_decl.name, fn_decl.params, fn_decl.return_type, fn_decl.body, code, kinds, local_starts, local_ends, local_values, args_scratch, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_fn_decl(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    name: std::kizu::ast::NodeId,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let ret_kind = code_return_kind(text, ast, return_type);
+    if ret_kind < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let name_span = code_node_span(text, ast, name);
+    let op_func_begin = code_op_func_begin();
+    try code.append(op_func_begin);
+    try code.append(name_span.start);
+    try code.append(name_span.end);
+    try code.append(params.len);
+    try code.append(ret_kind);
+    let locals_base = local_starts.len();
+    let params_eval = try lower_code_params(text, ast, params, kinds, local_starts, local_ends, local_values, 0, next_value);
+    if !params_eval.ok {
+        return code_eval_unsupported(params_eval.next);
+    }
+    let body_eval = try lower_code_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, params_eval.next);
+    if !body_eval.ok {
+        return code_eval_unsupported(body_eval.next);
+    }
+    let op_func_end = code_op_func_end();
+    try code.append(op_func_end);
+    return code_eval_value(0, body_eval.next);
+}
+
+// lower_code_body walks a function body block's statements onto the tape.
+fn lower_code_body(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let body_node = ast.get(body);
+    return match body_node.data {
+        Block(block) => try lower_code_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 0, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_params binds every parameter name to the next sequential value
+// id; the tape owns i64 parameters only, so each declared type must be i64.
+fn lower_code_params(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= params.len {
+        return code_eval_value(0, next_value);
+    }
+    let child = try ast.child_at(params, index);
+    let eval = try lower_code_param_node(text, ast, child, kinds, local_starts, local_ends, local_values, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try lower_code_params(text, ast, params, kinds, local_starts, local_ends, local_values, after, eval.next);
+}
+
+fn lower_code_param_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(child);
+    return match node.data {
+        Param(param) => try lower_code_param(text, ast, param.name, param.type_node, kinds, local_starts, local_ends, local_values, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_param(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    if !type_node_is_i64(text, ast, type_node) {
+        return code_eval_unsupported(next_value);
+    }
+    let name_span = code_node_span(text, ast, name);
+    try local_starts.append(name_span.start);
+    try local_ends.append(name_span.end);
+    try local_values.append(next_value);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+fn lower_code_statements(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    statements: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= statements.len {
+        return code_eval_value(0, next_value);
+    }
+    let child = try ast.child_at(statements, index);
+    let eval = try lower_code_statement(text, ast, decls, child, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try lower_code_statements(text, ast, decls, statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, after, eval.next);
+}
+
+fn lower_code_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    statement: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(statement);
+    return match node.data {
+        Let(let_node) => try lower_code_let(text, ast, decls, let_node.name, let_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        ExprStmt(expr_stmt) => try lower_code_expr_statement(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Return(return_node) => try lower_code_return(text, ast, decls, return_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_let binds a let local: the value expression lowers to a tape
+// value id and the name span joins the function's locals. A name already bound
+// in this function is not owned by the tape (the unified unsupported result).
+fn lower_code_let(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let name_span = code_node_span(text, ast, name);
+    let existing = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, name_span.start, name_span.end);
+    if existing >= 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    try local_starts.append(name_span.start);
+    try local_ends.append(name_span.end);
+    try local_values.append(eval.value_id);
+    return code_eval_value(eval.value_id, eval.next);
+}
+
+// lower_code_expr_statement lowers a statement-position expression; the tape
+// owns the print(<expr>) call, recorded with the argument's value kind so the
+// renderer picks the string or decimal writer.
+fn lower_code_expr_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    expr: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(expr);
+    return match node.data {
+        Call(call_node) => try lower_code_print_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_print_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_text = ast_node_text(text, ast, callee);
+    if !std::mem::equal_bytes(callee_text, "print") {
+        return code_eval_unsupported(next_value);
+    }
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let arg = try ast.child_at(args, 0);
+    let eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let kind = try kinds.get(eval.value_id);
+    let op_print = code_op_print();
+    try code.append(op_print);
+    try code.append(eval.value_id);
+    try code.append(kind);
+    return code_eval_value(eval.value_id, eval.next);
+}
+
+fn lower_code_return(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(value);
+    return match node.data {
+        Empty => try lower_code_return_void(code, next_value),
+        _ => try lower_code_return_value(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+    };
+}
+
+fn lower_code_return_void(
+    code: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let op_ret_void = code_op_ret_void();
+    try code.append(op_ret_void);
+    return code_eval_value(0, next_value);
+}
+
+fn lower_code_return_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let op_ret_value = code_op_ret_value();
+    try code.append(op_ret_value);
+    try code.append(eval.value_id);
+    return code_eval_value(eval.value_id, eval.next);
+}
+
+// code_local_lookup scans this function's locals (from locals_base) for a name
+// span match and returns the bound value id, or -1 when the name is unbound.
+fn code_local_lookup(
+    text: []u8,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    index: i64,
+    name_start: i64,
+    name_end: i64
+) -> !i64 {
+    if index >= local_starts.len() {
+        return 0 - 1;
+    }
+    let bound_start = try local_starts.get(index);
+    let bound_end = try local_ends.get(index);
+    let bound_name = text[bound_start..bound_end];
+    let name = text[name_start..name_end];
+    let after = index + 1;
+    if !std::mem::equal_bytes(bound_name, name) {
+        return try code_local_lookup(text, local_starts, local_ends, local_values, after, name_start, name_end);
+    }
+    let bound_value = try local_values.get(index);
+    return bound_value;
+}
+
 fn lower_code_expr(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
     node_id: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
     let node = ast.get(node_id);
     return match node.data {
-        Int(int_node) => try lower_code_int(text, ast, node_id, code, next_value),
-        Binary(binary) => try lower_code_binary(text, ast, binary.op, binary.left, binary.right, code, next_value),
+        Int(int_node) => try lower_code_int(text, ast, node_id, code, kinds, next_value),
+        String(string_node) => try lower_code_string(text, ast, node_id, code, kinds, next_value),
+        Var(var_node) => try lower_code_var(text, ast, node_id, code, local_starts, local_ends, local_values, locals_base, next_value),
+        Binary(binary) => try lower_code_binary(text, ast, decls, binary.op, binary.left, binary.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Call(call_node) => try lower_code_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -3375,6 +3918,7 @@ fn lower_code_int(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
     let literal_text = ast_node_text(text, ast, node_id);
@@ -3383,32 +3927,79 @@ fn lower_code_int(
     try code.append(op_const);
     try code.append(next_value);
     try code.append(literal);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
     let after_value = next_value + 1;
-    return CodeEval {
-        ok: true,
-        value: next_value,
-        next: after_value
-    };
+    return code_eval_value(next_value, after_value);
+}
+
+fn lower_code_string(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let payload = string_literal_span(text, ast, node_id);
+    if payload.start < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let op_const_str = code_op_const_str();
+    try code.append(op_const_str);
+    try code.append(next_value);
+    try code.append(payload.start);
+    try code.append(payload.end);
+    let kind_str = code_kind_str();
+    try kinds.append(kind_str);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+fn lower_code_var(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let name_span = code_node_span(text, ast, node_id);
+    let bound = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, name_span.start, name_span.end);
+    if bound < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    return code_eval_value(bound, next_value);
 }
 
 fn lower_code_binary(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
     op: std::kizu::ast::BinaryOp,
     left: std::kizu::ast::NodeId,
     right: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
     let kind = code_binary_kind(op);
     if kind == 0 {
         return code_eval_unsupported(next_value);
     }
-    let left_eval = try lower_code_expr(text, ast, left, code, next_value);
+    let left_eval = try lower_code_expr(text, ast, decls, left, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !left_eval.ok {
         return code_eval_unsupported(left_eval.next);
     }
-    let right_eval = try lower_code_expr(text, ast, right, code, left_eval.next);
+    let right_eval = try lower_code_expr(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, left_eval.next);
     if !right_eval.ok {
         return code_eval_unsupported(right_eval.next);
     }
@@ -3416,13 +4007,180 @@ fn lower_code_binary(
     try code.append(op_binary);
     try code.append(right_eval.next);
     try code.append(kind);
-    try code.append(left_eval.value);
-    try code.append(right_eval.value);
+    try code.append(left_eval.value_id);
+    try code.append(right_eval.value_id);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
     let result_value = right_eval.next;
     let after_value = result_value + 1;
-    return CodeEval {
-        ok: true,
-        value: result_value,
-        next: after_value
+    return code_eval_value(result_value, after_value);
+}
+
+// lower_code_call lowers a direct call to a user-declared i64 function: the
+// argument expressions lower first (their value ids collect in args_scratch),
+// then the CALL record carries the callee name span, the argument count, and
+// the argument value ids copied off the scratch tail.
+fn lower_code_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_span = code_node_span(text, ast, callee);
+    let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
+    if callee_kind != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let scratch_base = args_scratch.len();
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 0, next_value);
+    if !args_eval.ok {
+        return code_eval_unsupported(args_eval.next);
+    }
+    let op_call = code_op_call();
+    try code.append(op_call);
+    try code.append(args_eval.next);
+    try code.append(callee_span.start);
+    try code.append(callee_span.end);
+    try code.append(args.len);
+    try copy_code_args(code, args_scratch, scratch_base);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    let result_value = args_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+// lower_code_args lowers each call argument and collects its value id onto the
+// shared scratch tail (the CALL record then copies [scratch_base, end)). A nested
+// call argument would leave its own argument ids on the scratch below this call's,
+// and the tape has no scratch-truncate primitive yet, so a Call-valued argument is
+// rejected here: the tape's only contiguous-scratch invariant holds because every
+// other argument kind (Int / String / Var / Binary) appends exactly its own single
+// result id. Nested call arguments lower once a scratch-truncate capability lands.
+// code_node_is_call reports whether a node is a Call expression. It is the single
+// let+return-match accessor shape the compiled traversal path lowers (bool-literal
+// arms), so the nested-call rejection in lower_code_args stays out of a mid-function
+// match-over-union that the multi-statement path does not model.
+fn code_node_is_call(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Call(call_node) => true,
+        _ => false,
     };
+}
+
+fn lower_code_args(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= args.len {
+        return code_eval_value(0, next_value);
+    }
+    let arg = try ast.child_at(args, index);
+    if code_node_is_call(ast, arg) {
+        return code_eval_unsupported(next_value);
+    }
+    let eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    try args_scratch.append(eval.value_id);
+    let after = index + 1;
+    return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, after, eval.next);
+}
+
+fn copy_code_args(
+    code: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    index: i64
+) -> !void {
+    if index >= args_scratch.len() {
+        return;
+    }
+    let value = try args_scratch.get(index);
+    try code.append(value);
+    let after = index + 1;
+    try copy_code_args(code, args_scratch, after);
+    return;
+}
+
+// code_callee_return_kind scans the top-level declarations for the function
+// whose name matches the callee span and classifies its declared return type.
+fn code_callee_return_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    name_start: i64,
+    name_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= decls.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(decls, index);
+    let kind = try code_decl_return_kind(text, ast, child, name_start, name_end);
+    let after = index + 1;
+    if kind > 0 - 2 {
+        return kind;
+    }
+    return try code_callee_return_kind(text, ast, decls, name_start, name_end, after);
+}
+
+// code_decl_return_kind classifies one declaration against the callee name span:
+// -2 = not the named function (keep scanning), otherwise its return kind.
+fn code_decl_return_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    name_start: i64,
+    name_end: i64
+) -> !i64 {
+    let node = ast.get(child);
+    return match node.data {
+        FnDecl(fn_decl) => try code_fn_decl_return_kind(text, ast, fn_decl.name, fn_decl.return_type, name_start, name_end),
+        _ => code_decl_kind_skip(),
+    };
+}
+
+fn code_decl_kind_skip() -> i64 {
+    return 0 - 2;
+}
+
+// code_fn_decl_return_kind classifies one declaration against the callee name:
+// -2 = the names differ (keep scanning), otherwise the declaration's return
+// kind through code_return_kind.
+fn code_fn_decl_return_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    return_type: std::kizu::ast::NodeId,
+    name_start: i64,
+    name_end: i64
+) -> !i64 {
+    let decl_name = ast_node_text(text, ast, name);
+    let callee_name = text[name_start..name_end];
+    if !std::mem::equal_bytes(decl_name, callee_name) {
+        return 0 - 2;
+    }
+    return code_return_kind(text, ast, return_type);
 }
