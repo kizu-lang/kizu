@@ -15,9 +15,13 @@ import selfhost::ir::codegen;
 // fragments through w; the quote/newline bytes the LLVM text needs are appended as
 // explicit byte values.
 //
-// This slice renders the entry function 'main': a sequence of const-int / const-str /
-// binary / print records closed by a void return, plus the runtime preamble (types,
-// runtime declarations) and the C main wrapper.
+// render_functions walks every FUNC_BEGIN..FUNC_END span: 'main' renders the
+// kizu_run_main entry (io + body + exit), every other function a
+// kizu_run_user_<name> i64 define whose parameters are named from the value-id
+// base recorded on FUNC_BEGIN; CALL records lower to call instructions and
+// RET_VALUE to a return. Any function (main or user) that prints binds the io
+// handle at entry. The preamble (types, runtime declarations, the i64 decimal
+// helper) and the C main wrapper frame the module.
 
 pub fn render_tape_module(
     allocator: Allocator,
@@ -26,53 +30,152 @@ pub fn render_tape_module(
     code: &std::array::Array<i64>,
     kinds: &std::array::Array<i64>
 ) -> !std::string::String {
-    // This slice renders the single-function 'main' entry only: it does not yet
-    // emit user function definitions or render CALL records. The lowering accepts
-    // multi-function programs onto the tape, so guard the renderer's scope
-    // explicitly -- a tape carrying more than one function or any CALL record is
-    // rejected here rather than silently smashed into one kizu_run_main body.
-    // Deletion condition: drop this guard once render_tape_module emits per-function
-    // defines and lowers CALL records (issue 1255 slice 3b).
-    let func_count = try count_tape_records(code, codegen::code_op_func_begin(), 0);
-    if func_count > 1 {
-        return error("render_tape_module: only single-function main is supported in this slice");
-    }
-    let call_count = try count_tape_records(code, codegen::code_op_call(), 0);
-    if call_count > 0 {
-        return error("render_tape_module: CALL records are not rendered in this slice");
-    }
     var out = std::string::String(allocator);
     try render_preamble(&var out, source_path);
     try render_string_globals(&var out, text, code, 0);
-    try wl(&var out, "define i64 @kizu_run_main() {");
-    try wl(&var out, "entry:");
-    try wl(&var out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
-    try render_instructions(&var out, text, code, kinds, 0);
-    try wl(&var out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
-    try wl(&var out, "  ret i64 %exit_code");
-    try wl(&var out, "}");
-    try nl(&var out);
+    try render_functions(&var out, text, code, kinds, 0);
     try render_main_wrapper(&var out);
     return out;
 }
 
-// count_tape_records counts the records on the tape whose opcode is op, decoding
-// each record's arity to step over it.
-fn count_tape_records(
+// render_functions walks the tape function by function: each FUNC_BEGIN..FUNC_END
+// span renders one LLVM define ('main' is the kizu_run_main entry, every other
+// function a kizu_run_user_<name> i64 define), then the walk resumes past FUNC_END.
+fn render_functions(
+    out: &var std::string::String,
+    text: []u8,
     code: &std::array::Array<i64>,
-    op: i64,
+    kinds: &std::array::Array<i64>,
     index: i64
-) -> !i64 {
+) -> !void {
     if index >= code.len() {
-        return 0;
+        return;
     }
-    let record_op = try code.get(index);
+    let op = try code.get(index);
+    if op != codegen::code_op_func_begin() {
+        // Records outside a function frame are not expected; skip defensively.
+        let skip = try tape_record_end(code, index);
+        try render_functions(out, text, code, kinds, skip);
+        return;
+    }
+    let after = try render_one_function(out, text, code, kinds, index);
+    try render_functions(out, text, code, kinds, after);
+    return;
+}
+
+// render_one_function renders the function whose FUNC_BEGIN is at func_index and
+// returns the tape index past its FUNC_END.
+fn render_one_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    func_index: i64
+) -> !i64 {
+    let name_start = try code.get(func_index + 1);
+    let name_end = try code.get(func_index + 2);
+    let param_count = try code.get(func_index + 3);
+    let param_base = try code.get(func_index + 5);
+    let name = text[name_start..name_end];
+    let body_start = func_index + 6;
+    let func_end = try tape_function_end(code, body_start);
+    if std::mem::equal_bytes(name, "main") {
+        try wl(out, "define i64 @kizu_run_main() {");
+        try wl(out, "entry:");
+        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+        try render_body(out, text, code, kinds, body_start, func_end);
+        try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
+        try wl(out, "  ret i64 %exit_code");
+        try wl(out, "}");
+        try nl(out);
+        return func_end + 1;
+    }
+    try w(out, "define i64 @kizu_run_user_");
+    try w(out, name);
+    try w(out, "(");
+    try render_param_list(out, param_base, param_count, 0);
+    try wl(out, ") {");
+    try wl(out, "entry:");
+    // A user function that prints needs the io handle the print writers reference;
+    // bind it at entry only when the body actually contains a PRINT record so a
+    // pure-arithmetic function carries no unused handle.
+    if try body_has_print(code, body_start, func_end) {
+        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    }
+    try render_body(out, text, code, kinds, body_start, func_end);
+    try wl(out, "}");
+    try nl(out);
+    return func_end + 1;
+}
+
+// render_param_list emits 'i64 %v<param_base+i>' separated by commas.
+fn render_param_list(
+    out: &var std::string::String,
+    param_base: i64,
+    param_count: i64,
+    index: i64
+) -> !void {
+    if index >= param_count {
+        return;
+    }
+    if index > 0 {
+        try w(out, ", ");
+    }
+    try w(out, "i64 %v");
+    try wi(out, param_base + index);
+    let after = index + 1;
+    try render_param_list(out, param_base, param_count, after);
+    return;
+}
+
+// tape_function_end returns the index of the FUNC_END record closing the function
+// whose body begins at index.
+fn tape_function_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    if index >= code.len() {
+        return code.len();
+    }
+    let op = try code.get(index);
+    if op == codegen::code_op_func_end() {
+        return index;
+    }
     let next = try tape_record_end(code, index);
-    let rest = try count_tape_records(code, op, next);
-    if record_op == op {
-        return rest + 1;
+    return try tape_function_end(code, next);
+}
+
+// body_has_print reports whether the records in [index, func_end) include a PRINT.
+fn body_has_print(
+    code: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64
+) -> !bool {
+    if index >= func_end {
+        return false;
     }
-    return rest;
+    let op = try code.get(index);
+    if op == codegen::code_op_print() {
+        return true;
+    }
+    let next = try tape_record_end(code, index);
+    return try body_has_print(code, next, func_end);
+}
+
+// render_body renders the records in [index, func_end) of one function body.
+fn render_body(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64
+) -> !void {
+    if index >= func_end {
+        return;
+    }
+    let op = try code.get(index);
+    let next = try tape_record_end(code, index);
+    try render_one_instruction(out, text, code, kinds, op, index);
+    try render_body(out, text, code, kinds, next, func_end);
+    return;
 }
 
 // w appends a fragment with no trailing newline.
@@ -222,25 +325,6 @@ fn render_one_string_global(
     return;
 }
 
-// render_instructions walks the tape body emitting LLVM for each record until the
-// tape is exhausted. The entry body opcodes render in order.
-fn render_instructions(
-    out: &var std::string::String,
-    text: []u8,
-    code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
-    index: i64
-) -> !void {
-    if index >= code.len() {
-        return;
-    }
-    let op = try code.get(index);
-    let next = try tape_record_end(code, index);
-    try render_one_instruction(out, text, code, kinds, op, index);
-    try render_instructions(out, text, code, kinds, next);
-    return;
-}
-
 fn render_one_instruction(
     out: &var std::string::String,
     text: []u8,
@@ -267,6 +351,62 @@ fn render_one_instruction(
         try render_print(out, code, kinds, index);
         return;
     }
+    if op == codegen::code_op_call() {
+        try render_call(out, text, code, index);
+        return;
+    }
+    if op == codegen::code_op_ret_value() {
+        let value_id = try code.get(index + 1);
+        try w(out, "  ret i64 %v");
+        try wi(out, value_id);
+        try nl(out);
+        return;
+    }
+    return;
+}
+
+// render_call emits '%v<dst> = call i64 @kizu_run_user_<callee>(i64 %v<arg>, ...)'.
+fn render_call(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let callee_start = try code.get(index + 2);
+    let callee_end = try code.get(index + 3);
+    let arg_count = try code.get(index + 4);
+    let callee = text[callee_start..callee_end];
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call i64 @kizu_run_user_");
+    try w(out, callee);
+    try w(out, "(");
+    try render_call_args(out, code, index, arg_count, 0);
+    try wl(out, ")");
+    return;
+}
+
+// render_call_args emits the 'i64 %v<arg>' operands read from the CALL record's
+// trailing arg-id list (which begins at index + 5).
+fn render_call_args(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    arg_count: i64,
+    arg_index: i64
+) -> !void {
+    if arg_index >= arg_count {
+        return;
+    }
+    if arg_index > 0 {
+        try w(out, ", ");
+    }
+    let arg_value = try code.get(index + 5 + arg_index);
+    try w(out, "i64 %v");
+    try wi(out, arg_value);
+    let after = arg_index + 1;
+    try render_call_args(out, code, index, arg_count, after);
     return;
 }
 
@@ -443,7 +583,7 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
         return index + 3;
     }
     if op == codegen::code_op_func_begin() {
-        return index + 5;
+        return index + 6;
     }
     if op == codegen::code_op_func_end() {
         return index + 1;
