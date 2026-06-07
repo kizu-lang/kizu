@@ -12,6 +12,7 @@ struct I64RunTags {
     ast_return: i64,
     ast_binary: i64,
     ast_var: i64,
+    ast_bool: i64,
     ast_let: i64,
     ast_if: i64,
     ast_empty: i64,
@@ -34,6 +35,8 @@ struct I64RunTags {
 
 pub fn append_globals(out: &var std::string::String) -> !void {
     try append_llvm_constant(out, "i64_type", "3", "i64");
+    try append_llvm_constant(out, "run_true", "4", "true");
+    try append_llvm_constant(out, "run_false", "5", "false");
     return;
 }
 
@@ -57,10 +60,12 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     try append_eval_const_i64_expr_function(out, &tags);
     try append_eval_const_i64_operand_one_local_function(out, &tags);
     try append_eval_const_bool_expr_one_local_function(out, &tags);
+    try append_eval_const_bool_literal_function(out, &tags);
     try append_lower_const_i64_print_program_function(out);
     try append_lower_const_string_print_statement_program_function(out, &tags);
     try append_lower_const_print_block_program_function(out, &tags);
     try append_lower_const_let_if_program_function(out, &tags);
+    try append_lower_const_single_if_program_function(out, &tags);
     try append_lower_const_i64_program_function(out, &tags);
     return;
 }
@@ -77,6 +82,7 @@ fn load_i64_run_tags(ir_bytes: []u8) -> !I64RunTags {
         ast_return: try ast_data_tag(ir_bytes, "Return"),
         ast_binary: try ast_data_tag(ir_bytes, "Binary"),
         ast_var: try ast_data_tag(ir_bytes, "Var"),
+        ast_bool: try ast_data_tag(ir_bytes, "Bool"),
         ast_let: try ast_data_tag(ir_bytes, "Let"),
         ast_if: try ast_data_tag(ir_bytes, "If"),
         ast_empty: try ast_data_tag(ir_bytes, "Empty"),
@@ -1110,6 +1116,52 @@ fn append_eval_const_bool_expr_one_local_function(
     return;
 }
 
+fn append_eval_const_bool_literal_function(
+    out: &var std::string::String,
+    tags: &I64RunTags
+) -> !void {
+    try append_line(out, "define %kizu.error.bool @kizu_selfhost__cli_codegen_eval_const_bool_literal(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %node_id");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %node_id)");
+    try append_line(out, "  %data = extractvalue %kizu.kizu.ast.ast_node %node, 1");
+    try append_line(out, "  %tag = extractvalue %kizu.kizu.ast.ast_data %data, 0");
+    try out.append_bytes("  %is_bool = icmp eq i64 %tag, ");
+    try std::fmt::append_i64(out, tags.ast_bool);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_bool, label %literal_text, label %unsupported");
+    try append_line(out, "literal_text:");
+    try append_line(out, "  %literal = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %node_id)");
+    try append_line(out, "  %true_ptr = getelementptr inbounds [4 x i8], ptr @.kizu.cli.run_true, i64 0, i64 0");
+    try append_line(out, "  %true_base = insertvalue %kizu.slice.u8 poison, ptr %true_ptr, 0");
+    try append_line(out, "  %true_slice = insertvalue %kizu.slice.u8 %true_base, i64 4, 1");
+    try append_line(out, "  %is_true = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %literal, %kizu.slice.u8 %true_slice)");
+    try append_line(out, "  br i1 %is_true, label %true_value, label %check_false");
+    try append_line(out, "true_value:");
+    try append_line(out, "  %true0 = insertvalue %kizu.error.bool poison, i1 true, 0");
+    try append_line(out, "  %true1 = insertvalue %kizu.error.bool %true0, i1 true, 1");
+    try append_line(out, "  %true2 = insertvalue %kizu.error.bool %true1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_line(out, "  ret %kizu.error.bool %true2");
+    try append_line(out, "check_false:");
+    try append_line(out, "  %false_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.run_false, i64 0, i64 0");
+    try append_line(out, "  %false_base = insertvalue %kizu.slice.u8 poison, ptr %false_ptr, 0");
+    try append_line(out, "  %false_slice = insertvalue %kizu.slice.u8 %false_base, i64 5, 1");
+    try append_line(out, "  %is_false = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %literal, %kizu.slice.u8 %false_slice)");
+    try append_line(out, "  br i1 %is_false, label %false_value, label %unsupported");
+    try append_line(out, "false_value:");
+    try append_line(out, "  %false0 = insertvalue %kizu.error.bool poison, i1 true, 0");
+    try append_line(out, "  %false1 = insertvalue %kizu.error.bool %false0, i1 false, 1");
+    try append_line(out, "  %false2 = insertvalue %kizu.error.bool %false1, %kizu.slice.u8 zeroinitializer, 2");
+    try append_line(out, "  ret %kizu.error.bool %false2");
+    try append_unsupported_error_bool_block(out);
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
 fn append_lower_const_i64_print_program_function(out: &var std::string::String) -> !void {
     try append_line(out, "define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_const_i64_print_program(");
     try append_line(out, "  %kizu.slice.u8 %text,");
@@ -1329,6 +1381,64 @@ fn append_lower_const_let_if_program_function(
     return;
 }
 
+fn append_lower_const_single_if_program_function(
+    out: &var std::string::String,
+    tags: &I64RunTags
+) -> !void {
+    try append_line(out, "define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_const_single_if_program(");
+    try append_line(out, "  %kizu.slice.u8 %text,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %statement");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %statement_ast = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %statement)");
+    try append_line(out, "  %statement_data = extractvalue %kizu.kizu.ast.ast_node %statement_ast, 1");
+    try append_line(out, "  %statement_tag = extractvalue %kizu.kizu.ast.ast_data %statement_data, 0");
+    try out.append_bytes("  %is_if = icmp eq i64 %statement_tag, ");
+    try std::fmt::append_i64(out, tags.ast_if);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %is_if, label %if_payload_block, label %unsupported");
+    try append_line(out, "if_payload_block:");
+    try append_line(out, "  %if_slot = alloca %kizu.kizu.ast.ast_data, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.ast_data %statement_data, ptr %if_slot, align 8");
+    try append_line(out, "  %if_payload_ptr = getelementptr %kizu.kizu.ast.ast_data, ptr %if_slot, i32 0, i32 1");
+    try append_line(out, "  %if_payload = load %kizu.kizu.ast.if_node, ptr %if_payload_ptr, align 8");
+    try append_line(out, "  %condition = extractvalue %kizu.kizu.ast.if_node %if_payload, 0");
+    try append_line(out, "  %then_block = extractvalue %kizu.kizu.ast.if_node %if_payload, 1");
+    try append_line(out, "  %else_block = extractvalue %kizu.kizu.ast.if_node %if_payload, 2");
+    try append_line(out, "  %then_program = call %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_const_print_block_program(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %then_block)");
+    try append_line(out, "  %then_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(%kizu.selfhost.codegen.program %then_program)");
+    try append_line(out, "  br i1 %then_supported, label %validate_else, label %unsupported");
+    try append_line(out, "validate_else:");
+    try append_line(out, "  %else_ast = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %else_block)");
+    try append_line(out, "  %else_data = extractvalue %kizu.kizu.ast.ast_node %else_ast, 1");
+    try append_line(out, "  %else_tag = extractvalue %kizu.kizu.ast.ast_data %else_data, 0");
+    try out.append_bytes("  %if_else_empty = icmp eq i64 %else_tag, ");
+    try std::fmt::append_i64(out, tags.ast_empty);
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %if_else_empty, label %eval_condition, label %unsupported");
+    try append_line(out, "eval_condition:");
+    try append_line(out, "  %condition_result = call %kizu.error.bool @kizu_selfhost__cli_codegen_eval_const_bool_literal(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %condition)");
+    try append_line(out, "  %condition_ok = extractvalue %kizu.error.bool %condition_result, 0");
+    try append_line(out, "  br i1 %condition_ok, label %condition_bound, label %unsupported");
+    try append_line(out, "condition_bound:");
+    try append_line(out, "  %condition_value = extractvalue %kizu.error.bool %condition_result, 1");
+    try append_line(out, "  br i1 %condition_value, label %lower_then, label %lower_empty");
+    try append_line(out, "lower_then:");
+    try append_line(out, "  ret %kizu.selfhost.codegen.program %then_program");
+    try append_line(out, "lower_empty:");
+    try append_line(out, "  %main_ptr = getelementptr inbounds [4 x i8], ptr @.kizu.cli.run_main, i64 0, i64 0");
+    try append_line(out, "  %main_base = insertvalue %kizu.slice.u8 poison, ptr %main_ptr, 0");
+    try append_line(out, "  %main_slice = insertvalue %kizu.slice.u8 %main_base, i64 4, 1");
+    try append_line(out, "  %if_return_ast = call %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_return_void_run_ast(%kizu.slice.u8 %text, %kizu.slice.u8 %main_slice, i64 1)");
+    try append_line(out, "  %if_return_program = call %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_return_void_program(%kizu.selfhost.codegen.run_ast %if_return_ast)");
+    try append_line(out, "  ret %kizu.selfhost.codegen.program %if_return_program");
+    try append_unsupported_program_block(out);
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
 fn append_lower_const_i64_program_function(
     out: &var std::string::String,
     tags: &I64RunTags
@@ -1417,7 +1527,10 @@ fn append_lower_const_i64_program_function(
     try out.append_bytes("  %is_expr_stmt = icmp eq i64 %statement_tag, ");
     try std::fmt::append_i64(out, tags.ast_expr_stmt);
     try out.append_byte(cast<u8>(10));
-    try append_line(out, "  br i1 %is_expr_stmt, label %expr_stmt_payload, label %unsupported");
+    try append_line(out, "  br i1 %is_expr_stmt, label %expr_stmt_payload, label %try_single_if");
+    try append_line(out, "try_single_if:");
+    try append_line(out, "  %single_if_program = call %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_const_single_if_program(%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %statement)");
+    try append_line(out, "  ret %kizu.selfhost.codegen.program %single_if_program");
     try append_line(out, "expr_stmt_payload:");
     try append_line(out, "  %expr_slot = alloca %kizu.kizu.ast.ast_data, align 8");
     try append_line(out, "  store %kizu.kizu.ast.ast_data %statement_data, ptr %expr_slot, align 8");

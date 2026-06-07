@@ -706,6 +706,8 @@ func requiredLLVMConstI64RunCodegenFragments() []string {
 			"@kizu_selfhost__cli_codegen_eval_const_i64_operand_one_local(",
 		"define %kizu.error.bool " +
 			"@kizu_selfhost__cli_codegen_eval_const_bool_expr_one_local(",
+		"define %kizu.error.bool " +
+			"@kizu_selfhost__cli_codegen_eval_const_bool_literal(",
 		"define %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_i64_print_program(",
 		"define %kizu.selfhost.codegen.program " +
@@ -713,12 +715,16 @@ func requiredLLVMConstI64RunCodegenFragments() []string {
 		"define %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_let_if_program(",
 		"define %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_single_if_program(",
+		"define %kizu.selfhost.codegen.program " +
 			"@kizu_selfhost__cli_codegen_lower_const_i64_program(",
 		"@kizu_selfhost__cli_codegen_eval_const_i64_expr(%kizu.slice.u8 %text, " +
 			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %left)",
 		"@kizu_selfhost__cli_codegen_eval_const_bool_expr_one_local(%kizu.slice.u8 %text, " +
 			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %condition, " +
 			"%kizu.slice.u8 %local_name, i64 %local_value)",
+		"@kizu_selfhost__cli_codegen_eval_const_bool_literal(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %condition)",
 		"@kizu_selfhost__ir_codegen_eval_i64_call_arg_expr(%kizu.slice.u8 %text, " +
 			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, " +
 			"%kizu.kizu.ast.node_id %arg0_node)",
@@ -734,6 +740,11 @@ func requiredLLVMConstI64RunCodegenFragments() []string {
 			"[ %else_return_program, %else_return_void ], [ %else_print_program, %else_print ]",
 		"%else_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
 			"%kizu.selfhost.codegen.program %else_print_program)",
+		"%single_if_program = call %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_single_if_program(",
+		"%if_else_empty = icmp eq i64 %else_tag, ",
+		"%if_return_ast = call %kizu.selfhost.codegen.run_ast " +
+			"@kizu_selfhost__ir_codegen_return_void_run_ast(",
 		"%op = call i64 @kizu_selfhost__ir_codegen_run_binary_op(i64 %std_op)",
 		"%decimal_result = call %kizu.error.slice.u8 @kizu_selfhost__i64_decimal(i64 %value)",
 		"%program = call %kizu.selfhost.codegen.program " +
