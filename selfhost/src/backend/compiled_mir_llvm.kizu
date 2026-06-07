@@ -3411,8 +3411,9 @@ fn append_lower_run_ast_block_globals(stmt: &compiled_mir::MirLowerRunAstBlockSt
 // non-terminal statement must be a Let binding (lower_let_binding, inserted via insert_local) and
 // the terminal statement must be an ExprStmt forwarded to lower_print_statement or an empty Return
 // lowered to a return-void RunAst. A leading fixed-shape try-void probe handles
-// try helper(); print(...); return; before falling back to the local-binding loop. Any rejection
-// returns the wrapped unsupported_run_ast(); the checked Ast.child_at failure propagates as the
+// try helper(); print(...); return; before falling back to the local-binding loop. Duplicate local
+// names are reported as a real !RunAst failure carrying the duplicate name slice; other rejections
+// return the wrapped unsupported_run_ast(); the checked Ast.child_at failure propagates as the
 // !RunAst error. The AstData payload slot is hoisted to entry so the loop body allocates no stack.
 fn append_multi_lower_run_ast_block(
     out: &var std::string::String,
@@ -3561,6 +3562,17 @@ fn append_multi_lower_run_ast_block(
     try append_ll_line(out, "  %lrb_let_node = load %kizu.kizu.ast.let_node, ptr %lrb_let_ptr, align 8");
     try append_ll_line(out, "  %lrb_let_name = extractvalue %kizu.kizu.ast.let_node %lrb_let_node, 1");
     try append_ll_line(out, "  %lrb_let_value = extractvalue %kizu.kizu.ast.let_node %lrb_let_node, 2");
+    try out.append_bytes("  %lrb_local_name = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(%kizu.slice.u8 %");
+    try out.append_bytes(stmt.text_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(stmt.ast_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.ast_name);
+    try append_ll_line(out, ", %kizu.kizu.ast.node_id %lrb_let_name)");
+    try append_ll_line(out,
+        "  %lrb_duplicate = call i1 @kizu_selfhost__ir_codegen_local_table_contains(%kizu.selfhost.codegen.local_table %lrb_locals, %kizu.slice.u8 %lrb_local_name)");
+    try append_ll_line(out, "  br i1 %lrb_duplicate, label %lrb_duplicate_local, label %lrb_lower_let");
+    try append_ll_line(out, "lrb_lower_let:");
     try out.append_bytes("  %lrb_binding_let = call %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_lower_let_binding(%kizu.slice.u8 %");
     try out.append_bytes(stmt.text_name);
     try out.append_bytes(", ");
@@ -3570,6 +3582,13 @@ fn append_multi_lower_run_ast_block(
     try append_ll_line(out,
         ", %kizu.selfhost.codegen.local_table %lrb_locals, %kizu.kizu.ast.node_id %lrb_let_name, %kizu.kizu.ast.node_id %lrb_let_value)");
     try append_ll_line(out, "  br label %lrb_binding_done");
+    try append_ll_line(out, "lrb_duplicate_local:");
+    try append_ll_line(out, "  %lrb_dup_f0 = insertvalue %kizu.error.run_ast poison, i1 false, 0");
+    try append_ll_line(out,
+        "  %lrb_dup_f1 = insertvalue %kizu.error.run_ast %lrb_dup_f0, %kizu.selfhost.codegen.run_ast zeroinitializer, 1");
+    try append_ll_line(out,
+        "  %lrb_dup_f2 = insertvalue %kizu.error.run_ast %lrb_dup_f1, %kizu.slice.u8 %lrb_local_name, 2");
+    try append_ll_line(out, "  ret %kizu.error.run_ast %lrb_dup_f2");
     try append_ll_line(out, "lrb_not_let:");
     try out.append_bytes("  %lrb_binding_empty = call %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_empty_local(%kizu.slice.u8 %");
     try out.append_bytes(stmt.text_name);
@@ -3577,7 +3596,7 @@ fn append_multi_lower_run_ast_block(
     try append_ll_line(out, "  br label %lrb_binding_done");
     try append_ll_line(out, "lrb_binding_done:");
     try append_ll_line(out,
-        "  %lrb_binding = phi %kizu.selfhost.codegen.local_binding [ %lrb_binding_let, %lrb_let ], [ %lrb_binding_empty, %lrb_not_let ]");
+        "  %lrb_binding = phi %kizu.selfhost.codegen.local_binding [ %lrb_binding_let, %lrb_lower_let ], [ %lrb_binding_empty, %lrb_not_let ]");
     try append_ll_line(out,
         "  %lrb_binding_name = extractvalue %kizu.selfhost.codegen.local_binding %lrb_binding, 0");
     try append_ll_line(out, "  %lrb_name_len = extractvalue %kizu.slice.u8 %lrb_binding_name, 1");

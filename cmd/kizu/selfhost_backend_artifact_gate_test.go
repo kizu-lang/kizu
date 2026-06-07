@@ -473,6 +473,12 @@ func requiredLLVMRunArtifactEmissionFragments() []string {
 		"%from_codegen_lowering = extractvalue %kizu.selfhost.codegen.program %program, 15",
 		"%shape_ok = and i1 %shape_12, %from_codegen_lowering",
 		"%escape_next_write = call i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
+		"@.kizu.cli.run_duplicate_local_prefix = " +
+			"private unnamed_addr constant [39 x i8] c\"error: type error: duplicate variable `\"",
+		"@.kizu.cli.run_duplicate_local_suffix = " +
+			"private unnamed_addr constant [2 x i8] c\"`\\0A\"",
+		"%run_duplicate_name = extractvalue %kizu.error.run_ast %run_ast_result, 2",
+		"%run_dup_name_write = call %kizu.error.void @kizu_rt_io_write_stderr(",
 		"define i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
 		"%run_emitted = call i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
 		"%run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
@@ -1265,6 +1271,11 @@ func requiredLLVMLowerRunAstBlockFragments() []string {
 		"%lrb_let_node = load %kizu.kizu.ast.let_node, ptr %lrb_let_ptr, align 8",
 		"%lrb_binding_let = call %kizu.selfhost.codegen.local_binding " +
 			"@kizu_selfhost__ir_codegen_lower_let_binding(",
+		"%lrb_duplicate = call i1 @kizu_selfhost__ir_codegen_local_table_contains(" +
+			"%kizu.selfhost.codegen.local_table %lrb_locals, %kizu.slice.u8 %lrb_local_name)",
+		"lrb_duplicate_local:",
+		"%lrb_dup_f2 = insertvalue %kizu.error.run_ast %lrb_dup_f1, " +
+			"%kizu.slice.u8 %lrb_local_name, 2",
 		"%lrb_locals_next = call %kizu.selfhost.codegen.local_table " +
 			"@kizu_selfhost__ir_codegen_insert_local(",
 		"%lrb_is_exprstmt = icmp eq i64 %lrb_tag, 26",
