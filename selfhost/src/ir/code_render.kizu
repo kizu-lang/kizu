@@ -1,0 +1,452 @@
+import selfhost::ir::codegen;
+
+// Run codegen IR v1 renderer: walk the flat function-block-instruction tape
+// (the Array<i64> records lower_code_module emits, with the run source text for
+// string/name spans) and produce the run artifact LLVM module text.
+//
+// The renderer is the generic counterpart of the old per-shape hosted renderers:
+// it iterates the tape opcodes instead of matching a fixed Program shape. Every
+// value id names an SSA temp '%v<id>'; CONST_STR payloads become module globals
+// '@.kizu.run.s<id>'; PRINT dispatches on the recorded value kind to the string
+// or i64 writer.
+//
+// Kizu string literals do not interpret backslash escapes, so every emitted line
+// is written through wl (append the bytes then a real newline byte) and partial
+// fragments through w; the quote/newline bytes the LLVM text needs are appended as
+// explicit byte values.
+//
+// This slice renders the entry function 'main': a sequence of const-int / const-str /
+// binary / print records closed by a void return, plus the runtime preamble (types,
+// runtime declarations) and the C main wrapper.
+
+pub fn render_tape_module(
+    allocator: Allocator,
+    source_path: []u8,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try render_preamble(&var out, source_path);
+    try render_string_globals(&var out, text, code, 0);
+    try wl(&var out, "define i64 @kizu_run_main() {");
+    try wl(&var out, "entry:");
+    try wl(&var out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    try render_instructions(&var out, text, code, kinds, 0);
+    try wl(&var out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
+    try wl(&var out, "  ret i64 %exit_code");
+    try wl(&var out, "}");
+    try nl(&var out);
+    try render_main_wrapper(&var out);
+    return out;
+}
+
+// w appends a fragment with no trailing newline.
+fn w(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    return;
+}
+
+// wl appends a full line plus a real newline byte.
+fn wl(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// nl appends a single newline byte.
+fn nl(out: &var std::string::String) -> !void {
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// wi appends a decimal i64.
+fn wi(out: &var std::string::String, value: i64) -> !void {
+    try std::fmt::append_i64(out, value);
+    return;
+}
+
+fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
+    try wl(out, "; kizu codegen run artifact ll v1");
+    try w(out, "source_filename = ");
+    try out.append_byte(cast<u8>(34));
+    try w(out, source_path);
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
+    try nl(out);
+    try wl(out, "%kizu.slice.u8 = type { ptr, i64 }");
+    try wl(out, "%kizu.owned = type { ptr }");
+    try wl(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
+    try nl(out);
+    try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
+    try nl(out);
+    try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
+    try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
+    try wl(out, "declare %kizu.owned @kizu_rt_io_blocking()");
+    try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare i64 @kizu_rt_process_exit_code(i64)");
+    try wl(out, "declare void @kizu_host_init(i32, ptr)");
+    try nl(out);
+    try wl(out, "@.kizu.run.newline = private unnamed_addr constant [1 x i8] [i8 10]");
+    try nl(out);
+    try render_i64_decimal_helper(out);
+    return;
+}
+
+// render_i64_decimal_helper emits @kizu_run_i64_decimal: format an i64 into a
+// page-allocated 20-byte buffer and return the trimmed decimal slice. It backs the
+// PRINT path for i64 values, mirroring the runtime helper the old hosted i64 renderer
+// emitted.
+fn render_i64_decimal_helper(out: &var std::string::String) -> !void {
+    try wl(out, "define %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %value) {");
+    try wl(out, "entry:");
+    try wl(out, "  %allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
+    try wl(out, "  %allocator_ptr = extractvalue %kizu.owned %allocator, 0");
+    try wl(out, "  %buffer = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 20)");
+    try wl(out, "  %allocated = icmp ne ptr %buffer, null");
+    try wl(out, "  br i1 %allocated, label %check_zero, label %alloc_failed");
+    try wl(out, "check_zero:");
+    try wl(out, "  %is_zero = icmp eq i64 %value, 0");
+    try wl(out, "  br i1 %is_zero, label %zero, label %loop");
+    try wl(out, "zero:");
+    try wl(out, "  %zero_ptr = getelementptr i8, ptr %buffer, i64 19");
+    try wl(out, "  store i8 48, ptr %zero_ptr");
+    try wl(out, "  br label %finish_zero");
+    try wl(out, "loop:");
+    try wl(out, "  %current = phi i64 [ %value, %check_zero ], [ %quotient, %loop ]");
+    try wl(out, "  %write_index = phi i64 [ 19, %check_zero ], [ %next_index, %loop ]");
+    try wl(out, "  %digit = srem i64 %current, 10");
+    try wl(out, "  %digit_byte_i64 = add i64 %digit, 48");
+    try wl(out, "  %digit_byte = trunc i64 %digit_byte_i64 to i8");
+    try wl(out, "  %digit_ptr = getelementptr i8, ptr %buffer, i64 %write_index");
+    try wl(out, "  store i8 %digit_byte, ptr %digit_ptr");
+    try wl(out, "  %quotient = sdiv i64 %current, 10");
+    try wl(out, "  %next_index = sub i64 %write_index, 1");
+    try wl(out, "  %done = icmp eq i64 %quotient, 0");
+    try wl(out, "  br i1 %done, label %finish_loop, label %loop");
+    try wl(out, "finish_zero:");
+    try wl(out, "  br label %success");
+    try wl(out, "finish_loop:");
+    try wl(out, "  br label %success");
+    try wl(out, "success:");
+    try wl(out, "  %start = phi i64 [ 19, %finish_zero ], [ %write_index, %finish_loop ]");
+    try wl(out, "  %len = sub i64 20, %start");
+    try wl(out, "  %start_ptr = getelementptr i8, ptr %buffer, i64 %start");
+    try wl(out, "  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %start_ptr, 0");
+    try wl(out, "  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %len, 1");
+    try wl(out, "  %ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
+    try wl(out, "  %result = insertvalue %kizu.error.slice.u8 %ok, %kizu.slice.u8 %slice, 1");
+    try wl(out, "  ret %kizu.error.slice.u8 %result");
+    try wl(out, "alloc_failed:");
+    try wl(out, "  ret %kizu.error.slice.u8 zeroinitializer");
+    try wl(out, "}");
+    try nl(out);
+    return;
+}
+
+// render_string_globals walks the tape and emits a private constant for every
+// CONST_STR record's payload span, named '@.kizu.run.s<dst>'.
+fn render_string_globals(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    if index >= code.len() {
+        return;
+    }
+    let op = try code.get(index);
+    let next = try tape_record_end(code, index);
+    if op == codegen::code_op_const_str() {
+        let dst = try code.get(index + 1);
+        let payload_start = try code.get(index + 2);
+        let payload_end = try code.get(index + 3);
+        try render_one_string_global(out, text, dst, payload_start, payload_end);
+    }
+    try render_string_globals(out, text, code, next);
+    return;
+}
+
+fn render_one_string_global(
+    out: &var std::string::String,
+    text: []u8,
+    dst: i64,
+    payload_start: i64,
+    payload_end: i64
+) -> !void {
+    let payload = text[payload_start..payload_end];
+    let byte_len = payload_end - payload_start;
+    try w(out, "@.kizu.run.s");
+    try wi(out, dst);
+    try w(out, " = private unnamed_addr constant [");
+    try wi(out, byte_len);
+    try w(out, " x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try render_llvm_c_bytes(out, payload);
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
+    return;
+}
+
+// render_instructions walks the tape body emitting LLVM for each record until the
+// tape is exhausted. The entry body opcodes render in order.
+fn render_instructions(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    if index >= code.len() {
+        return;
+    }
+    let op = try code.get(index);
+    let next = try tape_record_end(code, index);
+    try render_one_instruction(out, text, code, kinds, op, index);
+    try render_instructions(out, text, code, kinds, next);
+    return;
+}
+
+fn render_one_instruction(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    op: i64,
+    index: i64
+) -> !void {
+    if op == codegen::code_op_const_int() {
+        let dst = try code.get(index + 1);
+        let literal = try code.get(index + 2);
+        try w(out, "  %v");
+        try wi(out, dst);
+        try w(out, " = add i64 0, ");
+        try wi(out, literal);
+        try nl(out);
+        return;
+    }
+    if op == codegen::code_op_binary() {
+        try render_binary(out, code, index);
+        return;
+    }
+    if op == codegen::code_op_print() {
+        try render_print(out, code, kinds, index);
+        return;
+    }
+    return;
+}
+
+fn render_binary(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    let left = try code.get(index + 3);
+    let right = try code.get(index + 4);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = ");
+    try w(out, binary_op_mnemonic(kind));
+    try w(out, " i64 %v");
+    try wi(out, left);
+    try w(out, ", %v");
+    try wi(out, right);
+    try nl(out);
+    return;
+}
+
+fn binary_op_mnemonic(kind: i64) -> []u8 {
+    if kind == 1 {
+        return "add";
+    }
+    if kind == 2 {
+        return "sub";
+    }
+    if kind == 3 {
+        return "mul";
+    }
+    return "sdiv";
+}
+
+// render_print emits the write for a print(<value>) record then the trailing
+// newline print() appends: a string value writes its global slice straight to
+// stdout; an i64 value formats through the decimal helper first.
+fn render_print(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let value_id = try code.get(index + 1);
+    let value_kind = try code.get(index + 2);
+    if value_kind == codegen::code_kind_str() {
+        let byte_len = try tape_string_length(code, value_id, 0);
+        try render_print_string(out, value_id, byte_len);
+        try render_print_newline(out, value_id);
+        return;
+    }
+    try render_print_i64(out, value_id);
+    try render_print_newline(out, value_id);
+    return;
+}
+
+// tape_string_length scans the tape for the CONST_STR record whose dst is value_id
+// and returns its payload byte length, so the print slice carries the exact length.
+fn tape_string_length(
+    code: &std::array::Array<i64>,
+    value_id: i64,
+    index: i64
+) -> !i64 {
+    if index >= code.len() {
+        return 0;
+    }
+    let op = try code.get(index);
+    let next = try tape_record_end(code, index);
+    if op == codegen::code_op_const_str() {
+        let dst = try code.get(index + 1);
+        if dst == value_id {
+            let payload_start = try code.get(index + 2);
+            let payload_end = try code.get(index + 3);
+            return payload_end - payload_start;
+        }
+    }
+    return try tape_string_length(code, value_id, next);
+}
+
+fn render_print_string(
+    out: &var std::string::String,
+    value_id: i64,
+    byte_len: i64
+) -> !void {
+    try w(out, "  %ps");
+    try wi(out, value_id);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.s");
+    try wi(out, value_id);
+    try wl(out, ", 0");
+    try w(out, "  %ps");
+    try wi(out, value_id);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %ps");
+    try wi(out, value_id);
+    try w(out, "_base, i64 ");
+    try wi(out, byte_len);
+    try wl(out, ", 1");
+    try w(out, "  %ps");
+    try wi(out, value_id);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %ps");
+    try wi(out, value_id);
+    try wl(out, "_slice)");
+    return;
+}
+
+fn render_print_i64(out: &var std::string::String, value_id: i64) -> !void {
+    try w(out, "  %pi");
+    try wi(out, value_id);
+    try w(out, "_dec = call %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %v");
+    try wi(out, value_id);
+    try wl(out, ")");
+    try w(out, "  %pi");
+    try wi(out, value_id);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %pi");
+    try wi(out, value_id);
+    try wl(out, "_dec, 1");
+    try w(out, "  %pi");
+    try wi(out, value_id);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pi");
+    try wi(out, value_id);
+    try wl(out, "_slice)");
+    return;
+}
+
+// render_print_newline writes the trailing newline print() appends after its payload.
+fn render_print_newline(out: &var std::string::String, value_id: i64) -> !void {
+    try w(out, "  %pn");
+    try wi(out, value_id);
+    try wl(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.newline, 0");
+    try w(out, "  %pn");
+    try wi(out, value_id);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %pn");
+    try wi(out, value_id);
+    try wl(out, "_base, i64 1, 1");
+    try w(out, "  %pn");
+    try wi(out, value_id);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pn");
+    try wi(out, value_id);
+    try wl(out, "_slice)");
+    return;
+}
+
+fn render_main_wrapper(out: &var std::string::String) -> !void {
+    try wl(out, "define i32 @main(i32 %argc, ptr %argv) {");
+    try wl(out, "entry:");
+    try wl(out, "  call void @kizu_host_init(i32 %argc, ptr %argv)");
+    try wl(out, "  %code = call i64 @kizu_run_main()");
+    try wl(out, "  %exit = trunc i64 %code to i32");
+    try wl(out, "  ret i32 %exit");
+    try wl(out, "}");
+    return;
+}
+
+// tape_record_end returns the tape index just past the record beginning at index,
+// using each opcode's fixed arity (CALL carries a trailing variable arg-id list).
+fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let op = try code.get(index);
+    if op == codegen::code_op_const_int() {
+        return index + 3;
+    }
+    if op == codegen::code_op_const_str() {
+        return index + 4;
+    }
+    if op == codegen::code_op_binary() {
+        return index + 5;
+    }
+    if op == codegen::code_op_call() {
+        let arg_count = try code.get(index + 4);
+        return index + 5 + arg_count;
+    }
+    if op == codegen::code_op_print() {
+        return index + 3;
+    }
+    if op == codegen::code_op_func_begin() {
+        return index + 5;
+    }
+    if op == codegen::code_op_func_end() {
+        return index + 1;
+    }
+    if op == codegen::code_op_ret_void() {
+        return index + 1;
+    }
+    if op == codegen::code_op_ret_value() {
+        return index + 2;
+    }
+    return code.len();
+}
+
+fn render_llvm_c_bytes(out: &var std::string::String, payload: []u8) -> !void {
+    var index = 0;
+    let length = std::mem::len(payload);
+    while index < length {
+        let byte = payload[index];
+        try render_llvm_c_byte(out, byte);
+        index = index + 1;
+    }
+    return;
+}
+
+fn render_llvm_c_byte(out: &var std::string::String, byte: u8) -> !void {
+    if byte == cast<u8>(34) {
+        try w(out, "\22");
+        return;
+    }
+    if byte == cast<u8>(92) {
+        try w(out, "\5C");
+        return;
+    }
+    if byte == cast<u8>(10) {
+        try w(out, "\0A");
+        return;
+    }
+    try out.append_byte(byte);
+    return;
+}
