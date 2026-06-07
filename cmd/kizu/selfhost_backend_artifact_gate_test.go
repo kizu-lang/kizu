@@ -331,9 +331,11 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"define %kizu.error.owned @kizu_selfhost__backend_hosted_artifact_path(",
 		"define i64 @kizu_selfhost__parse_buffer_append",
 		"define i64 @kizu_selfhost__parse_next_semantic_token_index",
-		"define %kizu.error.slice.u8 @kizu_selfhost__parse_format_alloc",
+		"define %kizu.error.owned @kizu_selfhost__parser_format_format_source(",
+		"call %kizu.error.owned @kizu_selfhost__parser_format_format_source(",
 		"define i1 @kizu_selfhost__parse_format_write",
-		"define i1 @kizu_selfhost__parse_format_file_write",
+		"define i1 @kizu_selfhost__format_source_write",
+		"define i1 @kizu_selfhost__format_source_file_write",
 		"define i64 @kizu_selfhost__parse_skip_comment_or_self",
 		"define i64 @kizu_selfhost__parse_missing_expr_index",
 		"define i64 @kizu_selfhost__parse_missing_assign_index",
@@ -344,12 +346,13 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"@.kizu.cli.fmt_write_short",
 		"%argc_is_three = icmp eq i64 %argc, 3",
 		"%parse_format_ok = call i1 @kizu_selfhost__parse_format_write",
+		"%format_newline = call %kizu.error.void @kizu_rt_io_write_stdout",
 		"%is_fmt = call i1 @kizu_selfhost__slice_equal",
 		"dispatch_fmt:",
-		"%fmt_format_ok = call i1 @kizu_selfhost__parse_format_write",
+		"%fmt_format_ok = call i1 @kizu_selfhost__format_source_write",
 		"dispatch_fmt_write_arg:",
 		"dispatch_fmt_write:",
-		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
+		"%fmt_write_format_ok = call i1 @kizu_selfhost__format_source_file_write",
 		"%run_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%run_ast_result = call %kizu.error.run_ast " +
@@ -1510,6 +1513,17 @@ func requiredLLVMFormatHelperFragments() []string {
 		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64
 		// wraps into %kizu.error.i64 rather than returning a raw i64 as the error union.
 		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
+		// format_source is the compiled formatter driver used by the hosted fmt command. Pin the
+		// tokenizer call and owned String return shape so the artifact cannot silently fall back to
+		// the old parse_format_alloc emitter.
+		"define %kizu.error.owned @kizu_selfhost__parser_format_format_source(",
+		"%format_tokens_call = call %kizu.error.owned @kizu_kizu__lexer_tokenize(",
+		"%index = phi i64 [ %void.then.alias.13, %loop13_preheader ], [ %index_next, %loop13_latch ]",
+		"%t24 = icmp slt i64 %index, %t23",
+		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +
+			"%kizu.owned %format_tokens, i64 %index)",
+		"%retwrap_ok = insertvalue %kizu.error.owned zeroinitializer, i1 true, 0",
+		"%retwrap_val = insertvalue %kizu.error.owned %retwrap_ok, %kizu.owned %out, 1",
 	}
 	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
 	fragments = append(fragments, requiredLLVMFormatSortFragments()...)
@@ -3005,7 +3019,7 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler parse stderr mismatch: %q", stderr)
 		return 1
 	}
-	failures := countHostedCompilerCLICommentParseFailures(t, exePath, dir, expected)
+	failures := countHostedCompilerCLICommentParseFailures(t, exePath, dir)
 	failures += countHostedCompilerCLIBorrowParseFailures(t, exePath, dir)
 	failures += countHostedCompilerCLIRealSourceParseFailures(t, exePath)
 
@@ -3064,12 +3078,7 @@ func countHostedCompilerCLIBorrowParseFailures(t *testing.T, exePath string, dir
 }
 
 // countHostedCompilerCLICommentParseFailures checks comments do not trigger parse scans.
-func countHostedCompilerCLICommentParseFailures(
-	t *testing.T,
-	exePath string,
-	dir string,
-	expected string,
-) int {
+func countHostedCompilerCLICommentParseFailures(t *testing.T, exePath string, dir string) int {
 	t.Helper()
 	commentPath := filepath.Join(dir, "hosted_parse_comment_binding.kizu")
 	commentSource := "fn main() {\n" +
@@ -3091,6 +3100,7 @@ func countHostedCompilerCLICommentParseFailures(
 		)
 		return 1
 	}
+	expected := "fn main() { print(\"from temp\"); }\n"
 	if stdout != expected {
 		t.Errorf(
 			"hosted compiler parse comment binding stdout mismatch:\nwant:\n%s\ngot:\n%s",
@@ -3179,7 +3189,7 @@ func countHostedCompilerCLIFmtFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler fmt exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 		return 1
 	}
-	expected := "import std::fmt;\nstruct Point { x: i64, y: i64 }\n"
+	expected := "import std::fmt;\n\nstruct Point {\n    x: i64, y: i64\n}\n"
 	if stdout != expected {
 		t.Errorf("hosted compiler fmt stdout mismatch:\nwant:\n%s\ngot:\n%s", expected, stdout)
 		return 1
@@ -3218,7 +3228,7 @@ func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
 		t.Errorf("read hosted fmt --write source: %v", err)
 		return 1
 	}
-	expected := "import std::fmt;\nstruct Point { x: i64, y: i64 }\n"
+	expected := "import std::fmt;\n\nstruct Point {\n    x: i64, y: i64\n}"
 	if string(formatted) != expected {
 		t.Errorf(
 			"hosted compiler fmt --write content mismatch:\nwant:\n%s\ngot:\n%s",
