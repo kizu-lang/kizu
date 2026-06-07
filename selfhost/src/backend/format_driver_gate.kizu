@@ -8,8 +8,8 @@ import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_llvm;
 
 // format_driver_lowering_gate drives the production compiled LLVM lowering over the real
-// selfhost::parser::format::format_source body and reports the measured next blocker, instead of
-// pinning the blocker in a comment. It reads the on-disk format.kizu, parses it, builds the
+// selfhost::parser::format::format_source body and reports success only after the compiled MIR
+// lowerer and LLVM renderer cross the real driver path. It reads the on-disk format.kizu, parses it, builds the
 // production ComponentFunctionCatalog for the 'selfhost::parser::format' component, finds
 // format_source, and emits its real signature + body IR facts the same way the IR fact catalog
 // does. It then derives the compiled params_spec / llvm_symbol from those facts and calls
@@ -52,23 +52,15 @@ import selfhost::backend::compiled_llvm;
 // as a Call-valued alias assignment: the call return type resolves from the local helper signature,
 // its scalar arg lowers through the existing call-arg path, and the resulting i8 is checked against
 // the target local's i8 type before aliasing. The later compound condition
-// 'if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 ...' (format.kizu:99), raising
-// "compiled mir: Array.len receiver is not a std::array::Array", now lowers the
-// std::string::String receiver through a StringLen MIR expression. Full-function LLVM rendering
-// for this path remains blocked until later lowering blockers are crossed.
-// The gate now stops at the later void if condition
-// 'if !(try next_token_text_equals(source, &format_tokens, index, "}"))' (format.kizu:130), lowers
+// 'if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 ...' (format.kizu:99) lowers
+// the std::string::String receiver through a StringLen MIR expression. The later void if condition
+// 'if !(try next_token_text_equals(source, &format_tokens, index, "}"))' (format.kizu:130) lowers
 // its hoisted !bool try-call with inverted branch polarity, and descends into the newline then-body
-// (format.kizu:131-133). Void-body alias names are now generated from the alias slot instead of a
-// fixed table, so the real path no longer exhausts at slot 63. Lowering now completes the
-// branch-merge loop prefixes and reaches the branch-merge latch validation for the main formatter
-// loop (format.kizu:42). The loop body carries non-induction scalar aliases, starting with the
-// earlier assignment 'previous = ","' (format.kizu:51), but
-// validate_branch_merge_no_unmodelled_aliases currently permits only the induction variable
-// through the branch-merge latch and raises
-// "compiled mir: branch-merge carried scalar not yet supported" from
-// selfhost/src/backend/compiled_mir_lower.kizu:7620. Carrying scalar aliases through a
-// branch-merge latch is the next capability (refs 1165 / 1162).
+// (format.kizu:131-133). Void-body alias names are generated from the alias slot instead of a fixed
+// table, so the real path no longer exhausts at slot 63. The main loop's branch-merge latch now
+// carries non-induction scalar aliases through typed phis, starting with the earlier assignment
+// 'previous = ","' (format.kizu:51). The gate now reaches full format_source lowering and LLVM
+// rendering and prints "format-driver-lowering-ok" (refs 1165 / 1162, issue 1231).
 pub fn format_driver_lowering_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();

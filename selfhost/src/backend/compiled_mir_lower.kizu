@@ -3431,14 +3431,23 @@ pub struct MultiExprLowerResult {
 pub struct CarriedScalarState {
     pub source_name: []u8,
     pub current_name: []u8,
+    pub llvm_type: []u8,
     pub init_literal: i64,
     pub init_var: []u8,
     pub init_offset: i64,
+    pub init_name: []u8,
 }
 
 pub struct LocalAliasState {
     pub source_name: []u8,
     pub current_name: []u8,
+}
+
+pub struct BranchMergeCarriedAlias {
+    pub source_name: []u8,
+    pub phi_name: []u8,
+    pub llvm_type: []u8,
+    pub init_name: []u8,
 }
 
 pub struct VoidAssignLowerResult {
@@ -7606,23 +7615,305 @@ fn lower_branch_merge_block_prefix(
     };
 }
 
+fn branch_merge_carried_type_supported(llvm_type: []u8) -> bool {
+    if std::mem::equal_bytes(llvm_type, "i64") {
+        return true;
+    }
+    if std::mem::equal_bytes(llvm_type, "i8") {
+        return true;
+    }
+    if std::mem::equal_bytes(llvm_type, "i1") {
+        return true;
+    }
+    if std::mem::equal_bytes(llvm_type, "%kizu.slice.u8") {
+        return true;
+    }
+    return false;
+}
+
+fn branch_merge_carried_phi_name(loop_index: i64, slot: i64) -> ![]u8 {
+    if slot < 0 {
+        return error("compiled mir: negative branch-merge carried scalar slot");
+    }
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes("branch.carried.scalar.");
+    try std::fmt::append_i64(&var out, loop_index);
+    try out.append_bytes(".");
+    try std::fmt::append_i64(&var out, slot);
+    let name = out.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(name, name);
+    return try copied.get(name);
+}
+
+fn branch_merge_carried_alias_index(
+    states: &std::array::Array<BranchMergeCarriedAlias>,
+    source_name: []u8
+) -> !i64 {
+    var index = 0;
+    while index < states.len() {
+        let state = try states.at(index);
+        if std::mem::equal_bytes(state.source_name, source_name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn branch_merge_param_spec_contains(params_spec: []u8, name: []u8) -> bool {
+    let spec_len = std::mem::len(params_spec);
+    let semicolon = cast<u8>(59);
+    let space = cast<u8>(32);
+    var pos = 0;
+    while pos < spec_len {
+        let entry_end = compiled_util::find_byte(params_spec, semicolon, pos);
+        let space_pos = compiled_util::find_byte(params_spec, space, pos);
+        if space_pos < entry_end {
+            let param_name = params_spec[space_pos + 1..entry_end];
+            if std::mem::equal_bytes(param_name, name) {
+                return true;
+            }
+        }
+        if entry_end < spec_len {
+            pos = entry_end + 1;
+        } else {
+            pos = spec_len;
+        }
+    }
+    return false;
+}
+
+fn branch_merge_top_level_local_before_loop(
+    ir_bytes: []u8,
+    function_name: []u8,
+    source_name: []u8,
+    while_stmt_index: i64,
+    bs: i64
+) -> !bool {
+    var index = 0;
+    while index < while_stmt_index {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(kind, "Let") {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
+            );
+            let name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, name_node, bs
+            );
+            if std::mem::equal_bytes(name, source_name) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn branch_merge_carried_source_available_before_loop(
+    ir_bytes: []u8,
+    function_name: []u8,
+    locals_spec: []u8,
+    source_name: []u8,
+    while_stmt_index: i64,
+    bs: i64
+) -> !bool {
+    if branch_merge_param_spec_contains(locals_spec, source_name) {
+        return true;
+    }
+    return try branch_merge_top_level_local_before_loop(
+        ir_bytes, function_name, source_name, while_stmt_index, bs
+    );
+}
+
+fn append_branch_merge_carried_alias(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    source_name: []u8,
+    induction_var: []u8,
+    loop_index: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    states: &var std::array::Array<BranchMergeCarriedAlias>,
+    bs: i64
+) -> !void {
+    if std::mem::equal_bytes(source_name, induction_var) {
+        return;
+    }
+    if (try branch_merge_carried_alias_index(states, source_name)) >= 0 {
+        return;
+    }
+    if !(try branch_merge_carried_source_available_before_loop(
+        ir_bytes, function_name, locals_spec, source_name, loop_index, bs
+    )) {
+        return;
+    }
+    let llvm_type = try compiled_mir_types::resolve_value_llvm_type(
+        ir_bytes, function_name, module_prefix, locals_spec, source_name, bs
+    );
+    if !branch_merge_carried_type_supported(llvm_type) {
+        return error("compiled mir: branch-merge carried scalar type unsupported");
+    }
+    let slot = states.len();
+    try states.append(BranchMergeCarriedAlias {
+        source_name: source_name,
+        phi_name: try branch_merge_carried_phi_name(loop_index, slot),
+        llvm_type: llvm_type,
+        init_name: try local_alias_current_name(aliases, source_name)
+    });
+    return;
+}
+
+fn collect_branch_merge_block_carried_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    block_node: i64,
+    statement_limit: i64,
+    induction_var: []u8,
+    loop_index: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    states: &var std::array::Array<BranchMergeCarriedAlias>,
+    bs: i64
+) -> !void {
+    var index = 0;
+    while index < statement_limit {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, block_node, "statement", index, bs
+        );
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(stmt_kind, "Assign") {
+            let target = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "target", 0, bs
+            );
+            let target_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, target, bs
+            );
+            if !std::mem::equal_bytes(target_kind, "Var") {
+                return error("compiled mir: branch-merge carried scalar target must be a var");
+            }
+            let target_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, target, bs
+            );
+            try append_branch_merge_carried_alias(
+                ir_bytes, function_name, module_prefix, locals_spec, target_name, induction_var,
+                loop_index, aliases, states, bs
+            );
+        } else {
+            if std::mem::equal_bytes(stmt_kind, "If") {
+                let then_node = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "then", 0, bs
+                );
+                let then_count = try while_body_statement_count(
+                    ir_bytes, function_name, then_node, bs
+                );
+                try collect_branch_merge_block_carried_aliases(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    then_node,
+                    then_count,
+                    induction_var,
+                    loop_index,
+                    aliases,
+                    states,
+                    bs
+                );
+                let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+                    ir_bytes, function_name, statement, "else", 0, bs
+                );
+                if else_node >= 0 {
+                    let else_kind = try ir_contract::body_node_kind_from(
+                        ir_bytes, function_name, else_node, bs
+                    );
+                    if !std::mem::equal_bytes(else_kind, "Empty") {
+                        let else_count = try while_body_statement_count(
+                            ir_bytes, function_name, else_node, bs
+                        );
+                        try collect_branch_merge_block_carried_aliases(
+                            ir_bytes,
+                            function_name,
+                            module_prefix,
+                            locals_spec,
+                            else_node,
+                            else_count,
+                            induction_var,
+                            loop_index,
+                            aliases,
+                            states,
+                            bs
+                        );
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn branch_merge_loop_aliases(
+    aliases: &std::array::Array<LocalAliasState>,
+    carried: &std::array::Array<BranchMergeCarriedAlias>
+) -> !std::array::Array<LocalAliasState> {
+    var loop_aliases = try copy_local_aliases(aliases);
+    var index = 0;
+    while index < carried.len() {
+        let state = try carried.at(index);
+        try set_local_alias(&var loop_aliases, state.source_name, state.phi_name);
+        index = index + 1;
+    }
+    return loop_aliases;
+}
+
 fn validate_branch_merge_no_unmodelled_aliases(
     before: &std::array::Array<LocalAliasState>,
     after: &std::array::Array<LocalAliasState>,
-    induction_var: []u8
+    induction_var: []u8,
+    carried: &std::array::Array<BranchMergeCarriedAlias>
 ) -> !void {
     var index = 0;
     while index < after.len() {
         let state = try after.at(index);
         if !std::mem::equal_bytes(state.source_name, induction_var) {
             let input_name = try local_alias_current_name(before, state.source_name);
-            if !std::mem::equal_bytes(input_name, state.current_name) {
+            if !std::mem::equal_bytes(input_name, state.current_name) and
+                (try branch_merge_carried_alias_index(carried, state.source_name)) < 0 {
                 return error("compiled mir: branch-merge carried scalar not yet supported");
             }
         }
         index = index + 1;
     }
     return;
+}
+
+fn materialize_branch_merge_carried_scalars(
+    carried: &std::array::Array<BranchMergeCarriedAlias>,
+    advance_aliases: &std::array::Array<LocalAliasState>
+) -> !std::array::Array<compiled_mir::MirCarriedScalar> {
+    var scalars = std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator());
+    var index = 0;
+    while index < carried.len() {
+        let state = try carried.at(index);
+        let latch_name = try local_alias_current_name(advance_aliases, state.source_name);
+        try scalars.append(compiled_mir::carried_scalar(
+            state.phi_name,
+            state.llvm_type,
+            0,
+            "",
+            0,
+            state.init_name,
+            latch_name
+        ));
+        index = index + 1;
+    }
+    return scalars;
 }
 
 // lower_multi_while_branch_merge_latch lowers a bounded counter loop whose induction update is carried
@@ -7687,21 +7978,6 @@ fn lower_multi_while_branch_merge_latch(
         induction_init_offset = 0;
     }
 
-    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let cond_result = try lower_expr_into(
-        ir_bytes,
-        function_name,
-        module_prefix,
-        locals_spec,
-        cond_node,
-        string_counter,
-        temp_counter,
-        &var cond_insts,
-        bs
-    );
-    let body_string_start = string_counter + try count_strings_in_insts(&cond_insts);
-    let body_temp_start = temp_counter + cond_insts.len();
-
     let advance_block = try branch_merge_advance_block(
         ir_bytes, function_name, terminal_if, bs
     );
@@ -7711,6 +7987,55 @@ fn lower_multi_while_branch_merge_latch(
     let then_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, terminal_if, "then", 0, bs
     );
+    let advance_count = try while_body_statement_count(ir_bytes, function_name, advance_block, bs);
+    var carried_aliases =
+        std::array::Array<BranchMergeCarriedAlias>(std::mem::page_allocator());
+    defer carried_aliases.deinit();
+    try collect_branch_merge_block_carried_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        body_node,
+        body_count - 1,
+        induction_var,
+        loop_index,
+        aliases,
+        &var carried_aliases,
+        bs
+    );
+    try collect_branch_merge_block_carried_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        advance_block,
+        advance_count - 1,
+        induction_var,
+        loop_index,
+        aliases,
+        &var carried_aliases,
+        bs
+    );
+    var loop_aliases = try branch_merge_loop_aliases(aliases, &carried_aliases);
+    defer loop_aliases.deinit();
+
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_with_local_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        &loop_aliases,
+        bs
+    );
+    let body_string_start = string_counter + try count_strings_in_insts(&cond_insts);
+    let body_temp_start = temp_counter + cond_insts.len();
+
     let advance_assign = try branch_merge_last_assign(
         ir_bytes,
         function_name,
@@ -7754,7 +8079,7 @@ fn lower_multi_while_branch_merge_latch(
     );
 
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-    var body_aliases = try copy_local_aliases(aliases);
+    var body_aliases = try copy_local_aliases(&loop_aliases);
     defer body_aliases.deinit();
     let body_result = try lower_branch_merge_block_prefix(
         ir_bytes,
@@ -7797,7 +8122,6 @@ fn lower_multi_while_branch_merge_latch(
         return error("compiled mir: branch-merge terminal condition must be bool");
     }
     let branch_cond_strings = try count_strings_in_insts(&branch_cond_insts);
-    let advance_count = try while_body_statement_count(ir_bytes, function_name, advance_block, bs);
     var branch_advance_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var advance_aliases = try copy_local_aliases(&body_aliases);
     defer advance_aliases.deinit();
@@ -7819,10 +8143,13 @@ fn lower_multi_while_branch_merge_latch(
         bs
     );
     try validate_branch_merge_no_unmodelled_aliases(
-        aliases, &body_aliases, induction_var
+        &loop_aliases, &body_aliases, induction_var, &carried_aliases
     );
     try validate_branch_merge_no_unmodelled_aliases(
-        &body_aliases, &advance_aliases, induction_var
+        &body_aliases, &advance_aliases, induction_var, &carried_aliases
+    );
+    let carried_scalars = try materialize_branch_merge_carried_scalars(
+        &carried_aliases, &advance_aliases
     );
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
@@ -7841,7 +8168,7 @@ fn lower_multi_while_branch_merge_latch(
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         "",
         std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
+        carried_scalars,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         -1,
         branch_latch_exit_on_true,
@@ -8393,9 +8720,11 @@ fn append_leading_decrement_carried_scalar(
     try states.append(CarriedScalarState {
         source_name: target_name,
         current_name: target_name,
+        llvm_type: "i64",
         init_literal: init.literal,
         init_var: init.var_name,
-        init_offset: init.offset
+        init_offset: init.offset,
+        init_name: ""
     });
     return;
 }
@@ -8444,9 +8773,11 @@ fn materialize_carried_scalars(
         let state = try states.at(index);
         try carried.append(compiled_mir::carried_scalar(
             state.source_name,
+            state.llvm_type,
             state.init_literal,
             state.init_var,
             state.init_offset,
+            state.init_name,
             state.current_name
         ));
         index = index + 1;
@@ -8480,9 +8811,11 @@ fn lower_scalar_select_assign_from_if(
     let state = try states.at(state_index);
     let state_source_name = state.source_name;
     let state_current_name = state.current_name;
+    let state_llvm_type = state.llvm_type;
     let state_init_literal = state.init_literal;
     let state_init_var = state.init_var;
     let state_init_offset = state.init_offset;
+    let state_init_name = state.init_name;
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, if_node, "condition", 0, bs
     );
@@ -8528,7 +8861,7 @@ fn lower_scalar_select_assign_from_if(
         target_name,
         state_current_name,
         output_name,
-        "i64",
+        state_llvm_type,
         cond_result,
         cond_insts,
         value_result,
@@ -8537,9 +8870,11 @@ fn lower_scalar_select_assign_from_if(
     try states.set(state_index, CarriedScalarState {
         source_name: state_source_name,
         current_name: output_name,
+        llvm_type: state_llvm_type,
         init_literal: state_init_literal,
         init_var: state_init_var,
-        init_offset: state_init_offset
+        init_offset: state_init_offset,
+        init_name: state_init_name
     });
     return MultiIfLowerResult {
         temp_counter: temp_counter + cond_len + value_len,

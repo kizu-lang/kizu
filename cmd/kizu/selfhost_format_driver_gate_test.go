@@ -187,6 +187,12 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     the alias slot by the generic String/std::fmt decimal builder instead of a fixed table. The
 //     low-slot spelling stays 'void.then.alias.<slot>', and the generated names keep the existing
 //     prefix so LLVM rendering remains isolated from locals, temps, and try labels.
+//   - "compiled mir: branch-merge carried scalar not yet supported": the main formatter loop
+//     (selfhost/src/parser/format.kizu:42) now carries non-induction scalar aliases through its
+//     terminal if/else latch, starting with 'previous = ","' at format.kizu:51. The lowerer
+//     collects loop-prefix and advance-arm assignment targets, validates their scalar LLVM types,
+//     threads them through typed loop-head phis, and feeds the latch edge from the final
+//     advance-arm aliases (issue 1231).
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
 	"compiled function: stdlib return not found",
@@ -209,32 +215,12 @@ var formatDriverCrossedLoweringBlockers = []string{
 	"compiled mir: Array.len receiver is not a std::array::Array",
 	"compiled mir: prefix-not try-call void condition not yet supported",
 	"compiled mir: too many void then aliases",
+	"compiled mir: branch-merge carried scalar not yet supported",
 }
 
-// formatDriverLoweringBlocker is the exact diagnostic the compiled MIR lowering now raises. The EOF
-// branch at selfhost/src/parser/format.kizu:68 now lowers as a real void if/else, descends into the
-// nested rbrace branch, accepts 'depth = depth - 1;' (format.kizu:75), lowers the nested else-path
-// append 'try out.append_byte(cast<u8>(10));' (format.kizu:81), and lowers the following
-// reassignment 'last = last_byte(text);' (format.kizu:86) through typed Call-valued alias
-// assignment. Lowering then crosses the compound condition
-// 'if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 ...'
-// (format.kizu:99), including the std::string::String receiver 'out.len()'. It now reaches the
-// later void if condition 'if !(try next_token_text_equals(source, &format_tokens, index, "}"))'
-// (format.kizu:130), lowers its hoisted !bool try-call with inverted branch polarity, and descends
-// into the void then-body newline append plus scalar reassignments (format.kizu:131-133) without
-// exhausting alias names. Lowering now completes the branch-merge loop prefixes and reaches the
-// branch-merge latch validation for the main formatter loop (format.kizu:42). The loop body carries
-// non-induction scalar aliases, starting with the earlier assignment 'previous = ","'
-// (format.kizu:51), but validate_branch_merge_no_unmodelled_aliases currently permits only the
-// induction variable through the branch-merge latch and raises
-// "compiled mir: branch-merge carried scalar not yet supported" from
-// selfhost/src/backend/compiled_mir_lower.kizu:7620. Carrying scalar aliases through a
-// branch-merge latch is the next capability (refs 1165 / 1162).
-const formatDriverLoweringBlocker = "compiled mir: " +
-	"branch-merge carried scalar not yet supported"
-
 // TestSelfhostFormatDriverLoweringGate emits the real format_source IR facts and drives the
-// production compiled MIR lowering over them, asserting it reaches the measured next blocker. The
+// production compiled MIR lowering over them, asserting it reaches full lowering/rendering
+// success. The
 // no-else void multi-statement then-block of the first top-level 'if' descends through
 // lower_void_then_body, lowering its two 'let' bindings: 'let next_index = try
 // index_after_leading_imports(&format_tokens);' and 'let last_import = try
@@ -256,24 +242,27 @@ const formatDriverLoweringBlocker = "compiled mir: " +
 // reassignment, 'last = last_byte(text);' (format.kizu:86), now lowers as a Call-valued alias
 // assignment. The later condition 'out.len() > 0' (format.kizu:99) now lowers through the
 // StringLen expression path. The later prefix-not try-call void condition at format.kizu:130
-// now lowers with inverted branch polarity and reaches its newline then-body; lowering then stops
-// when branch-merge latch validation sees the loop carrying the non-induction scalar alias
-// 'previous' first assigned in the rbrace enum-closing branch at format.kizu:51.
+// now lowers with inverted branch polarity and reaches its newline then-body. The branch-merge
+// latch carries scalar aliases such as `previous`, `last`, `at_line_start`, and `after_comment`
+// through typed loop-head phis, so the driver reaches `format-driver-lowering-ok`.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
 	out, err := runSelfhostFormatDriverLoweringGate(t)
-	if err == nil {
-		t.Fatalf("format driver lowering gate unexpectedly succeeded\n%s", out)
-	}
-	for _, blocker := range formatDriverCrossedLoweringBlockers {
-		if strings.Contains(err.Error(), blocker) {
-			t.Fatalf(
-				"format driver lowering gate regressed to a crossed blocker %q: %v\n%s",
-				blocker, err, out,
-			)
+	if err != nil {
+		for _, blocker := range formatDriverCrossedLoweringBlockers {
+			if strings.Contains(err.Error(), blocker) {
+				t.Fatalf(
+					"format driver lowering gate regressed to a crossed blocker %q: %v\n%s",
+					blocker, err, out,
+				)
+			}
 		}
+		t.Fatalf("format driver lowering gate failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(err.Error(), formatDriverLoweringBlocker) {
-		t.Fatalf("format driver lowering gate stopped at an unexpected blocker: %v\n%s", err, out)
+	if out != "format-driver-lowering-ok\n" {
+		t.Fatalf(
+			"format driver lowering gate output mismatch\nwant:\nformat-driver-lowering-ok\ngot:\n%s",
+			out,
+		)
 	}
 }
 
