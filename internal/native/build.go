@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 )
 
 // Options describes one native link request.
@@ -89,6 +90,13 @@ func runClang(irPath string, runtimePath string, options Options) ([]string, err
 	args := []string{}
 	if options.Triple != "" {
 		args = append(args, "-target", options.Triple)
+	}
+	// The selfhost compiler's checker recurses deeply over large packages; the
+	// default 8MiB main-thread stack overflows while checking the selfhost
+	// package itself. Reserve a 512MiB stack for the produced executable on
+	// darwin (address-space reservation only; pages commit on use).
+	if runtime.GOOS == "darwin" {
+		args = append(args, "-Wl,-stack_size,0x20000000")
 	}
 	args = append(args, "-O0", irPath, runtimePath, "-o", options.Output)
 	cmd := exec.Command(options.Linker, args...)

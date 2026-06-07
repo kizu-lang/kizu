@@ -2878,6 +2878,33 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "kizu_kizu__ast_parse_result",
         "%kizu.kizu.ast.ast ast;%kizu.kizu.ast.node_id root"
     );
+    // The BinaryOp constant accessors are single enum-field returns compiled for the
+    // run codegen tape lowering (code_binary_kind), so the tape's operator mapping
+    // calls real compiled std::kizu::ast functions instead of a handwritten tag table.
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_add",
+        "kizu_kizu__ast_binary_add",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_sub",
+        "kizu_kizu__ast_binary_sub",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_mul",
+        "kizu_kizu__ast_binary_mul",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_div",
+        "kizu_kizu__ast_binary_div",
+        ""
+    );
     // Ast.get is the first Arena<T>.get accessor compiled into stage2 (tracker 961): it
     // reads an AstNode back out of the nodes Arena by value via the checked
     // @kizu_rt_arena_get, reusing the AstNode/AstData union value-type ABI, and traps on
@@ -2953,12 +2980,9 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     // derived from signature facts, so the cluster no longer needs a handwritten
     // append_compiled_function_auto per helper.
     try append_kizu_parser_reachable_compiled_functions(out, ir_bytes);
-    try compiled_llvm::append_compiled_function_auto(
-        out, ir_bytes,
-        "selfhost::ir::codegen::ast_node_text",
-        "kizu_selfhost__ir_codegen_ast_node_text",
-        "%kizu.slice.u8 text;%kizu.kizu.ast.ast ast;%kizu.kizu.ast.node_id node_id"
-    );
+    // ast_node_text is emitted by the codegen closure BFS (reached from the run
+    // tape descent seed lower_code_expr), so it no longer needs an explicit
+    // registration here.
     try compiled_llvm::append_compiled_function_auto(
         out, ir_bytes,
         "selfhost::ir::codegen::lowered_program_supported",
@@ -3282,6 +3306,26 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         }
         return false;
     }
+    if std::mem::equal_bytes(prefix, "selfhost::ir::codegen::") {
+        // parse_int_literal is still owned by the cli_run_i64_codegen_llvm handwritten
+        // define: its accumulator loop carries a mid-body scalar assign the generic
+        // while lowering does not model yet. The tape closure references that single
+        // definition without re-emitting it. Deletion condition: once the generic
+        // while lowering carries mid-body scalar assigns, parse_int_literal joins the
+        // compiled closure and the handwritten define is removed with the rest of the
+        // run i64 shape path.
+        if std::mem::equal_bytes(callee, "parse_int_literal") {
+            return true;
+        }
+        // The run codegen tape's operator mapping calls the compiled std::kizu::ast
+        // BinaryOp constant accessors cross-module (code_binary_kind); they are
+        // emitted separately as kizu_kizu__ast_binary_* enum-field returns, so the
+        // codegen closure references them without re-emitting or walking them.
+        return std::mem::equal_bytes(callee, "std::kizu::ast::binary_add") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_sub") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_mul") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_div");
+    }
     if !std::mem::equal_bytes(prefix, "selfhost::ast::") {
         return false;
     }
@@ -3469,6 +3513,10 @@ fn append_codegen_reachable_compiled_functions(
     try pending.append("metadata_for_program");
     try pending.append("main_print_payload");
     try pending.append("unsupported_program");
+    // lower_code_expr is the run codegen IR v1 tape lowering root: the recursive
+    // expression descent compiled into stage2 so the hosted run path can lower
+    // checked expressions onto the flat instruction tape.
+    try pending.append("lower_code_expr");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,

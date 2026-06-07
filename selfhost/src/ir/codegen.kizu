@@ -3303,3 +3303,126 @@ fn parse_int_literal(literal: []u8) -> !i64 {
     }
     return value;
 }
+
+// ---------------------------------------------------------------------------
+// Run codegen IR v1: the flat function-block-instruction tape.
+//
+// The tape is a runtime-owned Array<i64> of fixed-prefix records
+// 'opcode dst operands...'; string operands are (start, end) spans into the
+// run source text, so the lowering needs no string allocation. lower_code_expr
+// is the recursive expression descent that replaces per-shape RunAst matching:
+// every checked expression lowers to tape records and a CodeEval result that
+// threads the SSA value counter. ok=false marks a construct the tape lowering
+// does not own yet, so callers report the single unified unsupported
+// diagnostic instead of dispatching to a shape-specific path.
+// ---------------------------------------------------------------------------
+
+struct CodeEval {
+    ok: bool,
+    value: i64,
+    next: i64,
+}
+
+fn code_eval_unsupported(next_value: i64) -> CodeEval {
+    return CodeEval {
+        ok: false,
+        value: 0,
+        next: next_value
+    };
+}
+
+fn code_op_const_int() -> i64 {
+    return 1;
+}
+
+fn code_op_binary() -> i64 {
+    return 2;
+}
+
+fn code_binary_kind(op: std::kizu::ast::BinaryOp) -> i64 {
+    if op == std::kizu::ast::binary_add() {
+        return 1;
+    }
+    if op == std::kizu::ast::binary_sub() {
+        return 2;
+    }
+    if op == std::kizu::ast::binary_mul() {
+        return 3;
+    }
+    if op == std::kizu::ast::binary_div() {
+        return 4;
+    }
+    return 0;
+}
+
+fn lower_code_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(node_id);
+    return match node.data {
+        Int(int_node) => try lower_code_int(text, ast, node_id, code, next_value),
+        Binary(binary) => try lower_code_binary(text, ast, binary.op, binary.left, binary.right, code, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_int(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let literal_text = ast_node_text(text, ast, node_id);
+    let literal = try parse_int_literal(literal_text);
+    let op_const = code_op_const_int();
+    try code.append(op_const);
+    try code.append(next_value);
+    try code.append(literal);
+    let after_value = next_value + 1;
+    return CodeEval {
+        ok: true,
+        value: next_value,
+        next: after_value
+    };
+}
+
+fn lower_code_binary(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    op: std::kizu::ast::BinaryOp,
+    left: std::kizu::ast::NodeId,
+    right: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let kind = code_binary_kind(op);
+    if kind == 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let left_eval = try lower_code_expr(text, ast, left, code, next_value);
+    if !left_eval.ok {
+        return code_eval_unsupported(left_eval.next);
+    }
+    let right_eval = try lower_code_expr(text, ast, right, code, left_eval.next);
+    if !right_eval.ok {
+        return code_eval_unsupported(right_eval.next);
+    }
+    let op_binary = code_op_binary();
+    try code.append(op_binary);
+    try code.append(right_eval.next);
+    try code.append(kind);
+    try code.append(left_eval.value);
+    try code.append(right_eval.value);
+    let result_value = right_eval.next;
+    let after_value = result_value + 1;
+    return CodeEval {
+        ok: true,
+        value: result_value,
+        next: after_value
+    };
+}

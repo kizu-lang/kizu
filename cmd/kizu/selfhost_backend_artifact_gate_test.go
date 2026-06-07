@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -951,9 +952,9 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		// count_with_range, and return its (identically-typed) error union directly.
 		"%match_arm_0_payload = load %kizu.kizu.ast.program_node, " +
 			"ptr %match_arm_0_ptr, align 8",
-		"%match_arm_0_a0 = extractvalue %kizu.kizu.ast.program_node %match_arm_0_payload, 0",
+		"%match_arm_0_a1 = extractvalue %kizu.kizu.ast.program_node %match_arm_0_payload, 0",
 		"%match_arm_0_call = call %kizu.error.i64 @kizu_selfhost__ast_count_with_range(" +
-			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %match_arm_0_a0)",
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %match_arm_0_a1)",
 		"  ret %kizu.error.i64 %match_arm_0_call",
 		// count_range: a two-phi accumulator loop over the range calling the checked
 		// Ast.child_at and the recursive node_count, propagating either failure and returning
@@ -2825,6 +2826,16 @@ func countHostCapabilitySmokeRunFailures(t *testing.T, exePath string) int {
 	return 0
 }
 
+// hostedLinkStackArgs reserves a larger main-thread stack for linked selfhost
+// compiler binaries on darwin: the checker recurses deeply over large packages
+// and overflows the default 8MiB stack while checking the selfhost package.
+func hostedLinkStackArgs() []string {
+	if goruntime.GOOS == "darwin" {
+		return []string{"-Wl,-stack_size,0x20000000"}
+	}
+	return nil
+}
+
 // countHostedCompilerCLISmokeFailures links and runs the generated CLI artifact.
 func countHostedCompilerCLISmokeFailures(t *testing.T) int {
 	t.Helper()
@@ -2840,10 +2851,15 @@ func countHostedCompilerCLISmokeFailures(t *testing.T) int {
 		t.Errorf("write hosted compiler CLI harness: %v", err)
 		return 1
 	}
-	compile := exec.Command(
-		clang,
-		"-Wno-override-module",
-		"-fno-integrated-as",
+	compileArgs := append(
+		[]string{
+			"-Wno-override-module",
+			"-fno-integrated-as",
+		},
+		hostedLinkStackArgs()...,
+	)
+	compileArgs = append(
+		compileArgs,
 		"target/selfhost/selfhost.ll",
 		"target/selfhost/selfhost.host.ll",
 		"selfhost/runtime/selfhost.hosted.c",
@@ -2851,6 +2867,7 @@ func countHostedCompilerCLISmokeFailures(t *testing.T) int {
 		"-o",
 		exePath,
 	)
+	compile := exec.Command(clang, compileArgs...)
 	compile.Dir = "../.."
 	if out, err := compile.CombinedOutput(); err != nil {
 		t.Errorf("compile hosted compiler CLI smoke: %v\n%s", err, out)

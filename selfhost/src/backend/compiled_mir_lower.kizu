@@ -789,6 +789,38 @@ pub fn lower_match_union_return_function(
     );
 }
 
+// match_union_is_field_chain_accessor reports whether a default-arm match-union accessor
+// is the narrow declaration_count shape: exactly two arms whose variant arm body is a
+// payload field-access chain. Any other default-arm match (e.g. arms that call helpers)
+// routes through the generalized traversal lowering instead.
+pub fn match_union_is_field_chain_accessor(
+    ir_bytes: []u8,
+    function_name: []u8,
+    bs: i64
+) -> !bool {
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let match_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_stmt, "value", 0, bs
+    );
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, match_node, "arm", bs
+    );
+    if arm_count != 2 {
+        return false;
+    }
+    let variant_arm = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_node, "arm", 0, bs
+    );
+    let variant_body = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, variant_arm, "body", 0, bs
+    );
+    let arm_expr = try match_union_arm_expr(ir_bytes, function_name, variant_body, bs);
+    let arm_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arm_expr, bs);
+    return std::mem::equal_bytes(arm_kind, "FieldExpr");
+}
+
 // match_union_has_default_arm reports whether the match in a 'let node = self.get(index);
 // return match node.data { ... };' body has a trailing '_' default arm. The single matched
 // variant + default arm shape (declaration_count) has one; the exhaustive node_count
@@ -900,7 +932,8 @@ pub fn lower_traversal_match_function(
             ir_bytes, function_name, match_node, "arm", index, bs
         );
         let arm = try build_traversal_arm(
-            ir_bytes, function_name, module_prefix, union_qualified, arm_node, bs
+            ir_bytes, function_name, module_prefix, union_qualified, params_spec,
+            llvm_return_type, arm_node, bs
         );
         try arms.append(arm);
         index = index + 1;
@@ -929,6 +962,8 @@ fn build_traversal_arm(
     function_name: []u8,
     module_prefix: []u8,
     union_qualified: []u8,
+    params_spec: []u8,
+    llvm_return_type: []u8,
     arm_node: i64,
     bs: i64
 ) -> !compiled_mir::MirTraversalArm {
@@ -938,11 +973,24 @@ fn build_traversal_arm(
     let variant_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, pattern, bs
     );
-    let variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
-        ir_bytes, ir_bytes[0..0], union_qualified, variant_name
-    );
-    if !variant.found {
-        return error("compiled mir: traversal arm variant not found");
+    // A '_' default arm matches no variant: it carries no payload and must stay the
+    // exhaustive fallthrough (the renderer treats the last arm as unconditional).
+    var tag = 0 - 1;
+    var payload_kizu = ir_bytes[0..0];
+    var payload_module = ir_bytes[0..0];
+    var payload_short = ir_bytes[0..0];
+    let is_default = std::mem::equal_bytes(variant_name, "_");
+    if !is_default {
+        let variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+            ir_bytes, ir_bytes[0..0], union_qualified, variant_name
+        );
+        if !variant.found {
+            return error("compiled mir: traversal arm variant not found");
+        }
+        tag = variant.tag;
+        payload_kizu = variant.payload_kizu;
+        payload_module = compiled_util::module_prefix_of(payload_kizu);
+        payload_short = payload_kizu[std::mem::len(payload_module)..std::mem::len(payload_kizu)];
     }
     let arm_body = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, arm_node, "body", 0, bs
@@ -951,10 +999,37 @@ fn build_traversal_arm(
     let arm_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arm_expr, bs);
     if std::mem::equal_bytes(arm_kind, "Int") {
         let value = try ir_contract::body_int_value_from(ir_bytes, function_name, arm_expr, bs);
-        return compiled_mir::traversal_literal_arm(variant.tag, value);
+        return compiled_mir::traversal_literal_arm(tag, value);
+    }
+    if std::mem::equal_bytes(arm_kind, "Call") {
+        // A plain-call arm returns the function's success value directly; the renderer
+        // wraps the callee result into the own error union. The callee's success LLVM
+        // type resolves from its signature fact.
+        let plain_callee = try ir_contract::body_call_callee_or_empty_from(
+            ir_bytes, function_name, arm_expr, bs
+        );
+        let plain_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+            ir_bytes, "function-signature-return ", module_prefix, plain_callee
+        );
+        if std::mem::len(plain_ret) == 0 {
+            return error("compiled mir: traversal arm call return type not found");
+        }
+        let success_llvm = try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, module_prefix, plain_ret
+        );
+        let plain_args = try build_traversal_arm_args(
+            ir_bytes, function_name, params_spec, payload_module, payload_short,
+            arm_expr, bs
+        );
+        let plain_payload_llvm = try traversal_arm_payload_llvm(
+            ir_bytes, payload_kizu, &plain_args
+        );
+        return compiled_mir::traversal_plain_call_arm(
+            tag, plain_payload_llvm, module_prefix, plain_callee, success_llvm, plain_args
+        );
     }
     if !std::mem::equal_bytes(arm_kind, "TryExpr") {
-        return error("compiled mir: traversal arm must be 'try <call>' or an int literal");
+        return error("compiled mir: traversal arm must be a call, 'try <call>', or an int literal");
     }
     let inner_call = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, arm_expr, "value", 0, bs
@@ -963,46 +1038,97 @@ fn build_traversal_arm(
     if !std::mem::equal_bytes(inner_kind, "Call") {
         return error("compiled mir: traversal arm try must wrap a call");
     }
+    // The try-call arm's callee must share this function's error-union return so its
+    // result returns as an identity tail; validated by the renderer's call type.
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, inner_call, bs
     );
-    let payload_kizu = variant.payload_kizu;
-    let payload_module = compiled_util::module_prefix_of(payload_kizu);
-    let payload_short = payload_kizu[std::mem::len(payload_module)..std::mem::len(payload_kizu)];
-    let payload_llvm = try compiled_type_lower::kizu_type_to_llvm(
-        ir_bytes, ir_bytes[0..0], payload_kizu
+    let args = try build_traversal_arm_args(
+        ir_bytes, function_name, params_spec, payload_module, payload_short,
+        inner_call, bs
     );
+    let payload_llvm = try traversal_arm_payload_llvm(ir_bytes, payload_kizu, &args);
+    return compiled_mir::traversal_try_arm(
+        tag, payload_llvm, module_prefix, callee_name, args
+    );
+}
+
+// traversal_arm_payload_llvm resolves the matched variant payload's LLVM type only when an
+// arm argument actually extracts a payload field. Arms that only forward parameters (e.g.
+// the tape descent's 'Int(int_node) => try lower_code_int(text, ast, node_id, code, ...)'
+// where the binding is unused) skip the lookup, so leaf variants whose payload structs are
+// deliberately unmodelled stay compilable.
+fn traversal_arm_payload_llvm(
+    ir_bytes: []u8,
+    payload_kizu: []u8,
+    args: &std::array::Array<compiled_mir::MirTraversalArg>
+) -> ![]u8 {
+    var index = 0;
+    while index < args.len() {
+        let arg = try args.at(index);
+        if !arg.is_param {
+            return try compiled_type_lower::kizu_type_to_llvm(
+                ir_bytes, ir_bytes[0..0], payload_kizu
+            );
+        }
+        index = index + 1;
+    }
+    return ir_bytes[0..0];
+}
+
+// build_traversal_arm_args lowers every call argument of a traversal arm explicitly: a
+// Var argument forwards a caller parameter by name (typed from the params_spec), and a
+// FieldExpr argument extracts the named field off the matched variant payload. Nothing
+// is implicit, so arms can mix forwarded parameters with payload fields in any order.
+fn build_traversal_arm_args(
+    ir_bytes: []u8,
+    function_name: []u8,
+    params_spec: []u8,
+    payload_module: []u8,
+    payload_short: []u8,
+    call_node: i64,
+    bs: i64
+) -> !std::array::Array<compiled_mir::MirTraversalArg> {
     let call_arg_count = try ir_contract::body_edge_count_from(
-        ir_bytes, function_name, inner_call, "arg", bs
+        ir_bytes, function_name, call_node, "arg", bs
     );
     var args = std::array::Array<compiled_mir::MirTraversalArg>(std::mem::page_allocator());
-    var arg_index = 1;
+    var arg_index = 0;
     while arg_index < call_arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, inner_call, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, bs
         );
         let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
-        if !std::mem::equal_bytes(arg_kind, "FieldExpr") {
-            return error("compiled mir: traversal arm arg must be a payload field access");
+        if std::mem::equal_bytes(arg_kind, "Var") {
+            let arg_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, arg_node, bs
+            );
+            let arg_type = try compiled_signature::find_param_type(params_spec, arg_name);
+            try args.append(compiled_mir::traversal_param_arg(arg_name, arg_type));
+        } else {
+            if !std::mem::equal_bytes(arg_kind, "FieldExpr") {
+                return error("compiled mir: traversal arm arg must be a parameter or payload field");
+            }
+            if std::mem::len(payload_short) == 0 {
+                return error("compiled mir: traversal default arm cannot read a payload field");
+            }
+            let field_name = try ir_contract::body_field_expr_name_from(
+                ir_bytes, function_name, arg_node, "field", bs
+            );
+            let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
+                ir_bytes, payload_module, payload_short, field_name
+            );
+            if !field.found {
+                return error("compiled mir: traversal arm payload field not found");
+            }
+            let field_llvm = try compiled_type_lower::kizu_type_to_llvm(
+                ir_bytes, payload_module, field.field_type
+            );
+            try args.append(compiled_mir::traversal_arg(field.index, field_llvm));
         }
-        let field_name = try ir_contract::body_field_expr_name_from(
-            ir_bytes, function_name, arg_node, "field", bs
-        );
-        let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-            ir_bytes, payload_module, payload_short, field_name
-        );
-        if !field.found {
-            return error("compiled mir: traversal arm payload field not found");
-        }
-        let field_llvm = try compiled_type_lower::kizu_type_to_llvm(
-            ir_bytes, payload_module, field.field_type
-        );
-        try args.append(compiled_mir::traversal_arg(field.index, field_llvm));
         arg_index = arg_index + 1;
     }
-    return compiled_mir::traversal_try_arm(
-        variant.tag, payload_llvm, module_prefix, callee_name, args
-    );
+    return args;
 }
 
 // is_count_range_function reports whether a function is count_range's accumulator shape:
@@ -3868,6 +3994,32 @@ fn lower_multi_expr_statement(
     );
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var consumed_string = 0;
+    // 'try <receiver>.append(<value>);' on a std::array::Array<T> receiver lowers
+    // through the element-size-generic @kizu_rt_array_append ABI: the receiver's
+    // declared Array<T> type supplies the element LLVM type and the single value
+    // argument lowers through the shared method-arg path.
+    if std::mem::equal_bytes(method_name, "append") {
+        let receiver_kizu = try compiled_mir_types::resolve_receiver_value_kizu_type(
+            ir_bytes, function_name, module_prefix, receiver_name, bs
+        );
+        let element_kizu = compiled_mir_types::array_value_element_kizu_type_or_empty(
+            array_receiver_lookup_kizu_type(receiver_kizu)
+        );
+        if std::mem::len(element_kizu) == 0 {
+            return error("compiled mir: append receiver is not a std::array::Array");
+        }
+        let element_llvm = try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, module_prefix, element_kizu
+        );
+        consumed_string = try lower_string_method_arg(
+            ir_bytes, function_name, module_prefix, element_llvm,
+            arg_node, string_counter, aliases, &var args, bs
+        );
+        try stmts.append(compiled_mir::array_try_append_stmt(
+            receiver_alias, element_llvm, llvm_return_type,
+            string_counter, try_counter, args
+        ));
+    } else {
     if std::mem::equal_bytes(method_name, "append_bytes") {
         consumed_string = try lower_string_method_arg(
             ir_bytes, function_name, module_prefix, "%kizu.slice.u8",
@@ -3891,10 +4043,22 @@ fn lower_multi_expr_statement(
             return error("compiled mir: unsupported string method");
         }
     }
+    }
     return MultiExprLowerResult {
         string_counter: string_counter + consumed_string,
         try_counter: try_counter + 1
     };
+}
+
+// array_receiver_lookup_kizu_type strips the borrow markers from a receiver type
+// spelling ('&var std::array::Array<T>' arrives as '&var_std::array::Array<T>') so
+// the Array<T> element extraction sees the bare container type.
+fn array_receiver_lookup_kizu_type(kizu_type: []u8) -> []u8 {
+    let stripped = compiled_mir_types::struct_lookup_kizu_type(kizu_type);
+    if std::mem::starts_with(stripped, "var_") {
+        return stripped[4..std::mem::len(stripped)];
+    }
+    return stripped;
 }
 
 fn owned_deinit_receiver_type_supported(kizu_type: []u8) -> bool {
@@ -4083,6 +4247,15 @@ fn lower_string_method_arg(
             ir_bytes, function_name, value_node, bs
         );
         try args.append(compiled_mir::int_literal_call_arg(arg_type, literal));
+        return 0;
+    }
+    if std::mem::equal_bytes(arg_kind, "FieldExpr") {
+        // A struct-field read argument (e.g. 'code.append(right_eval.next)') reuses the
+        // shared call-arg field lowering; it consumes no string slot.
+        try args.append(try compiled_mir_lower_call::lower_single_call_arg(
+            ir_bytes, function_name, module_prefix, "", arg_type, arg_node,
+            string_index, bs
+        ));
         return 0;
     }
     return error("compiled mir: unsupported string method argument");
@@ -4702,6 +4875,37 @@ fn lower_try_call_void_if(
     };
 }
 
+// lower_return_struct_literal lowers a 'return <Struct> { ... };' statement.
+// Inside an error-union function ('return CodeEval { ... };' in '!CodeEval') the
+// struct builds as the success value and wraps into the function's error union;
+// a plain struct return keeps building into the return type directly (empty wrap
+// markers).
+fn lower_return_struct_literal(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    value: i64,
+    string_counter: i64,
+    bs: i64
+) -> !compiled_mir::MirStmt {
+    var wrap_error_union = ir_bytes[0..0];
+    var success_llvm = ir_bytes[0..0];
+    if std::mem::starts_with(llvm_return_type, "%kizu.error.") {
+        wrap_error_union = llvm_return_type;
+        success_llvm = try compiled_signature::resolve_struct_literal_type(
+            ir_bytes, function_name, module_prefix, value, bs
+        );
+    }
+    let fields = try compiled_mir_lower_struct::lower_struct_fields(
+        ir_bytes, function_name, module_prefix, locals_spec, value, bs
+    );
+    return compiled_mir::return_struct_wrapped_stmt(
+        string_counter, wrap_error_union, success_llvm, fields
+    );
+}
+
 fn lower_multi_return_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4813,10 +5017,10 @@ fn lower_multi_return_statement(
         );
     }
     if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
-        let fields = try compiled_mir_lower_struct::lower_struct_fields(
-            ir_bytes, function_name, module_prefix, locals_spec, value, bs
+        return try lower_return_struct_literal(
+            ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+            value, string_counter, bs
         );
-        return compiled_mir::return_struct_stmt(string_counter, fields);
     }
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let result_id = try lower_expr_with_local_aliases(

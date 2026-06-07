@@ -83,6 +83,19 @@ pub fn cross_module_callee_qualified_name_or_empty(
     callee_name: []u8
 ) -> []u8 {
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
+        // A 'std::kizu::*' callee that carries its own function-signature-return fact
+        // is a compiled std component function (e.g. the std::kizu::ast BinaryOp
+        // accessors), not a runtime intrinsic: resolve it as a fully-qualified
+        // cross-module callee so its return type and symbol come from the real
+        // signature facts rather than the stdlib-symbol table.
+        if std::mem::starts_with(callee_name, "std::kizu::") {
+            let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+                ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
+            );
+            if std::mem::len(ret_kizu) > 0 {
+                return callee_name;
+            }
+        }
         return ir_bytes[0..0];
     }
     let colon = compiled_util::find_byte(callee_name, cast<u8>(58), 0);
@@ -112,7 +125,12 @@ pub fn lower_call_return_type(
         if std::mem::len(ret_kizu) == 0 {
             return error("compiled mir: cross-module callee return type not found");
         }
-        return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, ir_bytes[0..0], ret_kizu);
+        // The signature fact spells the return type the way the callee's own module
+        // wrote it (e.g. the bare 'BinaryOp' inside std::kizu::ast), so lower it
+        // against the callee's module prefix rather than the caller's.
+        return try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, compiled_util::module_prefix_of(qualified), ret_kizu
+        );
     }
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
         let stdlib_ret = try compiled_fact_lookup::lookup_stdlib_return(
@@ -440,7 +458,7 @@ pub fn array_value_element_kizu_type_or_empty(kizu_type: []u8) -> []u8 {
 // resolve_receiver_value_kizu_type resolves a value receiver's kizu type whether it is a
 // function parameter or a local binding (issue 1165). It is used where the call-site
 // params_spec is not threaded (let-binding type resolution).
-fn resolve_receiver_value_kizu_type(
+pub fn resolve_receiver_value_kizu_type(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
@@ -783,6 +801,13 @@ fn resolve_let_value_kizu_type(
                 ir_bytes, module_prefix, try_callee
             );
         }
+    }
+    // 'let result_value = right_eval.next;' binds a struct-field read: the field's
+    // declared kizu type resolves from the receiver's struct-field facts.
+    if std::mem::equal_bytes(value_kind, "FieldExpr") {
+        return try resolve_field_expr_kizu_type(
+            ir_bytes, function_name, module_prefix, "", value, bs
+        );
     }
     return error("compiled mir: unsupported local type value");
 }

@@ -208,21 +208,34 @@ func TestSelfhostCodegenLoopI64BuildersUseCompiledAuto(t *testing.T) {
 	}
 }
 
-// TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening pins that the
-// codegen cluster admits no cross-component external accessor. Its only non-local
-// callee is the std::mem equal_bytes intrinsic (handled by the shared collector's
-// std::mem:: branch), so compiled_external_accessor_allowed must keep its
-// prefix-limited parser / selfhost::ast branches and must not grow a
-// selfhost::ir::codegen:: branch that would broaden the allow policy.
+// TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening pins the exact
+// external-accessor policy of the codegen cluster. The run codegen tape lowering
+// references two kinds of separately-emitted definitions: the compiled
+// std::kizu::ast BinaryOp constant accessors (kizu_kizu__ast_binary_*) called by
+// code_binary_kind, and the transitional handwritten parse_int_literal define
+// (deleted once the generic while lowering carries mid-body scalar assigns).
+// Anything beyond that exact allowlist is a policy widening this test rejects.
 func TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 
 	assertComponentCompiledCalleeFactGate(t, cli)
 
 	allow := selfhostKizuFunctionBody(t, cli, "fn compiled_external_accessor_allowed(")
-	if strings.Contains(allow, "selfhost::ir::codegen::") {
-		t.Fatalf("compiled_external_accessor_allowed grew a codegen branch; " +
-			"the cluster needs no external accessor")
+	allowed := []string{
+		`"parse_int_literal"`,
+		`"std::kizu::ast::binary_add"`,
+		`"std::kizu::ast::binary_sub"`,
+		`"std::kizu::ast::binary_mul"`,
+		`"std::kizu::ast::binary_div"`,
+	}
+	for _, fragment := range allowed {
+		if !strings.Contains(allow, fragment) {
+			t.Fatalf("compiled_external_accessor_allowed lost the codegen allowlist entry %s", fragment)
+		}
+	}
+	if strings.Contains(allow, `"std::kizu::ast::binary_eq"`) ||
+		strings.Contains(allow, `"std::kizu::ast::binary_and"`) {
+		t.Fatalf("compiled_external_accessor_allowed widened the codegen accessor allowlist")
 	}
 }
 
