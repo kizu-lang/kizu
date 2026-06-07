@@ -4059,6 +4059,25 @@ fn lower_code_call(
     return code_eval_value(result_value, after_value);
 }
 
+// lower_code_args lowers each call argument and collects its value id onto the
+// shared scratch tail (the CALL record then copies [scratch_base, end)). A nested
+// call argument would leave its own argument ids on the scratch below this call's,
+// and the tape has no scratch-truncate primitive yet, so a Call-valued argument is
+// rejected here: the tape's only contiguous-scratch invariant holds because every
+// other argument kind (Int / String / Var / Binary) appends exactly its own single
+// result id. Nested call arguments lower once a scratch-truncate capability lands.
+// code_node_is_call reports whether a node is a Call expression. It is the single
+// let+return-match accessor shape the compiled traversal path lowers (bool-literal
+// arms), so the nested-call rejection in lower_code_args stays out of a mid-function
+// match-over-union that the multi-statement path does not model.
+fn code_node_is_call(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Call(call_node) => true,
+        _ => false,
+    };
+}
+
 fn lower_code_args(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -4078,6 +4097,9 @@ fn lower_code_args(
         return code_eval_value(0, next_value);
     }
     let arg = try ast.child_at(args, index);
+    if code_node_is_call(ast, arg) {
+        return code_eval_unsupported(next_value);
+    }
     let eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !eval.ok {
         return code_eval_unsupported(eval.next);
