@@ -727,8 +727,13 @@ func requiredLLVMConstI64RunCodegenFragments() []string {
 			"%kizu.slice.u8 %callee_text)",
 		"%then_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
 			"%kizu.selfhost.codegen.program %then_program)",
+		"%else_empty = icmp eq i64 %else_tag, ",
+		"%else_return_ast = call %kizu.selfhost.codegen.run_ast " +
+			"@kizu_selfhost__ir_codegen_return_void_run_ast(",
+		"%else_program = phi %kizu.selfhost.codegen.program " +
+			"[ %else_return_program, %else_return_void ], [ %else_print_program, %else_print ]",
 		"%else_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
-			"%kizu.selfhost.codegen.program %else_program)",
+			"%kizu.selfhost.codegen.program %else_print_program)",
 		"%op = call i64 @kizu_selfhost__ir_codegen_run_binary_op(i64 %std_op)",
 		"%decimal_result = call %kizu.error.slice.u8 @kizu_selfhost__i64_decimal(i64 %value)",
 		"%program = call %kizu.selfhost.codegen.program " +
