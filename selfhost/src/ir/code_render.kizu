@@ -26,6 +26,21 @@ pub fn render_tape_module(
     code: &std::array::Array<i64>,
     kinds: &std::array::Array<i64>
 ) -> !std::string::String {
+    // This slice renders the single-function 'main' entry only: it does not yet
+    // emit user function definitions or render CALL records. The lowering accepts
+    // multi-function programs onto the tape, so guard the renderer's scope
+    // explicitly -- a tape carrying more than one function or any CALL record is
+    // rejected here rather than silently smashed into one kizu_run_main body.
+    // Deletion condition: drop this guard once render_tape_module emits per-function
+    // defines and lowers CALL records (issue 1255 slice 3b).
+    let func_count = try count_tape_records(code, codegen::code_op_func_begin(), 0);
+    if func_count > 1 {
+        return error("render_tape_module: only single-function main is supported in this slice");
+    }
+    let call_count = try count_tape_records(code, codegen::code_op_call(), 0);
+    if call_count > 0 {
+        return error("render_tape_module: CALL records are not rendered in this slice");
+    }
     var out = std::string::String(allocator);
     try render_preamble(&var out, source_path);
     try render_string_globals(&var out, text, code, 0);
@@ -39,6 +54,25 @@ pub fn render_tape_module(
     try nl(&var out);
     try render_main_wrapper(&var out);
     return out;
+}
+
+// count_tape_records counts the records on the tape whose opcode is op, decoding
+// each record's arity to step over it.
+fn count_tape_records(
+    code: &std::array::Array<i64>,
+    op: i64,
+    index: i64
+) -> !i64 {
+    if index >= code.len() {
+        return 0;
+    }
+    let record_op = try code.get(index);
+    let next = try tape_record_end(code, index);
+    let rest = try count_tape_records(code, op, next);
+    if record_op == op {
+        return rest + 1;
+    }
+    return rest;
 }
 
 // w appends a fragment with no trailing newline.
@@ -300,7 +334,7 @@ fn tape_string_length(
     index: i64
 ) -> !i64 {
     if index >= code.len() {
-        return 0;
+        return error("render: print string value has no CONST_STR record");
     }
     let op = try code.get(index);
     let next = try tape_record_end(code, index);
