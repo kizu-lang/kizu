@@ -2901,10 +2901,11 @@ fn lower_const_int_print(
     arg: std::kizu::ast::NodeId,
     env: &IntEnv
 ) -> !Program {
-    let value = try eval_int_expr(text, ast, arg, env);
-    if value < 0 {
+    let result = try eval_int_expr(text, ast, arg, env);
+    if !result.ok {
         return unsupported_program(text[0..0]);
     }
+    let value = result.i64_value;
     let start = scratch.len();
     try std::fmt::append_i64(scratch, value);
     let end = scratch.len();
@@ -3009,6 +3010,25 @@ fn int_env_put(env: &IntEnv, name: []u8, value: i64) -> IntEnv {
     return overflow_from(env);
 }
 
+struct IntEval {
+    ok: bool,
+    i64_value: i64,
+}
+
+fn int_eval_ok(value: i64) -> IntEval {
+    return IntEval {
+        ok: true,
+        i64_value: value
+    };
+}
+
+fn int_eval_unsupported() -> IntEval {
+    return IntEval {
+        ok: false,
+        i64_value: 0
+    };
+}
+
 fn extend_int_env(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -3017,24 +3037,24 @@ fn extend_int_env(
     value: std::kizu::ast::NodeId
 ) -> !IntEnv {
     let local_name = ast_node_text(text, ast, name);
-    let local_value = try eval_int_expr(text, ast, value, env);
-    if local_value < 0 {
+    let local_result = try eval_int_expr(text, ast, value, env);
+    if !local_result.ok {
         return overflow_from(env);
     }
-    return int_env_put(env, local_name, local_value);
+    return int_env_put(env, local_name, local_result.i64_value);
 }
 
-fn int_env_value(env: &IntEnv, name: []u8) -> !i64 {
+fn int_env_value(env: &IntEnv, name: []u8) -> IntEval {
     if env.count >= 1 and std::mem::equal_bytes(env.name0, name) {
-        return env.value0;
+        return int_eval_ok(env.value0);
     }
     if env.count >= 2 and std::mem::equal_bytes(env.name1, name) {
-        return env.value1;
+        return int_eval_ok(env.value1);
     }
     if env.count >= 3 and std::mem::equal_bytes(env.name2, name) {
-        return env.value2;
+        return int_eval_ok(env.value2);
     }
-    return -1;
+    return int_eval_unsupported();
 }
 
 // eval_int_expr evaluates an integer literal, local reference, arithmetic
@@ -3046,19 +3066,19 @@ fn eval_int_expr(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     env: &IntEnv
-) -> !i64 {
+) -> !IntEval {
     let node = ast.get(node_id);
     return match node.data {
-        Int(int_node) => try parse_int_literal(ast_node_text(text, ast, node_id)),
-        Var(var_node) => try int_env_value(env, ast_node_text(text, ast, node_id)),
+        Int(int_node) => int_eval_ok(try parse_int_literal(ast_node_text(text, ast, node_id))),
+        Var(var_node) => int_env_value(env, ast_node_text(text, ast, node_id)),
         Binary(binary) => try eval_int_binary(text, ast, binary.op, binary.left, binary.right, env),
         Call(call_node) => try eval_call(text, ast, env, call_node.callee, call_node.args),
         _ => try unsupported_int_expr(),
     };
 }
 
-fn unsupported_int_expr() -> !i64 {
-    return -1;
+fn unsupported_int_expr() -> !IntEval {
+    return int_eval_unsupported();
 }
 
 // eval_call evaluates a direct call to a user-declared function by binding its
@@ -3071,7 +3091,7 @@ fn eval_call(
     caller_env: &IntEnv,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange
-) -> !i64 {
+) -> !IntEval {
     let name = ast_node_text(text, ast, callee);
     var index = 0;
     while index < caller_env.decls.len {
@@ -3086,7 +3106,7 @@ fn eval_call(
         }
         index = index + 1;
     }
-    return -1;
+    return int_eval_unsupported();
 }
 
 fn eval_fn_decl(
@@ -3095,7 +3115,7 @@ fn eval_fn_decl(
     caller_env: &IntEnv,
     fn_node: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange
-) -> !i64 {
+) -> !IntEval {
     let node = ast.get(fn_node);
     return match node.data {
         FnDecl(fn_decl) => try eval_fn_body(text, ast, caller_env, fn_decl.params, fn_decl.body, args),
@@ -3110,9 +3130,9 @@ fn eval_fn_body(
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange
-) -> !i64 {
+) -> !IntEval {
     if params.len != args.len {
-        return error("argument count mismatch in run codegen");
+        return try unsupported_int_expr();
     }
     var param_env = empty_int_env(text, caller_env.decls);
     var index = 0;
@@ -3124,10 +3144,10 @@ fn eval_fn_body(
             return try unsupported_int_expr();
         }
         let pvalue = try eval_int_expr(text, ast, arg, caller_env);
-        if pvalue < 0 {
+        if !pvalue.ok {
             return try unsupported_int_expr();
         }
-        let extended = int_env_put(&param_env, pname, pvalue);
+        let extended = int_env_put(&param_env, pname, pvalue.i64_value);
         if extended.count < 0 {
             return try unsupported_int_expr();
         }
@@ -3154,7 +3174,7 @@ fn eval_function_body(
     ast: std::kizu::ast::Ast,
     body: std::kizu::ast::NodeId,
     env: &IntEnv
-) -> !i64 {
+) -> !IntEval {
     let node = ast.get(body);
     return match node.data {
         Block(block) => try eval_block_return(text, ast, block.statements, env),
@@ -3170,7 +3190,7 @@ fn eval_block_return(
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange,
     env: &IntEnv
-) -> !i64 {
+) -> !IntEval {
     var current = copy_int_env(env);
     var index = 0;
     while index < statements.len {
@@ -3203,26 +3223,26 @@ fn eval_int_binary(
     left_id: std::kizu::ast::NodeId,
     right_id: std::kizu::ast::NodeId,
     env: &IntEnv
-) -> !i64 {
+) -> !IntEval {
     let left = try eval_int_expr(text, ast, left_id, env);
     let right = try eval_int_expr(text, ast, right_id, env);
-    if left < 0 or right < 0 {
+    if !left.ok or !right.ok {
         return try unsupported_int_expr();
     }
     if op == std::kizu::ast::binary_add() {
-        return left + right;
+        return int_eval_ok(left.i64_value + right.i64_value);
     }
     if op == std::kizu::ast::binary_sub() {
-        return left - right;
+        return int_eval_ok(left.i64_value - right.i64_value);
     }
     if op == std::kizu::ast::binary_mul() {
-        return left * right;
+        return int_eval_ok(left.i64_value * right.i64_value);
     }
     if op == std::kizu::ast::binary_div() {
-        if right == 0 {
+        if right.i64_value == 0 {
             return try unsupported_int_expr();
         }
-        return left / right;
+        return int_eval_ok(left.i64_value / right.i64_value);
     }
     return try unsupported_int_expr();
 }
@@ -3277,26 +3297,26 @@ fn eval_bool_binary(
     }
     let left_i64 = try eval_int_expr(text, ast, left_id, env);
     let right_i64 = try eval_int_expr(text, ast, right_id, env);
-    if left_i64 < 0 or right_i64 < 0 {
+    if !left_i64.ok or !right_i64.ok {
         return try unsupported_bool_expr();
     }
     if op == std::kizu::ast::binary_eq() {
-        return left_i64 == right_i64;
+        return left_i64.i64_value == right_i64.i64_value;
     }
     if op == std::kizu::ast::binary_not_eq() {
-        return left_i64 != right_i64;
+        return left_i64.i64_value != right_i64.i64_value;
     }
     if op == std::kizu::ast::binary_lt() {
-        return left_i64 < right_i64;
+        return left_i64.i64_value < right_i64.i64_value;
     }
     if op == std::kizu::ast::binary_lte() {
-        return left_i64 <= right_i64;
+        return left_i64.i64_value <= right_i64.i64_value;
     }
     if op == std::kizu::ast::binary_gt() {
-        return left_i64 > right_i64;
+        return left_i64.i64_value > right_i64.i64_value;
     }
     if op == std::kizu::ast::binary_gte() {
-        return left_i64 >= right_i64;
+        return left_i64.i64_value >= right_i64.i64_value;
     }
     return error("unsupported boolean operator in run codegen");
 }
