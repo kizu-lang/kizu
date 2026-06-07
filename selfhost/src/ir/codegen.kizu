@@ -2902,6 +2902,9 @@ fn lower_const_int_print(
     env: &IntEnv
 ) -> !Program {
     let value = try eval_int_expr(text, ast, arg, env);
+    if value < 0 {
+        return unsupported_program(text[0..0]);
+    }
     let start = scratch.len();
     try std::fmt::append_i64(scratch, value);
     let end = scratch.len();
@@ -3015,6 +3018,9 @@ fn extend_int_env(
 ) -> !IntEnv {
     let local_name = ast_node_text(text, ast, name);
     let local_value = try eval_int_expr(text, ast, value, env);
+    if local_value < 0 {
+        return overflow_from(env);
+    }
     return int_env_put(env, local_name, local_value);
 }
 
@@ -3028,7 +3034,7 @@ fn int_env_value(env: &IntEnv, name: []u8) -> !i64 {
     if env.count >= 3 and std::mem::equal_bytes(env.name2, name) {
         return env.value2;
     }
-    return error("unknown integer local in run codegen");
+    return -1;
 }
 
 // eval_int_expr evaluates an integer literal, local reference, arithmetic
@@ -3052,7 +3058,7 @@ fn eval_int_expr(
 }
 
 fn unsupported_int_expr() -> !i64 {
-    return error("unsupported integer expression in run codegen");
+    return -1;
 }
 
 // eval_call evaluates a direct call to a user-declared function by binding its
@@ -3080,7 +3086,7 @@ fn eval_call(
         }
         index = index + 1;
     }
-    return error("unknown function in run codegen");
+    return -1;
 }
 
 fn eval_fn_decl(
@@ -3115,12 +3121,15 @@ fn eval_fn_body(
         let arg = try ast.child_at(args, index);
         let pname = param_name(text, ast, param);
         if std::mem::len(pname) == 0 {
-            return error("unsupported parameter in run codegen");
+            return try unsupported_int_expr();
         }
         let pvalue = try eval_int_expr(text, ast, arg, caller_env);
+        if pvalue < 0 {
+            return try unsupported_int_expr();
+        }
         let extended = int_env_put(&param_env, pname, pvalue);
         if extended.count < 0 {
-            return error("too many parameters in run codegen");
+            return try unsupported_int_expr();
         }
         param_env = extended;
         index = index + 1;
@@ -3179,12 +3188,12 @@ fn eval_block_return(
             _ => overflow_from(&current),
         };
         if next.count < 0 {
-            return error("unsupported function body in run codegen");
+            return try unsupported_int_expr();
         }
         current = next;
         index = index + 1;
     }
-    return error("function body has no return in run codegen");
+    return try unsupported_int_expr();
 }
 
 fn eval_int_binary(
@@ -3197,6 +3206,9 @@ fn eval_int_binary(
 ) -> !i64 {
     let left = try eval_int_expr(text, ast, left_id, env);
     let right = try eval_int_expr(text, ast, right_id, env);
+    if left < 0 or right < 0 {
+        return try unsupported_int_expr();
+    }
     if op == std::kizu::ast::binary_add() {
         return left + right;
     }
@@ -3208,11 +3220,11 @@ fn eval_int_binary(
     }
     if op == std::kizu::ast::binary_div() {
         if right == 0 {
-            return error("division by zero in run codegen");
+            return try unsupported_int_expr();
         }
         return left / right;
     }
-    return error("unsupported integer operator in run codegen");
+    return try unsupported_int_expr();
 }
 
 // eval_bool_expr evaluates a boolean literal, integer comparison, or logical
@@ -3263,25 +3275,28 @@ fn eval_bool_binary(
         let right = try eval_bool_expr(text, ast, right_id, env);
         return left or right;
     }
-    let left = try eval_int_expr(text, ast, left_id, env);
-    let right = try eval_int_expr(text, ast, right_id, env);
+    let left_i64 = try eval_int_expr(text, ast, left_id, env);
+    let right_i64 = try eval_int_expr(text, ast, right_id, env);
+    if left_i64 < 0 or right_i64 < 0 {
+        return try unsupported_bool_expr();
+    }
     if op == std::kizu::ast::binary_eq() {
-        return left == right;
+        return left_i64 == right_i64;
     }
     if op == std::kizu::ast::binary_not_eq() {
-        return left != right;
+        return left_i64 != right_i64;
     }
     if op == std::kizu::ast::binary_lt() {
-        return left < right;
+        return left_i64 < right_i64;
     }
     if op == std::kizu::ast::binary_lte() {
-        return left <= right;
+        return left_i64 <= right_i64;
     }
     if op == std::kizu::ast::binary_gt() {
-        return left > right;
+        return left_i64 > right_i64;
     }
     if op == std::kizu::ast::binary_gte() {
-        return left >= right;
+        return left_i64 >= right_i64;
     }
     return error("unsupported boolean operator in run codegen");
 }
