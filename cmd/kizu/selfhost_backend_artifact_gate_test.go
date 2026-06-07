@@ -761,9 +761,16 @@ func requiredLLVMReturnErrorFragments() []string {
 	return []string{
 		"@.kizu.cli.stdout_payload_error = " +
 			"private unnamed_addr constant [34 x i8] c\"unsupported codegen stdout payload\"",
+		"@.kizu.cli.error_union_i64_type = " +
+			"private unnamed_addr constant [4 x i8] c\"!i64\"",
+		"define i1 @kizu_selfhost__ir_codegen_type_node_is_error_union_i64(",
 		"%string_result = insertvalue %kizu.error.slice.u8 %string_ok, %kizu.slice.u8 %string_payload, 1",
 		"%try_void = call i1 @kizu_selfhost__ir_codegen_try_void_program_supported",
 		"%try_result = insertvalue %kizu.error.slice.u8 %try_ok, %kizu.slice.u8 %second_payload, 1",
+		"define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_i64_return_exit_code(",
+		"define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_i64_helper_block_exit_code(",
+		"%return_i64 = call i1 @kizu_selfhost__ir_codegen_type_node_is_error_union_i64(",
+		"%i64_result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_try_i64_helper_block_exit_code(",
 		"%err = insertvalue %kizu.slice.u8 %err_base, i64 34, 1",
 		"%fail0 = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 false, 0",
 		"%fail1 = insertvalue %kizu.error.slice.u8 %fail0, %kizu.slice.u8 %err, 2",
