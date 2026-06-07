@@ -80,6 +80,12 @@ func runRenderCases() []runRenderCase {
 				"\nfn main() {\n    print(mul(4, 5));\n}\n",
 			wantStdout: "20\n",
 		},
+		{
+			name: "user_function_prints",
+			source: "fn announce(value: i64) -> i64 {\n    print(value);\n    return value;\n}\n" +
+				"\nfn main() {\n    print(announce(7));\n}\n",
+			wantStdout: "7\n7\n",
+		},
 	}
 }
 
