@@ -357,6 +357,9 @@ func requiredLLVMCLIRunTestFragments() []string {
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%run_ast_result = call %kizu.error.run_ast " +
 			"@kizu_selfhost__ir_codegen_lower_run_parse_result",
+		"%run_const_i64_program = call %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_i64_program",
+		"%run_program_final = phi %kizu.selfhost.codegen.program",
 		"%test_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%test_executable = call %kizu.selfhost.executable " +
@@ -419,8 +422,11 @@ func requiredLLVMExecutableFragments() []string {
 		"@kizu_kizu__ast_ast_add_node",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_lower_program",
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_ast",
+		"define %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_i64_program",
 		"define i1 @kizu_selfhost__ir_codegen_program_supported",
 	}
+	fragments = append(fragments, requiredLLVMCLIExpressionParserFragments()...)
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
 	fragments = append(fragments, requiredLLVMReturnErrorFragments()...)
@@ -451,7 +457,14 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMSourceModulePathFragments()...)
 	fragments = append(fragments, requiredLLVMSourcePackagePrefixFragments()...)
 	fragments = append(fragments, requiredLLVMSourceLoaderFragments()...)
-	return append(fragments, []string{
+	fragments = append(fragments, requiredLLVMRunArtifactEmissionFragments()...)
+	return fragments
+}
+
+// requiredLLVMRunArtifactEmissionFragments locks the hosted run artifact writer
+// and linker path used after a supported codegen Program is produced.
+func requiredLLVMRunArtifactEmissionFragments() []string {
+	return []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
@@ -464,7 +477,20 @@ func requiredLLVMExecutableFragments() []string {
 		"%run_emitted = call i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
 		"%run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
 		"%run_artifact_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
-	}...)
+	}
+}
+
+// requiredLLVMCLIExpressionParserFragments locks the hosted CLI AST parser pieces
+// that parse operator precedence before run codegen sees the checked AST.
+func requiredLLVMCLIExpressionParserFragments() []string {
+	return []string{
+		"define %kizu.selfhost.cli.parse_node_result " +
+			"@kizu_selfhost__cli_parse_compare_expr",
+		"define %kizu.selfhost.cli.parse_node_result " +
+			"@kizu_selfhost__cli_parse_additive_expr",
+		"define %kizu.selfhost.cli.parse_node_result " +
+			"@kizu_selfhost__cli_parse_multiplicative_expr",
+	}
 }
 
 // requiredLLVMSourcePredicateFragments locks SourceKind predicates compiled through
@@ -600,7 +626,7 @@ func requiredLLVMSourceLoaderFragments() []string {
 // requiredLLVMRunCodegenLoweringFragments returns the tracker-961 run-codegen
 // lowering members compiled into stage2.
 func requiredLLVMRunCodegenLoweringFragments() []string {
-	return []string{
+	fragments := []string{
 		// tracker 961: first AST-traversal lowering member compiled into stage2.
 		// This lands the run-AST local-binding model (LocalTable / LocalBinding)
 		// plus the duplicate-name membership check used inside lower_run_ast_block.
@@ -659,6 +685,25 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 		"define %kizu.selfhost.codegen.int_env @kizu_selfhost__ir_codegen_empty_int_env",
 		"%v0_1 = insertvalue %kizu.selfhost.codegen.int_env %v0_0, " +
 			"%kizu.kizu.ast.child_range %decls, 1",
+	}
+	return append(fragments, requiredLLVMConstI64RunCodegenFragments()...)
+}
+
+// requiredLLVMConstI64RunCodegenFragments locks the stage2 run fallback that
+// shape-validates arithmetic print ASTs and lowers them without Go fallback.
+func requiredLLVMConstI64RunCodegenFragments() []string {
+	return []string{
+		"define %kizu.error.i64 @kizu_selfhost__cli_codegen_eval_const_i64_expr(",
+		"define %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_i64_print_program(",
+		"define %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__cli_codegen_lower_const_i64_program(",
+		"@kizu_selfhost__cli_codegen_eval_const_i64_expr(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %left)",
+		"%op = call i64 @kizu_selfhost__ir_codegen_run_binary_op(i64 %std_op)",
+		"%decimal_result = call %kizu.error.slice.u8 @kizu_selfhost__i64_decimal(i64 %value)",
+		"%program = call %kizu.selfhost.codegen.program " +
+			"@kizu_selfhost__ir_codegen_lowered_main_print_program(%kizu.slice.u8 %decimal)",
 	}
 }
 
