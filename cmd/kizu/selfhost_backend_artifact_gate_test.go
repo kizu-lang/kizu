@@ -357,9 +357,6 @@ func requiredLLVMCLIRunTestFragments() []string {
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%run_ast_result = call %kizu.error.run_ast " +
 			"@kizu_selfhost__ir_codegen_lower_run_parse_result",
-		"%run_const_i64_program = call %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_i64_program",
-		"%run_program_final = phi %kizu.selfhost.codegen.program",
 		"%test_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%test_executable = call %kizu.selfhost.executable " +
@@ -422,11 +419,8 @@ func requiredLLVMExecutableFragments() []string {
 		"@kizu_kizu__ast_ast_add_node",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_lower_program",
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_ast",
-		"define %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_i64_program",
 		"define i1 @kizu_selfhost__ir_codegen_program_supported",
 	}
-	fragments = append(fragments, requiredLLVMCLIExpressionParserFragments()...)
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
 	fragments = append(fragments, requiredLLVMReturnErrorFragments()...)
@@ -457,14 +451,7 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMSourceModulePathFragments()...)
 	fragments = append(fragments, requiredLLVMSourcePackagePrefixFragments()...)
 	fragments = append(fragments, requiredLLVMSourceLoaderFragments()...)
-	fragments = append(fragments, requiredLLVMRunArtifactEmissionFragments()...)
-	return fragments
-}
-
-// requiredLLVMRunArtifactEmissionFragments locks the hosted run artifact writer
-// and linker path used after a supported codegen Program is produced.
-func requiredLLVMRunArtifactEmissionFragments() []string {
-	return []string{
+	return append(fragments, []string{
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
@@ -473,30 +460,11 @@ func requiredLLVMRunArtifactEmissionFragments() []string {
 		"%from_codegen_lowering = extractvalue %kizu.selfhost.codegen.program %program, 15",
 		"%shape_ok = and i1 %shape_12, %from_codegen_lowering",
 		"%escape_next_write = call i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
-		"@.kizu.cli.run_duplicate_local_prefix = " +
-			"private unnamed_addr constant [39 x i8] c\"error: type error: duplicate variable `\"",
-		"@.kizu.cli.run_duplicate_local_suffix = " +
-			"private unnamed_addr constant [2 x i8] c\"`\\0A\"",
-		"%run_duplicate_name = extractvalue %kizu.error.run_ast %run_ast_result, 2",
-		"%run_dup_name_write = call %kizu.error.void @kizu_rt_io_write_stderr(",
 		"define i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
 		"%run_emitted = call i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
 		"%run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
 		"%run_artifact_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
-	}
-}
-
-// requiredLLVMCLIExpressionParserFragments locks the hosted CLI AST parser pieces
-// that parse operator precedence before run codegen sees the checked AST.
-func requiredLLVMCLIExpressionParserFragments() []string {
-	return []string{
-		"define %kizu.selfhost.cli.parse_node_result " +
-			"@kizu_selfhost__cli_parse_compare_expr",
-		"define %kizu.selfhost.cli.parse_node_result " +
-			"@kizu_selfhost__cli_parse_additive_expr",
-		"define %kizu.selfhost.cli.parse_node_result " +
-			"@kizu_selfhost__cli_parse_multiplicative_expr",
-	}
+	}...)
 }
 
 // requiredLLVMSourcePredicateFragments locks SourceKind predicates compiled through
@@ -632,7 +600,7 @@ func requiredLLVMSourceLoaderFragments() []string {
 // requiredLLVMRunCodegenLoweringFragments returns the tracker-961 run-codegen
 // lowering members compiled into stage2.
 func requiredLLVMRunCodegenLoweringFragments() []string {
-	fragments := []string{
+	return []string{
 		// tracker 961: first AST-traversal lowering member compiled into stage2.
 		// This lands the run-AST local-binding model (LocalTable / LocalBinding)
 		// plus the duplicate-name membership check used inside lower_run_ast_block.
@@ -692,73 +660,6 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 		"%v0_1 = insertvalue %kizu.selfhost.codegen.int_env %v0_0, " +
 			"%kizu.kizu.ast.child_range %decls, 1",
 	}
-	return append(fragments, requiredLLVMConstI64RunCodegenFragments()...)
-}
-
-// requiredLLVMConstI64RunCodegenFragments locks the stage2 run fallback that
-// shape-validates arithmetic print ASTs and lowers them without Go fallback.
-func requiredLLVMConstI64RunCodegenFragments() []string {
-	return []string{
-		"define %kizu.error.i64 " +
-			"@kizu_selfhost__ir_codegen_eval_i64_call_arg_expr(",
-		"define %kizu.error.i64 @kizu_selfhost__cli_codegen_eval_const_i64_expr(",
-		"define %kizu.error.i64 " +
-			"@kizu_selfhost__cli_codegen_eval_const_i64_operand_one_local(",
-		"define %kizu.error.bool " +
-			"@kizu_selfhost__cli_codegen_eval_const_bool_expr_one_local(",
-		"define %kizu.error.bool " +
-			"@kizu_selfhost__cli_codegen_eval_const_bool_literal(",
-		"define %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_i64_print_program(",
-		"define %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_string_print_statement_program(",
-		"define %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_void_block_program(",
-		"define %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_let_if_program(",
-		"define %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_single_if_program(",
-		"define %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_i64_program(",
-		"@kizu_selfhost__cli_codegen_eval_const_i64_expr(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %left)",
-		"@kizu_selfhost__cli_codegen_eval_const_bool_expr_one_local(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %condition, " +
-			"%kizu.slice.u8 %local_name, i64 %local_value)",
-		"@kizu_selfhost__cli_codegen_eval_const_bool_literal(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %condition)",
-		"@kizu_selfhost__ir_codegen_eval_i64_call_arg_expr(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, " +
-			"%kizu.kizu.ast.node_id %arg0_node)",
-		"@kizu_selfhost__ir_codegen_find_i64_binary_function(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, " +
-			"%kizu.slice.u8 %callee_text)",
-		"%then_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
-			"%kizu.selfhost.codegen.program %then_program)",
-		"%else_empty = icmp eq i64 %else_tag, ",
-		"%else_return_ast = call %kizu.selfhost.codegen.run_ast " +
-			"@kizu_selfhost__ir_codegen_return_void_run_ast(",
-		"%else_program = phi %kizu.selfhost.codegen.program " +
-			"[ %else_return_program, %else_return_void ], [ %else_print_program, %else_print ], " +
-			"[ %else_void_program, %else_void_block ]",
-		"%else_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
-			"%kizu.selfhost.codegen.program %else_print_program)",
-		"%else_void_program = call %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_void_block_program(",
-		"%else_void_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
-			"%kizu.selfhost.codegen.program %else_void_program)",
-		"%single_if_program = call %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_single_if_program(",
-		"%if_else_empty = icmp eq i64 %else_tag, ",
-		"%if_return_ast = call %kizu.selfhost.codegen.run_ast " +
-			"@kizu_selfhost__ir_codegen_return_void_run_ast(",
-		"%op = call i64 @kizu_selfhost__ir_codegen_run_binary_op(i64 %std_op)",
-		"%decimal_result = call %kizu.error.slice.u8 @kizu_selfhost__i64_decimal(i64 %value)",
-		"%program = call %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__ir_codegen_lowered_main_print_program(%kizu.slice.u8 %decimal)",
-		"%let_if_program = call %kizu.selfhost.codegen.program " +
-			"@kizu_selfhost__cli_codegen_lower_const_let_if_program(",
-	}
 }
 
 // requiredLLVMAstAccessorFragments returns the tracker-961 read-only AST accessor
@@ -790,16 +691,9 @@ func requiredLLVMReturnErrorFragments() []string {
 	return []string{
 		"@.kizu.cli.stdout_payload_error = " +
 			"private unnamed_addr constant [34 x i8] c\"unsupported codegen stdout payload\"",
-		"@.kizu.cli.error_union_i64_type = " +
-			"private unnamed_addr constant [4 x i8] c\"!i64\"",
-		"define i1 @kizu_selfhost__ir_codegen_type_node_is_error_union_i64(",
 		"%string_result = insertvalue %kizu.error.slice.u8 %string_ok, %kizu.slice.u8 %string_payload, 1",
 		"%try_void = call i1 @kizu_selfhost__ir_codegen_try_void_program_supported",
 		"%try_result = insertvalue %kizu.error.slice.u8 %try_ok, %kizu.slice.u8 %second_payload, 1",
-		"define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_i64_return_exit_code(",
-		"define %kizu.error.i64 @kizu_selfhost__ir_codegen_try_i64_helper_block_exit_code(",
-		"%return_i64 = call i1 @kizu_selfhost__ir_codegen_type_node_is_error_union_i64(",
-		"%i64_result = call %kizu.error.i64 @kizu_selfhost__ir_codegen_try_i64_helper_block_exit_code(",
 		"%err = insertvalue %kizu.slice.u8 %err_base, i64 34, 1",
 		"%fail0 = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 false, 0",
 		"%fail1 = insertvalue %kizu.error.slice.u8 %fail0, %kizu.slice.u8 %err, 2",
@@ -1294,11 +1188,6 @@ func requiredLLVMLowerRunAstBlockFragments() []string {
 		"%lrb_let_node = load %kizu.kizu.ast.let_node, ptr %lrb_let_ptr, align 8",
 		"%lrb_binding_let = call %kizu.selfhost.codegen.local_binding " +
 			"@kizu_selfhost__ir_codegen_lower_let_binding(",
-		"%lrb_duplicate = call i1 @kizu_selfhost__ir_codegen_local_table_contains(" +
-			"%kizu.selfhost.codegen.local_table %lrb_locals, %kizu.slice.u8 %lrb_local_name)",
-		"lrb_duplicate_local:",
-		"%lrb_dup_f2 = insertvalue %kizu.error.run_ast %lrb_dup_f1, " +
-			"%kizu.slice.u8 %lrb_local_name, 2",
 		"%lrb_locals_next = call %kizu.selfhost.codegen.local_table " +
 			"@kizu_selfhost__ir_codegen_insert_local(",
 		"%lrb_is_exprstmt = icmp eq i64 %lrb_tag, 26",
