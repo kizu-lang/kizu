@@ -5605,9 +5605,11 @@ fn append_multi_while(
     var carried_init_index = 0;
     while carried_init_index < carried.len() {
         let entry = try carried.at(carried_init_index);
-        try append_while_counter_preheader_init(
-            out, entry.var_name, entry.init_var, entry.init_offset
-        );
+        if std::mem::len(entry.init_name) == 0 {
+            try append_while_counter_preheader_init(
+                out, entry.var_name, entry.init_var, entry.init_offset
+            );
+        }
         carried_init_index = carried_init_index + 1;
     }
     try out.append_bytes("  br label %loop");
@@ -5636,10 +5638,17 @@ fn append_multi_while(
     var carried_phi_index = 0;
     while carried_phi_index < carried.len() {
         let entry = try carried.at(carried_phi_index);
-        try append_while_counter_phi(
-            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal,
-            entry.latch_var, -1
-        );
+        if std::mem::len(entry.init_name) > 0 or
+            !std::mem::equal_bytes(entry.llvm_type, "i64") {
+            try append_while_carried_scalar_phi(
+                out, stmt, entry.var_name, entry.llvm_type, entry.init_name, entry.latch_var
+            );
+        } else {
+            try append_while_counter_phi(
+                out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal,
+                entry.latch_var, -1
+            );
+        }
         carried_phi_index = carried_phi_index + 1;
     }
     try append_expr_insts(out, function.name, &stmt.cond_insts);
@@ -5902,6 +5911,34 @@ fn append_while_counter_phi(
         try out.append_bytes(counter_var);
         try out.append_bytes("_next");
     }
+    try out.append_bytes(", ");
+    try append_while_latch_pred_label(out, stmt);
+    try out.append_bytes(" ]");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_while_carried_scalar_phi(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt,
+    var_name: []u8,
+    llvm_type: []u8,
+    init_name: []u8,
+    latch_var: []u8
+) -> !void {
+    if std::mem::len(init_name) == 0 {
+        return error("compiled mir llvm: typed carried scalar requires an init name");
+    }
+    try out.append_bytes("  %");
+    try out.append_bytes(var_name);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init_name);
+    try out.append_bytes(", %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_preheader ], [ %");
+    try out.append_bytes(latch_var);
     try out.append_bytes(", ");
     try append_while_latch_pred_label(out, stmt);
     try out.append_bytes(" ]");
