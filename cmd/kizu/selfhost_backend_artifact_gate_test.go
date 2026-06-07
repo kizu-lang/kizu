@@ -693,6 +693,8 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 // shape-validates arithmetic print ASTs and lowers them without Go fallback.
 func requiredLLVMConstI64RunCodegenFragments() []string {
 	return []string{
+		"define %kizu.error.i64 " +
+			"@kizu_selfhost__ir_codegen_eval_i64_call_arg_expr(",
 		"define %kizu.error.i64 @kizu_selfhost__cli_codegen_eval_const_i64_expr(",
 		"define %kizu.error.i64 " +
 			"@kizu_selfhost__cli_codegen_eval_const_i64_operand_one_local(",
@@ -711,6 +713,12 @@ func requiredLLVMConstI64RunCodegenFragments() []string {
 		"@kizu_selfhost__cli_codegen_eval_const_bool_expr_one_local(%kizu.slice.u8 %text, " +
 			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %condition, " +
 			"%kizu.slice.u8 %local_name, i64 %local_value)",
+		"@kizu_selfhost__ir_codegen_eval_i64_call_arg_expr(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, " +
+			"%kizu.kizu.ast.node_id %arg0_node)",
+		"@kizu_selfhost__ir_codegen_find_i64_binary_function(%kizu.slice.u8 %text, " +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, " +
+			"%kizu.slice.u8 %callee_text)",
 		"%then_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
 			"%kizu.selfhost.codegen.program %then_program)",
 		"%else_supported = call i1 @kizu_selfhost__ir_codegen_program_supported(" +
