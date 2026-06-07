@@ -944,23 +944,49 @@ fn append_parse_if_function(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %body_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_block(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %body_index)");
     try append_line(out, "  %body_ok = extractvalue %kizu.selfhost.cli.parse_node_result %body_result, 0");
-    try append_line(out, "  br i1 %body_ok, label %build, label %fail");
-    try append_line(out, "build:");
+    try append_line(out, "  br i1 %body_ok, label %maybe_else, label %fail");
+    try append_line(out, "maybe_else:");
     try append_line(out, "  %body_next = extractvalue %kizu.selfhost.cli.parse_node_result %body_result, 1");
     try append_line(out, "  %body_node = extractvalue %kizu.selfhost.cli.parse_node_result %body_result, 2");
     try append_line(out, "  %if_start = extractvalue %kizu.kizu.lexer.token %if_token, 1");
+    try append_line(out,
+        "  %else_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %body_next)");
+    try append_line(out, "  %else_kind = extractvalue %kizu.kizu.lexer.token %else_token, 0");
+    try append_line(out, "  %has_else = icmp eq i64 %else_kind, 14");
+    try append_line(out, "  br i1 %has_else, label %parse_else, label %build_no_else");
+    try append_line(out, "parse_else:");
+    try append_line(out, "  %else_body_index = add i64 %body_next, 1");
+    try append_line(out,
+        "  %else_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_block(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %else_body_index)");
+    try append_line(out, "  %else_ok = extractvalue %kizu.selfhost.cli.parse_node_result %else_result, 0");
+    try append_line(out, "  br i1 %else_ok, label %build_with_else, label %fail");
+    try append_line(out, "build_no_else:");
     try append_line(out, "  %body_close_index = sub i64 %body_next, 1");
     try append_line(out,
         "  %body_close = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %body_close_index)");
-    try append_line(out, "  %if_end = extractvalue %kizu.kizu.lexer.token %body_close, 2");
+    try append_line(out, "  %body_if_end = extractvalue %kizu.kizu.lexer.token %body_close, 2");
     try append_line(out,
-        "  %else_empty = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %if_end, i64 %if_end, i64 44)");
+        "  %else_empty = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %body_if_end, i64 %body_if_end, i64 44)");
+    try append_line(out, "  br label %build_if");
+    try append_line(out, "build_with_else:");
+    try append_line(out, "  %else_next = extractvalue %kizu.selfhost.cli.parse_node_result %else_result, 1");
+    try append_line(out, "  %else_node = extractvalue %kizu.selfhost.cli.parse_node_result %else_result, 2");
+    try append_line(out, "  %else_close_index = sub i64 %else_next, 1");
     try append_line(out,
-        "  %if_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_if(%kizu.kizu.ast.ast %ast, i64 %if_start, i64 %if_end, %kizu.kizu.ast.node_id %condition_node, %kizu.kizu.ast.node_id %body_node, %kizu.kizu.ast.node_id %else_empty)");
+        "  %else_close = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %else_close_index)");
+    try append_line(out, "  %else_if_end = extractvalue %kizu.kizu.lexer.token %else_close, 2");
+    try append_line(out, "  br label %build_if");
+    try append_line(out, "build_if:");
+    try append_line(out, "  %if_next = phi i64 [ %body_next, %build_no_else ], [ %else_next, %build_with_else ]");
+    try append_line(out, "  %if_end = phi i64 [ %body_if_end, %build_no_else ], [ %else_if_end, %build_with_else ]");
+    try append_line(out,
+        "  %else_block = phi %kizu.kizu.ast.node_id [ %else_empty, %build_no_else ], [ %else_node, %build_with_else ]");
+    try append_line(out,
+        "  %if_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_if(%kizu.kizu.ast.ast %ast, i64 %if_start, i64 %if_end, %kizu.kizu.ast.node_id %condition_node, %kizu.kizu.ast.node_id %body_node, %kizu.kizu.ast.node_id %else_block)");
     try append_line(out,
         "  %ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
     try append_line(out,
-        "  %ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %ok0, i64 %body_next, 1");
+        "  %ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %ok0, i64 %if_next, 1");
     try append_line(out,
         "  %ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %ok1, %kizu.kizu.ast.node_id %if_node, 2");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %ok2");
@@ -1265,16 +1291,37 @@ fn append_parse_compare_expr_function(out: &var std::string::String) -> !void {
         "  %op_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %primary_next)");
     try append_line(out, "  %op_kind = extractvalue %kizu.kizu.lexer.token %op_token, 0");
     try append_line(out, "  %is_eq = icmp eq i64 %op_kind, 41");
-    try append_line(out, "  br i1 %is_eq, label %op_eq, label %maybe_lt");
+    try append_line(out, "  br i1 %is_eq, label %op_eq, label %maybe_not_eq");
+    try append_line(out, "maybe_not_eq:");
+    try append_line(out, "  %is_not_eq = icmp eq i64 %op_kind, 42");
+    try append_line(out, "  br i1 %is_not_eq, label %op_not_eq, label %maybe_lt");
     try append_line(out, "maybe_lt:");
     try append_line(out, "  %is_lt = icmp eq i64 %op_kind, 46");
-    try append_line(out, "  br i1 %is_lt, label %op_lt, label %return_primary");
+    try append_line(out, "  br i1 %is_lt, label %op_lt, label %maybe_lte");
+    try append_line(out, "maybe_lte:");
+    try append_line(out, "  %is_lte = icmp eq i64 %op_kind, 47");
+    try append_line(out, "  br i1 %is_lte, label %op_lte, label %maybe_gt");
+    try append_line(out, "maybe_gt:");
+    try append_line(out, "  %is_gt = icmp eq i64 %op_kind, 48");
+    try append_line(out, "  br i1 %is_gt, label %op_gt, label %maybe_gte");
+    try append_line(out, "maybe_gte:");
+    try append_line(out, "  %is_gte = icmp eq i64 %op_kind, 49");
+    try append_line(out, "  br i1 %is_gte, label %op_gte, label %return_primary");
     try append_line(out, "op_eq:");
+    try append_line(out, "  br label %op_ready");
+    try append_line(out, "op_not_eq:");
     try append_line(out, "  br label %op_ready");
     try append_line(out, "op_lt:");
     try append_line(out, "  br label %op_ready");
+    try append_line(out, "op_lte:");
+    try append_line(out, "  br label %op_ready");
+    try append_line(out, "op_gt:");
+    try append_line(out, "  br label %op_ready");
+    try append_line(out, "op_gte:");
+    try append_line(out, "  br label %op_ready");
     try append_line(out, "op_ready:");
-    try append_line(out, "  %binary_op = phi i64 [ 5, %op_eq ], [ 7, %op_lt ]");
+    try append_line(out,
+        "  %binary_op = phi i64 [ 5, %op_eq ], [ 6, %op_not_eq ], [ 7, %op_lt ], [ 8, %op_lte ], [ 9, %op_gt ], [ 10, %op_gte ]");
     try append_line(out, "  %rhs_index = add i64 %primary_next, 1");
     try append_line(out,
         "  %rhs = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_additive_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %rhs_index)");
