@@ -356,8 +356,8 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__format_source_file_write",
 		"%run_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
-		"%run_ast_result = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_run_parse_result",
+		"%run_render = call %kizu.error.owned " +
+			"@kizu_selfhost__ir_code_render_render_run_artifact",
 		"%test_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%test_executable = call %kizu.selfhost.executable " +
