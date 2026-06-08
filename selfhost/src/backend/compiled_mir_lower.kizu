@@ -4489,6 +4489,50 @@ fn lower_multi_let_statement(
                 let_name, let_value, string_counter, temp_counter, try_counter, stmts, bs
             );
         }
+        // 'var code = std::array::Array<T>(<allocator>);' is a standalone runtime-owned
+        // array constructor (the run pipeline entry seeds six scratch arrays this way). It
+        // lowers to the element-size-generic @kizu_rt_array_new builtin (an ArrayNew stmt),
+        // binding the owned handle and registering the Array<T> local so later borrows of it
+        // resolve to %kizu.owned.
+        let ctor_callee = try ir_contract::body_call_callee_or_empty_from(
+            ir_bytes, function_name, let_value, bs
+        );
+        if std::mem::starts_with(ctor_callee, "std::array::Array<") {
+            let ctor_len = std::mem::len(ctor_callee);
+            if ctor_callee[ctor_len - 1] != cast<u8>(62) {
+                return error("compiled mir: malformed array constructor type");
+            }
+            let prefix_len = std::mem::len("std::array::Array<");
+            let element_kizu = ctor_callee[prefix_len..ctor_len - 1];
+            let element_llvm = try compiled_type_lower::kizu_type_to_llvm(
+                ir_bytes, module_prefix, element_kizu
+            );
+            let ctor_arg_count = try compiled_mir_types::count_call_args(
+                ir_bytes, function_name, let_value, bs
+            );
+            if ctor_arg_count != 1 {
+                return error("compiled mir: array constructor takes exactly the allocator argument");
+            }
+            let alloc_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, let_value, "arg", 0, bs
+            );
+            let alloc_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, alloc_node, bs
+            );
+            let alloc_alias = try local_alias_current_name(aliases, alloc_name);
+            let array_locals = try compiled_signature::extend_locals_spec(
+                ir_bytes, locals_spec, let_name, ctor_callee
+            );
+            try stmts.append(compiled_mir::array_new_stmt(
+                let_name, "%kizu.owned", alloc_alias, element_llvm
+            ));
+            return MultiLowerResult {
+                locals_spec: array_locals,
+                string_counter: string_counter,
+                temp_counter: temp_counter,
+                try_counter: try_counter
+            };
+        }
         // 'let comparison = compare_bytes(token_text(source, left_token), token_text(source,
         // right_token));' carries nested call arguments the inline call-arg descriptors cannot
         // model, so it lowers through the generic expression path (which materializes each

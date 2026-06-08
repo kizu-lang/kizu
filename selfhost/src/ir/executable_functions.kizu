@@ -11,6 +11,7 @@ pub fn append_facts(
 ) -> !void {
     var execute_found = false;
     var codegen_found = false;
+    var code_render_found = false;
     var backend_found = false;
     var executable_found = false;
     var hosted_found = false;
@@ -57,6 +58,10 @@ pub fn append_facts(
                 try append_codegen_function_facts(allocator, out, file);
                 codegen_found = true;
             }
+            if std::mem::equal_bytes(module, "ir/code_render") {
+                try append_code_render_function_facts(allocator, out, file);
+                code_render_found = true;
+            }
             if std::mem::equal_bytes(module, "backend") {
                 try append_backend_function_facts(allocator, out, file);
                 backend_found = true;
@@ -97,6 +102,9 @@ pub fn append_facts(
     }
     if !codegen_found {
         return error("missing codegen source");
+    }
+    if !code_render_found {
+        return error("missing code render source");
     }
     if !backend_found {
         return error("missing backend source");
@@ -2170,6 +2178,12 @@ fn backend_wrapper_external_callee_allowed(callee_text: []u8) -> bool {
 // accessors (codegen::code_op_* / codegen::code_kind_*), pure i64 returns already
 // compiled by the codegen closure, referenced here without re-walking them.
 fn code_render_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    // render_run_artifact lowers the parsed run source into the tape through the
+    // codegen module's lower_code_module entry, already compiled by the codegen
+    // closure, so the render closure references it without re-walking it.
+    if std::mem::equal_bytes(callee_text, "codegen::lower_code_module") {
+        return true;
+    }
     return std::mem::starts_with(callee_text, "codegen::code_op_") or
         std::mem::starts_with(callee_text, "codegen::code_kind_");
 }
@@ -2714,7 +2728,7 @@ fn append_code_render_reachable_helper_bodies(
 ) -> !void {
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
-    try append_codegen_closure_seed(&var pending, catalog, "render_tape_module");
+    try append_codegen_closure_seed(&var pending, catalog, "render_run_artifact");
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);

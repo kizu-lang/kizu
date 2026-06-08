@@ -2448,6 +2448,11 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     // signature facts, so the cluster no longer needs a handwritten
     // append_compiled_function_auto per helper.
     try append_codegen_reachable_compiled_functions(out, ir_bytes);
+    // The selfhost::ir::code_render run tape renderer closure compiled into stage2:
+    // render_run_artifact lowers a parsed run source to the tape (via the codegen
+    // closure's lower_code_module) and renders it to the executable LLVM module text,
+    // the generic replacement for the per-shape hosted run renderers.
+    try append_code_render_reachable_compiled_functions(out, ir_bytes);
     // artifact_path is the first selfhost std::string::String builder compiled into
     // stage2 (issue 1165 slice 1): it lowers through the generic multi-statement path,
     // calling the runtime string intrinsics to concatenate the directory, the borrowed
@@ -3264,6 +3269,12 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         return false;
     }
     if std::mem::equal_bytes(prefix, "selfhost::ir::code_render::") {
+        // render_run_artifact reaches the tape lowering through codegen::lower_code_module,
+        // emitted by the codegen closure, so the render closure references it without
+        // re-emitting or walking it.
+        if std::mem::equal_bytes(callee, "codegen::lower_code_module") {
+            return true;
+        }
         return std::mem::starts_with(callee, "codegen::code_op_") or
             std::mem::starts_with(callee, "codegen::code_kind_");
     }
@@ -3500,7 +3511,7 @@ pub fn append_code_render_reachable_compiled_functions(
     ir_bytes: []u8
 ) -> !void {
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
-    try pending.append("render_tape_module");
+    try pending.append("render_run_artifact");
     try append_component_reachable_compiled_functions(
         out,
         ir_bytes,
