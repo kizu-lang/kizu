@@ -456,7 +456,6 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
-		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
 		"%payload = call %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"%from_codegen_lowering = extractvalue %kizu.selfhost.codegen.program %program, 15",
 		"%shape_ok = and i1 %shape_12, %from_codegen_lowering",
