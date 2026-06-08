@@ -297,6 +297,7 @@ fn render_main_function(
     try wl(out, "define i64 @kizu_run_main() {");
     try wl(out, "entry:");
     try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    try render_var_allocas(out, code, body_start, func_end);
     try render_body(out, text, code, kinds, body_start, func_end);
     try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
     try wl(out, "  ret i64 %exit_code");
@@ -328,6 +329,7 @@ fn render_user_function(
     if prints {
         try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
     }
+    try render_var_allocas(out, code, body_start, func_end);
     try render_body(out, text, code, kinds, body_start, func_end);
     try wl(out, "}");
     try nl(out);
@@ -394,6 +396,43 @@ fn body_has_print(
     return try body_has_print(code, next, func_end);
 }
 
+// render_var_allocas hoists one 'alloca i64' to the function entry for every var
+// slot the body declares: a VAR_DECL slot (a 'var' local) or a FOR_BEGIN slot (a
+// for-loop induction var). Hoisting all slots to entry keeps every VAR_LOAD/STORE
+// and the for latch dominated by the alloca regardless of loop nesting.
+fn render_var_allocas(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64
+) -> !void {
+    if index >= func_end {
+        return;
+    }
+    let op = try code.get(index);
+    let var_decl = codegen::code_op_var_decl();
+    if op == var_decl {
+        let decl_slot = try code.get(index + 1);
+        try render_one_alloca(out, decl_slot);
+    }
+    let for_begin = codegen::code_op_for_begin();
+    if op == for_begin {
+        let for_slot = try code.get(index + 2);
+        try render_one_alloca(out, for_slot);
+    }
+    let next = try tape_record_end(code, index);
+    try render_var_allocas(out, code, next, func_end);
+    return;
+}
+
+// render_one_alloca emits '%slot<id> = alloca i64' for one var slot.
+fn render_one_alloca(out: &var std::string::String, slot: i64) -> !void {
+    try w(out, "  %slot");
+    try wi(out, slot);
+    try wl(out, " = alloca i64");
+    return;
+}
+
 // render_body renders the records in [index, func_end) of one function body.
 fn render_body(
     out: &var std::string::String,
@@ -456,7 +495,311 @@ fn render_one_instruction(
     if op == if_end {
         try render_if_end(out, code, index);
     }
+    let var_decl = codegen::code_op_var_decl();
+    if op == var_decl {
+        try render_var_decl(out, code, index);
+    }
+    let var_load = codegen::code_op_var_load();
+    if op == var_load {
+        try render_var_load(out, code, index);
+    }
+    let var_store = codegen::code_op_var_store();
+    if op == var_store {
+        try render_var_store(out, code, index);
+    }
+    let while_begin = codegen::code_op_while_begin();
+    if op == while_begin {
+        try render_while_begin(out, code, index);
+    }
+    let while_cond = codegen::code_op_while_cond();
+    if op == while_cond {
+        try render_while_cond(out, code, index);
+    }
+    let while_end = codegen::code_op_while_end();
+    if op == while_end {
+        try render_while_end(out, code, index);
+    }
+    let for_begin = codegen::code_op_for_begin();
+    if op == for_begin {
+        try render_for_begin(out, code, index);
+    }
+    let for_end = codegen::code_op_for_end();
+    if op == for_end {
+        try render_for_end(out, code, index);
+    }
+    let break_op = codegen::code_op_break();
+    if op == break_op {
+        try render_break(out, code, index);
+    }
+    let continue_op = codegen::code_op_continue();
+    if op == continue_op {
+        try render_continue(out, code, index);
+    }
     return;
+}
+
+// render_var_decl stores a var local's init value into its alloca slot; the
+// '%slot<id>' alloca is hoisted to the function entry by render_var_allocas.
+fn render_var_decl(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let slot = try code.get(index + 1);
+    let init_value = try code.get(index + 2);
+    try w(out, "  store i64 %v");
+    try wi(out, init_value);
+    try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+// render_var_load reads a var local's alloca slot into a fresh SSA value.
+fn render_var_load(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slot = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load i64, ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+// render_var_store writes an SSA value back into a var local's alloca slot.
+fn render_var_store(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let slot = try code.get(index + 1);
+    let value_id = try code.get(index + 2);
+    try w(out, "  store i64 %v");
+    try wi(out, value_id);
+    try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+// render_while_begin closes the current block into the condition block and opens
+// it; the condition expression records follow and produce the i1 WHILE_COND tests.
+fn render_while_begin(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    try w(out, "  br label %wcond_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "wcond_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_while_cond branches on the lowered i1 condition into the loop body or
+// past the loop, then opens the body block.
+fn render_while_cond(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let cond = try code.get(index + 1);
+    let begin = try code.get(index + 2);
+    try w(out, "  br i1 %v");
+    try wi(out, cond);
+    try w(out, ", label %wbody_");
+    try wi(out, begin);
+    try w(out, ", label %wend_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "wbody_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_while_end closes the body back to the condition block and opens the exit
+// block break targets.
+fn render_while_end(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    try w(out, "  br label %wcond_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "wend_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_for_begin seeds the induction slot from the start value and opens the
+// bounded condition block: it loads the slot and compares it against the end
+// value, branching into the body or past the loop.
+fn render_for_begin(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let slot = try code.get(index + 2);
+    let start_value = try code.get(index + 3);
+    let end_value = try code.get(index + 4);
+    let load_value = try code.get(index + 5);
+    let cmp_value = try code.get(index + 6);
+    try w(out, "  store i64 %v");
+    try wi(out, start_value);
+    try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    try w(out, "  br label %fcond_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "fcond_");
+    try wi(out, begin);
+    try wl(out, ":");
+    try w(out, "  %v");
+    try wi(out, load_value);
+    try w(out, " = load i64, ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    try w(out, "  %v");
+    try wi(out, cmp_value);
+    try w(out, " = icmp slt i64 %v");
+    try wi(out, load_value);
+    try w(out, ", %v");
+    try wi(out, end_value);
+    try nl(out);
+    try w(out, "  br i1 %v");
+    try wi(out, cmp_value);
+    try w(out, ", label %fbody_");
+    try wi(out, begin);
+    try w(out, ", label %fend_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "fbody_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_for_end emits the increment latch (the continue target) and opens the
+// exit block (the break target): the body falls through to the latch, which loads
+// the slot, adds one, stores it back, and branches to the condition block.
+fn render_for_end(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let slot = try code.get(index + 2);
+    let load_value = try code.get(index + 3);
+    let add_value = try code.get(index + 4);
+    try w(out, "  br label %flatch_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "flatch_");
+    try wi(out, begin);
+    try wl(out, ":");
+    try w(out, "  %v");
+    try wi(out, load_value);
+    try w(out, " = load i64, ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    try w(out, "  %v");
+    try wi(out, add_value);
+    try w(out, " = add i64 %v");
+    try wi(out, load_value);
+    try wl(out, ", 1");
+    try w(out, "  store i64 %v");
+    try wi(out, add_value);
+    try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    try w(out, "  br label %fcond_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "fend_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_break branches to the enclosing loop's exit label and opens a fresh dead
+// block so any records the lowering emitted after the break stay well-formed LLVM.
+fn render_break(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    let exit_prefix = loop_exit_label_prefix(kind);
+    try w(out, "  br label %");
+    try w(out, exit_prefix);
+    try wi(out, begin);
+    try nl(out);
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_continue branches to the enclosing loop's continue label (the while
+// condition block or the for latch) and opens a fresh dead block.
+fn render_continue(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    let cont_prefix = loop_continue_label_prefix(kind);
+    try w(out, "  br label %");
+    try w(out, cont_prefix);
+    try wi(out, begin);
+    try nl(out);
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_dead_label opens a uniquely named block after a break/continue terminator
+// so the records following it in the same statement list remain in a labeled block.
+fn render_dead_label(
+    out: &var std::string::String,
+    index: i64
+) -> !void {
+    try w(out, "dead_");
+    try wi(out, index);
+    try wl(out, ":");
+    return;
+}
+
+// loop_exit_label_prefix maps a loop kind to its break-target label prefix.
+fn loop_exit_label_prefix(kind: i64) -> []u8 {
+    let kind_for = codegen::code_loop_kind_for();
+    if kind == kind_for {
+        return "fend_";
+    }
+    return "wend_";
+}
+
+// loop_continue_label_prefix maps a loop kind to its continue-target label prefix
+// (for loops continue at their increment latch, while loops at the condition).
+fn loop_continue_label_prefix(kind: i64) -> []u8 {
+    let kind_for = codegen::code_loop_kind_for();
+    if kind == kind_for {
+        return "flatch_";
+    }
+    return "wcond_";
 }
 
 // render_if_begin emits the conditional branch for an IF_BEGIN record: it tests the
@@ -892,6 +1235,46 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let if_end = codegen::code_op_if_end();
     if op == if_end {
         return index + 2;
+    }
+    let var_decl = codegen::code_op_var_decl();
+    if op == var_decl {
+        return index + 3;
+    }
+    let var_load = codegen::code_op_var_load();
+    if op == var_load {
+        return index + 3;
+    }
+    let var_store = codegen::code_op_var_store();
+    if op == var_store {
+        return index + 3;
+    }
+    let while_begin = codegen::code_op_while_begin();
+    if op == while_begin {
+        return index + 2;
+    }
+    let while_cond = codegen::code_op_while_cond();
+    if op == while_cond {
+        return index + 3;
+    }
+    let while_end = codegen::code_op_while_end();
+    if op == while_end {
+        return index + 2;
+    }
+    let for_begin = codegen::code_op_for_begin();
+    if op == for_begin {
+        return index + 7;
+    }
+    let for_end = codegen::code_op_for_end();
+    if op == for_end {
+        return index + 5;
+    }
+    let break_op = codegen::code_op_break();
+    if op == break_op {
+        return index + 3;
+    }
+    let continue_op = codegen::code_op_continue();
+    if op == continue_op {
+        return index + 3;
     }
     return code.len();
 }

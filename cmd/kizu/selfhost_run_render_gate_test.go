@@ -48,7 +48,8 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	if err := os.MkdirAll("target/selfhost", 0o755); err != nil {
 		t.Fatalf("prepare target dir: %v", err)
 	}
-	for _, item := range runRenderCases() {
+	cases := append(runRenderCases(), runRenderLoopCases()...)
+	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
 		})
@@ -103,6 +104,39 @@ func runRenderCases() []runRenderCase {
 			source: "fn main() {\n    let n = 3;\n    if n == 3 {\n        print(\"three\");\n    }\n" +
 				"    print(\"done\");\n}\n",
 			wantStdout: "three\ndone\n",
+		},
+	}
+}
+
+// runRenderLoopCases is the control-flow corpus (while/for + var + break/continue)
+// the tape renderer covers in this slice, kept separate so each case list stays
+// within the per-function length budget.
+func runRenderLoopCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "while_counter",
+			source: "fn main() {\n    var i = 0;\n    while i < 3 {\n        print(i);\n" +
+				"        i = i + 1;\n    }\n    print(\"done\");\n}\n",
+			wantStdout: "0\n1\n2\ndone\n",
+		},
+		{
+			name: "while_break_continue",
+			source: "fn main() {\n    var i = 0;\n    while i < 7 {\n        i = i + 1;\n" +
+				"        if i == 3 {\n            continue;\n        }\n" +
+				"        if i == 6 {\n            break;\n        }\n        print(i);\n    }\n}\n",
+			wantStdout: "1\n2\n4\n5\n",
+		},
+		{
+			name:       "for_range",
+			source:     "fn main() {\n    for 0..4 |n| {\n        print(n);\n    }\n}\n",
+			wantStdout: "0\n1\n2\n3\n",
+		},
+		{
+			name: "for_range_break_continue",
+			source: "fn main() {\n    for 2..7 |n| {\n        if n == 3 {\n" +
+				"            continue;\n        }\n" +
+				"        if n == 6 {\n            break;\n        }\n        print(n);\n    }\n}\n",
+			wantStdout: "2\n4\n5\n",
 		},
 	}
 }
