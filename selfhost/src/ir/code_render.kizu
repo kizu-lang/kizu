@@ -444,6 +444,74 @@ fn render_one_instruction(
     if op == ret_value {
         try render_ret_value(out, code, index);
     }
+    let if_begin = codegen::code_op_if_begin();
+    if op == if_begin {
+        try render_if_begin(out, code, index);
+    }
+    let if_else = codegen::code_op_if_else();
+    if op == if_else {
+        try render_if_else(out, code, index);
+    }
+    let if_end = codegen::code_op_if_end();
+    if op == if_end {
+        try render_if_end(out, code, index);
+    }
+    return;
+}
+
+// render_if_begin emits the conditional branch for an IF_BEGIN record: it tests the
+// i1 condition value and branches to the then/else labels keyed by this record's
+// own tape index, then opens the then label.
+fn render_if_begin(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let cond = try code.get(index + 1);
+    try w(out, "  br i1 %v");
+    try wi(out, cond);
+    try w(out, ", label %then_");
+    try wi(out, index);
+    try w(out, ", label %else_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "then_");
+    try wi(out, index);
+    try wl(out, ":");
+    return;
+}
+
+// render_if_else closes the then block (branch to the end label) and opens the else
+// label; the IF_ELSE record carries its IF_BEGIN tape index so the labels match.
+fn render_if_else(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    try w(out, "  br label %end_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "else_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_if_end closes the else block (branch to the end label) and opens the end
+// label; the IF_END record carries its IF_BEGIN tape index so the labels match.
+fn render_if_end(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    try w(out, "  br label %end_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "end_");
+    try wi(out, begin);
+    try wl(out, ":");
     return;
 }
 
@@ -483,12 +551,51 @@ fn render_binary(
     let kind = try code.get(index + 2);
     let left = try code.get(index + 3);
     let right = try code.get(index + 4);
+    // A comparison kind lowers to an i1 'icmp <pred>'; the arithmetic kinds lower
+    // to their i64 mnemonic. Both branches are void then-bodies falling through to
+    // a single return (the shape the compiled-MIR if-lowering models).
+    let is_compare = kind >= 5;
+    if is_compare {
+        try render_binary_compare(out, dst, kind, left, right);
+    }
+    if !is_compare {
+        try render_binary_arith(out, dst, kind, left, right);
+    }
+    return;
+}
+
+fn render_binary_arith(
+    out: &var std::string::String,
+    dst: i64,
+    kind: i64,
+    left: i64,
+    right: i64
+) -> !void {
     try w(out, "  %v");
     try wi(out, dst);
     try w(out, " = ");
-    // Bind the mnemonic so the w() call takes a local rather than a nested call arg.
     let mnemonic = binary_op_mnemonic(kind);
     try w(out, mnemonic);
+    try w(out, " i64 %v");
+    try wi(out, left);
+    try w(out, ", %v");
+    try wi(out, right);
+    try nl(out);
+    return;
+}
+
+fn render_binary_compare(
+    out: &var std::string::String,
+    dst: i64,
+    kind: i64,
+    left: i64,
+    right: i64
+) -> !void {
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = icmp ");
+    let predicate = binary_compare_predicate(kind);
+    try w(out, predicate);
     try w(out, " i64 %v");
     try wi(out, left);
     try w(out, ", %v");
@@ -508,6 +615,27 @@ fn binary_op_mnemonic(kind: i64) -> []u8 {
         return "mul";
     }
     return "sdiv";
+}
+
+// binary_compare_predicate maps a comparison binary kind (5..10) to its signed
+// LLVM icmp predicate.
+fn binary_compare_predicate(kind: i64) -> []u8 {
+    if kind == 5 {
+        return "eq";
+    }
+    if kind == 6 {
+        return "ne";
+    }
+    if kind == 7 {
+        return "slt";
+    }
+    if kind == 8 {
+        return "sle";
+    }
+    if kind == 9 {
+        return "sgt";
+    }
+    return "sge";
 }
 
 // render_call emits '%v<dst> = call i64 @kizu_run_user_<callee>(i64 %v<arg>, ...)'.
@@ -751,6 +879,18 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let ret_value = codegen::code_op_ret_value();
     if op == ret_value {
+        return index + 2;
+    }
+    let if_begin = codegen::code_op_if_begin();
+    if op == if_begin {
+        return index + 2;
+    }
+    let if_else = codegen::code_op_if_else();
+    if op == if_else {
+        return index + 2;
+    }
+    let if_end = codegen::code_op_if_end();
+    if op == if_end {
         return index + 2;
     }
     return code.len();

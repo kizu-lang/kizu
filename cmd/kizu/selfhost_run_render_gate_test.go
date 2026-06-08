@@ -86,6 +86,24 @@ func runRenderCases() []runRenderCase {
 				"\nfn main() {\n    print(announce(7));\n}\n",
 			wantStdout: "7\n7\n",
 		},
+		{
+			name: "if_else_true_branch",
+			source: "fn main() {\n    let age = 20;\n    if age >= 20 {\n" +
+				"        print(\"adult\");\n    } else {\n        print(\"minor\");\n    }\n}\n",
+			wantStdout: "adult\n",
+		},
+		{
+			name: "if_else_false_branch",
+			source: "fn main() {\n    let age = 15;\n    if age >= 20 {\n" +
+				"        print(\"adult\");\n    } else {\n        print(\"minor\");\n    }\n}\n",
+			wantStdout: "minor\n",
+		},
+		{
+			name: "if_no_else",
+			source: "fn main() {\n    let n = 3;\n    if n == 3 {\n        print(\"three\");\n    }\n" +
+				"    print(\"done\");\n}\n",
+			wantStdout: "three\ndone\n",
+		},
 	}
 }
 

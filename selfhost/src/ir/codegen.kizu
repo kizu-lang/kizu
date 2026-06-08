@@ -3381,12 +3381,34 @@ pub fn code_op_ret_value() -> i64 {
     return 31;
 }
 
+// Structured control-flow opcodes. They carry fixed arity so the linear tape
+// walk (tape_record_end) skips them like any other record; the renderer emits
+// matching LLVM labels from the IF_BEGIN tape index (IF_ELSE/IF_END carry that
+// begin index so their labels match without a render-time block stack).
+pub fn code_op_if_begin() -> i64 {
+    return 40;
+}
+
+pub fn code_op_if_else() -> i64 {
+    return 41;
+}
+
+pub fn code_op_if_end() -> i64 {
+    return 42;
+}
+
 pub fn code_kind_i64() -> i64 {
     return 1;
 }
 
 pub fn code_kind_str() -> i64 {
     return 2;
+}
+
+// code_kind_bool marks an i1 comparison result on the kinds parallel array; the
+// renderer emits it as an icmp and an if condition consumes it as i1.
+pub fn code_kind_bool() -> i64 {
+    return 3;
 }
 
 fn code_binary_kind(op: std::kizu::ast::BinaryOp) -> i64 {
@@ -3402,7 +3424,31 @@ fn code_binary_kind(op: std::kizu::ast::BinaryOp) -> i64 {
     if op == std::kizu::ast::binary_div() {
         return 4;
     }
+    if op == std::kizu::ast::binary_eq() {
+        return 5;
+    }
+    if op == std::kizu::ast::binary_not_eq() {
+        return 6;
+    }
+    if op == std::kizu::ast::binary_lt() {
+        return 7;
+    }
+    if op == std::kizu::ast::binary_lte() {
+        return 8;
+    }
+    if op == std::kizu::ast::binary_gt() {
+        return 9;
+    }
+    if op == std::kizu::ast::binary_gte() {
+        return 10;
+    }
     return 0;
+}
+
+// code_binary_kind_is_comparison reports whether a binary kind id is a comparison
+// (eq/not_eq/lt/lte/gt/gte); such results are i1 booleans, the rest are i64.
+fn code_binary_kind_is_comparison(kind: i64) -> bool {
+    return kind >= 5 and kind <= 10;
 }
 
 // code_return_kind classifies a function's declared return type for the tape:
@@ -3715,6 +3761,80 @@ fn lower_code_statement(
         Let(let_node) => try lower_code_let(text, ast, decls, let_node.name, let_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         ExprStmt(expr_stmt) => try lower_code_expr_statement(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Return(return_node) => try lower_code_return(text, ast, decls, return_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        If(if_node) => try lower_code_if(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_if lowers an 'if <cond> { <then> } else { <else> }' statement onto the
+// tape: the condition expression lowers to an i1 value, then IF_BEGIN records that
+// value, the then-block statements follow, IF_ELSE separates the else-block, and
+// IF_END closes it. IF_ELSE/IF_END carry the IF_BEGIN tape index so the renderer's
+// labels match. A missing else (Empty) renders an empty else block; an 'else if'
+// chains through lower_code_else_block.
+fn lower_code_if(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let cond_eval = try lower_code_expr(text, ast, decls, condition, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !cond_eval.ok {
+        return code_eval_unsupported(cond_eval.next);
+    }
+    let if_begin_index = code.len();
+    let op_if_begin = code_op_if_begin();
+    try code.append(op_if_begin);
+    try code.append(cond_eval.value_id);
+    let then_eval = try lower_code_body(text, ast, decls, then_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, cond_eval.next);
+    if !then_eval.ok {
+        return code_eval_unsupported(then_eval.next);
+    }
+    let op_if_else = code_op_if_else();
+    try code.append(op_if_else);
+    try code.append(if_begin_index);
+    let else_eval = try lower_code_else_block(text, ast, decls, else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, then_eval.next);
+    if !else_eval.ok {
+        return code_eval_unsupported(else_eval.next);
+    }
+    let op_if_end = code_op_if_end();
+    try code.append(op_if_end);
+    try code.append(if_begin_index);
+    return code_eval_value(0, else_eval.next);
+}
+
+// lower_code_else_block lowers the else arm: an Empty node is a no-else if (the
+// else block stays empty), a Block lowers its statements, and an If is an
+// 'else if' chained through lower_code_if (its own IF records nest on the tape).
+fn lower_code_else_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    else_block: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(else_block);
+    return match node.data {
+        Empty => code_eval_value(0, next_value),
+        Block(block) => try lower_code_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 0, next_value),
+        If(if_node) => try lower_code_if(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -4012,8 +4132,13 @@ fn lower_code_binary(
     try code.append(kind);
     try code.append(left_eval.value_id);
     try code.append(right_eval.value_id);
-    let kind_i64 = code_kind_i64();
-    try kinds.append(kind_i64);
+    if code_binary_kind_is_comparison(kind) {
+        let kind_bool = code_kind_bool();
+        try kinds.append(kind_bool);
+    } else {
+        let kind_i64 = code_kind_i64();
+        try kinds.append(kind_i64);
+    }
     let result_value = right_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);

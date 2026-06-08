@@ -227,14 +227,24 @@ func TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening(t *testing.T) 
 		`"std::kizu::ast::binary_sub"`,
 		`"std::kizu::ast::binary_mul"`,
 		`"std::kizu::ast::binary_div"`,
+		// The comparison BinaryOp accessors back the run codegen tape's if-condition
+		// lowering (code_binary_kind eq/not_eq/lt/lte/gt/gte).
+		`"std::kizu::ast::binary_eq"`,
+		`"std::kizu::ast::binary_not_eq"`,
+		`"std::kizu::ast::binary_lt"`,
+		`"std::kizu::ast::binary_lte"`,
+		`"std::kizu::ast::binary_gt"`,
+		`"std::kizu::ast::binary_gte"`,
 	}
 	for _, fragment := range allowed {
 		if !strings.Contains(allow, fragment) {
 			t.Fatalf("compiled_external_accessor_allowed lost the codegen allowlist entry %s", fragment)
 		}
 	}
-	if strings.Contains(allow, `"std::kizu::ast::binary_eq"`) ||
-		strings.Contains(allow, `"std::kizu::ast::binary_and"`) {
+	// binary_and / binary_or remain unsupported: the tape does not lower
+	// short-circuit boolean conditions yet, so they must not appear.
+	if strings.Contains(allow, `"std::kizu::ast::binary_and"`) ||
+		strings.Contains(allow, `"std::kizu::ast::binary_or"`) {
 		t.Fatalf("compiled_external_accessor_allowed widened the codegen accessor allowlist")
 	}
 }
