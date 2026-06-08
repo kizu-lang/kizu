@@ -299,11 +299,25 @@ fn render_main_function(
     try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
     try render_var_allocas(out, code, body_start, func_end);
     try render_body(out, text, code, kinds, body_start, func_end);
-    try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
-    try wl(out, "  ret i64 %exit_code");
+    // The entry block needs exactly one terminator. A trailing 'return;' (RET_VOID)
+    // already rendered its own 'ret', so only emit the process-exit tail when the
+    // body did not end in a return.
+    let main_terminated = try body_last_is_return(code, body_start, func_end);
+    try render_main_tail(out, main_terminated);
     try wl(out, "}");
     try nl(out);
     return func_end + 1;
+}
+
+// render_main_tail emits the process-exit terminator for kizu_run_main unless the
+// body already ended in a return record (which rendered its own terminator).
+fn render_main_tail(out: &var std::string::String, terminated: bool) -> !void {
+    if terminated {
+        return;
+    }
+    try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
+    try wl(out, "  ret i64 %exit_code");
+    return;
 }
 
 fn render_user_function(
@@ -331,9 +345,62 @@ fn render_user_function(
     }
     try render_var_allocas(out, code, body_start, func_end);
     try render_body(out, text, code, kinds, body_start, func_end);
+    // Every user function is declared 'i64'; a void body (or a trailing 'return;')
+    // needs an i64 terminator. Emit 'ret i64 0' only when the body did not already
+    // end in a return record that rendered its own terminator.
+    let user_terminated = try body_last_is_return(code, body_start, func_end);
+    try render_user_tail(out, user_terminated);
     try wl(out, "}");
     try nl(out);
     return func_end + 1;
+}
+
+// render_user_tail closes a user function body that did not end in a return with
+// the default 'ret i64 0' terminator.
+fn render_user_tail(out: &var std::string::String, terminated: bool) -> !void {
+    if terminated {
+        return;
+    }
+    try wl(out, "  ret i64 0");
+    return;
+}
+
+// body_last_is_return reports whether the final tape record in [index, func_end)
+// is a return record (RET_VALUE or RET_VOID), i.e. the body already emitted its
+// own terminator for the entry block.
+fn body_last_is_return(
+    code: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64
+) -> !bool {
+    if index >= func_end {
+        return false;
+    }
+    let next = try tape_record_end(code, index);
+    let is_last = next >= func_end;
+    if is_last {
+        return try last_record_is_return(code, index);
+    }
+    return try body_last_is_return(code, next, func_end);
+}
+
+// last_record_is_return reads the opcode at index and classifies it as a return.
+fn last_record_is_return(code: &std::array::Array<i64>, index: i64) -> !bool {
+    let op = try code.get(index);
+    return op_is_return(op);
+}
+
+// op_is_return classifies a tape opcode as a function-terminating return.
+fn op_is_return(op: i64) -> bool {
+    let ret_value = codegen::code_op_ret_value();
+    if op == ret_value {
+        return true;
+    }
+    let ret_void = codegen::code_op_ret_void();
+    if op == ret_void {
+        return true;
+    }
+    return false;
 }
 
 // render_param_list emits 'i64 %v<param_base+i>' separated by commas.
@@ -482,6 +549,10 @@ fn render_one_instruction(
     let ret_value = codegen::code_op_ret_value();
     if op == ret_value {
         try render_ret_value(out, code, index);
+    }
+    let ret_void = codegen::code_op_ret_void();
+    if op == ret_void {
+        try render_ret_void(out);
     }
     let if_begin = codegen::code_op_if_begin();
     if op == if_begin {
@@ -882,6 +953,14 @@ fn render_ret_value(
     try w(out, "  ret i64 %v");
     try wi(out, value_id);
     try nl(out);
+    return;
+}
+
+// render_ret_void emits the terminator for a 'return;' statement. Every emitted
+// function is declared i64, so a void return yields i64 0; callers of a void user
+// function ignore the result and kizu_run_main maps it to process exit 0.
+fn render_ret_void(out: &var std::string::String) -> !void {
+    try wl(out, "  ret i64 0");
     return;
 }
 
