@@ -1,0 +1,65 @@
+import selfhost::ir::executable_functions;
+import selfhost::backend::cli_llvm;
+import selfhost::source;
+
+// run_render_lower_gate drives the compiled MIR lowering over ONLY the
+// selfhost::ir::code_render renderer closure, with the codegen / std::kizu::ast
+// facts present for cross-module signature resolution but their closures left
+// unlowered, surfacing the next renderer lowering blocker in seconds.
+pub fn run_render_lower_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+
+    var facts = std::string::String(allocator);
+    defer facts.deinit();
+
+    let ast_path = "std/src/kizu/ast.kizu";
+    let ast_text = try std::fs::read_file(io, ast_path);
+    let ast_file = gate_render_source_file(0, source::SourceKind::Std, ast_path, ast_text);
+    try executable_functions::append_ast_function_facts(allocator, &var facts, &ast_file);
+
+    let codegen_path = "selfhost/src/ir/codegen.kizu";
+    let codegen_text = try std::fs::read_file(io, codegen_path);
+    let codegen_file = gate_render_source_file(1, source::SourceKind::Selfhost, codegen_path, codegen_text);
+    try executable_functions::append_codegen_function_facts(allocator, &var facts, &codegen_file);
+
+    let render_path = "selfhost/src/ir/code_render.kizu";
+    let render_text = try std::fs::read_file(io, render_path);
+    let render_file = gate_render_source_file(2, source::SourceKind::Selfhost, render_path, render_text);
+    try executable_functions::append_code_render_function_facts(allocator, &var facts, &render_file);
+
+    let facts_path = "target/selfhost/run_render_lower_gate.ir";
+    if !(try std::fs::exists(io, "target")) {
+        try std::fs::create_dir(io, "target");
+    }
+    if !(try std::fs::exists(io, "target/selfhost")) {
+        try std::fs::create_dir(io, "target/selfhost");
+    }
+    let facts_bytes = facts.as_bytes();
+    try std::fs::write_file(io, &facts_path, &facts_bytes);
+    let ir_bytes = try std::fs::read_file(io, &facts_path);
+
+    var registry = std::string::String(allocator);
+    defer registry.deinit();
+    try cli_llvm::append_code_render_reachable_compiled_functions(&var registry, ir_bytes);
+
+    print("run-render-lower-ok");
+    return;
+}
+
+fn gate_render_source_file(
+    id: i64,
+    kind: source::SourceKind,
+    path: []u8,
+    text: []u8
+) -> source::SourceFile {
+    return source::SourceFile {
+        id: id,
+        kind: kind,
+        package_name: "selfhost",
+        module_start: 13,
+        module_end: std::mem::len(path) - 5,
+        path: path,
+        text: text
+    };
+}

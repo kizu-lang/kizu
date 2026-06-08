@@ -81,3 +81,32 @@ func TestSelfhostRunStageEmitGate(t *testing.T) {
 		t.Fatalf("stage emit gate output mismatch:\n%s", out.String())
 	}
 }
+
+// TestSelfhostRunRenderLowerGate drives the compiled MIR lowering over only the
+// code_render renderer closure (codegen/ast facts present but unlowered), surfacing
+// the next renderer lowering blocker fast. Focused debugging only.
+func TestSelfhostRunRenderLowerGate(t *testing.T) {
+	if os.Getenv("KIZU_RUN_SELFHOST_RUN_RENDER_LOWER") != "1" {
+		t.Skip("set KIZU_RUN_SELFHOST_RUN_RENDER_LOWER=1 to run the render lower gate")
+	}
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatalf("chdir repo root: %v", err)
+	}
+	defer restore()
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatalf("load selfhost: %v", err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatalf("check selfhost: %v", err)
+	}
+	var out bytes.Buffer
+	const entry = "selfhost::backend::run_render_lower_gate::run_render_lower_gate"
+	if err := interp.New(&out).RunEntry(program, entry); err != nil {
+		t.Fatalf("render lower gate failed: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "run-render-lower-ok") {
+		t.Fatalf("render lower gate output mismatch:\n%s", out.String())
+	}
+}

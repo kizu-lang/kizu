@@ -6533,7 +6533,72 @@ fn append_expr_inst(
         Call(payload) => try append_call_expr(out, llvm_symbol, payload);,
         ArrayLen(payload) => try append_array_len_expr(out, payload);,
         StringLen(payload) => try append_string_len_expr(out, payload);,
+        IntCast(payload) => try append_int_cast_expr(out, payload, insts);,
     }
+    return;
+}
+
+// llvm_int_width parses the bit width of an LLVM integer type spelling ("iN");
+// any non-integer spelling yields 0 so the caller can reject it.
+fn llvm_int_width(ty: []u8) -> i64 {
+    let n = std::mem::len(ty);
+    if n < 2 or ty[0] != cast<u8>(105) {
+        return 0;
+    }
+    var value = 0;
+    var index = 1;
+    while index < n {
+        let digit = ty[index];
+        if digit < cast<u8>(48) or digit > cast<u8>(57) {
+            return 0;
+        }
+        value = value * 10 + cast<i64>(digit) - 48;
+        index = index + 1;
+    }
+    return value;
+}
+
+// append_int_cast_expr renders an integer 'cast<iN>(<expr>)': it truncates a
+// wider source, sign-extends a narrower one, and copies (add 0) when the widths
+// already match, producing the target integer type.
+fn append_int_cast_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirIntCastExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    let src_width = llvm_int_width(inst.source_llvm);
+    let dst_width = llvm_int_width(inst.llvm_type);
+    if src_width == 0 or dst_width == 0 {
+        return error("compiled mir llvm: int cast requires integer operands");
+    }
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    if dst_width < src_width {
+        try out.append_bytes(" = trunc ");
+        try out.append_bytes(inst.source_llvm);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, insts, inst.operand);
+        try out.append_bytes(" to ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if dst_width > src_width {
+        try out.append_bytes(" = sext ");
+        try out.append_bytes(inst.source_llvm);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, insts, inst.operand);
+        try out.append_bytes(" to ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    try out.append_bytes(" = add ");
+    try out.append_bytes(inst.llvm_type);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.operand);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
     return;
 }
 // append_array_len_expr renders a local/param 'tokens.len()' read: the receiver is a

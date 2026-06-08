@@ -10,18 +10,14 @@ import selfhost::ir::codegen;
 // '@.kizu.run.s<id>'; PRINT dispatches on the recorded value kind to the string
 // or i64 writer.
 //
-// Kizu string literals do not interpret backslash escapes, so every emitted line
-// is written through wl (append the bytes then a real newline byte) and partial
-// fragments through w; the quote/newline bytes the LLVM text needs are appended as
-// explicit byte values.
-//
-// render_functions walks every FUNC_BEGIN..FUNC_END span: 'main' renders the
-// kizu_run_main entry (io + body + exit), every other function a
-// kizu_run_user_<name> i64 define whose parameters are named from the value-id
-// base recorded on FUNC_BEGIN; CALL records lower to call instructions and
-// RET_VALUE to a return. Any function (main or user) that prints binds the io
-// handle at entry. The preamble (types, runtime declarations, the i64 decimal
-// helper) and the C main wrapper frame the module.
+// The cluster is written to compile into stage2 through the generic compiled-MIR
+// subset: opcode constants are bound to locals before they are compared (no call
+// in a condition), control flow uses early-return guards and tail recursion (no
+// loop-carried scalars), and i64 formatting uses the local recursive wi helper
+// rather than the std::fmt String builder. Kizu string literals do not interpret
+// backslash escapes, so every emitted line is written through wl (bytes then a
+// real newline byte) and partial fragments through w; quote/newline bytes are
+// appended as explicit byte values.
 
 pub fn render_tape_module(
     allocator: Allocator,
@@ -36,146 +32,6 @@ pub fn render_tape_module(
     try render_functions(&var out, text, code, kinds, 0);
     try render_main_wrapper(&var out);
     return out;
-}
-
-// render_functions walks the tape function by function: each FUNC_BEGIN..FUNC_END
-// span renders one LLVM define ('main' is the kizu_run_main entry, every other
-// function a kizu_run_user_<name> i64 define), then the walk resumes past FUNC_END.
-fn render_functions(
-    out: &var std::string::String,
-    text: []u8,
-    code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
-    index: i64
-) -> !void {
-    if index >= code.len() {
-        return;
-    }
-    let op = try code.get(index);
-    if op != codegen::code_op_func_begin() {
-        // Records outside a function frame are not expected; skip defensively.
-        let skip = try tape_record_end(code, index);
-        try render_functions(out, text, code, kinds, skip);
-        return;
-    }
-    let after = try render_one_function(out, text, code, kinds, index);
-    try render_functions(out, text, code, kinds, after);
-    return;
-}
-
-// render_one_function renders the function whose FUNC_BEGIN is at func_index and
-// returns the tape index past its FUNC_END.
-fn render_one_function(
-    out: &var std::string::String,
-    text: []u8,
-    code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
-    func_index: i64
-) -> !i64 {
-    let name_start = try code.get(func_index + 1);
-    let name_end = try code.get(func_index + 2);
-    let param_count = try code.get(func_index + 3);
-    let param_base = try code.get(func_index + 5);
-    let name = text[name_start..name_end];
-    let body_start = func_index + 6;
-    let func_end = try tape_function_end(code, body_start);
-    if std::mem::equal_bytes(name, "main") {
-        try wl(out, "define i64 @kizu_run_main() {");
-        try wl(out, "entry:");
-        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
-        try render_body(out, text, code, kinds, body_start, func_end);
-        try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
-        try wl(out, "  ret i64 %exit_code");
-        try wl(out, "}");
-        try nl(out);
-        return func_end + 1;
-    }
-    try w(out, "define i64 @kizu_run_user_");
-    try w(out, name);
-    try w(out, "(");
-    try render_param_list(out, param_base, param_count, 0);
-    try wl(out, ") {");
-    try wl(out, "entry:");
-    // A user function that prints needs the io handle the print writers reference;
-    // bind it at entry only when the body actually contains a PRINT record so a
-    // pure-arithmetic function carries no unused handle.
-    if try body_has_print(code, body_start, func_end) {
-        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
-    }
-    try render_body(out, text, code, kinds, body_start, func_end);
-    try wl(out, "}");
-    try nl(out);
-    return func_end + 1;
-}
-
-// render_param_list emits 'i64 %v<param_base+i>' separated by commas.
-fn render_param_list(
-    out: &var std::string::String,
-    param_base: i64,
-    param_count: i64,
-    index: i64
-) -> !void {
-    if index >= param_count {
-        return;
-    }
-    if index > 0 {
-        try w(out, ", ");
-    }
-    try w(out, "i64 %v");
-    try wi(out, param_base + index);
-    let after = index + 1;
-    try render_param_list(out, param_base, param_count, after);
-    return;
-}
-
-// tape_function_end returns the index of the FUNC_END record closing the function
-// whose body begins at index.
-fn tape_function_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
-    if index >= code.len() {
-        return code.len();
-    }
-    let op = try code.get(index);
-    if op == codegen::code_op_func_end() {
-        return index;
-    }
-    let next = try tape_record_end(code, index);
-    return try tape_function_end(code, next);
-}
-
-// body_has_print reports whether the records in [index, func_end) include a PRINT.
-fn body_has_print(
-    code: &std::array::Array<i64>,
-    index: i64,
-    func_end: i64
-) -> !bool {
-    if index >= func_end {
-        return false;
-    }
-    let op = try code.get(index);
-    if op == codegen::code_op_print() {
-        return true;
-    }
-    let next = try tape_record_end(code, index);
-    return try body_has_print(code, next, func_end);
-}
-
-// render_body renders the records in [index, func_end) of one function body.
-fn render_body(
-    out: &var std::string::String,
-    text: []u8,
-    code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
-    index: i64,
-    func_end: i64
-) -> !void {
-    if index >= func_end {
-        return;
-    }
-    let op = try code.get(index);
-    let next = try tape_record_end(code, index);
-    try render_one_instruction(out, text, code, kinds, op, index);
-    try render_body(out, text, code, kinds, next, func_end);
-    return;
 }
 
 // w appends a fragment with no trailing newline.
@@ -197,9 +53,23 @@ fn nl(out: &var std::string::String) -> !void {
     return;
 }
 
-// wi appends a decimal i64.
+// wi appends a non-negative i64 as decimal digits. The renderer only emits
+// non-negative ids/spans/literals, so a most-significant-first recursive digit
+// walk (each frame appends one digit byte) avoids the std::fmt String builder,
+// which is outside the compiled-MIR subset this cluster lowers through.
 fn wi(out: &var std::string::String, value: i64) -> !void {
-    try std::fmt::append_i64(out, value);
+    // Emit the high-order digits first by recursing on value/10 when there is a
+    // carry, then append this frame's least-significant digit. Written without an
+    // early return so the body stays a single fall-through path the compiled-MIR
+    // void then-body lowering models (the renderer compiles into stage2).
+    if value >= 10 {
+        let high = value / 10;
+        try wi(out, high);
+    }
+    let tens = value / 10;
+    let digit = value - tens * 10;
+    let digit_byte = cast<u8>(48 + digit);
+    try out.append_byte(digit_byte);
     return;
 }
 
@@ -214,7 +84,6 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.slice.u8 = type { ptr, i64 }");
     try wl(out, "%kizu.owned = type { ptr }");
     try wl(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
-    try nl(out);
     try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
@@ -232,8 +101,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
 
 // render_i64_decimal_helper emits @kizu_run_i64_decimal: format an i64 into a
 // page-allocated 20-byte buffer and return the trimmed decimal slice. It backs the
-// PRINT path for i64 values, mirroring the runtime helper the old hosted i64 renderer
-// emitted.
+// PRINT path for i64 values.
 fn render_i64_decimal_helper(out: &var std::string::String) -> !void {
     try wl(out, "define %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %value) {");
     try wl(out, "entry:");
@@ -293,12 +161,10 @@ fn render_string_globals(
         return;
     }
     let op = try code.get(index);
+    let const_str = codegen::code_op_const_str();
     let next = try tape_record_end(code, index);
-    if op == codegen::code_op_const_str() {
-        let dst = try code.get(index + 1);
-        let payload_start = try code.get(index + 2);
-        let payload_end = try code.get(index + 3);
-        try render_one_string_global(out, text, dst, payload_start, payload_end);
+    if op == const_str {
+        try render_one_string_global(out, text, code, index);
     }
     try render_string_globals(out, text, code, next);
     return;
@@ -307,10 +173,12 @@ fn render_string_globals(
 fn render_one_string_global(
     out: &var std::string::String,
     text: []u8,
-    dst: i64,
-    payload_start: i64,
-    payload_end: i64
+    code: &std::array::Array<i64>,
+    index: i64
 ) -> !void {
+    let dst = try code.get(index + 1);
+    let payload_start = try code.get(index + 2);
+    let payload_end = try code.get(index + 3);
     let payload = text[payload_start..payload_end];
     let byte_len = payload_end - payload_start;
     try w(out, "@.kizu.run.s");
@@ -325,44 +193,288 @@ fn render_one_string_global(
     return;
 }
 
+// render_functions walks the tape function by function: each FUNC_BEGIN..FUNC_END
+// span renders one LLVM define ('main' is the kizu_run_main entry, every other
+// function a kizu_run_user_<name> i64 define), then the walk resumes past FUNC_END.
+fn render_functions(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    if index >= code.len() {
+        return;
+    }
+    let after = try render_function_or_skip(out, text, code, kinds, index);
+    try render_functions(out, text, code, kinds, after);
+    return;
+}
+
+// render_function_or_skip renders the function whose FUNC_BEGIN is at index (or
+// skips a stray non-function record) and returns the next tape index to walk from.
+fn render_function_or_skip(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !i64 {
+    let op = try code.get(index);
+    let func_begin = codegen::code_op_func_begin();
+    if op != func_begin {
+        return try tape_record_end(code, index);
+    }
+    return try render_one_function(out, text, code, kinds, index);
+}
+
+// render_one_function renders the function whose FUNC_BEGIN is at func_index and
+// returns the tape index past its FUNC_END.
+fn render_one_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    func_index: i64
+) -> !i64 {
+    let name_start = try code.get(func_index + 1);
+    let name_end = try code.get(func_index + 2);
+    let param_count = try code.get(func_index + 3);
+    let param_base = try code.get(func_index + 5);
+    let name = text[name_start..name_end];
+    let body_start = func_index + 6;
+    let func_end = try tape_function_end(code, body_start);
+    // Each renderer returns the tape index past its FUNC_END so this stays a pair of
+    // single-statement early-return guards (the shape the compiled-MIR if-lowering
+    // models), keeping render_one_function free of a multi-statement then-body.
+    if std::mem::equal_bytes(name, "main") {
+        return try render_main_function(out, text, code, kinds, body_start, func_end);
+    }
+    return try render_user_function(out, text, code, kinds, name, param_base, param_count, body_start, func_end);
+}
+
+fn render_main_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    body_start: i64,
+    func_end: i64
+) -> !i64 {
+    try wl(out, "define i64 @kizu_run_main() {");
+    try wl(out, "entry:");
+    try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    try render_body(out, text, code, kinds, body_start, func_end);
+    try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
+    try wl(out, "  ret i64 %exit_code");
+    try wl(out, "}");
+    try nl(out);
+    return func_end + 1;
+}
+
+fn render_user_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    name: []u8,
+    param_base: i64,
+    param_count: i64,
+    body_start: i64,
+    func_end: i64
+) -> !i64 {
+    try w(out, "define i64 @kizu_run_user_");
+    try w(out, name);
+    try w(out, "(");
+    try render_param_list(out, param_base, param_count, 0);
+    try wl(out, ") {");
+    try wl(out, "entry:");
+    // A user function that prints needs the io handle the print writers reference;
+    // bind it at entry only when the body actually contains a PRINT record.
+    let prints = try body_has_print(code, body_start, func_end);
+    if prints {
+        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    }
+    try render_body(out, text, code, kinds, body_start, func_end);
+    try wl(out, "}");
+    try nl(out);
+    return func_end + 1;
+}
+
+// render_param_list emits 'i64 %v<param_base+i>' separated by commas.
+fn render_param_list(
+    out: &var std::string::String,
+    param_base: i64,
+    param_count: i64,
+    index: i64
+) -> !void {
+    if index >= param_count {
+        return;
+    }
+    if index > 0 {
+        try w(out, ", ");
+    }
+    try w(out, "i64 %v");
+    // Bind the slot id so the wi() call takes a local rather than a 'base + index'
+    // binary arg (the call-arg lowering only models 'base + <int literal>').
+    let slot = param_base + index;
+    try wi(out, slot);
+    let after = index + 1;
+    try render_param_list(out, param_base, param_count, after);
+    return;
+}
+
+// tape_function_end returns the index of the FUNC_END record closing the function
+// whose body begins at index.
+fn tape_function_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    // Bind the tape length once so the bounds guard returns a local rather than a
+    // 'return code.len();' the compiled-MIR if-then early-return path would treat as
+    // a free-function call.
+    let total = code.len();
+    if index >= total {
+        return total;
+    }
+    let op = try code.get(index);
+    let func_end = codegen::code_op_func_end();
+    if op == func_end {
+        return index;
+    }
+    let next = try tape_record_end(code, index);
+    return try tape_function_end(code, next);
+}
+
+// body_has_print reports whether the records in [index, func_end) include a PRINT.
+fn body_has_print(
+    code: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64
+) -> !bool {
+    if index >= func_end {
+        return false;
+    }
+    let op = try code.get(index);
+    let print_op = codegen::code_op_print();
+    if op == print_op {
+        return true;
+    }
+    let next = try tape_record_end(code, index);
+    return try body_has_print(code, next, func_end);
+}
+
+// render_body renders the records in [index, func_end) of one function body.
+fn render_body(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64
+) -> !void {
+    if index >= func_end {
+        return;
+    }
+    let next = try tape_record_end(code, index);
+    try render_one_instruction(out, text, code, kinds, index);
+    try render_body(out, text, code, kinds, next, func_end);
+    return;
+}
+
 fn render_one_instruction(
     out: &var std::string::String,
     text: []u8,
     code: &std::array::Array<i64>,
     kinds: &std::array::Array<i64>,
-    op: i64,
     index: i64
 ) -> !void {
-    if op == codegen::code_op_const_int() {
-        let dst = try code.get(index + 1);
-        let literal = try code.get(index + 2);
-        try w(out, "  %v");
-        try wi(out, dst);
-        try w(out, " = add i64 0, ");
-        try wi(out, literal);
-        try nl(out);
-        return;
+    // The opcodes are mutually exclusive, so each writer runs under its own void
+    // then-body guard and the function falls through to a single return -- the shape
+    // both the Go reference compiler and the compiled-MIR void if-lowering accept (a
+    // 'return try <void call>;' identity tail is rejected by the former).
+    let op = try code.get(index);
+    let const_int = codegen::code_op_const_int();
+    if op == const_int {
+        try render_const_int(out, code, index);
     }
-    if op == codegen::code_op_binary() {
+    let binary = codegen::code_op_binary();
+    if op == binary {
         try render_binary(out, code, index);
-        return;
     }
-    if op == codegen::code_op_print() {
-        try render_print(out, code, kinds, index);
-        return;
+    let print_op = codegen::code_op_print();
+    if op == print_op {
+        try render_print(out, code, index);
     }
-    if op == codegen::code_op_call() {
+    let call = codegen::code_op_call();
+    if op == call {
         try render_call(out, text, code, index);
-        return;
     }
-    if op == codegen::code_op_ret_value() {
-        let value_id = try code.get(index + 1);
-        try w(out, "  ret i64 %v");
-        try wi(out, value_id);
-        try nl(out);
-        return;
+    let ret_value = codegen::code_op_ret_value();
+    if op == ret_value {
+        try render_ret_value(out, code, index);
     }
     return;
+}
+
+fn render_const_int(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let literal = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = add i64 0, ");
+    try wi(out, literal);
+    try nl(out);
+    return;
+}
+
+fn render_ret_value(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let value_id = try code.get(index + 1);
+    try w(out, "  ret i64 %v");
+    try wi(out, value_id);
+    try nl(out);
+    return;
+}
+
+fn render_binary(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    let left = try code.get(index + 3);
+    let right = try code.get(index + 4);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = ");
+    // Bind the mnemonic so the w() call takes a local rather than a nested call arg.
+    let mnemonic = binary_op_mnemonic(kind);
+    try w(out, mnemonic);
+    try w(out, " i64 %v");
+    try wi(out, left);
+    try w(out, ", %v");
+    try wi(out, right);
+    try nl(out);
+    return;
+}
+
+fn binary_op_mnemonic(kind: i64) -> []u8 {
+    if kind == 1 {
+        return "add";
+    }
+    if kind == 2 {
+        return "sub";
+    }
+    if kind == 3 {
+        return "mul";
+    }
+    return "sdiv";
 }
 
 // render_call emits '%v<dst> = call i64 @kizu_run_user_<callee>(i64 %v<arg>, ...)'.
@@ -410,57 +522,47 @@ fn render_call_args(
     return;
 }
 
-fn render_binary(
-    out: &var std::string::String,
-    code: &std::array::Array<i64>,
-    index: i64
-) -> !void {
-    let dst = try code.get(index + 1);
-    let kind = try code.get(index + 2);
-    let left = try code.get(index + 3);
-    let right = try code.get(index + 4);
-    try w(out, "  %v");
-    try wi(out, dst);
-    try w(out, " = ");
-    try w(out, binary_op_mnemonic(kind));
-    try w(out, " i64 %v");
-    try wi(out, left);
-    try w(out, ", %v");
-    try wi(out, right);
-    try nl(out);
-    return;
-}
-
-fn binary_op_mnemonic(kind: i64) -> []u8 {
-    if kind == 1 {
-        return "add";
-    }
-    if kind == 2 {
-        return "sub";
-    }
-    if kind == 3 {
-        return "mul";
-    }
-    return "sdiv";
-}
-
 // render_print emits the write for a print(<value>) record then the trailing
 // newline print() appends: a string value writes its global slice straight to
 // stdout; an i64 value formats through the decimal helper first.
 fn render_print(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
     index: i64
 ) -> !void {
     let value_id = try code.get(index + 1);
     let value_kind = try code.get(index + 2);
-    if value_kind == codegen::code_kind_str() {
-        let byte_len = try tape_string_length(code, value_id, 0);
-        try render_print_string(out, value_id, byte_len);
-        try render_print_newline(out, value_id);
-        return;
+    let kind_str = codegen::code_kind_str();
+    // Dispatch on the recorded value kind through mutually exclusive void then-body
+    // guards (each leaf writer also emits the trailing newline) and fall through to a
+    // single return -- the shape both the Go reference compiler and the compiled-MIR
+    // void if-lowering accept.
+    let is_string = value_kind == kind_str;
+    if is_string {
+        try render_print_string_line(out, code, value_id);
     }
+    if !is_string {
+        try render_print_i64_line(out, value_id);
+    }
+    return;
+}
+
+// render_print_string_line writes a string print value (its global slice) followed
+// by the trailing newline print() appends.
+fn render_print_string_line(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64
+) -> !void {
+    let byte_len = try tape_string_length(code, value_id, 0);
+    try render_print_string(out, value_id, byte_len);
+    try render_print_newline(out, value_id);
+    return;
+}
+
+// render_print_i64_line formats an i64 print value through the decimal helper then
+// writes the trailing newline.
+fn render_print_i64_line(out: &var std::string::String, value_id: i64) -> !void {
     try render_print_i64(out, value_id);
     try render_print_newline(out, value_id);
     return;
@@ -477,16 +579,24 @@ fn tape_string_length(
         return error("render: print string value has no CONST_STR record");
     }
     let op = try code.get(index);
+    let const_str = codegen::code_op_const_str();
     let next = try tape_record_end(code, index);
-    if op == codegen::code_op_const_str() {
+    if op == const_str {
         let dst = try code.get(index + 1);
         if dst == value_id {
-            let payload_start = try code.get(index + 2);
-            let payload_end = try code.get(index + 3);
-            return payload_end - payload_start;
+            return try tape_const_str_payload_length(code, index);
         }
     }
     return try tape_string_length(code, value_id, next);
+}
+
+// tape_const_str_payload_length returns the payload byte length of the CONST_STR
+// record at index (its end span minus its start span), kept in its own function so
+// the matching guard stays a single-statement 'return try <call>;'.
+fn tape_const_str_payload_length(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let payload_start = try code.get(index + 2);
+    let payload_end = try code.get(index + 3);
+    return payload_end - payload_start;
 }
 
 fn render_print_string(
@@ -562,36 +672,52 @@ fn render_main_wrapper(out: &var std::string::String) -> !void {
     return;
 }
 
+// tape_call_record_end returns the index past a CALL record, reading its trailing
+// variable arg-id count (kept out of tape_record_end so the call branch stays a
+// single-statement return the compiled-MIR if-lowering models).
+fn tape_call_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let arg_count = try code.get(index + 4);
+    return index + 5 + arg_count;
+}
+
 // tape_record_end returns the tape index just past the record beginning at index,
 // using each opcode's fixed arity (CALL carries a trailing variable arg-id list).
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let op = try code.get(index);
-    if op == codegen::code_op_const_int() {
+    let const_int = codegen::code_op_const_int();
+    if op == const_int {
         return index + 3;
     }
-    if op == codegen::code_op_const_str() {
+    let const_str = codegen::code_op_const_str();
+    if op == const_str {
         return index + 4;
     }
-    if op == codegen::code_op_binary() {
+    let binary = codegen::code_op_binary();
+    if op == binary {
         return index + 5;
     }
-    if op == codegen::code_op_call() {
-        let arg_count = try code.get(index + 4);
-        return index + 5 + arg_count;
+    let call = codegen::code_op_call();
+    if op == call {
+        return try tape_call_record_end(code, index);
     }
-    if op == codegen::code_op_print() {
+    let print_op = codegen::code_op_print();
+    if op == print_op {
         return index + 3;
     }
-    if op == codegen::code_op_func_begin() {
+    let func_begin = codegen::code_op_func_begin();
+    if op == func_begin {
         return index + 6;
     }
-    if op == codegen::code_op_func_end() {
+    let func_end = codegen::code_op_func_end();
+    if op == func_end {
         return index + 1;
     }
-    if op == codegen::code_op_ret_void() {
+    let ret_void = codegen::code_op_ret_void();
+    if op == ret_void {
         return index + 1;
     }
-    if op == codegen::code_op_ret_value() {
+    let ret_value = codegen::code_op_ret_value();
+    if op == ret_value {
         return index + 2;
     }
     return code.len();
@@ -609,18 +735,25 @@ fn render_llvm_c_bytes(out: &var std::string::String, payload: []u8) -> !void {
 }
 
 fn render_llvm_c_byte(out: &var std::string::String, byte: u8) -> !void {
-    if byte == cast<u8>(34) {
+    // Escape the three c-string metacharacters through mutually exclusive void
+    // then-body guards and append any other byte verbatim, falling through to a
+    // single return -- the shape both the Go reference compiler and the compiled-MIR
+    // void if-lowering accept (a 'return try <void call>;' tail is rejected by the former).
+    let quote = cast<u8>(34);
+    let backslash = cast<u8>(92);
+    let newline = cast<u8>(10);
+    let is_special = byte == quote or byte == backslash or byte == newline;
+    if byte == quote {
         try w(out, "\22");
-        return;
     }
-    if byte == cast<u8>(92) {
+    if byte == backslash {
         try w(out, "\5C");
-        return;
     }
-    if byte == cast<u8>(10) {
+    if byte == newline {
         try w(out, "\0A");
-        return;
     }
-    try out.append_byte(byte);
+    if !is_special {
+        try out.append_byte(byte);
+    }
     return;
 }

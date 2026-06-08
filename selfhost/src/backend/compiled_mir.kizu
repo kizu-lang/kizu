@@ -216,6 +216,18 @@ pub struct MirStringLenExpr {
     pub receiver_name: []u8,
 }
 
+// MirIntCastExpr backs 'cast<iN>(<i64 expr>)' over a non-literal integer operand
+// (a literal cast folds to a typed ConstInt). operand references the earlier
+// expression temp holding the source integer; the renderer narrows it with trunc,
+// widens it with sext, or copies it when the widths already match, producing a
+// value of llvm_type. It owns nothing, so it is copy-only.
+pub struct MirIntCastExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub operand: i64,
+    pub source_llvm: []u8,
+}
+
 pub union MirExprInst {
     Var(MirVarExpr),
     ConstString(MirConstStringExpr),
@@ -230,6 +242,7 @@ pub union MirExprInst {
     Call(MirCallExpr),
     ArrayLen(MirArrayLenExpr),
     StringLen(MirStringLenExpr),
+    IntCast(MirIntCastExpr),
 }
 
 pub enum MirIfThenKind {
@@ -1475,6 +1488,7 @@ impl MirExprInst {
             Call(payload) => payload.deinit(),
             ArrayLen(payload) => return;,
             StringLen(payload) => return;,
+            IntCast(payload) => return;,
         }
     }
 }
@@ -2650,6 +2664,22 @@ pub fn string_len_expr_inst(id: i64, receiver_name: []u8) -> MirExprInst {
     });
 }
 
+// int_cast_expr_inst builds an integer 'cast<iN>(<expr>)' instruction over the
+// already-lowered source temp 'operand' (source_llvm), producing target_llvm.
+pub fn int_cast_expr_inst(
+    id: i64,
+    operand: i64,
+    source_llvm: []u8,
+    target_llvm: []u8
+) -> MirExprInst {
+    return MirExprInst::IntCast(MirIntCastExpr {
+        id: id,
+        llvm_type: target_llvm,
+        operand: operand,
+        source_llvm: source_llvm
+    });
+}
+
 // expr_inst_id and expr_inst_llvm_type read the result id and LLVM type that
 // every expr-inst variant carries, so result wiring (type-by-id lookups) does
 // not depend on the active variant.
@@ -2668,6 +2698,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         Call(payload) => payload.id,
         ArrayLen(payload) => payload.id,
         StringLen(payload) => payload.id,
+        IntCast(payload) => payload.id,
     };
 }
 
@@ -2686,6 +2717,7 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         Call(payload) => payload.llvm_type,
         ArrayLen(payload) => payload.llvm_type,
         StringLen(payload) => payload.llvm_type,
+        IntCast(payload) => payload.llvm_type,
     };
 }
 
@@ -2796,6 +2828,12 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
             id: payload.id,
             llvm_type: payload.llvm_type,
             receiver_name: payload.receiver_name
+        }),
+        IntCast(payload) => MirExprInst::IntCast(MirIntCastExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            operand: payload.operand,
+            source_llvm: payload.source_llvm
         }),
     };
 }
