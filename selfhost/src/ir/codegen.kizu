@@ -3381,6 +3381,23 @@ pub fn code_op_ret_value() -> i64 {
     return 31;
 }
 
+// TRY_CALL frames a 'try <call>' of an error-union-void callee: the renderer emits
+// the call, extracts the ok flag, and branches into a fail block that propagates
+// the error (a user error-union function returns it, kizu_run_main exits 1) or a
+// cont block that resumes the body. It carries the callee name span and the
+// argument value ids (no result value: a try of !void yields nothing).
+pub fn code_op_try_call() -> i64 {
+    return 32;
+}
+
+// RET_ERR_FAIL frames a 'return error("msg")' in an error-union-void function: it
+// carries the message string's value id (a CONST_STR record already emitted the
+// '@.kizu.run.s<id>' global) so the renderer returns an error union whose ok flag
+// is false and whose slice points at that message global.
+pub fn code_op_ret_err_fail() -> i64 {
+    return 33;
+}
+
 // Structured control-flow opcodes. They carry fixed arity so the linear tape
 // walk (tape_record_end) skips them like any other record; the renderer emits
 // matching LLVM labels from the IF_BEGIN tape index (IF_ELSE/IF_END carry that
@@ -3529,7 +3546,8 @@ fn code_binary_kind_is_comparison(kind: i64) -> bool {
 }
 
 // code_return_kind classifies a function's declared return type for the tape:
-// 0 = void (empty or 'void'), 1 = i64, -1 = a type the tape does not own yet.
+// 0 = void (empty or 'void'), 1 = i64, 2 = error-union void ('!void'),
+// -1 = a type the tape does not own yet (e.g. '!i64').
 fn code_return_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -3544,6 +3562,9 @@ fn code_return_kind(
     let type_text = ast_node_text(text, ast, type_node);
     if std::mem::equal_bytes(type_text, "void") {
         return 0;
+    }
+    if std::mem::equal_bytes(type_text, "!void") {
+        return 2;
     }
     return 0 - 1;
 }
@@ -4254,8 +4275,71 @@ fn lower_code_expr_statement(
     let node = ast.get(expr);
     return match node.data {
         Call(call_node) => try lower_code_print_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        TryExpr(try_expr) => try lower_code_try_statement(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
+}
+
+// lower_code_try_statement lowers a 'try <call>;' statement: the try value must be
+// a direct call to an error-union-void function, lowered onto the tape as TRY_CALL.
+fn lower_code_try_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    call_expr: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(call_expr);
+    return match node.data {
+        Call(call_node) => try lower_code_try_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_try_call lowers 'try <callee>(<args>)' where callee is a declared
+// error-union-void function: the argument expressions lower first, then the
+// TRY_CALL record carries the callee name span, the argument count, and the
+// argument value ids copied off the scratch tail. The try yields no value, so
+// no result value id is consumed.
+fn lower_code_try_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_span = code_node_span(text, ast, callee);
+    let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
+    if callee_kind != 2 {
+        return code_eval_unsupported(next_value);
+    }
+    let scratch_base = args_scratch.len();
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 0, next_value);
+    if !args_eval.ok {
+        return code_eval_unsupported(args_eval.next);
+    }
+    let op_try_call = code_op_try_call();
+    try code.append(op_try_call);
+    try code.append(callee_span.start);
+    try code.append(callee_span.end);
+    try code.append(args.len);
+    try copy_code_args(code, args_scratch, scratch_base);
+    return code_eval_value(0, args_eval.next);
 }
 
 fn lower_code_print_call(
@@ -4310,6 +4394,7 @@ fn lower_code_return(
     let node = ast.get(value);
     return match node.data {
         Empty => try lower_code_return_void(code, next_value),
+        Call(call_node) => try lower_code_return_call(text, ast, decls, value, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => try lower_code_return_value(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
     };
 }
@@ -4321,6 +4406,57 @@ fn lower_code_return_void(
     let op_ret_void = code_op_ret_void();
     try code.append(op_ret_void);
     return code_eval_value(0, next_value);
+}
+
+// lower_code_return_call splits a 'return <call>' between the error-union failure
+// builtin ('return error("msg")') and an ordinary i64-returning call: 'error' is
+// not a declared function, so it never reaches the normal call lowering.
+fn lower_code_return_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_text = ast_node_text(text, ast, callee);
+    if std::mem::equal_bytes(callee_text, "error") {
+        return try lower_code_return_error(text, ast, args, code, kinds, next_value);
+    }
+    return try lower_code_return_value(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+// lower_code_return_error lowers 'return error("msg")': the message string literal
+// lowers to a CONST_STR value (its '@.kizu.run.s<id>' global is rendered with the
+// other string globals) and the RET_ERR_FAIL record carries that value id.
+fn lower_code_return_error(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let arg = try ast.child_at(args, 0);
+    let eval = try lower_code_string(text, ast, arg, code, kinds, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let op_ret_err_fail = code_op_ret_err_fail();
+    try code.append(op_ret_err_fail);
+    try code.append(eval.value_id);
+    return code_eval_value(0, eval.next);
 }
 
 fn lower_code_return_value(
