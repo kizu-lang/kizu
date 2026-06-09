@@ -3398,6 +3398,22 @@ pub fn code_op_ret_err_fail() -> i64 {
     return 33;
 }
 
+// IO_BLOCKING frames a 'std::io::blocking()' call producing a '%kizu.owned' io
+// handle value. It carries the result value id (kind owned).
+pub fn code_op_io_blocking() -> i64 {
+    return 34;
+}
+
+// TRY_FS_READ frames a 'try std::fs::read_file(io, path)' expression: the renderer
+// builds the path slice from the CONST_STR global, calls the runtime read, and
+// branches into a fail block that propagates (kizu_run_main exits 1, an
+// error-union-void caller returns the error) or a cont block that extracts the
+// bytes slice into the result value. It carries the result value id (kind slice),
+// the io handle value id, and the path string value id.
+pub fn code_op_try_fs_read() -> i64 {
+    return 35;
+}
+
 // Structured control-flow opcodes. They carry fixed arity so the linear tape
 // walk (tape_record_end) skips them like any other record; the renderer emits
 // matching LLVM labels from the IF_BEGIN tape index (IF_ELSE/IF_END carry that
@@ -3503,6 +3519,19 @@ pub fn code_kind_str() -> i64 {
 // renderer emits it as an icmp and an if condition consumes it as i1.
 pub fn code_kind_bool() -> i64 {
     return 3;
+}
+
+// code_kind_owned marks a '%kizu.owned' runtime handle value (e.g. the io handle
+// returned by std::io::blocking()). code_kind_slice marks a runtime
+// '%kizu.slice.u8' value (e.g. the bytes returned by std::fs::read_file), as
+// distinct from code_kind_str, which names a CONST_STR global rather than an SSA
+// slice value.
+pub fn code_kind_owned() -> i64 {
+    return 4;
+}
+
+pub fn code_kind_slice() -> i64 {
+    return 5;
 }
 
 fn code_binary_kind(op: std::kizu::ast::BinaryOp) -> i64 {
@@ -4530,6 +4559,7 @@ fn lower_code_expr(
         Var(var_node) => try lower_code_var(text, ast, node_id, code, kinds, local_starts, local_ends, local_values, locals_base, next_value),
         Binary(binary) => try lower_code_binary(text, ast, decls, binary.op, binary.left, binary.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Call(call_node) => try lower_code_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        TryExpr(try_expr) => try lower_code_try_expr(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -4690,6 +4720,10 @@ fn lower_code_call(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let callee_text = ast_node_text(text, ast, callee);
+    if std::mem::equal_bytes(callee_text, "std::io::blocking") {
+        return try lower_code_io_blocking(args, code, kinds, next_value);
+    }
     let callee_span = code_node_span(text, ast, callee);
     let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
     if callee_kind != 1 {
@@ -4721,6 +4755,114 @@ fn lower_code_call(
 // rejected here: the tape's only contiguous-scratch invariant holds because every
 // other argument kind (Int / String / Var / Binary) appends exactly its own single
 // result id. Nested call arguments lower once a scratch-truncate capability lands.
+// lower_code_io_blocking lowers a 'std::io::blocking()' call to the IO_BLOCKING
+// record producing a '%kizu.owned' io handle value (kind owned).
+fn lower_code_io_blocking(
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let op_io_blocking = code_op_io_blocking();
+    try code.append(op_io_blocking);
+    try code.append(next_value);
+    let kind_owned = code_kind_owned();
+    try kinds.append(kind_owned);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// lower_code_try_expr lowers a 'try <call>' in expression position (the right-hand
+// side of a let): the only error-union-yielding builtin the tape owns is
+// std::fs::read_file, whose try yields the read bytes slice.
+fn lower_code_try_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    call_expr: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(call_expr);
+    return match node.data {
+        Call(call_node) => try lower_code_try_call_expr(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_try_call_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_text = ast_node_text(text, ast, callee);
+    if std::mem::equal_bytes(callee_text, "std::fs::read_file") {
+        return try lower_code_try_fs_read(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    return code_eval_unsupported(next_value);
+}
+
+// lower_code_try_fs_read lowers 'try std::fs::read_file(io, path)': the io handle
+// and path string lower to value ids first, then TRY_FS_READ records them with a
+// fresh result value id (kind slice) for the read bytes.
+fn lower_code_try_fs_read(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 2 {
+        return code_eval_unsupported(next_value);
+    }
+    let io_arg = try ast.child_at(args, 0);
+    let io_eval = try lower_code_expr(text, ast, decls, io_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !io_eval.ok {
+        return code_eval_unsupported(io_eval.next);
+    }
+    let path_arg = try ast.child_at(args, 1);
+    let path_eval = try lower_code_expr(text, ast, decls, path_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, io_eval.next);
+    if !path_eval.ok {
+        return code_eval_unsupported(path_eval.next);
+    }
+    let op_try_fs_read = code_op_try_fs_read();
+    let result_value = path_eval.next;
+    try code.append(op_try_fs_read);
+    try code.append(result_value);
+    try code.append(io_eval.value_id);
+    try code.append(path_eval.value_id);
+    let kind_slice = code_kind_slice();
+    try kinds.append(kind_slice);
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
 // code_node_is_call reports whether a node is a Call expression. It is the single
 // let+return-match accessor shape the compiled traversal path lowers (bool-literal
 // arms), so the nested-call rejection in lower_code_args stays out of a mid-function

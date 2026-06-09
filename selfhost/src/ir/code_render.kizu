@@ -123,6 +123,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
     try wl(out, "declare %kizu.owned @kizu_rt_io_blocking()");
     try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare i64 @kizu_rt_process_exit_code(i64)");
     try wl(out, "declare void @kizu_host_init(i32, ptr)");
     try nl(out);
@@ -622,6 +623,14 @@ fn render_one_instruction(
     let ret_err_fail = codegen::code_op_ret_err_fail();
     if op == ret_err_fail {
         try render_ret_err_fail(out, code, index);
+    }
+    let io_blocking = codegen::code_op_io_blocking();
+    if op == io_blocking {
+        try render_io_blocking(out, code, index);
+    }
+    let try_fs_read = codegen::code_op_try_fs_read();
+    if op == try_fs_read {
+        try render_try_fs_read(out, code, index, abi);
     }
     let if_begin = codegen::code_op_if_begin();
     if op == if_begin {
@@ -1304,6 +1313,112 @@ fn render_try_propagate_error(out: &var std::string::String, index: i64) -> !voi
     return;
 }
 
+// render_io_blocking emits 'std::io::blocking()': a runtime io handle into the
+// result value (a '%kizu.owned' SSA value).
+fn render_io_blocking(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try wl(out, " = call %kizu.owned @kizu_rt_io_blocking()");
+    return;
+}
+
+// render_try_fs_read emits 'try std::fs::read_file(io, path)': build the path slice
+// from its CONST_STR global, call the runtime read, extract the ok flag, and branch
+// into a fail block that propagates the error or a cont block that extracts the read
+// bytes slice into the result value. SSA temps and labels are suffixed with the
+// result value id so they stay unique.
+fn render_try_fs_read(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let io_value = try code.get(index + 2);
+    let path_value = try code.get(index + 3);
+    let path_len = try tape_string_length(code, path_value, 0);
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, "_pathbase = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.s");
+    try wi(out, path_value);
+    try wl(out, ", 0");
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, "_path = insertvalue %kizu.slice.u8 %fr");
+    try wi(out, dst);
+    try w(out, "_pathbase, i64 ");
+    try wi(out, path_len);
+    try wl(out, ", 1");
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %v");
+    try wi(out, io_value);
+    try w(out, ", %kizu.slice.u8 %fr");
+    try wi(out, dst);
+    try wl(out, "_path)");
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %fr");
+    try wi(out, dst);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %fr");
+    try wi(out, dst);
+    try w(out, "_ok, label %fr");
+    try wi(out, dst);
+    try w(out, "_cont, label %fr");
+    try wi(out, dst);
+    try wl(out, "_fail");
+    try w(out, "fr");
+    try wi(out, dst);
+    try wl(out, "_fail:");
+    try render_fs_read_propagate(out, dst, abi);
+    try w(out, "fr");
+    try wi(out, dst);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.slice.u8 %fr");
+    try wi(out, dst);
+    try wl(out, ", 1");
+    return;
+}
+
+// render_fs_read_propagate emits the fail-block terminator for a try fs read: the
+// kizu_run_main entry exits the process with code 1, every other (error-union-void)
+// function returns a failed error union.
+fn render_fs_read_propagate(out: &var std::string::String, dst: i64, abi: i64) -> !void {
+    let main_abi = ret_abi_main();
+    if abi == main_abi {
+        try render_fs_read_propagate_exit(out, dst);
+    }
+    if abi != main_abi {
+        try render_ret_err_void_fail(out);
+    }
+    return;
+}
+
+fn render_fs_read_propagate_exit(out: &var std::string::String, dst: i64) -> !void {
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try wl(out, "_exit = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try w(out, "  ret i64 %fr");
+    try wi(out, dst);
+    try wl(out, "_exit");
+    return;
+}
+
+// render_ret_err_void_fail returns a failed '%kizu.error.void' union with an empty
+// message slice as an inline aggregate constant (no SSA temp needed).
+fn render_ret_err_void_fail(out: &var std::string::String) -> !void {
+    try wl(out, "  ret %kizu.error.void { i1 false, %kizu.slice.u8 zeroinitializer }");
+    return;
+}
+
 // render_print emits the write for a print(<value>) record then the trailing
 // newline print() appends: a string value writes its global slice straight to
 // stdout; an i64 value formats through the decimal helper first.
@@ -1315,17 +1430,41 @@ fn render_print(
     let value_id = try code.get(index + 1);
     let value_kind = try code.get(index + 2);
     let kind_str = codegen::code_kind_str();
+    let kind_slice = codegen::code_kind_slice();
     // Dispatch on the recorded value kind through mutually exclusive void then-body
     // guards (each leaf writer also emits the trailing newline) and fall through to a
     // single return -- the shape both the Go reference compiler and the compiled-MIR
-    // void if-lowering accept.
+    // void if-lowering accept. A str value writes its global slice, a slice value
+    // writes its SSA slice directly, and any other value formats as i64.
     let is_string = value_kind == kind_str;
+    let is_slice = value_kind == kind_slice;
+    let is_i64 = !is_string and !is_slice;
     if is_string {
         try render_print_string_line(out, code, value_id);
     }
-    if !is_string {
+    if is_slice {
+        try render_print_slice_line(out, value_id);
+    }
+    if is_i64 {
         try render_print_i64_line(out, value_id);
     }
+    return;
+}
+
+// render_print_slice_line writes a runtime slice print value (its '%v<id>' SSA
+// '%kizu.slice.u8') followed by the trailing newline print() appends.
+fn render_print_slice_line(out: &var std::string::String, value_id: i64) -> !void {
+    try render_print_slice(out, value_id);
+    try render_print_newline(out, value_id);
+    return;
+}
+
+fn render_print_slice(out: &var std::string::String, value_id: i64) -> !void {
+    try w(out, "  %psl");
+    try wi(out, value_id);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %v");
+    try wi(out, value_id);
+    try wl(out, ")");
     return;
 }
 
@@ -1497,6 +1636,14 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let ret_err_fail = codegen::code_op_ret_err_fail();
     if op == ret_err_fail {
         return index + 2;
+    }
+    let io_blocking = codegen::code_op_io_blocking();
+    if op == io_blocking {
+        return index + 2;
+    }
+    let try_fs_read = codegen::code_op_try_fs_read();
+    if op == try_fs_read {
+        return index + 4;
     }
     let print_op = codegen::code_op_print();
     if op == print_op {
