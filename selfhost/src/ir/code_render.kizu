@@ -273,6 +273,7 @@ fn render_one_function(
     let name_start = try code.get(func_index + 1);
     let name_end = try code.get(func_index + 2);
     let param_count = try code.get(func_index + 3);
+    let ret_kind = try code.get(func_index + 4);
     let param_base = try code.get(func_index + 5);
     let name = text[name_start..name_end];
     let body_start = func_index + 6;
@@ -283,7 +284,33 @@ fn render_one_function(
     if std::mem::equal_bytes(name, "main") {
         return try render_main_function(out, text, code, kinds, body_start, func_end);
     }
-    return try render_user_function(out, text, code, kinds, name, param_base, param_count, body_start, func_end);
+    return try render_user_function(out, text, code, kinds, name, param_base, param_count, ret_kind, body_start, func_end);
+}
+
+// The return ABI selects how returns and try-propagations render: MAIN is the
+// kizu_run_main i64 entry (a void return is exit 0, a try failure exits 1),
+// USER_I64 is an ordinary i64-returning user define, and USER_ERR_VOID is a
+// '%kizu.error.void'-returning user define (a void return is the ok union, a try
+// failure returns the propagated error).
+fn ret_abi_main() -> i64 {
+    return 0;
+}
+
+fn ret_abi_user_i64() -> i64 {
+    return 1;
+}
+
+fn ret_abi_user_err_void() -> i64 {
+    return 2;
+}
+
+// user_ret_abi maps a user function's declared return kind (0 void, 1 i64, 2
+// error-union void) to its render ABI.
+fn user_ret_abi(ret_kind: i64) -> i64 {
+    if ret_kind == 2 {
+        return ret_abi_user_err_void();
+    }
+    return ret_abi_user_i64();
 }
 
 fn render_main_function(
@@ -298,7 +325,8 @@ fn render_main_function(
     try wl(out, "entry:");
     try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
     try render_var_allocas(out, code, body_start, func_end);
-    try render_body(out, text, code, kinds, body_start, func_end);
+    let main_abi = ret_abi_main();
+    try render_body(out, text, code, kinds, body_start, func_end, main_abi);
     // The entry block needs exactly one terminator. A trailing 'return;' (RET_VOID)
     // already rendered its own 'ret', so only emit the process-exit tail when the
     // body did not end in a return.
@@ -328,11 +356,11 @@ fn render_user_function(
     name: []u8,
     param_base: i64,
     param_count: i64,
+    ret_kind: i64,
     body_start: i64,
     func_end: i64
 ) -> !i64 {
-    try w(out, "define i64 @kizu_run_user_");
-    try w(out, name);
+    try render_user_define_head(out, name, ret_kind);
     try w(out, "(");
     try render_param_list(out, param_base, param_count, 0);
     try wl(out, ") {");
@@ -344,24 +372,51 @@ fn render_user_function(
         try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
     }
     try render_var_allocas(out, code, body_start, func_end);
-    try render_body(out, text, code, kinds, body_start, func_end);
-    // Every user function is declared 'i64'; a void body (or a trailing 'return;')
-    // needs an i64 terminator. Emit 'ret i64 0' only when the body did not already
-    // end in a return record that rendered its own terminator.
+    let abi = user_ret_abi(ret_kind);
+    try render_body(out, text, code, kinds, body_start, func_end, abi);
+    // A void body (or a trailing 'return;') needs a terminator matching the ABI:
+    // an i64 function returns 0, an error-union-void function returns the ok union.
+    // Emit it only when the body did not already end in a return record that
+    // rendered its own terminator.
     let user_terminated = try body_last_is_return(code, body_start, func_end);
-    try render_user_tail(out, user_terminated);
+    try render_user_tail(out, user_terminated, abi);
     try wl(out, "}");
     try nl(out);
     return func_end + 1;
 }
 
+// render_user_define_head writes the 'define <ret> @kizu_run_user_<name>' opener
+// whose return type is '%kizu.error.void' for an error-union-void function and
+// 'i64' for every other user function.
+fn render_user_define_head(
+    out: &var std::string::String,
+    name: []u8,
+    ret_kind: i64
+) -> !void {
+    let is_err_void = ret_kind == 2;
+    if is_err_void {
+        try w(out, "define %kizu.error.void @kizu_run_user_");
+    }
+    if !is_err_void {
+        try w(out, "define i64 @kizu_run_user_");
+    }
+    try w(out, name);
+    return;
+}
+
 // render_user_tail closes a user function body that did not end in a return with
-// the default 'ret i64 0' terminator.
-fn render_user_tail(out: &var std::string::String, terminated: bool) -> !void {
+// the default terminator for its ABI.
+fn render_user_tail(out: &var std::string::String, terminated: bool, abi: i64) -> !void {
     if terminated {
         return;
     }
-    try wl(out, "  ret i64 0");
+    let err_void = ret_abi_user_err_void();
+    if abi == err_void {
+        try render_ret_err_ok(out);
+    }
+    if abi != err_void {
+        try wl(out, "  ret i64 0");
+    }
     return;
 }
 
@@ -398,6 +453,10 @@ fn op_is_return(op: i64) -> bool {
     }
     let ret_void = codegen::code_op_ret_void();
     if op == ret_void {
+        return true;
+    }
+    let ret_err_fail = codegen::code_op_ret_err_fail();
+    if op == ret_err_fail {
         return true;
     }
     return false;
@@ -507,14 +566,15 @@ fn render_body(
     code: &std::array::Array<i64>,
     kinds: &std::array::Array<i64>,
     index: i64,
-    func_end: i64
+    func_end: i64,
+    abi: i64
 ) -> !void {
     if index >= func_end {
         return;
     }
     let next = try tape_record_end(code, index);
-    try render_one_instruction(out, text, code, kinds, index);
-    try render_body(out, text, code, kinds, next, func_end);
+    try render_one_instruction(out, text, code, kinds, index, abi);
+    try render_body(out, text, code, kinds, next, func_end, abi);
     return;
 }
 
@@ -523,7 +583,8 @@ fn render_one_instruction(
     text: []u8,
     code: &std::array::Array<i64>,
     kinds: &std::array::Array<i64>,
-    index: i64
+    index: i64,
+    abi: i64
 ) -> !void {
     // The opcodes are mutually exclusive, so each writer runs under its own void
     // then-body guard and the function falls through to a single return -- the shape
@@ -546,13 +607,21 @@ fn render_one_instruction(
     if op == call {
         try render_call(out, text, code, index);
     }
+    let try_call = codegen::code_op_try_call();
+    if op == try_call {
+        try render_try_call(out, text, code, index, abi);
+    }
     let ret_value = codegen::code_op_ret_value();
     if op == ret_value {
         try render_ret_value(out, code, index);
     }
     let ret_void = codegen::code_op_ret_void();
     if op == ret_void {
-        try render_ret_void(out);
+        try render_ret_void(out, abi);
+    }
+    let ret_err_fail = codegen::code_op_ret_err_fail();
+    if op == ret_err_fail {
+        try render_ret_err_fail(out, code, index);
     }
     let if_begin = codegen::code_op_if_begin();
     if op == if_begin {
@@ -956,11 +1025,42 @@ fn render_ret_value(
     return;
 }
 
-// render_ret_void emits the terminator for a 'return;' statement. Every emitted
-// function is declared i64, so a void return yields i64 0; callers of a void user
-// function ignore the result and kizu_run_main maps it to process exit 0.
-fn render_ret_void(out: &var std::string::String) -> !void {
-    try wl(out, "  ret i64 0");
+// render_ret_void emits the terminator for a 'return;' statement. An i64 function
+// (and the kizu_run_main entry, which maps it to process exit 0) yields 'ret i64 0';
+// an error-union-void function yields the ok union.
+fn render_ret_void(out: &var std::string::String, abi: i64) -> !void {
+    let err_void = ret_abi_user_err_void();
+    if abi == err_void {
+        try render_ret_err_ok(out);
+    }
+    if abi != err_void {
+        try wl(out, "  ret i64 0");
+    }
+    return;
+}
+
+// render_ret_err_ok returns the success '%kizu.error.void' union (ok flag true,
+// empty message slice) as an inline aggregate constant so no SSA temp is needed.
+fn render_ret_err_ok(out: &var std::string::String) -> !void {
+    try wl(out, "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    return;
+}
+
+// render_ret_err_fail returns the failure '%kizu.error.void' union for a
+// 'return error("msg")': the ok flag is false and the message slice points at the
+// message string global the CONST_STR record emitted ('@.kizu.run.s<value_id>').
+fn render_ret_err_fail(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let value_id = try code.get(index + 1);
+    let byte_len = try tape_string_length(code, value_id, 0);
+    try w(out, "  ret %kizu.error.void { i1 false, %kizu.slice.u8 { ptr @.kizu.run.s");
+    try wi(out, value_id);
+    try w(out, ", i64 ");
+    try wi(out, byte_len);
+    try wl(out, " } }");
     return;
 }
 
@@ -1102,6 +1202,105 @@ fn render_call_args(
     try wi(out, arg_value);
     let after = arg_index + 1;
     try render_call_args(out, code, index, arg_count, after);
+    return;
+}
+
+// render_try_call emits a 'try <callee>()' of an error-union-void function: call
+// the '%kizu.error.void' callee, extract its ok flag, and branch into a fail block
+// that propagates the error or a cont block that resumes the body. SSA temps and
+// labels are suffixed with the record's tape index so they stay unique.
+fn render_try_call(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let callee_start = try code.get(index + 1);
+    let callee_end = try code.get(index + 2);
+    let arg_count = try code.get(index + 3);
+    let callee = text[callee_start..callee_end];
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_run_user_");
+    try w(out, callee);
+    try w(out, "(");
+    try render_try_call_args(out, code, index, arg_count, 0);
+    try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    return;
+}
+
+// render_try_call_args emits the 'i64 %v<arg>' operands read from the TRY_CALL
+// record's trailing arg-id list (which begins at index + 4: TRY_CALL has no
+// leading result value id).
+fn render_try_call_args(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    arg_count: i64,
+    arg_index: i64
+) -> !void {
+    if arg_index >= arg_count {
+        return;
+    }
+    if arg_index > 0 {
+        try w(out, ", ");
+    }
+    let arg_value = try code.get(index + 4 + arg_index);
+    try w(out, "i64 %v");
+    try wi(out, arg_value);
+    let after = arg_index + 1;
+    try render_try_call_args(out, code, index, arg_count, after);
+    return;
+}
+
+// render_try_propagate emits the fail-block terminator for a try: the kizu_run_main
+// entry exits the process with code 1, every other (error-union-void) function
+// returns the propagated error union.
+fn render_try_propagate(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    let main_abi = ret_abi_main();
+    if abi == main_abi {
+        try render_try_propagate_exit(out, index);
+    }
+    if abi != main_abi {
+        try render_try_propagate_error(out, index);
+    }
+    return;
+}
+
+fn render_try_propagate_exit(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try wl(out, "_exit = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try w(out, "  ret i64 %tc");
+    try wi(out, index);
+    try wl(out, "_exit");
+    return;
+}
+
+fn render_try_propagate_error(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  ret %kizu.error.void %tc");
+    try wi(out, index);
+    try nl(out);
     return;
 }
 
@@ -1263,6 +1462,14 @@ fn tape_call_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     return index + 5 + arg_count;
 }
 
+// tape_try_call_record_end returns the index past a TRY_CALL record. TRY_CALL has
+// no result value, so its arg-id list begins at index + 4 (one slot earlier than
+// CALL's, which carries a leading result value id).
+fn tape_try_call_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let arg_count = try code.get(index + 3);
+    return index + 4 + arg_count;
+}
+
 // tape_record_end returns the tape index just past the record beginning at index,
 // using each opcode's fixed arity (CALL carries a trailing variable arg-id list).
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
@@ -1282,6 +1489,14 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let call = codegen::code_op_call();
     if op == call {
         return try tape_call_record_end(code, index);
+    }
+    let try_call = codegen::code_op_try_call();
+    if op == try_call {
+        return try tape_try_call_record_end(code, index);
+    }
+    let ret_err_fail = codegen::code_op_ret_err_fail();
+    if op == ret_err_fail {
+        return index + 2;
     }
     let print_op = codegen::code_op_print();
     if op == print_op {
