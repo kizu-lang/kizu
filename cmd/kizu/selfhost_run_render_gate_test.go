@@ -55,6 +55,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderShadowingCases()...)
 	cases = append(cases, runRenderErrorUnionI64Cases()...)
 	cases = append(cases, runRenderExpectCases()...)
+	cases = append(cases, runRenderModPrintBoolCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -333,6 +334,24 @@ func runRenderExpectCases() []runRenderCase {
 				"    std::testing::expect(age < 20 or age >= 30);\n" +
 				"    std::testing::expect(!admin);\n    print(\"ok\");\n    return;\n}\n",
 			wantStdout: "ok\n",
+		},
+	}
+}
+
+// runRenderModPrintBoolCases is the remainder-operator and print(bool) corpus.
+func runRenderModPrintBoolCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "mod_operator",
+			source: "fn main() {\n    print(7 % 3);\n    print(10 % 2);\n" +
+				"    if 9 % 4 == 1 {\n        print(\"mod-ok\");\n    }\n}\n",
+			wantStdout: "1\n0\nmod-ok\n",
+		},
+		{
+			name: "print_bool_values",
+			source: "fn main() {\n    let t = 1 == 1;\n    print(t);\n    print(false);\n" +
+				"    print(2 < 1 or true);\n}\n",
+			wantStdout: "true\nfalse\ntrue\n",
 		},
 	}
 }

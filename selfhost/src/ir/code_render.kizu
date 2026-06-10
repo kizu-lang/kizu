@@ -67,6 +67,22 @@ pub fn render_run_artifact(
     return try render_tape_module(allocator, source_path, text, &code, &kinds);
 }
 
+// render_bool_print_global emits one of the bool print payload globals
+// ('true'/'false' plus a newline byte) behind its constant header.
+fn render_bool_print_global(
+    out: &var std::string::String,
+    header: []u8,
+    word: []u8
+) -> !void {
+    try w(out, header);
+    try out.append_byte(cast<u8>(34));
+    try w(out, word);
+    try w(out, "\0A");
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
+    return;
+}
+
 // expect_fail_message is the runtime expectation-failure line
 // std::testing::expect traps with (matching the reference compiler's message).
 fn expect_fail_message() -> []u8 {
@@ -153,6 +169,8 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare void @kizu_host_init(i32, ptr)");
     try nl(out);
     try wl(out, "@.kizu.run.newline = private unnamed_addr constant [1 x i8] [i8 10]");
+    try render_bool_print_global(out, "@.kizu.run.bool_true = private unnamed_addr constant [5 x i8] c", "true");
+    try render_bool_print_global(out, "@.kizu.run.bool_false = private unnamed_addr constant [6 x i8] c", "false");
     try render_expect_fail_global(out);
     try nl(out);
     try render_i64_decimal_helper(out);
@@ -1336,10 +1354,11 @@ fn render_binary(
     let kind = try code.get(index + 2);
     let left = try code.get(index + 3);
     let right = try code.get(index + 4);
-    // A comparison kind lowers to an i1 'icmp <pred>'; the arithmetic kinds lower
-    // to their i64 mnemonic. Both branches are void then-bodies falling through to
-    // a single return (the shape the compiled-MIR if-lowering models).
-    let is_compare = kind >= 5;
+    // A comparison kind (5..10) lowers to an i1 'icmp <pred>'; the arithmetic
+    // kinds (including 11 = srem) lower to their i64 mnemonic. Both branches are
+    // void then-bodies falling through to a single return (the shape the
+    // compiled-MIR if-lowering models).
+    let is_compare = kind >= 5 and kind <= 10;
     if is_compare {
         try render_binary_compare(out, dst, kind, left, right);
     }
@@ -1398,6 +1417,9 @@ fn binary_op_mnemonic(kind: i64) -> []u8 {
     }
     if kind == 3 {
         return "mul";
+    }
+    if kind == 11 {
+        return "srem";
     }
     return "sdiv";
 }
@@ -1883,19 +1905,26 @@ fn render_print(
     let value_kind = try code.get(index + 2);
     let kind_str = codegen::code_kind_str();
     let kind_slice = codegen::code_kind_slice();
+    let kind_bool = codegen::code_kind_bool();
     // Dispatch on the recorded value kind through mutually exclusive void then-body
     // guards (each leaf writer also emits the trailing newline) and fall through to a
     // single return -- the shape both the Go reference compiler and the compiled-MIR
     // void if-lowering accept. A str value writes its global slice, a slice value
-    // writes its SSA slice directly, and any other value formats as i64.
+    // writes its SSA slice directly, a bool selects its word payload, and any
+    // other value formats as i64.
     let is_string = value_kind == kind_str;
     let is_slice = value_kind == kind_slice;
-    let is_i64 = !is_string and !is_slice;
+    let is_bool = value_kind == kind_bool;
+    let not_str_slice = !is_string and !is_slice;
+    let is_i64 = not_str_slice and !is_bool;
     if is_string {
         try render_print_string_line(out, code, value_id);
     }
     if is_slice {
         try render_print_slice_line(out, value_id);
+    }
+    if is_bool {
+        try render_print_bool_line(out, value_id);
     }
     if is_i64 {
         try render_print_i64_line(out, value_id);
@@ -1930,6 +1959,39 @@ fn render_print_string_line(
     let byte_len = try tape_string_length(code, value_id, 0);
     try render_print_string(out, value_id, byte_len);
     try render_print_newline(out, value_id);
+    return;
+}
+
+// render_print_bool_line selects the 'true'/'false' word payload (each carries
+// its own trailing newline) from the i1 value and writes it to stdout.
+fn render_print_bool_line(out: &var std::string::String, value_id: i64) -> !void {
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_ptr = select i1 %v");
+    try wi(out, value_id);
+    try wl(out, ", ptr @.kizu.run.bool_true, ptr @.kizu.run.bool_false");
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_len = select i1 %v");
+    try wi(out, value_id);
+    try wl(out, ", i64 5, i64 6");
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %pb");
+    try wi(out, value_id);
+    try wl(out, "_ptr, 0");
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %pb");
+    try wi(out, value_id);
+    try w(out, "_base, i64 %pb");
+    try wi(out, value_id);
+    try wl(out, "_len, 1");
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pb");
+    try wi(out, value_id);
+    try wl(out, "_slice)");
     return;
 }
 
