@@ -763,6 +763,12 @@ fn render_one_instruction(
     if op == enum_const {
         try render_enum_const(out, code, index);
     }
+    // A UNION_CONST shares ENUM_CONST's dst/tag offsets, so the tag-constant
+    // renderer serves both (the payload value renders through its own record).
+    let union_const = codegen::code_op_union_const();
+    if op == union_const {
+        try render_enum_const(out, code, index);
+    }
     let call = codegen::code_op_call();
     if op == call {
         try render_call(out, text, code, kinds, index);
@@ -2135,19 +2141,19 @@ fn render_print(
     let not_bool_record = !is_bool and !is_record;
     let is_i64 = not_str_slice and not_bool_record;
     if is_string {
-        try render_print_string_line(out, code, value_id);
+        try render_print_string_line(out, code, value_id, index);
     }
     if is_slice {
-        try render_print_slice_line(out, value_id);
+        try render_print_slice_line(out, value_id, index);
     }
     if is_bool {
-        try render_print_bool_line(out, value_id);
+        try render_print_bool_line(out, value_id, index);
     }
     if is_record {
-        try render_print_enum_line(out, code, value_id, value_kind);
+        try render_print_enum_line(out, code, value_kind, index);
     }
     if is_i64 {
-        try render_print_i64_line(out, value_id);
+        try render_print_i64_line(out, value_id, index);
     }
     return;
 }
@@ -2159,8 +2165,8 @@ fn render_print(
 fn render_print_enum_line(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
-    value_id: i64,
-    value_kind: i64
+    value_kind: i64,
+    suffix: i64
 ) -> !void {
     let record_base = codegen::code_kind_struct_base();
     let record_pos = value_kind - record_base;
@@ -2169,37 +2175,37 @@ fn render_print_enum_line(
     let qual_end = try code.get(record_pos + 3);
     let byte_len = qual_end - qual_start;
     try w(out, "  %pe");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.e");
     try wi(out, dst);
     try wl(out, ", 0");
     try w(out, "  %pe");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_slice = insertvalue %kizu.slice.u8 %pe");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_base, i64 ");
     try wi(out, byte_len);
     try wl(out, ", 1");
     try w(out, "  %pe");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pe");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_slice)");
-    try render_print_newline(out, value_id);
+    try render_print_newline(out, suffix);
     return;
 }
 
 // render_print_slice_line writes a runtime slice print value (its '%v<id>' SSA
 // '%kizu.slice.u8') followed by the trailing newline print() appends.
-fn render_print_slice_line(out: &var std::string::String, value_id: i64) -> !void {
-    try render_print_slice(out, value_id);
-    try render_print_newline(out, value_id);
+fn render_print_slice_line(out: &var std::string::String, value_id: i64, suffix: i64) -> !void {
+    try render_print_slice(out, value_id, suffix);
+    try render_print_newline(out, suffix);
     return;
 }
 
-fn render_print_slice(out: &var std::string::String, value_id: i64) -> !void {
+fn render_print_slice(out: &var std::string::String, value_id: i64, suffix: i64) -> !void {
     try w(out, "  %psl");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %v");
     try wi(out, value_id);
     try wl(out, ")");
@@ -2255,52 +2261,53 @@ fn render_str_slice(
 fn render_print_string_line(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
-    value_id: i64
+    value_id: i64,
+    suffix: i64
 ) -> !void {
     let byte_len = try tape_string_length(code, value_id, 0);
-    try render_print_string(out, value_id, byte_len);
-    try render_print_newline(out, value_id);
+    try render_print_string(out, value_id, byte_len, suffix);
+    try render_print_newline(out, suffix);
     return;
 }
 
 // render_print_bool_line selects the 'true'/'false' word payload (each carries
 // its own trailing newline) from the i1 value and writes it to stdout.
-fn render_print_bool_line(out: &var std::string::String, value_id: i64) -> !void {
+fn render_print_bool_line(out: &var std::string::String, value_id: i64, suffix: i64) -> !void {
     try w(out, "  %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_ptr = select i1 %v");
     try wi(out, value_id);
     try wl(out, ", ptr @.kizu.run.bool_true, ptr @.kizu.run.bool_false");
     try w(out, "  %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_len = select i1 %v");
     try wi(out, value_id);
     try wl(out, ", i64 5, i64 6");
     try w(out, "  %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_ptr, 0");
     try w(out, "  %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_slice = insertvalue %kizu.slice.u8 %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_base, i64 %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_len, 1");
     try w(out, "  %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pb");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_slice)");
     return;
 }
 
 // render_print_i64_line formats an i64 print value through the decimal helper then
 // writes the trailing newline.
-fn render_print_i64_line(out: &var std::string::String, value_id: i64) -> !void {
-    try render_print_i64(out, value_id);
-    try render_print_newline(out, value_id);
+fn render_print_i64_line(out: &var std::string::String, value_id: i64, suffix: i64) -> !void {
+    try render_print_i64(out, value_id, suffix);
+    try render_print_newline(out, suffix);
     return;
 }
 
@@ -2364,61 +2371,62 @@ fn tape_const_str_spans_length(
 fn render_print_string(
     out: &var std::string::String,
     value_id: i64,
-    byte_len: i64
+    byte_len: i64,
+    suffix: i64
 ) -> !void {
     try w(out, "  %ps");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.s");
     try wi(out, value_id);
     try wl(out, ", 0");
     try w(out, "  %ps");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_slice = insertvalue %kizu.slice.u8 %ps");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_base, i64 ");
     try wi(out, byte_len);
     try wl(out, ", 1");
     try w(out, "  %ps");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %ps");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_slice)");
     return;
 }
 
-fn render_print_i64(out: &var std::string::String, value_id: i64) -> !void {
+fn render_print_i64(out: &var std::string::String, value_id: i64, suffix: i64) -> !void {
     try w(out, "  %pi");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_dec = call %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %v");
     try wi(out, value_id);
     try wl(out, ")");
     try w(out, "  %pi");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_slice = extractvalue %kizu.error.slice.u8 %pi");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_dec, 1");
     try w(out, "  %pi");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pi");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_slice)");
     return;
 }
 
 // render_print_newline writes the trailing newline print() appends after its payload.
-fn render_print_newline(out: &var std::string::String, value_id: i64) -> !void {
+fn render_print_newline(out: &var std::string::String, suffix: i64) -> !void {
     try w(out, "  %pn");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.newline, 0");
     try w(out, "  %pn");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_slice = insertvalue %kizu.slice.u8 %pn");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_base, i64 1, 1");
     try w(out, "  %pn");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pn");
-    try wi(out, value_id);
+    try wi(out, suffix);
     try wl(out, "_slice)");
     return;
 }
@@ -2513,6 +2521,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let enum_const = codegen::code_op_enum_const();
     if op == enum_const {
         return index + 7;
+    }
+    let union_const = codegen::code_op_union_const();
+    if op == union_const {
+        return index + 8;
     }
     let binary = codegen::code_op_binary();
     if op == binary {

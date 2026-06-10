@@ -63,6 +63,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderStructCases()...)
 	cases = append(cases, runRenderEnumMatchCases()...)
 	cases = append(cases, runRenderVarStructCases()...)
+	cases = append(cases, runRenderUnionPayloadCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -507,6 +508,26 @@ func runRenderVarStructCases() []runRenderCase {
 				"    user.name = \"bob\";\n    user.age = user.age + 1;\n" +
 				"    print(user.name);\n    print(user.age);\n}\n",
 			wantStdout: "bob\n31\n",
+		},
+	}
+}
+
+// runRenderUnionPayloadCases is the union corpus (payload constructors, payload
+// bindings in match arms incl. a slice payload, and a payload-less variant).
+func runRenderUnionPayloadCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "union_payload_match",
+			source: "union Shape {\n    Point,\n    Circle(i64),\n    Label([]u8),\n}\n\n" +
+				"fn main() {\n    let circle = Shape::Circle(10);\n    match circle {\n" +
+				"        Point => print(\"point\"),\n        Circle(radius) => print(radius),\n" +
+				"        Label(text) => print(text),\n    }\n" +
+				"    let label = Shape::Label(\"name\");\n    match label {\n" +
+				"        Point => print(\"point\"),\n        Circle(radius) => print(radius),\n" +
+				"        Label(text) => print(text),\n    }\n" +
+				"    let point = Shape::Point;\n    match point {\n" +
+				"        Point => print(\"point\"),\n        _ => print(\"other\"),\n    }\n}\n",
+			wantStdout: "10\nname\npoint\n",
 		},
 	}
 }
