@@ -363,7 +363,7 @@ fn render_user_function(
 ) -> !i64 {
     try render_user_define_head(out, name, ret_kind);
     try w(out, "(");
-    try render_param_list(out, param_base, param_count, 0);
+    try render_param_list(out, kinds, param_base, param_count, 0);
     try wl(out, ") {");
     try wl(out, "entry:");
     // A user function that prints needs the io handle the print writers reference;
@@ -463,9 +463,11 @@ fn op_is_return(op: i64) -> bool {
     return false;
 }
 
-// render_param_list emits 'i64 %v<param_base+i>' separated by commas.
+// render_param_list emits '<type> %v<param_base+i>' separated by commas, typing
+// each parameter from its value kind (i1 for bool, i64 otherwise).
 fn render_param_list(
     out: &var std::string::String,
+    kinds: &std::array::Array<i64>,
     param_base: i64,
     param_count: i64,
     index: i64
@@ -476,13 +478,28 @@ fn render_param_list(
     if index > 0 {
         try w(out, ", ");
     }
-    try w(out, "i64 %v");
     // Bind the slot id so the wi() call takes a local rather than a 'base + index'
     // binary arg (the call-arg lowering only models 'base + <int literal>').
     let slot = param_base + index;
+    let kind = try kinds.get(slot);
+    try render_value_type(out, kind);
+    try w(out, " %v");
     try wi(out, slot);
     let after = index + 1;
-    try render_param_list(out, param_base, param_count, after);
+    try render_param_list(out, kinds, param_base, param_count, after);
+    return;
+}
+
+// render_value_type writes the LLVM scalar type for a tape value kind: bool
+// values are 'i1', every other scalar value the renderer types here is 'i64'.
+fn render_value_type(out: &var std::string::String, kind: i64) -> !void {
+    let kind_bool = codegen::code_kind_bool();
+    if kind == kind_bool {
+        try w(out, "i1");
+    }
+    if kind != kind_bool {
+        try w(out, "i64");
+    }
     return;
 }
 
@@ -547,6 +564,11 @@ fn render_var_allocas(
         let for_slot = try code.get(index + 2);
         try render_one_alloca(out, for_slot);
     }
+    let sc_begin = codegen::code_op_sc_begin();
+    if op == sc_begin {
+        let sc_slot = try code.get(index + 1);
+        try render_one_sc_alloca(out, sc_slot);
+    }
     let next = try tape_record_end(code, index);
     try render_var_allocas(out, code, next, func_end);
     return;
@@ -557,6 +579,15 @@ fn render_one_alloca(out: &var std::string::String, slot: i64) -> !void {
     try w(out, "  %slot");
     try wi(out, slot);
     try wl(out, " = alloca i64");
+    return;
+}
+
+// render_one_sc_alloca emits '%sc<id> = alloca i1' for one short-circuit slot
+// (named by its SC_BEGIN tape index and hoisted to the function entry).
+fn render_one_sc_alloca(out: &var std::string::String, slot: i64) -> !void {
+    try w(out, "  %sc");
+    try wi(out, slot);
+    try wl(out, " = alloca i1");
     return;
 }
 
@@ -596,9 +627,25 @@ fn render_one_instruction(
     if op == const_int {
         try render_const_int(out, code, index);
     }
+    let const_bool = codegen::code_op_const_bool();
+    if op == const_bool {
+        try render_const_bool(out, code, index);
+    }
+    let not_op = codegen::code_op_not();
+    if op == not_op {
+        try render_not(out, code, index);
+    }
     let binary = codegen::code_op_binary();
     if op == binary {
         try render_binary(out, code, index);
+    }
+    let sc_begin = codegen::code_op_sc_begin();
+    if op == sc_begin {
+        try render_sc_begin(out, code, index);
+    }
+    let sc_end = codegen::code_op_sc_end();
+    if op == sc_end {
+        try render_sc_end(out, code, index);
     }
     let print_op = codegen::code_op_print();
     if op == print_op {
@@ -606,11 +653,11 @@ fn render_one_instruction(
     }
     let call = codegen::code_op_call();
     if op == call {
-        try render_call(out, text, code, index);
+        try render_call(out, text, code, kinds, index);
     }
     let try_call = codegen::code_op_try_call();
     if op == try_call {
-        try render_try_call(out, text, code, index, abi);
+        try render_try_call(out, text, code, kinds, index, abi);
     }
     let ret_value = codegen::code_op_ret_value();
     if op == ret_value {
@@ -1022,6 +1069,116 @@ fn render_const_int(
     return;
 }
 
+// render_const_bool materializes a bool literal as an i1 SSA value: the tape
+// literal is 1 (true) or 0 (false), compared against zero.
+fn render_const_bool(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let literal = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = icmp ne i64 ");
+    try wi(out, literal);
+    try wl(out, ", 0");
+    return;
+}
+
+// render_not emits the logical negation of an i1 operand ('xor i1 <op>, true').
+fn render_not(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let operand = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = xor i1 %v");
+    try wi(out, operand);
+    try wl(out, ", true");
+    return;
+}
+
+// render_sc_begin opens a short-circuit 'and'/'or': store the left i1 into the
+// record's slot, then branch into the right-operand block only when the left does
+// not already decide the result (an 'and' skips on false, an 'or' skips on true).
+fn render_sc_begin(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let lhs = try code.get(index + 2);
+    let is_or = try code.get(index + 3);
+    try w(out, "  store i1 %v");
+    try wi(out, lhs);
+    try w(out, ", ptr %sc");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "  br i1 %v");
+    try wi(out, lhs);
+    if is_or == 1 {
+        try render_sc_branch(out, begin, "scend_", "scrhs_");
+    }
+    if is_or != 1 {
+        try render_sc_branch(out, begin, "scrhs_", "scend_");
+    }
+    try w(out, "scrhs_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_sc_branch writes the ', label %<a><begin>, label %<b><begin>' tail of the
+// SC_BEGIN conditional branch.
+fn render_sc_branch(
+    out: &var std::string::String,
+    begin: i64,
+    true_prefix: []u8,
+    false_prefix: []u8
+) -> !void {
+    try w(out, ", label %");
+    try w(out, true_prefix);
+    try wi(out, begin);
+    try w(out, ", label %");
+    try w(out, false_prefix);
+    try wi(out, begin);
+    try nl(out);
+    return;
+}
+
+// render_sc_end closes a short-circuit 'and'/'or': store the right i1 into the
+// slot, fall into the join block, and load the slot into the result value.
+fn render_sc_end(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let rhs = try code.get(index + 2);
+    let dst = try code.get(index + 3);
+    try w(out, "  store i1 %v");
+    try wi(out, rhs);
+    try w(out, ", ptr %sc");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "  br label %scend_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "scend_");
+    try wi(out, begin);
+    try wl(out, ":");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load i1, ptr %sc");
+    try wi(out, begin);
+    try nl(out);
+    return;
+}
+
 fn render_ret_value(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
@@ -1169,11 +1326,12 @@ fn binary_compare_predicate(kind: i64) -> []u8 {
     return "sge";
 }
 
-// render_call emits '%v<dst> = call i64 @kizu_run_user_<callee>(i64 %v<arg>, ...)'.
+// render_call emits '%v<dst> = call i64 @kizu_run_user_<callee>(<type> %v<arg>, ...)'.
 fn render_call(
     out: &var std::string::String,
     text: []u8,
     code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
     index: i64
 ) -> !void {
     let dst = try code.get(index + 1);
@@ -1186,16 +1344,18 @@ fn render_call(
     try w(out, " = call i64 @kizu_run_user_");
     try w(out, callee);
     try w(out, "(");
-    try render_call_args(out, code, index, arg_count, 0);
+    try render_call_args(out, code, kinds, index, arg_count, 0);
     try wl(out, ")");
     return;
 }
 
-// render_call_args emits the 'i64 %v<arg>' operands read from the CALL record's
-// trailing arg-id list (which begins at index + 5).
+// render_call_args emits the '<type> %v<arg>' operands read from the CALL record's
+// trailing arg-id list (which begins at index + 5), typing each argument from its
+// value kind.
 fn render_call_args(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
     index: i64,
     arg_count: i64,
     arg_index: i64
@@ -1207,10 +1367,12 @@ fn render_call_args(
         try w(out, ", ");
     }
     let arg_value = try code.get(index + 5 + arg_index);
-    try w(out, "i64 %v");
+    let arg_kind = try kinds.get(arg_value);
+    try render_value_type(out, arg_kind);
+    try w(out, " %v");
     try wi(out, arg_value);
     let after = arg_index + 1;
-    try render_call_args(out, code, index, arg_count, after);
+    try render_call_args(out, code, kinds, index, arg_count, after);
     return;
 }
 
@@ -1222,6 +1384,7 @@ fn render_try_call(
     out: &var std::string::String,
     text: []u8,
     code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
     index: i64,
     abi: i64
 ) -> !void {
@@ -1234,7 +1397,7 @@ fn render_try_call(
     try w(out, " = call %kizu.error.void @kizu_run_user_");
     try w(out, callee);
     try w(out, "(");
-    try render_try_call_args(out, code, index, arg_count, 0);
+    try render_try_call_args(out, code, kinds, index, arg_count, 0);
     try wl(out, ")");
     try w(out, "  %tc");
     try wi(out, index);
@@ -1258,12 +1421,13 @@ fn render_try_call(
     return;
 }
 
-// render_try_call_args emits the 'i64 %v<arg>' operands read from the TRY_CALL
+// render_try_call_args emits the '<type> %v<arg>' operands read from the TRY_CALL
 // record's trailing arg-id list (which begins at index + 4: TRY_CALL has no
-// leading result value id).
+// leading result value id), typing each argument from its value kind.
 fn render_try_call_args(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
     index: i64,
     arg_count: i64,
     arg_index: i64
@@ -1275,10 +1439,12 @@ fn render_try_call_args(
         try w(out, ", ");
     }
     let arg_value = try code.get(index + 4 + arg_index);
-    try w(out, "i64 %v");
+    let arg_kind = try kinds.get(arg_value);
+    try render_value_type(out, arg_kind);
+    try w(out, " %v");
     try wi(out, arg_value);
     let after = arg_index + 1;
-    try render_try_call_args(out, code, index, arg_count, after);
+    try render_try_call_args(out, code, kinds, index, arg_count, after);
     return;
 }
 
@@ -1617,6 +1783,14 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     if op == const_int {
         return index + 3;
     }
+    let const_bool = codegen::code_op_const_bool();
+    if op == const_bool {
+        return index + 3;
+    }
+    let not_op = codegen::code_op_not();
+    if op == not_op {
+        return index + 3;
+    }
     let const_str = codegen::code_op_const_str();
     if op == const_str {
         return index + 4;
@@ -1624,6 +1798,14 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let binary = codegen::code_op_binary();
     if op == binary {
         return index + 5;
+    }
+    let sc_begin = codegen::code_op_sc_begin();
+    if op == sc_begin {
+        return index + 4;
+    }
+    let sc_end = codegen::code_op_sc_end();
+    if op == sc_end {
+        return index + 4;
     }
     let call = codegen::code_op_call();
     if op == call {

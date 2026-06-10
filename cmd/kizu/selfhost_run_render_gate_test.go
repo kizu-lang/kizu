@@ -49,6 +49,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 		t.Fatalf("prepare target dir: %v", err)
 	}
 	cases := append(runRenderCases(), runRenderLoopCases()...)
+	cases = append(cases, runRenderBoolCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -137,6 +138,54 @@ func runRenderLoopCases() []runRenderCase {
 				"            continue;\n        }\n" +
 				"        if n == 6 {\n            break;\n        }\n        print(n);\n    }\n}\n",
 			wantStdout: "2\n4\n5\n",
+		},
+	}
+}
+
+// runRenderBoolCases is the bool corpus (bool literals, short-circuit and/or,
+// logical not, bool parameters) the tape renderer covers in this slice.
+func runRenderBoolCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "while_true_break",
+			source: "fn main() {\n    var i = 0;\n    while true {\n        print(i);\n" +
+				"        i = i + 1;\n        if i == 2 {\n            break;\n        }\n    }\n}\n",
+			wantStdout: "0\n1\n",
+		},
+		{
+			name: "if_bool_literal_false",
+			source: "fn main() {\n    if false {\n        print(\"not executed\");\n    }\n" +
+				"    print(\"done\");\n}\n",
+			wantStdout: "done\n",
+		},
+		{
+			name: "logical_and_or",
+			source: "fn main() {\n    let age = 30;\n    let admin = false;\n" +
+				"    if age >= 20 and age < 130 {\n        print(\"and-ok\");\n    }\n" +
+				"    if (age < 20 and admin) or age == 30 {\n        print(\"or-ok\");\n    }\n" +
+				"    if admin or age < 20 {\n        print(\"unexpected\");\n    }\n}\n",
+			wantStdout: "and-ok\nor-ok\n",
+		},
+		{
+			name: "logical_not",
+			source: "fn main() {\n    let admin = false;\n    if !admin {\n" +
+				"        print(\"not-ok\");\n    }\n    if !(1 == 2) {\n        print(\"ne-ok\");\n    }\n}\n",
+			wantStdout: "not-ok\nne-ok\n",
+		},
+		{
+			// The right operand divides by the guarded zero, so this output is only
+			// reachable when 'and' really short-circuits.
+			name: "short_circuit_division_guard",
+			source: "fn main() {\n    let x = 0;\n    if x != 0 and 100 / x > 0 {\n" +
+				"        print(\"unexpected\");\n    } else {\n        print(\"guarded\");\n    }\n}\n",
+			wantStdout: "guarded\n",
+		},
+		{
+			name: "bool_parameter_call",
+			source: "fn pick(flag: bool) -> i64 {\n    var result = 2;\n    if flag {\n" +
+				"        result = 1;\n    }\n    return result;\n}\n" +
+				"\nfn main() {\n    print(pick(true));\n    print(pick(false));\n}\n",
+			wantStdout: "1\n2\n",
 		},
 	}
 }

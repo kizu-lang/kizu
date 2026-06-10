@@ -211,10 +211,12 @@ func TestSelfhostCodegenLoopI64BuildersUseCompiledAuto(t *testing.T) {
 // TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening pins the exact
 // external-accessor policy of the codegen cluster. The run codegen tape lowering
 // references two kinds of separately-emitted definitions: the compiled
-// std::kizu::ast BinaryOp constant accessors (kizu_kizu__ast_binary_*) called by
-// code_binary_kind, and the transitional handwritten parse_int_literal define
-// (deleted once the generic while lowering carries mid-body scalar assigns).
-// Anything beyond that exact allowlist is a policy widening this test rejects.
+// std::kizu::ast operator constant accessors (kizu_kizu__ast_binary_* called by
+// code_binary_kind and the short-circuit and/or routing, plus
+// kizu_kizu__ast_prefix_not called by the logical-not lowering), and the
+// transitional handwritten parse_int_literal define (deleted once the generic
+// while lowering carries mid-body scalar assigns). Anything beyond that exact
+// allowlist is a policy widening this test rejects.
 func TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 
@@ -235,17 +237,16 @@ func TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening(t *testing.T) 
 		`"std::kizu::ast::binary_lte"`,
 		`"std::kizu::ast::binary_gt"`,
 		`"std::kizu::ast::binary_gte"`,
+		// The logical accessors back the tape's short-circuit and/or lowering
+		// (SC_BEGIN/SC_END records) and prefix_not its logical-not lowering.
+		`"std::kizu::ast::binary_and"`,
+		`"std::kizu::ast::binary_or"`,
+		`"std::kizu::ast::prefix_not"`,
 	}
 	for _, fragment := range allowed {
 		if !strings.Contains(allow, fragment) {
 			t.Fatalf("compiled_external_accessor_allowed lost the codegen allowlist entry %s", fragment)
 		}
-	}
-	// binary_and / binary_or remain unsupported: the tape does not lower
-	// short-circuit boolean conditions yet, so they must not appear.
-	if strings.Contains(allow, `"std::kizu::ast::binary_and"`) ||
-		strings.Contains(allow, `"std::kizu::ast::binary_or"`) {
-		t.Fatalf("compiled_external_accessor_allowed widened the codegen accessor allowlist")
 	}
 }
 
