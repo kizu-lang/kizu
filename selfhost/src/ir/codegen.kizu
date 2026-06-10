@@ -3389,6 +3389,15 @@ pub fn code_op_struct_lit() -> i64 {
     return 8;
 }
 
+// ENUM_CONST materializes an 'Enum::Variant' read as its declaration-order tag:
+// the record is 'op dst qual_start qual_end enum_start enum_end tag' where the
+// qual span covers the 'Enum::Variant' source text (print renders it verbatim)
+// and the enum span names the declaration match arm patterns resolve against.
+// The dst value renders as the i64 tag constant.
+pub fn code_op_enum_const() -> i64 {
+    return 9;
+}
+
 pub fn code_op_func_begin() -> i64 {
     return 10;
 }
@@ -3619,10 +3628,11 @@ pub fn code_kind_slice() -> i64 {
     return 5;
 }
 
-// code_kind_struct_base marks a struct literal value on the kinds array: the
-// entry stores base + <STRUCT_LIT record tape index>, so a field read recovers
-// the record position directly from the kind while every scalar kind check
-// rejects struct values without a dedicated guard.
+// code_kind_struct_base marks a record-backed value on the kinds array: the
+// entry stores base + <record tape index> for STRUCT_LIT and ENUM_CONST values,
+// so a consumer recovers the record position directly from the kind (the opcode
+// at that position tells the two apart) while every scalar kind check rejects
+// record-backed values without a dedicated guard.
 pub fn code_kind_struct_base() -> i64 {
     return 1000;
 }
@@ -3830,11 +3840,13 @@ fn lower_code_function(
     next_value: i64
 ) -> !CodeEval {
     let node = ast.get(decl_id);
-    // A struct declaration emits nothing: literals carry their own field names
-    // and the checked AST already validated them against the declaration.
+    // A struct or enum declaration emits nothing: struct literals carry their
+    // own field names, enum constants resolve their tags against the
+    // declaration on demand, and the checked AST already validated both.
     return match node.data {
         FnDecl(fn_decl) => try lower_code_fn_decl(text, ast, decls, fn_decl.name, fn_decl.params, fn_decl.return_type, fn_decl.body, code, kinds, local_starts, local_ends, local_values, args_scratch, next_value),
         StructDecl(struct_decl) => code_eval_value(0, next_value),
+        EnumDecl(enum_decl) => code_eval_value(0, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -4141,6 +4153,7 @@ fn lower_code_statement(
         ExprStmt(expr_stmt) => try lower_code_expr_statement(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Return(return_node) => try lower_code_return(text, ast, decls, return_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         If(if_node) => try lower_code_if(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
+        Match(match_node) => try lower_code_match(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
         While(while_node) => try lower_code_while(text, ast, decls, while_node.label, while_node.condition, while_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         For(for_node) => try lower_code_for(text, ast, decls, for_node.label, for_node.name, for_node.start, for_node.end, for_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Break(break_node) => try lower_code_break(text, ast, break_node.label, code, local_starts, local_ends, local_values, locals_base, loop_begin, loop_kind, next_value),
@@ -4222,6 +4235,208 @@ fn lower_code_else_block(
         Empty => code_eval_value(0, next_value),
         Block(block) => try lower_code_nested_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
         If(if_node) => try lower_code_if(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_match lowers a statement-position 'match <enum> { ... }' as a
+// nested if/else chain of tag comparisons over the structured IF records; a
+// '_' arm lowers as the unconditional tail. The matched value must trace to an
+// ENUM_CONST record so the arm patterns resolve against its enum declaration.
+fn lower_code_match(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let value_eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !value_eval.ok {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let value_kind = try kinds.get(value_eval.value_id);
+    let record_base = code_kind_struct_base();
+    if value_kind < record_base {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let record_pos = value_kind - record_base;
+    let record_op = try code.get(record_pos);
+    let op_enum_const = code_op_enum_const();
+    if record_op != op_enum_const {
+        return code_eval_unsupported(value_eval.next);
+    }
+    if arms.len == 0 {
+        return code_eval_unsupported(value_eval.next);
+    }
+    return try lower_code_match_arms(text, ast, decls, value_eval.value_id, record_pos, arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, 0, value_eval.next);
+}
+
+// lower_code_match_arms dispatches the arm at index into the nested if chain
+// (past the last arm the chain is complete and nothing more lowers).
+fn lower_code_match_arms(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value_id: i64,
+    record_pos: i64,
+    arms: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= arms.len {
+        return code_eval_value(0, next_value);
+    }
+    let arm = try ast.child_at(arms, index);
+    return try lower_code_match_arm_node(text, ast, decls, value_id, record_pos, arms, arm, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, index, next_value);
+}
+
+fn lower_code_match_arm_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value_id: i64,
+    record_pos: i64,
+    arms: std::kizu::ast::ChildRange,
+    arm: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(arm);
+    return match node.data {
+        MatchArm(match_arm) => try lower_code_match_arm(text, ast, decls, value_id, record_pos, arms, match_arm.pattern, match_arm.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, index, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_match_arm lowers one arm: a '_' pattern lowers its body
+// unconditionally (the chain tail), any other pattern compares the matched
+// value against its variant tag and the remaining arms nest in the else branch.
+fn lower_code_match_arm(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value_id: i64,
+    record_pos: i64,
+    arms: std::kizu::ast::ChildRange,
+    pattern: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    let pattern_text = ast_node_text(text, ast, pattern);
+    if std::mem::equal_bytes(pattern_text, "_") {
+        return try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value);
+    }
+    let enum_start_pos = record_pos + 4;
+    let enum_start = try code.get(enum_start_pos);
+    let enum_end_pos = record_pos + 5;
+    let enum_end = try code.get(enum_end_pos);
+    let pattern_span = code_node_span(text, ast, pattern);
+    let tag = try enum_variant_tag_lookup(text, ast, decls, enum_start, enum_end, pattern_span.start, pattern_span.end, 0);
+    if tag < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let op_const = code_op_const_int();
+    try code.append(op_const);
+    try code.append(next_value);
+    try code.append(tag);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    let tag_value = next_value;
+    let cond_value = next_value + 1;
+    let op_binary = code_op_binary();
+    let eq_kind = code_binary_kind(std::kizu::ast::binary_eq());
+    try code.append(op_binary);
+    try code.append(cond_value);
+    try code.append(eq_kind);
+    try code.append(value_id);
+    try code.append(tag_value);
+    let kind_bool = code_kind_bool();
+    try kinds.append(kind_bool);
+    let after_cond = cond_value + 1;
+    let if_begin_index = code.len();
+    let op_if_begin = code_op_if_begin();
+    try code.append(op_if_begin);
+    try code.append(cond_value);
+    let body_eval = try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, after_cond);
+    if !body_eval.ok {
+        return code_eval_unsupported(body_eval.next);
+    }
+    let op_if_else = code_op_if_else();
+    try code.append(op_if_else);
+    try code.append(if_begin_index);
+    let after = index + 1;
+    let rest_eval = try lower_code_match_arms(text, ast, decls, value_id, record_pos, arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, after, body_eval.next);
+    if !rest_eval.ok {
+        return code_eval_unsupported(rest_eval.next);
+    }
+    let op_if_end = code_op_if_end();
+    try code.append(op_if_end);
+    try code.append(if_begin_index);
+    return code_eval_value(0, rest_eval.next);
+}
+
+// lower_code_match_body lowers one arm body: a bare call or try-call lowers as
+// the matching statement form, a block opens its own binding scope.
+fn lower_code_match_body(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(body);
+    return match node.data {
+        ExprStmt(expr_stmt) => try lower_code_expr_statement(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Call(call_node) => try lower_code_statement_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        TryExpr(try_expr) => try lower_code_try_statement(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Block(block) => try lower_code_nested_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -5061,17 +5276,42 @@ fn lower_code_print_call(
         return code_eval_unsupported(eval.next);
     }
     let kind = try kinds.get(eval.value_id);
-    // A struct value has no printable SSA temp (its record renders nothing), so
-    // 'print(<struct>)' stays an explicit unsupported program.
-    let struct_base = code_kind_struct_base();
-    if kind >= struct_base {
-        return code_eval_unsupported(eval.next);
+    // A record-backed value prints only when its record is an ENUM_CONST (the
+    // renderer writes the qualified variant name from the record's span); a
+    // struct value has no printable SSA temp, so 'print(<struct>)' stays an
+    // explicit unsupported program.
+    let record_base = code_kind_struct_base();
+    if kind >= record_base {
+        return try lower_code_print_record(code, eval.value_id, kind, record_base, eval.next);
     }
     let op_print = code_op_print();
     try code.append(op_print);
     try code.append(eval.value_id);
     try code.append(kind);
     return code_eval_value(eval.value_id, eval.next);
+}
+
+// lower_code_print_record keeps 'print(<enum>)' on the tape (the PRINT record
+// carries the record kind so the renderer resolves the ENUM_CONST span) and
+// rejects every other record-backed value.
+fn lower_code_print_record(
+    code: &var std::array::Array<i64>,
+    value_id: i64,
+    kind: i64,
+    record_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_pos = kind - record_base;
+    let record_op = try code.get(record_pos);
+    let op_enum_const = code_op_enum_const();
+    if record_op != op_enum_const {
+        return code_eval_unsupported(next_value);
+    }
+    let op_print = code_op_print();
+    try code.append(op_print);
+    try code.append(value_id);
+    try code.append(kind);
+    return code_eval_value(value_id, next_value);
 }
 
 fn lower_code_return(
@@ -5262,7 +5502,7 @@ fn lower_code_expr(
         Prefix(prefix_node) => try lower_code_prefix(text, ast, decls, prefix_node.op, prefix_node.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Binary(binary) => try lower_code_binary(text, ast, decls, binary.op, binary.left, binary.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Call(call_node) => try lower_code_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
-        FieldExpr(field_expr) => try lower_code_field_expr(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        FieldExpr(field_expr) => try lower_code_field_expr(text, ast, decls, node_id, field_expr.receiver, field_expr.name, field_expr.namespace, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         StructLiteralExpr(struct_lit) => try lower_code_struct_literal(text, ast, decls, struct_lit.fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         TryExpr(try_expr) => try lower_code_try_expr(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
@@ -5745,11 +5985,13 @@ fn lower_code_struct_field(
 // lower_code_field_expr resolves a '.' field read at lowering time: the receiver
 // must evaluate to a struct literal value (its kinds entry stores the STRUCT_LIT
 // record position) and the read resolves to the field's own value id without
-// emitting any record. Nested struct fields chain through the same resolution.
+// emitting any record. Nested struct fields chain through the same resolution. A
+// namespaced 'Enum::Variant' read lowers to its ENUM_CONST tag instead.
 fn lower_code_field_expr(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId,
     receiver: std::kizu::ast::NodeId,
     name: std::kizu::ast::NodeId,
     namespace: bool,
@@ -5763,7 +6005,7 @@ fn lower_code_field_expr(
     next_value: i64
 ) -> !CodeEval {
     if namespace {
-        return code_eval_unsupported(next_value);
+        return try lower_code_enum_const(text, ast, decls, node_id, receiver, name, code, kinds, next_value);
     }
     let base_eval = try lower_code_expr(text, ast, decls, receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !base_eval.ok {
@@ -5775,6 +6017,11 @@ fn lower_code_field_expr(
         return code_eval_unsupported(base_eval.next);
     }
     let record_pos = base_kind - struct_base;
+    let record_op = try code.get(record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if record_op != op_struct_lit {
+        return code_eval_unsupported(base_eval.next);
+    }
     let count_pos = record_pos + 2;
     let field_count = try code.get(count_pos);
     let name_span = code_node_span(text, ast, name);
@@ -5783,6 +6030,128 @@ fn lower_code_field_expr(
         return code_eval_unsupported(base_eval.next);
     }
     return code_eval_value(field_value, base_eval.next);
+}
+
+// lower_code_enum_const lowers 'Enum::Variant': the variant resolves to its
+// declaration-order tag against the named enum declaration, and the ENUM_CONST
+// record keeps the qualified and enum-name source spans so print renders the
+// variant name and match arms resolve their patterns.
+fn lower_code_enum_const(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let enum_span = code_node_span(text, ast, receiver);
+    let variant_span = code_node_span(text, ast, name);
+    let tag = try enum_variant_tag_lookup(text, ast, decls, enum_span.start, enum_span.end, variant_span.start, variant_span.end, 0);
+    if tag < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let qual_span = code_node_span(text, ast, node_id);
+    let record_pos = code.len();
+    let op_enum_const = code_op_enum_const();
+    try code.append(op_enum_const);
+    try code.append(next_value);
+    try code.append(qual_span.start);
+    try code.append(qual_span.end);
+    try code.append(enum_span.start);
+    try code.append(enum_span.end);
+    try code.append(tag);
+    let record_base = code_kind_struct_base();
+    let record_kind = record_base + record_pos;
+    try kinds.append(record_kind);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// enum_variant_tag_lookup scans the top-level declarations for the enum whose
+// name matches the receiver span and returns the named variant's
+// declaration-order tag (-1 when no declaration carries it).
+fn enum_variant_tag_lookup(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    enum_start: i64,
+    enum_end: i64,
+    var_start: i64,
+    var_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= decls.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(decls, index);
+    let tag = try enum_decl_variant_tag(text, ast, child, enum_start, enum_end, var_start, var_end);
+    let after = index + 1;
+    if tag > 0 - 2 {
+        return tag;
+    }
+    return try enum_variant_tag_lookup(text, ast, decls, enum_start, enum_end, var_start, var_end, after);
+}
+
+// enum_decl_variant_tag classifies one declaration against the enum name span:
+// -2 = not the named enum (keep scanning), otherwise the variant's tag.
+fn enum_decl_variant_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    enum_start: i64,
+    enum_end: i64,
+    var_start: i64,
+    var_end: i64
+) -> !i64 {
+    let node = ast.get(child);
+    return match node.data {
+        EnumDecl(enum_decl) => try enum_named_variant_tag(text, ast, enum_decl.name, enum_decl.tags, enum_start, enum_end, var_start, var_end),
+        _ => code_decl_kind_skip(),
+    };
+}
+
+fn enum_named_variant_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    tags: std::kizu::ast::ChildRange,
+    enum_start: i64,
+    enum_end: i64,
+    var_start: i64,
+    var_end: i64
+) -> !i64 {
+    let decl_name = ast_node_text(text, ast, name);
+    let enum_name = text[enum_start..enum_end];
+    if !std::mem::equal_bytes(decl_name, enum_name) {
+        return 0 - 2;
+    }
+    return try enum_tags_index(text, ast, tags, var_start, var_end, 0);
+}
+
+// enum_tags_index returns the declaration-order index of the named variant in
+// the enum's tag list (-1 when the list does not carry it).
+fn enum_tags_index(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    tags: std::kizu::ast::ChildRange,
+    var_start: i64,
+    var_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= tags.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(tags, index);
+    let tag_text = ast_node_text(text, ast, child);
+    let variant_name = text[var_start..var_end];
+    let after = index + 1;
+    if !std::mem::equal_bytes(tag_text, variant_name) {
+        return try enum_tags_index(text, ast, tags, var_start, var_end, after);
+    }
+    return index;
 }
 
 // struct_record_field walks the STRUCT_LIT record's field entries and returns
@@ -5867,17 +6236,18 @@ fn lower_code_binary(
     if !right_eval.ok {
         return code_eval_unsupported(right_eval.next);
     }
-    // The BINARY record types both operands as i64 (icmp/arith on '%v' i64 temps),
-    // so a bool/str/slice operand is not owned by this record. The guard constant
-    // takes its own name: the else arm below re-binds 'kind_i64' and the compiled
-    // function names LLVM locals from source locals without scope disambiguation.
-    let operand_kind_i64 = code_kind_i64();
+    // The BINARY record types both operands as i64 (icmp/arith on '%v' i64
+    // temps), so a bool/str/slice operand is not owned by this record. An
+    // ENUM_CONST-backed operand passes: its SSA temp is its i64 tag, so enum
+    // equality lowers as a plain icmp (the checker owns operator legality).
     let left_kind = try kinds.get(left_eval.value_id);
-    if left_kind != operand_kind_i64 {
+    let left_i64_like = try code_operand_is_i64_like(code, left_kind);
+    if !left_i64_like {
         return code_eval_unsupported(right_eval.next);
     }
     let right_kind = try kinds.get(right_eval.value_id);
-    if right_kind != operand_kind_i64 {
+    let right_i64_like = try code_operand_is_i64_like(code, right_kind);
+    if !right_i64_like {
         return code_eval_unsupported(right_eval.next);
     }
     let op_binary = code_op_binary();
@@ -5896,6 +6266,23 @@ fn lower_code_binary(
     let result_value = right_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
+}
+
+// code_operand_is_i64_like accepts an i64 operand or an ENUM_CONST-backed value
+// (whose SSA temp is its i64 tag), so tag comparisons lower as a plain icmp.
+fn code_operand_is_i64_like(code: &var std::array::Array<i64>, kind: i64) -> !bool {
+    let kind_i64 = code_kind_i64();
+    if kind == kind_i64 {
+        return true;
+    }
+    let record_base = code_kind_struct_base();
+    if kind < record_base {
+        return false;
+    }
+    let record_pos = kind - record_base;
+    let record_op = try code.get(record_pos);
+    let op_enum_const = code_op_enum_const();
+    return record_op == op_enum_const;
 }
 
 // lower_code_logical lowers a short-circuit 'and'/'or' (is_or 0/1): the left
