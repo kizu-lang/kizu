@@ -3398,6 +3398,15 @@ pub fn code_op_enum_const() -> i64 {
     return 9;
 }
 
+// UNION_CONST materializes a 'Union::Variant(<payload>)' construction (or a
+// payload-less variant read) as its declaration-order tag: the record extends
+// ENUM_CONST's layout with a trailing payload value id ('op dst qual_start
+// qual_end union_start union_end tag payload', payload -1 when the variant
+// carries none), so match arms bind the payload under their binding name.
+pub fn code_op_union_const() -> i64 {
+    return 12;
+}
+
 pub fn code_op_func_begin() -> i64 {
     return 10;
 }
@@ -3870,6 +3879,7 @@ fn lower_code_function(
         FnDecl(fn_decl) => try lower_code_fn_decl(text, ast, decls, fn_decl.name, fn_decl.params, fn_decl.return_type, fn_decl.body, code, kinds, local_starts, local_ends, local_values, args_scratch, next_value),
         StructDecl(struct_decl) => code_eval_value(0, next_value),
         EnumDecl(enum_decl) => code_eval_value(0, next_value),
+        UnionDecl(union_decl) => code_eval_value(0, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -4295,8 +4305,11 @@ fn lower_code_match(
     let record_pos = value_kind - record_base;
     let record_op = try code.get(record_pos);
     let op_enum_const = code_op_enum_const();
+    let op_union_const = code_op_union_const();
     if record_op != op_enum_const {
-        return code_eval_unsupported(value_eval.next);
+        if record_op != op_union_const {
+            return code_eval_unsupported(value_eval.next);
+        }
     }
     if arms.len == 0 {
         return code_eval_unsupported(value_eval.next);
@@ -4354,7 +4367,7 @@ fn lower_code_match_arm_node(
 ) -> !CodeEval {
     let node = ast.get(arm);
     return match node.data {
-        MatchArm(match_arm) => try lower_code_match_arm(text, ast, decls, value_id, record_pos, arms, match_arm.pattern, match_arm.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, index, next_value),
+        MatchArm(match_arm) => try lower_code_match_arm(text, ast, decls, value_id, record_pos, arms, match_arm.pattern, match_arm.binding, match_arm.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, index, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -4370,6 +4383,7 @@ fn lower_code_match_arm(
     record_pos: i64,
     arms: std::kizu::ast::ChildRange,
     pattern: std::kizu::ast::NodeId,
+    binding: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -4389,12 +4403,8 @@ fn lower_code_match_arm(
     if std::mem::equal_bytes(pattern_text, "_") {
         return try lower_code_match_wildcard(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, is_tail, next_value);
     }
-    let enum_start_pos = record_pos + 4;
-    let enum_start = try code.get(enum_start_pos);
-    let enum_end_pos = record_pos + 5;
-    let enum_end = try code.get(enum_end_pos);
     let pattern_span = code_node_span(text, ast, pattern);
-    let tag = try enum_variant_tag_lookup(text, ast, decls, enum_start, enum_end, pattern_span.start, pattern_span.end, 0);
+    let tag = try match_pattern_tag(text, ast, decls, code, record_pos, pattern_span.start, pattern_span.end);
     if tag < 0 {
         return code_eval_unsupported(next_value);
     }
@@ -4420,7 +4430,7 @@ fn lower_code_match_arm(
     let op_if_begin = code_op_if_begin();
     try code.append(op_if_begin);
     try code.append(cond_value);
-    let body_eval = try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, after_cond);
+    let body_eval = try lower_code_match_arm_body(text, ast, decls, binding, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, record_pos, after_cond);
     if !body_eval.ok {
         return code_eval_unsupported(body_eval.next);
     }
@@ -4436,6 +4446,92 @@ fn lower_code_match_arm(
     try code.append(op_if_end);
     try code.append(if_begin_index);
     return code_eval_value(0, rest_eval.next);
+}
+
+// match_pattern_tag resolves an arm pattern against the matched record's
+// declaration: an ENUM_CONST record resolves through the enum declarations, a
+// UNION_CONST record through the unions (both keep the name span at +4/+5).
+fn match_pattern_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    record_pos: i64,
+    p_start: i64,
+    p_end: i64
+) -> !i64 {
+    let name_start_pos = record_pos + 4;
+    let name_start = try code.get(name_start_pos);
+    let name_end_pos = record_pos + 5;
+    let name_end = try code.get(name_end_pos);
+    let record_op = try code.get(record_pos);
+    let op_union_const = code_op_union_const();
+    if record_op == op_union_const {
+        return try union_variant_tag_lookup(text, ast, decls, name_start, name_end, p_start, p_end, 0);
+    }
+    return try enum_variant_tag_lookup(text, ast, decls, name_start, name_end, p_start, p_end, 0);
+}
+
+// lower_code_match_arm_body lowers one matching arm's body with the union
+// payload bound under the arm's binding name when the matched record carries
+// one (the binding row blanks after the body so it stays arm-scoped); every
+// other shape lowers the body directly.
+fn lower_code_match_arm_body(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    binding: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    record_pos: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_op = try code.get(record_pos);
+    let op_union_const = code_op_union_const();
+    if record_op != op_union_const {
+        return try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value);
+    }
+    let payload_pos = record_pos + 7;
+    let payload_value = try code.get(payload_pos);
+    if payload_value < 0 {
+        return try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value);
+    }
+    let binding_empty = match_binding_is_empty(ast, binding);
+    if binding_empty {
+        return try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value);
+    }
+    let binding_span = code_node_span(text, ast, binding);
+    let row = local_starts.len();
+    try local_starts.append(binding_span.start);
+    try local_ends.append(binding_span.end);
+    try local_values.append(payload_value);
+    let body_eval = try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value);
+    try local_starts.set(row, 0);
+    try local_ends.set(row, 0);
+    if !body_eval.ok {
+        return code_eval_unsupported(body_eval.next);
+    }
+    return code_eval_value(0, body_eval.next);
+}
+
+// match_binding_is_empty reports whether the arm carries no payload binding.
+fn match_binding_is_empty(
+    ast: std::kizu::ast::Ast,
+    binding: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(binding);
+    return match node.data {
+        Empty => true,
+        _ => false,
+    };
 }
 
 // lower_code_match_wildcard lowers a '_' arm body unconditionally. The checker
@@ -5622,7 +5718,10 @@ fn lower_code_print_call(
 
 // lower_code_print_record keeps 'print(<enum>)' on the tape (the PRINT record
 // carries the record kind so the renderer resolves the ENUM_CONST span) and
-// rejects every other record-backed value.
+// rejects every other record-backed value. UNION_CONST stays rejected on
+// purpose: the renderer's string-globals walk emits '@.kizu.run.e' globals for
+// ENUM_CONST records only, so admitting a union here would reference an
+// undefined global (lift both sides together if union printing ever lands).
 fn lower_code_print_record(
     code: &var std::array::Array<i64>,
     value_id: i64,
@@ -6463,7 +6562,7 @@ fn lower_code_enum_const(
     let variant_span = code_node_span(text, ast, name);
     let tag = try enum_variant_tag_lookup(text, ast, decls, enum_span.start, enum_span.end, variant_span.start, variant_span.end, 0);
     if tag < 0 {
-        return code_eval_unsupported(next_value);
+        return try lower_code_union_const_read(text, ast, decls, node_id, enum_span.start, enum_span.end, variant_span.start, variant_span.end, code, kinds, next_value);
     }
     let qual_span = code_node_span(text, ast, node_id);
     let record_pos = code.len();
@@ -6480,6 +6579,31 @@ fn lower_code_enum_const(
     try kinds.append(record_kind);
     let after_value = next_value + 1;
     return code_eval_value(next_value, after_value);
+}
+
+// lower_code_union_const_read lowers a payload-less 'Union::Variant' read (the
+// fallback when no enum declaration carries the variant): the UNION_CONST
+// record stores -1 as its payload value id.
+fn lower_code_union_const_read(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId,
+    union_start: i64,
+    union_end: i64,
+    var_start: i64,
+    var_end: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let tag = try union_variant_tag_lookup(text, ast, decls, union_start, union_end, var_start, var_end, 0);
+    if tag < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let qual_span = code_node_span(text, ast, node_id);
+    let no_payload = 0 - 1;
+    return try lower_code_union_const(qual_span.start, qual_span.end, union_start, union_end, tag, no_payload, code, kinds, next_value);
 }
 
 // enum_variant_tag_lookup scans the top-level declarations for the enum whose
@@ -6564,6 +6688,148 @@ fn enum_tags_index(
         return try enum_tags_index(text, ast, tags, var_start, var_end, after);
     }
     return index;
+}
+
+// union_variant_tag_lookup mirrors enum_variant_tag_lookup over the union
+// declarations: it returns the named variant's declaration-order tag.
+fn union_variant_tag_lookup(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    union_start: i64,
+    union_end: i64,
+    var_start: i64,
+    var_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= decls.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(decls, index);
+    let tag = try union_decl_variant_tag(text, ast, child, union_start, union_end, var_start, var_end);
+    let after = index + 1;
+    if tag > 0 - 2 {
+        return tag;
+    }
+    return try union_variant_tag_lookup(text, ast, decls, union_start, union_end, var_start, var_end, after);
+}
+
+// union_decl_variant_tag classifies one declaration against the union name span:
+// -2 = not the named union (keep scanning), otherwise the variant's tag.
+fn union_decl_variant_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    union_start: i64,
+    union_end: i64,
+    var_start: i64,
+    var_end: i64
+) -> !i64 {
+    let node = ast.get(child);
+    return match node.data {
+        UnionDecl(union_decl) => try union_named_variant_tag(text, ast, union_decl.name, union_decl.variants, union_start, union_end, var_start, var_end),
+        _ => code_decl_kind_skip(),
+    };
+}
+
+fn union_named_variant_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    variants: std::kizu::ast::ChildRange,
+    union_start: i64,
+    union_end: i64,
+    var_start: i64,
+    var_end: i64
+) -> !i64 {
+    let decl_name = ast_node_text(text, ast, name);
+    let union_name = text[union_start..union_end];
+    if !std::mem::equal_bytes(decl_name, union_name) {
+        return 0 - 2;
+    }
+    return try union_variants_index(text, ast, variants, var_start, var_end, 0);
+}
+
+// union_variants_index returns the declaration-order index of the named variant
+// in the union's variant list (-1 when the list does not carry it).
+fn union_variants_index(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    variants: std::kizu::ast::ChildRange,
+    var_start: i64,
+    var_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= variants.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(variants, index);
+    let matched = try union_variant_matches(text, ast, child, var_start, var_end);
+    let after = index + 1;
+    if matched {
+        return index;
+    }
+    return try union_variants_index(text, ast, variants, var_start, var_end, after);
+}
+
+fn union_variant_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    var_start: i64,
+    var_end: i64
+) -> !bool {
+    let node = ast.get(child);
+    return match node.data {
+        UnionVariant(variant) => union_variant_name_matches(text, ast, variant.name, var_start, var_end),
+        _ => union_variant_no_match(),
+    };
+}
+
+fn union_variant_name_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    var_start: i64,
+    var_end: i64
+) -> bool {
+    let variant_text = ast_node_text(text, ast, name);
+    let wanted = text[var_start..var_end];
+    return std::mem::equal_bytes(variant_text, wanted);
+}
+
+fn union_variant_no_match() -> bool {
+    return false;
+}
+
+// lower_code_union_const emits a UNION_CONST record for the resolved variant tag
+// and payload value (-1 for a payload-less variant read).
+fn lower_code_union_const(
+    qual_start: i64,
+    qual_end: i64,
+    union_start: i64,
+    union_end: i64,
+    tag: i64,
+    payload_value: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let record_pos = code.len();
+    let op_union_const = code_op_union_const();
+    try code.append(op_union_const);
+    try code.append(next_value);
+    try code.append(qual_start);
+    try code.append(qual_end);
+    try code.append(union_start);
+    try code.append(union_end);
+    try code.append(tag);
+    try code.append(payload_value);
+    let record_base = code_kind_struct_base();
+    let record_kind = record_base + record_pos;
+    try kinds.append(record_kind);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
 }
 
 // struct_record_field walks the STRUCT_LIT record's field entries and returns
@@ -6775,12 +7041,120 @@ fn lower_code_call(
     if std::mem::equal_bytes(callee_text, "std::io::blocking") {
         return try lower_code_io_blocking(args, code, kinds, next_value);
     }
+    // The union-constructor probe resolves the callee against the union
+    // declarations without touching the tape; only a resolved constructor
+    // commits to the union path, so a failure past this point (an unsupported
+    // payload) stays a final unsupported program instead of falling through to
+    // the user-call path over a partially written tape.
+    let union_tag = try code_callee_union_tag(text, ast, decls, callee);
+    if union_tag >= 0 {
+        return try lower_code_union_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     let callee_span = code_node_span(text, ast, callee);
     let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
     if callee_kind != 1 {
         return code_eval_unsupported(next_value);
     }
     return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+// code_callee_union_tag resolves a call's callee against the union declarations
+// without touching the tape (-1 when the callee is not a union constructor), so
+// the call dispatch commits to the union path before any lowering side effect.
+fn code_callee_union_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(callee);
+    return match node.data {
+        FieldExpr(field_expr) => try code_callee_union_field_tag(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace),
+        _ => code_assign_no_field(),
+    };
+}
+
+fn code_callee_union_field_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool
+) -> !i64 {
+    if !namespace {
+        return 0 - 1;
+    }
+    let union_span = code_node_span(text, ast, receiver);
+    let variant_span = code_node_span(text, ast, name);
+    return try union_variant_tag_lookup(text, ast, decls, union_span.start, union_span.end, variant_span.start, variant_span.end, 0);
+}
+
+// lower_code_union_call routes a call whose callee is a namespaced
+// 'Union::Variant' path into the UNION_CONST construction.
+fn lower_code_union_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(callee);
+    return match node.data {
+        FieldExpr(field_expr) => try lower_code_union_ctor(text, ast, decls, callee, field_expr.receiver, field_expr.name, field_expr.namespace, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_union_ctor lowers 'Union::Variant(<payload>)': the variant must
+// resolve against a union declaration (a miss keeps the tape untouched so the
+// caller falls through), the single payload argument lowers to its own value,
+// and the UNION_CONST record keeps the spans, tag, and payload value id.
+fn lower_code_union_ctor(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if !namespace {
+        return code_eval_unsupported(next_value);
+    }
+    let union_span = code_node_span(text, ast, receiver);
+    let variant_span = code_node_span(text, ast, name);
+    let tag = try union_variant_tag_lookup(text, ast, decls, union_span.start, union_span.end, variant_span.start, variant_span.end, 0);
+    if tag < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let payload_arg = try ast.child_at(args, 0);
+    let payload_eval = try lower_code_expr(text, ast, decls, payload_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !payload_eval.ok {
+        return code_eval_unsupported(payload_eval.next);
+    }
+    let qual_span = code_node_span(text, ast, callee);
+    return try lower_code_union_const(qual_span.start, qual_span.end, union_span.start, union_span.end, tag, payload_eval.value_id, code, kinds, payload_eval.next);
 }
 
 // emit_code_user_call lowers the arguments into a fresh scratch frame and appends
