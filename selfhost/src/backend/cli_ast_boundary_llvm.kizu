@@ -325,21 +325,13 @@ fn append_parse_fn_decl_function(out: &var std::string::String) -> !void {
     try append_line(out, "  %first_param_index = add i64 %index, 3");
     try append_line(out, "  br label %param_loop");
     try append_line(out, "param_loop:");
-    try append_line(out, "  %p_cursor = phi i64 [ %first_param_index, %check_params ], [ %p_after_comma, %param_sep_comma ], [ %p_after_comptime, %param_skip_comptime ]");
-    try append_line(out, "  %p_count = phi i64 [ 0, %check_params ], [ %p_count_next, %param_sep_comma ], [ %p_count, %param_skip_comptime ]");
+    try append_line(out, "  %p_cursor = phi i64 [ %first_param_index, %check_params ], [ %p_after_comma, %param_sep_comma ]");
+    try append_line(out, "  %p_count = phi i64 [ 0, %check_params ], [ %p_count_next, %param_sep_comma ]");
     try append_line(out,
         "  %p_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %p_cursor)");
     try append_line(out, "  %p_kind = extractvalue %kizu.kizu.lexer.token %p_token, 0");
     try append_line(out, "  %p_is_close = icmp eq i64 %p_kind, 32");
-    try append_line(out, "  br i1 %p_is_close, label %params_done_head, label %param_maybe_comptime");
-    // A 'comptime' marker before a parameter name only affects checking; the
-    // boundary skips it and parses the 'name: type' pair as usual.
-    try append_line(out, "param_maybe_comptime:");
-    try append_line(out, "  %p_is_comptime = icmp eq i64 %p_kind, 21");
-    try append_line(out, "  br i1 %p_is_comptime, label %param_skip_comptime, label %param_name");
-    try append_line(out, "param_skip_comptime:");
-    try append_line(out, "  %p_after_comptime = add i64 %p_cursor, 1");
-    try append_line(out, "  br label %param_loop");
+    try append_line(out, "  br i1 %p_is_close, label %params_done_head, label %param_name");
     try append_line(out, "param_name:");
     try append_line(out, "  %p_name_ok = icmp eq i64 %p_kind, 27");
     try append_line(out, "  br i1 %p_name_ok, label %param_colon, label %fail");
@@ -669,22 +661,6 @@ fn append_parse_statement_function(out: &var std::string::String) -> !void {
         "  %labeled_for_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_for(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, %kizu.kizu.ast.node_id %label_node, i64 %labeled_index)");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %labeled_for_result");
     try append_line(out, "dispatch:");
-    // 'comptime if' selects its branch from a checked constant condition; the
-    // boundary parses it as the equivalent runtime if.
-    try append_line(out, "  %is_comptime_stmt = icmp eq i64 %kind, 21");
-    try append_line(out, "  br i1 %is_comptime_stmt, label %comptime_stmt_probe, label %dispatch_kinds");
-    try append_line(out, "comptime_stmt_probe:");
-    try append_line(out, "  %comptime_if_probe = add i64 %index, 1");
-    try append_line(out,
-        "  %comptime_if_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %comptime_if_probe)");
-    try append_line(out, "  %comptime_if_kind = extractvalue %kizu.kizu.lexer.token %comptime_if_token, 0");
-    try append_line(out, "  %comptime_is_if = icmp eq i64 %comptime_if_kind, 13");
-    try append_line(out, "  br i1 %comptime_is_if, label %parse_comptime_if, label %dispatch_kinds");
-    try append_line(out, "parse_comptime_if:");
-    try append_line(out,
-        "  %comptime_if_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_if(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %comptime_if_probe)");
-    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %comptime_if_result");
-    try append_line(out, "dispatch_kinds:");
     try append_line(out, "  %is_let = icmp eq i64 %kind, 8");
     try append_line(out, "  br i1 %is_let, label %parse_let, label %maybe_var");
     try append_line(out, "maybe_var:");
@@ -1610,17 +1586,7 @@ fn append_parse_primary_expr_function(out: &var std::string::String) -> !void {
     // operator); the Prefix node spans from the bang to the operand's end.
     try append_line(out, "maybe_bang:");
     try append_line(out, "  %is_bang = icmp eq i64 %kind, 40");
-    try append_line(out, "  br i1 %is_bang, label %bang_expr, label %maybe_comptime");
-    // 'comptime <expr>' evaluates to the same value as its operand expression,
-    // so the boundary parses it transparently (no wrapper node).
-    try append_line(out, "maybe_comptime:");
-    try append_line(out, "  %is_comptime = icmp eq i64 %kind, 21");
-    try append_line(out, "  br i1 %is_comptime, label %comptime_expr, label %fail");
-    try append_line(out, "comptime_expr:");
-    try append_line(out, "  %comptime_inner_index = add i64 %index, 1");
-    try append_line(out,
-        "  %comptime_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %comptime_inner_index)");
-    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %comptime_result");
+    try append_line(out, "  br i1 %is_bang, label %bang_expr, label %fail");
     try append_line(out, "bang_expr:");
     try append_line(out, "  %bang_operand_index = add i64 %index, 1");
     try append_line(out,
