@@ -229,7 +229,8 @@ fn render_i64_decimal_helper(out: &var std::string::String) -> !void {
 }
 
 // render_string_globals walks the tape and emits a private constant for every
-// CONST_STR record's payload span, named '@.kizu.run.s<dst>'.
+// CONST_STR record's payload span (named '@.kizu.run.s<dst>') and for every
+// ENUM_CONST record's qualified variant span (named '@.kizu.run.e<dst>').
 fn render_string_globals(
     out: &var std::string::String,
     text: []u8,
@@ -245,7 +246,36 @@ fn render_string_globals(
     if op == const_str {
         try render_one_string_global(out, text, code, index);
     }
+    let enum_const = codegen::code_op_enum_const();
+    if op == enum_const {
+        try render_one_enum_global(out, text, code, index);
+    }
     try render_string_globals(out, text, code, next);
+    return;
+}
+
+// render_one_enum_global emits the qualified 'Enum::Variant' source text the
+// ENUM_CONST record at index spans, so print writes the variant name verbatim.
+fn render_one_enum_global(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let qual_start = try code.get(index + 2);
+    let qual_end = try code.get(index + 3);
+    let payload = text[qual_start..qual_end];
+    let byte_len = qual_end - qual_start;
+    try w(out, "@.kizu.run.e");
+    try wi(out, dst);
+    try w(out, " = private unnamed_addr constant [");
+    try wi(out, byte_len);
+    try w(out, " x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try render_llvm_c_bytes(out, payload);
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
     return;
 }
 
@@ -714,6 +744,10 @@ fn render_one_instruction(
     let str_slice = codegen::code_op_str_slice();
     if op == str_slice {
         try render_str_slice(out, code, index);
+    }
+    let enum_const = codegen::code_op_enum_const();
+    if op == enum_const {
+        try render_enum_const(out, code, index);
     }
     let call = codegen::code_op_call();
     if op == call {
@@ -2019,11 +2053,14 @@ fn render_print(
     // void if-lowering accept. A str value writes its global slice, a slice value
     // writes its SSA slice directly, a bool selects its word payload, and any
     // other value formats as i64.
+    let record_base = codegen::code_kind_struct_base();
     let is_string = value_kind == kind_str;
     let is_slice = value_kind == kind_slice;
     let is_bool = value_kind == kind_bool;
+    let is_record = value_kind >= record_base;
     let not_str_slice = !is_string and !is_slice;
-    let is_i64 = not_str_slice and !is_bool;
+    let not_bool_record = !is_bool and !is_record;
+    let is_i64 = not_str_slice and not_bool_record;
     if is_string {
         try render_print_string_line(out, code, value_id);
     }
@@ -2033,9 +2070,49 @@ fn render_print(
     if is_bool {
         try render_print_bool_line(out, value_id);
     }
+    if is_record {
+        try render_print_enum_line(out, code, value_id, value_kind);
+    }
     if is_i64 {
         try render_print_i64_line(out, value_id);
     }
+    return;
+}
+
+// render_print_enum_line writes a record-backed print value: the lowering only
+// admits ENUM_CONST-backed values here (lower_code_print_record verifies the
+// record opcode), so this reads the ENUM_CONST layout without re-checking it
+// and writes the record's qualified variant global followed by the newline.
+fn render_print_enum_line(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64,
+    value_kind: i64
+) -> !void {
+    let record_base = codegen::code_kind_struct_base();
+    let record_pos = value_kind - record_base;
+    let dst = try code.get(record_pos + 1);
+    let qual_start = try code.get(record_pos + 2);
+    let qual_end = try code.get(record_pos + 3);
+    let byte_len = qual_end - qual_start;
+    try w(out, "  %pe");
+    try wi(out, value_id);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.e");
+    try wi(out, dst);
+    try wl(out, ", 0");
+    try w(out, "  %pe");
+    try wi(out, value_id);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %pe");
+    try wi(out, value_id);
+    try w(out, "_base, i64 ");
+    try wi(out, byte_len);
+    try wl(out, ", 1");
+    try w(out, "  %pe");
+    try wi(out, value_id);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pe");
+    try wi(out, value_id);
+    try wl(out, "_slice)");
+    try render_print_newline(out, value_id);
     return;
 }
 
@@ -2053,6 +2130,24 @@ fn render_print_slice(out: &var std::string::String, value_id: i64) -> !void {
     try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %v");
     try wi(out, value_id);
     try wl(out, ")");
+    return;
+}
+
+// render_enum_const materializes an 'Enum::Variant' read as its i64 tag (the
+// qualified-name global is only consumed by print).
+fn render_enum_const(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let tag_pos = index + 6;
+    let tag = try code.get(tag_pos);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = add i64 0, ");
+    try wi(out, tag);
+    try nl(out);
     return;
 }
 
@@ -2331,6 +2426,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let struct_lit = codegen::code_op_struct_lit();
     if op == struct_lit {
         return try tape_struct_lit_record_end(code, index);
+    }
+    let enum_const = codegen::code_op_enum_const();
+    if op == enum_const {
+        return index + 7;
     }
     let binary = codegen::code_op_binary();
     if op == binary {

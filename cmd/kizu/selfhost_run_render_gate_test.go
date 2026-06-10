@@ -61,6 +61,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderSliceParamCases()...)
 	cases = append(cases, runRenderIoWriteCases()...)
 	cases = append(cases, runRenderStructCases()...)
+	cases = append(cases, runRenderEnumMatchCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -461,6 +462,35 @@ func runRenderStructCases() []runRenderCase {
 				"        label: \"deep\",\n    };\n" +
 				"    print(double(outer.inner.value));\n    print(outer.label);\n}\n",
 			wantStdout: "42\ndeep\n",
+		},
+	}
+}
+
+// runRenderEnumMatchCases is the enum corpus (qualified variant prints, tag
+// equality, match dispatch over variants, and a wildcard arm).
+func runRenderEnumMatchCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "enum_print_and_equality",
+			source: "enum Color {\n    Red,\n    Green,\n    Blue,\n}\n\n" +
+				"fn main() {\n    let color = Color::Green;\n    print(color);\n" +
+				"    print(color == Color::Green);\n    print(color == Color::Red);\n}\n",
+			wantStdout: "Color::Green\ntrue\nfalse\n",
+		},
+		{
+			name: "enum_match_dispatch",
+			source: "enum Color {\n    Red,\n    Green,\n    Blue,\n}\n\n" +
+				"fn main() {\n    let color = Color::Blue;\n    match color {\n" +
+				"        Red => print(\"red\"),\n        Green => print(\"green\"),\n" +
+				"        Blue => print(\"blue\"),\n    }\n    print(\"done\");\n}\n",
+			wantStdout: "blue\ndone\n",
+		},
+		{
+			name: "enum_match_wildcard",
+			source: "enum Mode {\n    Fast,\n    Slow,\n}\n\n" +
+				"fn main() {\n    let mode = Mode::Slow;\n    match mode {\n" +
+				"        Fast => print(\"fast\"),\n        _ => print(\"other\"),\n    }\n}\n",
+			wantStdout: "other\n",
 		},
 	}
 }
