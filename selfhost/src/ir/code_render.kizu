@@ -117,6 +117,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.slice.u8 = type { ptr, i64 }");
     try wl(out, "%kizu.owned = type { ptr }");
     try wl(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
+    try wl(out, "%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
@@ -305,11 +306,18 @@ fn ret_abi_user_err_void() -> i64 {
     return 2;
 }
 
+fn ret_abi_user_err_i64() -> i64 {
+    return 3;
+}
+
 // user_ret_abi maps a user function's declared return kind (0 void, 1 i64, 2
-// error-union void) to its render ABI.
+// error-union void, 3 error-union i64) to its render ABI.
 fn user_ret_abi(ret_kind: i64) -> i64 {
     if ret_kind == 2 {
         return ret_abi_user_err_void();
+    }
+    if ret_kind == 3 {
+        return ret_abi_user_err_i64();
     }
     return ret_abi_user_i64();
 }
@@ -381,19 +389,25 @@ fn render_user_function(
 }
 
 // render_user_define_head writes the 'define <ret> @kizu_run_user_<name>' opener
-// whose return type is '%kizu.error.void' for an error-union-void function and
-// 'i64' for every other user function.
+// whose return type follows the declared kind: '%kizu.error.void' for '!void',
+// '%kizu.error.i64' for '!i64', and 'i64' for every other user function.
 fn render_user_define_head(
     out: &var std::string::String,
     name: []u8,
     ret_kind: i64
 ) -> !void {
     let is_err_void = ret_kind == 2;
+    let is_err_i64 = ret_kind == 3;
     if is_err_void {
         try w(out, "define %kizu.error.void @kizu_run_user_");
     }
+    if is_err_i64 {
+        try w(out, "define %kizu.error.i64 @kizu_run_user_");
+    }
     if !is_err_void {
-        try w(out, "define i64 @kizu_run_user_");
+        if !is_err_i64 {
+            try w(out, "define i64 @kizu_run_user_");
+        }
     }
     try w(out, name);
     return;
@@ -403,11 +417,17 @@ fn render_user_define_head(
 // default terminator for its ABI.
 fn render_user_tail(out: &var std::string::String, abi: i64) -> !void {
     let err_void = ret_abi_user_err_void();
+    let err_i64 = ret_abi_user_err_i64();
     if abi == err_void {
         try render_ret_err_ok(out);
     }
+    if abi == err_i64 {
+        try wl(out, "  ret %kizu.error.i64 { i1 true, i64 0, %kizu.slice.u8 zeroinitializer }");
+    }
     if abi != err_void {
-        try wl(out, "  ret i64 0");
+        if abi != err_i64 {
+            try wl(out, "  ret i64 0");
+        }
     }
     return;
 }
@@ -608,9 +628,13 @@ fn render_one_instruction(
     if op == try_call {
         try render_try_call(out, text, code, kinds, index, abi);
     }
+    let try_call_i64 = codegen::code_op_try_call_i64();
+    if op == try_call_i64 {
+        try render_try_call_i64(out, text, code, kinds, index, abi);
+    }
     let ret_value = codegen::code_op_ret_value();
     if op == ret_value {
-        try render_ret_value(out, code, index);
+        try render_ret_value(out, code, index, abi);
     }
     let ret_void = codegen::code_op_ret_void();
     if op == ret_void {
@@ -618,7 +642,7 @@ fn render_one_instruction(
     }
     let ret_err_fail = codegen::code_op_ret_err_fail();
     if op == ret_err_fail {
-        try render_ret_err_fail(out, code, index);
+        try render_ret_err_fail(out, code, index, abi);
     }
     let io_blocking = codegen::code_op_io_blocking();
     if op == io_blocking {
@@ -1128,19 +1152,59 @@ fn render_sc_end(
     return;
 }
 
-// render_ret_value emits the i64 return terminator, then opens a fresh dead block
-// (like break/continue do) so a return in a nested block leaves the structural
-// records that follow it (IF_ELSE/IF_END/loop closers) in a labeled block.
+// render_ret_value emits the value-return terminator for the surrounding ABI,
+// then opens a fresh dead block (like break/continue do) so a return in a nested
+// block leaves the structural records that follow it in a labeled block. The
+// kizu_run_main entry discards its return value (a run process exits 0 on
+// success, matching the reference compiler); an error-union-i64 function wraps
+// the value into its ok union.
 fn render_ret_value(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
-    index: i64
+    index: i64,
+    abi: i64
 ) -> !void {
     let value_id = try code.get(index + 1);
+    let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == main_abi {
+        try wl(out, "  ret i64 0");
+    }
+    if abi == err_i64 {
+        try render_ret_value_err_i64(out, index, value_id);
+    }
+    if abi != main_abi {
+        if abi != err_i64 {
+            try render_ret_value_plain(out, value_id);
+        }
+    }
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_ret_value_plain emits the ordinary i64 return terminator.
+fn render_ret_value_plain(out: &var std::string::String, value_id: i64) -> !void {
     try w(out, "  ret i64 %v");
     try wi(out, value_id);
     try nl(out);
-    try render_dead_label(out, index);
+    return;
+}
+
+// render_ret_value_err_i64 wraps an i64 return value into the ok
+// '%kizu.error.i64' union through an index-suffixed temp.
+fn render_ret_value_err_i64(
+    out: &var std::string::String,
+    index: i64,
+    value_id: i64
+) -> !void {
+    try w(out, "  %rv");
+    try wi(out, index);
+    try w(out, " = insertvalue %kizu.error.i64 { i1 true, i64 0, %kizu.slice.u8 zeroinitializer }, i64 %v");
+    try wi(out, value_id);
+    try wl(out, ", 1");
+    try w(out, "  ret %kizu.error.i64 %rv");
+    try wi(out, index);
+    try nl(out);
     return;
 }
 
@@ -1173,16 +1237,64 @@ fn render_ret_err_ok(out: &var std::string::String) -> !void {
 fn render_ret_err_fail(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
-    index: i64
+    index: i64,
+    abi: i64
 ) -> !void {
     let value_id = try code.get(index + 1);
+    let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == main_abi {
+        try render_ret_err_fail_exit(out, index);
+    }
+    if abi == err_i64 {
+        try render_ret_err_fail_i64(out, code, value_id);
+    }
+    if abi != main_abi {
+        if abi != err_i64 {
+            try render_ret_err_fail_void(out, code, value_id);
+        }
+    }
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_ret_err_fail_exit maps a 'return error("msg")' in kizu_run_main to the
+// process-exit-1 path.
+fn render_ret_err_fail_exit(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %ef");
+    try wi(out, index);
+    try wl(out, "_exit = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try w(out, "  ret i64 %ef");
+    try wi(out, index);
+    try wl(out, "_exit");
+    return;
+}
+
+fn render_ret_err_fail_void(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64
+) -> !void {
     let byte_len = try tape_string_length(code, value_id, 0);
     try w(out, "  ret %kizu.error.void { i1 false, %kizu.slice.u8 { ptr @.kizu.run.s");
     try wi(out, value_id);
     try w(out, ", i64 ");
     try wi(out, byte_len);
     try wl(out, " } }");
-    try render_dead_label(out, index);
+    return;
+}
+
+fn render_ret_err_fail_i64(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64
+) -> !void {
+    let byte_len = try tape_string_length(code, value_id, 0);
+    try w(out, "  ret %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 { ptr @.kizu.run.s");
+    try wi(out, value_id);
+    try w(out, ", i64 ");
+    try wi(out, byte_len);
+    try wl(out, " } }");
     return;
 }
 
@@ -1404,6 +1516,117 @@ fn render_try_call_args(
     return;
 }
 
+// render_try_call_i64 emits a 'try <callee>(...)' of an error-union-i64 function:
+// call the '%kizu.error.i64' callee, extract its ok flag, and branch into a fail
+// block that propagates the error by the surrounding ABI or a cont block that
+// extracts the i64 success value into the result. SSA temps and labels are
+// suffixed with the record's tape index so they stay unique.
+fn render_try_call_i64(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let callee_start = try code.get(index + 2);
+    let callee_end = try code.get(index + 3);
+    let arg_count = try code.get(index + 4);
+    let callee = text[callee_start..callee_end];
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.i64 @kizu_run_user_");
+    try w(out, callee);
+    try w(out, "(");
+    try render_call_args(out, code, kinds, index, arg_count, 0);
+    try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_i64_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 1");
+    return;
+}
+
+// render_try_i64_propagate emits the fail-block terminator for a try over an
+// error-union-i64 callee: kizu_run_main exits 1, an error-union-void function
+// re-wraps the message into its own union, and an error-union-i64 function
+// propagates a fresh failed union carrying the message.
+fn render_try_i64_propagate(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == main_abi {
+        try render_try_propagate_exit(out, index);
+    }
+    if abi == err_i64 {
+        try render_try_i64_propagate_err_i64(out, index);
+    }
+    if abi != main_abi {
+        if abi != err_i64 {
+            try render_try_i64_propagate_err_void(out, index);
+        }
+    }
+    return;
+}
+
+// render_try_i64_propagate_err_i64 forwards a failed error-union-i64 try as the
+// surrounding error-union-i64 function's own failed union.
+fn render_try_i64_propagate_err_i64(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pv = insertvalue %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_pm, 2");
+    try w(out, "  ret %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, "_pv");
+    return;
+}
+
+// render_try_i64_propagate_err_void re-wraps a failed error-union-i64 try into the
+// surrounding error-union-void function's own union.
+fn render_try_i64_propagate_err_void(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pv = insertvalue %kizu.error.void { i1 false, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_pm, 1");
+    try w(out, "  ret %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, "_pv");
+    return;
+}
+
 // render_try_propagate emits the fail-block terminator for a try: the kizu_run_main
 // entry exits the process with code 1, every other (error-union-void) function
 // returns the propagated error union.
@@ -1413,7 +1636,7 @@ fn render_try_propagate(out: &var std::string::String, index: i64, abi: i64) -> 
         try render_try_propagate_exit(out, index);
     }
     if abi != main_abi {
-        try render_try_propagate_error(out, index);
+        try render_try_propagate_error(out, index, abi);
     }
     return;
 }
@@ -1428,7 +1651,37 @@ fn render_try_propagate_exit(out: &var std::string::String, index: i64) -> !void
     return;
 }
 
-fn render_try_propagate_error(out: &var std::string::String, index: i64) -> !void {
+fn render_try_propagate_error(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == err_i64 {
+        try render_try_propagate_error_i64(out, index);
+    }
+    if abi != err_i64 {
+        try render_try_propagate_error_void(out, index);
+    }
+    return;
+}
+
+// render_try_propagate_error_i64 re-wraps a failed '%kizu.error.void' try into the
+// surrounding error-union-i64 function's own union.
+fn render_try_propagate_error_i64(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_emsg = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_eu = insertvalue %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_emsg, 2");
+    try w(out, "  ret %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, "_eu");
+    return;
+}
+
+fn render_try_propagate_error_void(out: &var std::string::String, index: i64) -> !void {
     try w(out, "  ret %kizu.error.void %tc");
     try wi(out, index);
     try nl(out);
@@ -1515,11 +1768,17 @@ fn render_try_fs_read(
 // function returns a failed error union.
 fn render_fs_read_propagate(out: &var std::string::String, dst: i64, abi: i64) -> !void {
     let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
     if abi == main_abi {
         try render_fs_read_propagate_exit(out, dst);
     }
+    if abi == err_i64 {
+        try wl(out, "  ret %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }");
+    }
     if abi != main_abi {
-        try render_ret_err_void_fail(out);
+        if abi != err_i64 {
+            try render_ret_err_void_fail(out);
+        }
     }
     return;
 }
@@ -1770,6 +2029,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let try_call = codegen::code_op_try_call();
     if op == try_call {
         return try tape_try_call_record_end(code, index);
+    }
+    let try_call_i64 = codegen::code_op_try_call_i64();
+    if op == try_call_i64 {
+        return try tape_call_record_end(code, index);
     }
     let ret_err_fail = codegen::code_op_ret_err_fail();
     if op == ret_err_fail {

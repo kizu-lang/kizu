@@ -53,6 +53,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderReturnCases()...)
 	cases = append(cases, runRenderNestedCallCases()...)
 	cases = append(cases, runRenderShadowingCases()...)
+	cases = append(cases, runRenderErrorUnionI64Cases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -279,6 +280,42 @@ func runRenderShadowingCases() []runRenderCase {
 			source: "fn main() {\n    for 0..2 |i| {\n        print(i);\n    }\n" +
 				"    let i = 9;\n    print(i);\n}\n",
 			wantStdout: "0\n1\n9\n",
+		},
+	}
+}
+
+// runRenderErrorUnionI64Cases is the error-union-i64 corpus ('-> !i64' functions,
+// value-yielding try in let position, discarded try statements, propagation
+// through !void and !i64 callers, and main discarding its return value).
+func runRenderErrorUnionI64Cases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "try_i64_let_value",
+			source: "fn parse() -> !i64 {\n    return 1;\n}\n\n" +
+				"fn main() -> !i64 {\n    let value = try parse();\n    print(value);\n" +
+				"    return value + 1;\n}\n",
+			wantStdout: "1\n",
+		},
+		{
+			name: "try_i64_statement_discard",
+			source: "fn parse() -> !i64 {\n    return 1;\n}\n\n" +
+				"fn main() -> !void {\n    try parse();\n    print(\"reached\");\n    return;\n}\n",
+			wantStdout: "reached\n",
+		},
+		{
+			// the propagate blocks render (and must compile) even on the success
+			// path; the failing-path exit code is covered by the parity manifest.
+			name: "try_i64_through_err_void_and_err_i64",
+			source: "fn base() -> !i64 {\n    return 7;\n}\n\n" +
+				"fn doubled() -> !i64 {\n    let v = try base();\n    return v * 2;\n}\n\n" +
+				"fn step() -> !void {\n    let v = try doubled();\n    print(v);\n    return;\n}\n\n" +
+				"fn main() -> !void {\n    try step();\n    print(\"done\");\n    return;\n}\n",
+			wantStdout: "14\ndone\n",
+		},
+		{
+			name:       "main_return_value_exits_zero",
+			source:     "fn main() -> i64 {\n    print(\"v\");\n    return 5;\n}\n",
+			wantStdout: "v\n",
 		},
 	}
 }
