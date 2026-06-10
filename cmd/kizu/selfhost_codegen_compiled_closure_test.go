@@ -229,6 +229,7 @@ func TestSelfhostCodegenCompiledClosureNoExternalAccessorWidening(t *testing.T) 
 		`"std::kizu::ast::binary_sub"`,
 		`"std::kizu::ast::binary_mul"`,
 		`"std::kizu::ast::binary_div"`,
+		`"std::kizu::ast::binary_mod"`,
 		// The comparison BinaryOp accessors back the run codegen tape's if-condition
 		// lowering (code_binary_kind eq/not_eq/lt/lte/gt/gte).
 		`"std::kizu::ast::binary_eq"`,
