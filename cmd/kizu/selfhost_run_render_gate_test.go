@@ -59,6 +59,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderLabeledLoopCases()...)
 	cases = append(cases, runRenderMultilineStringCases()...)
 	cases = append(cases, runRenderSliceParamCases()...)
+	cases = append(cases, runRenderIoWriteCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -418,6 +419,22 @@ func runRenderSliceParamCases() []runRenderCase {
 				"fn shout(message: []u8) -> void {\n    echo(message);\n    echo(message);\n}\n\n" +
 				"fn main() {\n    shout(\"twice\");\n}\n",
 			wantStdout: "twice\ntwice\n",
+		},
+	}
+}
+
+// runRenderIoWriteCases is the std::io::write_stdout/write_stderr corpus (string
+// literal payloads and a stderr write between stdout writes; stderr content is
+// covered by the parity manifest).
+func runRenderIoWriteCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "io_write_stdout_literals",
+			source: "fn main() -> !void {\n    let io = std::io::blocking();\n" +
+				"    try std::io::write_stdout(io, \"alpha \");\n" +
+				"    try std::io::write_stderr(io, \"to stderr\");\n" +
+				"    try std::io::write_stdout(io, \"beta\");\n    return;\n}\n",
+			wantStdout: "alpha beta",
 		},
 	}
 }
