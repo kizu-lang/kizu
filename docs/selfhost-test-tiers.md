@@ -20,6 +20,7 @@ direct heavyweight gates into routine hosted artifact validation.
 | Frontend parity or Go/Kizu oracle evidence | `just selfhost-oracle` | explicit oracle | Functional parity gate; logs but does not enforce the wall-time budget. |
 | Oracle performance or budget changes | `just selfhost-oracle-budget` | explicit performance gate | Same oracle with budget enforcement enabled. |
 | Debugging one interpreted selfhost stage or the CLI contract | `just selfhost-integration-gates` or `just selfhost-cli-gate` | focused debugging | Direct heavyweight interpreter gates; not routine preflight. |
+| Run tape / renderer internals that only exist as interpreter entry points | raw `go test` with the explicit `KIZU_RUN_SELFHOST_RUN_*` env | last-resort debugging | No `just` recipe on purpose. Prefer hosted stage2 parity, native-source, or production-from-scratch gates first. |
 
 ## Daily Gate
 
@@ -212,8 +213,36 @@ just selfhost-cli-gate
 
 This tier runs with `KIZU_RUN_SELFHOST_GATES=1`. It should not be chained after
 `just selfhost-oracle` in routine preflight. Use it when a specific resolver,
-type, ownership, IR, one-pass pipeline, backend artifact, or CLI contract gate
-needs focused output.
+type, ownership, IR, one-pass pipeline, backend artifact, CLI contract, or
+format-driver gate needs focused output.
+
+The format driver facts/lowering gates also execute selfhost internals through
+`interp.New(...).RunEntry(...)`. They are env-gated by `KIZU_RUN_SELFHOST_GATES=1`
+and should be run as raw focused commands only when pinning #1165 / #1162
+blockers, not as part of default `go test ./cmd/kizu`.
+
+The run tape and run renderer internal gates are heavier than ordinary focused
+debugging. They call `interp.New(...).RunEntry(...)` on selfhost backend entry
+points such as `selfhost::backend::run_tape_gate::run_tape_lowering_gate`,
+build source-driven facts, and run compiled-MIR lowering through the Go
+interpreter. They are not routine validation and intentionally have no `just`
+recipes. Use them only when a measured blocker cannot be pinned by the hosted
+stage2 parity gates, `just selfhost-native-source-gate`, or
+`just selfhost-production-from-scratch`.
+
+When one of these interpreter-only internals is necessary, run the raw command
+with a clear budget and keep full logs, for example:
+
+```sh
+KIZU_RUN_SELFHOST_RUN_TAPE=1 \
+  go test -timeout=30m ./cmd/kizu \
+  -run 'TestSelfhostRunTapeLoweringGate$' -count=1 -v \
+  > target/selfhost/reports/run-tape-debug.log 2>&1
+```
+
+Do not pipe these gates through `tail` or start multiple background watcher
+shells. Hidden output makes timeout and failure diagnosis slower than the gate
+itself.
 
 `just selfhost-integration-gates` intentionally excludes the CLI contract and
 backend artifact gates. The CLI gate still uses an interpreted CLI contract
@@ -458,6 +487,8 @@ The accepted policy for now is:
 - aggregate oracle: explicit bootstrap/preflight command with a 60s local budget;
 - aggregate oracle budget: explicit performance gate, not a routine switch gate;
 - direct heavyweight interpreter gates: explicit debugging commands;
+- run tape/render interpreter internals: no routine `just` recipe; raw command
+  only for a measured blocker with full logs and an explicit time budget;
 - backend artifact contract: explicit stage0-native gate, not the daily loop;
 - hosted artifact fast gate: routine selfhost CLI parity loop after bootstrap;
 - production switch gate: production-from-scratch plus native source-path and

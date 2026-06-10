@@ -53,6 +53,11 @@ selfhost 作業では、毎回 full bootstrap しないで検証段階を分け�
 - `just selfhost-oracle` は Go/Kizu oracle evidence が必要な PR や frontend parity 確認で明示的に使う。
 - oracle の時間予算そのものを検証する場合だけ `just selfhost-oracle-budget` を使う。
 - IR / backend / runtime / CLI contract の direct heavyweight gate は focused debugging 用で、通常ループに入れない。
+- `KIZU_RUN_SELFHOST_RUN_TAPE=1` や `KIZU_RUN_SELFHOST_RUN_RENDER=1` の run tape/render gate は
+  Go interpreter 上で selfhost 内部関数を実行する heavyweight debug path です。通常検証や待機ループに入れず、
+  必要な blocker pin のために明示実行する場合だけ raw command で使ってください。
+- interpreted selfhost gate を実行する場合は、`tail -4` などで出力を隠さず、ログファイルと時間予算を明示してください。
+  完了待ち shell を複数積まないでください。
 - heavyweight gate や oracle が遅い場合でも、hidden fallback や Go fallback で短縮しない。
 
 ## PR Workflow
