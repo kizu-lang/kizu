@@ -649,6 +649,11 @@ fn render_var_allocas(
         let decl_slot = try code.get(index + 1);
         try render_one_alloca(out, decl_slot);
     }
+    let var_decl_slice = codegen::code_op_var_decl_slice();
+    if op == var_decl_slice {
+        let slice_slot = try code.get(index + 1);
+        try render_one_slice_alloca(out, slice_slot);
+    }
     let for_begin = codegen::code_op_for_begin();
     if op == for_begin {
         let for_slot = try code.get(index + 2);
@@ -669,6 +674,15 @@ fn render_one_alloca(out: &var std::string::String, slot: i64) -> !void {
     try w(out, "  %slot");
     try wi(out, slot);
     try wl(out, " = alloca i64");
+    return;
+}
+
+// render_one_slice_alloca emits '%sslot<id> = alloca %kizu.slice.u8' for one
+// scalarized slice-field slot.
+fn render_one_slice_alloca(out: &var std::string::String, slot: i64) -> !void {
+    try w(out, "  %sslot");
+    try wi(out, slot);
+    try wl(out, " = alloca %kizu.slice.u8");
     return;
 }
 
@@ -813,6 +827,18 @@ fn render_one_instruction(
     if op == var_store {
         try render_var_store(out, code, index);
     }
+    let var_decl_slice = codegen::code_op_var_decl_slice();
+    if op == var_decl_slice {
+        try render_var_decl_slice(out, code, index);
+    }
+    let var_load_slice = codegen::code_op_var_load_slice();
+    if op == var_load_slice {
+        try render_var_load_slice(out, code, index);
+    }
+    let var_store_slice = codegen::code_op_var_store_slice();
+    if op == var_store_slice {
+        try render_var_store_slice(out, code, index);
+    }
     let while_begin = codegen::code_op_while_begin();
     if op == while_begin {
         try render_while_begin(out, code, index);
@@ -888,6 +914,53 @@ fn render_var_store(
     try w(out, "  store i64 %v");
     try wi(out, value_id);
     try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+// render_var_decl_slice / render_var_load_slice / render_var_store_slice mirror
+// the i64 var slot trio for '%kizu.slice.u8' slots ('%sslot<id>').
+fn render_var_decl_slice(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let slot = try code.get(index + 1);
+    let init_value = try code.get(index + 2);
+    try w(out, "  store %kizu.slice.u8 %v");
+    try wi(out, init_value);
+    try w(out, ", ptr %sslot");
+    try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+fn render_var_load_slice(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slot = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load %kizu.slice.u8, ptr %sslot");
+    try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+fn render_var_store_slice(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let slot = try code.get(index + 1);
+    let value_id = try code.get(index + 2);
+    try w(out, "  store %kizu.slice.u8 %v");
+    try wi(out, value_id);
+    try w(out, ", ptr %sslot");
     try wi(out, slot);
     try nl(out);
     return;
@@ -2395,6 +2468,16 @@ fn tape_struct_lit_record_end(code: &std::array::Array<i64>, index: i64) -> !i64
     return index + 3 + field_slots;
 }
 
+// tape_var_struct_record_end returns the index past a VAR_STRUCT record, reading
+// its field count ('op dst field_count [name_start name_end slot kind] per
+// field'). The renderer emits nothing for the record itself: field reads and
+// assignments were already lowered onto the slot trios.
+fn tape_var_struct_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let field_count = try code.get(index + 2);
+    let field_slots = field_count * 4;
+    return index + 3 + field_slots;
+}
+
 // tape_record_end returns the tape index just past the record beginning at index,
 // using each opcode's fixed arity (CALL carries a trailing variable arg-id list).
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
@@ -2514,6 +2597,22 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let var_store = codegen::code_op_var_store();
     if op == var_store {
         return index + 3;
+    }
+    let var_decl_slice = codegen::code_op_var_decl_slice();
+    if op == var_decl_slice {
+        return index + 3;
+    }
+    let var_load_slice = codegen::code_op_var_load_slice();
+    if op == var_load_slice {
+        return index + 3;
+    }
+    let var_store_slice = codegen::code_op_var_store_slice();
+    if op == var_store_slice {
+        return index + 3;
+    }
+    let var_struct = codegen::code_op_var_struct();
+    if op == var_struct {
+        return try tape_var_struct_record_end(code, index);
     }
     let while_begin = codegen::code_op_while_begin();
     if op == while_begin {

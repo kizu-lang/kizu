@@ -3519,6 +3519,29 @@ pub fn code_op_var_store() -> i64 {
     return 52;
 }
 
+// VAR_DECL_SLICE / VAR_LOAD_SLICE / VAR_STORE_SLICE mirror the i64 var slot trio
+// for '%kizu.slice.u8' slots ('%sslot<id>'), backing scalarized var-struct
+// slice fields (a string field materializes through STR_SLICE first).
+pub fn code_op_var_decl_slice() -> i64 {
+    return 53;
+}
+
+pub fn code_op_var_load_slice() -> i64 {
+    return 54;
+}
+
+pub fn code_op_var_store_slice() -> i64 {
+    return 55;
+}
+
+// VAR_STRUCT scalarizes a 'var' struct binding: the record is
+// 'op dst field_count [name_start name_end slot kind] per field' where each
+// field owns its own slot and the kind (i64 or slice) selects the slot trio its
+// reads and assignments use. The renderer emits nothing for the record itself.
+pub fn code_op_var_struct() -> i64 {
+    return 56;
+}
+
 // While-loop opcodes frame a 'while <cond> { <body> }': WHILE_BEGIN opens the
 // condition block, WHILE_COND branches on the lowered i1 condition into the body
 // or past the loop, WHILE_END closes the body back to the condition block. Each
@@ -4533,9 +4556,9 @@ fn lower_code_let(
     return code_eval_value(eval.value_id, eval.next);
 }
 
-// lower_code_var_binding guards a 'var' init to an i64 value before binding the
-// slot: var slots are i64 allocas, so a non-i64 init (bool/str/slice) has no i64
-// SSA temp to store and is not owned by the tape yet.
+// lower_code_var_binding routes a 'var' init by its kind: an i64 init takes an
+// i64 slot, a struct-literal init scalarizes into per-field slots, and any
+// other kind (bool/str/slice) is not owned by the tape yet.
 fn lower_code_var_binding(
     text: []u8,
     name_start: i64,
@@ -4550,10 +4573,175 @@ fn lower_code_var_binding(
 ) -> !CodeEval {
     let kind_i64 = code_kind_i64();
     let init_kind = try kinds.get(init_value_id);
-    if init_kind != kind_i64 {
+    if init_kind == kind_i64 {
+        return try bind_code_var(text, name_start, name_end, init_value_id, code, local_starts, local_ends, local_values, next_value);
+    }
+    let record_base = code_kind_struct_base();
+    if init_kind < record_base {
         return code_eval_unsupported(next_value);
     }
-    return try bind_code_var(text, name_start, name_end, init_value_id, code, local_starts, local_ends, local_values, next_value);
+    let record_pos = init_kind - record_base;
+    let record_op = try code.get(record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if record_op != op_struct_lit {
+        return code_eval_unsupported(next_value);
+    }
+    return try bind_code_var_struct(text, name_start, name_end, record_pos, code, kinds, local_starts, local_ends, local_values, next_value);
+}
+
+// bind_code_var_struct scalarizes a 'var <name> = <struct literal>' binding:
+// every literal field takes its own slot (i64 fields through the i64 trio,
+// str/slice fields through the slice trio after STR_SLICE materialization),
+// the VAR_STRUCT record maps the field names to their slots and kinds, and the
+// local binds the record's dst value like a let binding.
+fn bind_code_var_struct(
+    text: []u8,
+    name_start: i64,
+    name_end: i64,
+    record_pos: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let count_pos = record_pos + 2;
+    let field_count = try code.get(count_pos);
+    // Slot ids come from the locals-array length, so the two field walks see the
+    // same deterministic numbering: the decl walk reserves one blank row per
+    // field, then the record walk recomputes slot_base + index.
+    let slot_base = local_starts.len();
+    let decls_eval = try emit_var_struct_decls(code, kinds, local_starts, local_ends, local_values, record_pos, field_count, 0, next_value);
+    if !decls_eval.ok {
+        return code_eval_unsupported(decls_eval.next);
+    }
+    let var_struct_pos = code.len();
+    let op_var_struct = code_op_var_struct();
+    try code.append(op_var_struct);
+    try code.append(decls_eval.next);
+    try code.append(field_count);
+    try append_var_struct_fields(code, kinds, record_pos, field_count, slot_base, 0);
+    let record_base = code_kind_struct_base();
+    let record_kind = record_base + var_struct_pos;
+    try kinds.append(record_kind);
+    try local_starts.append(name_start);
+    try local_ends.append(name_end);
+    try local_values.append(decls_eval.next);
+    let after_value = decls_eval.next + 1;
+    return code_eval_value(decls_eval.next, after_value);
+}
+
+// emit_var_struct_decls walks the STRUCT_LIT record's fields and emits one slot
+// decl per field (reserving its blank locals row); a str field materializes its
+// slice first, and any other non-i64/non-slice field is unsupported.
+fn emit_var_struct_decls(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    record_pos: i64,
+    field_count: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= field_count {
+        return code_eval_value(0, next_value);
+    }
+    let entry_slots = index * 3;
+    let value_pos = record_pos + 5 + entry_slots;
+    let field_value = try code.get(value_pos);
+    let eval = try emit_one_var_struct_decl(code, kinds, local_starts, local_ends, local_values, field_value, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try emit_var_struct_decls(code, kinds, local_starts, local_ends, local_values, record_pos, field_count, after, eval.next);
+}
+
+// emit_one_var_struct_decl gives one scalarized field its slot: the slot id is
+// the blank locals row this decl reserves (the row's empty span never matches a
+// name lookup).
+fn emit_one_var_struct_decl(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    field_value: i64,
+    next_value: i64
+) -> !CodeEval {
+    let slice_eval = try lower_code_arg_slice(code, kinds, field_value, next_value);
+    let stored_kind = try kinds.get(slice_eval.value_id);
+    let slot = local_starts.len();
+    let kind_i64 = code_kind_i64();
+    let slice_kind = code_kind_slice();
+    if stored_kind != kind_i64 {
+        if stored_kind != slice_kind {
+            return code_eval_unsupported(slice_eval.next);
+        }
+    }
+    let decl_op = var_struct_decl_op(stored_kind);
+    try code.append(decl_op);
+    try code.append(slot);
+    try code.append(slice_eval.value_id);
+    try local_starts.append(0);
+    try local_ends.append(0);
+    try local_values.append(0);
+    return code_eval_value(slice_eval.value_id, slice_eval.next);
+}
+
+// var_struct_decl_op picks the slot trio for a scalarized field's stored kind.
+fn var_struct_decl_op(stored_kind: i64) -> i64 {
+    let kind_i64 = code_kind_i64();
+    if stored_kind == kind_i64 {
+        return code_op_var_decl();
+    }
+    return code_op_var_decl_slice();
+}
+
+// var_struct_slot_kind maps a literal field's original kind to its slot kind:
+// an i64 field keeps an i64 slot, a str/slice field takes a slice slot (the
+// decl walk already rejected every other kind).
+fn var_struct_slot_kind(field_kind: i64) -> i64 {
+    let kind_i64 = code_kind_i64();
+    if field_kind == kind_i64 {
+        return kind_i64;
+    }
+    return code_kind_slice();
+}
+
+// append_var_struct_fields copies each field's name span, recomputed slot, and
+// slot kind onto the VAR_STRUCT record, mirroring the emit_var_struct_decls walk.
+fn append_var_struct_fields(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    record_pos: i64,
+    field_count: i64,
+    slot_base: i64,
+    index: i64
+) -> !void {
+    if index >= field_count {
+        return;
+    }
+    let entry_slots = index * 3;
+    let entry_pos = record_pos + 3 + entry_slots;
+    let entry_name_start = try code.get(entry_pos);
+    let entry_end_pos = entry_pos + 1;
+    let entry_name_end = try code.get(entry_end_pos);
+    let value_pos = entry_pos + 2;
+    let field_value = try code.get(value_pos);
+    let field_kind = try kinds.get(field_value);
+    let slot_kind = var_struct_slot_kind(field_kind);
+    let slot = slot_base + index;
+    try code.append(entry_name_start);
+    try code.append(entry_name_end);
+    try code.append(slot);
+    try code.append(slot_kind);
+    let after = index + 1;
+    try append_var_struct_fields(code, kinds, record_pos, field_count, slot_base, after);
+    return;
 }
 
 // bind_code_var binds a 'var' local to a fresh alloca slot and emits the VAR_DECL
@@ -4601,6 +4789,10 @@ fn lower_code_assign(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let field_entry = try code_assign_field_entry(text, ast, target, code, kinds, local_starts, local_ends, local_values, locals_base);
+    if field_entry >= 0 {
+        return try lower_code_field_assign(text, ast, decls, field_entry, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     let slot = try code_assign_target_slot(text, ast, target, local_starts, local_ends, local_values, locals_base);
     if slot < 0 {
         return code_eval_unsupported(next_value);
@@ -4620,6 +4812,113 @@ fn lower_code_assign(
     try code.append(slot);
     try code.append(eval.value_id);
     return code_eval_value(eval.value_id, eval.next);
+}
+
+// code_assign_field_entry resolves an assignment target to its scalarized
+// var-struct field entry (-1 when the target is not 'var_struct.field').
+fn code_assign_field_entry(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64
+) -> !i64 {
+    let node = ast.get(target);
+    return match node.data {
+        FieldExpr(field_expr) => try code_assign_field_expr_entry(text, ast, field_expr.receiver, field_expr.name, field_expr.namespace, code, kinds, local_starts, local_ends, local_values, locals_base),
+        _ => code_assign_no_field(),
+    };
+}
+
+fn code_assign_no_field() -> i64 {
+    return 0 - 1;
+}
+
+// code_assign_field_expr_entry resolves a '<name>.<field>' assignment target:
+// the receiver must be a local bound to a VAR_STRUCT record value (nested
+// receivers and let structs stay unsupported).
+fn code_assign_field_expr_entry(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64
+) -> !i64 {
+    if namespace {
+        return 0 - 1;
+    }
+    let receiver_span = code_node_span(text, ast, receiver);
+    let bound = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, receiver_span.start, receiver_span.end);
+    if bound < 0 {
+        return 0 - 1;
+    }
+    let slot_floor = code_var_slot_base();
+    if bound >= slot_floor {
+        return 0 - 1;
+    }
+    let value_kind = try kinds.get(bound);
+    let record_base = code_kind_struct_base();
+    if value_kind < record_base {
+        return 0 - 1;
+    }
+    let record_pos = value_kind - record_base;
+    let record_op = try code.get(record_pos);
+    let op_var_struct = code_op_var_struct();
+    if record_op != op_var_struct {
+        return 0 - 1;
+    }
+    let count_pos = record_pos + 2;
+    let field_count = try code.get(count_pos);
+    let name_span = code_node_span(text, ast, name);
+    return try var_struct_field_entry(text, code, record_pos, field_count, name_span.start, name_span.end, 0);
+}
+
+// lower_code_field_assign lowers 'obj.field = <expr>;' for a scalarized var
+// struct: the value lowers (a string materializes through STR_SLICE), its kind
+// must match the field's slot kind, and the matching store writes the slot.
+fn lower_code_field_assign(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    field_entry: i64,
+    value: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let slice_eval = try lower_code_arg_slice(code, kinds, eval.value_id, eval.next);
+    let stored_kind = try kinds.get(slice_eval.value_id);
+    let kind_pos = field_entry + 3;
+    let slot_kind = try code.get(kind_pos);
+    if stored_kind != slot_kind {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let slot_pos = field_entry + 2;
+    let slot = try code.get(slot_pos);
+    let store_op = var_struct_store_op(slot_kind);
+    try code.append(store_op);
+    try code.append(slot);
+    try code.append(slice_eval.value_id);
+    return code_eval_value(slice_eval.value_id, slice_eval.next);
 }
 
 // code_assign_target_slot resolves an assignment target to its var slot, or -1
@@ -6047,6 +6346,10 @@ fn lower_code_field_expr(
     }
     let record_pos = base_kind - struct_base;
     let record_op = try code.get(record_pos);
+    let op_var_struct = code_op_var_struct();
+    if record_op == op_var_struct {
+        return try lower_code_var_struct_read(text, ast, name, code, kinds, record_pos, base_eval.next);
+    }
     let op_struct_lit = code_op_struct_lit();
     if record_op != op_struct_lit {
         return code_eval_unsupported(base_eval.next);
@@ -6059,6 +6362,85 @@ fn lower_code_field_expr(
         return code_eval_unsupported(base_eval.next);
     }
     return code_eval_value(field_value, base_eval.next);
+}
+
+// lower_code_var_struct_read loads a scalarized var-struct field from its slot
+// into a fresh value (the slot kind picks the i64 or slice load).
+fn lower_code_var_struct_read(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    record_pos: i64,
+    next_value: i64
+) -> !CodeEval {
+    let name_span = code_node_span(text, ast, name);
+    let count_pos = record_pos + 2;
+    let field_count = try code.get(count_pos);
+    // 'field_entry' (not 'entry') keeps the binding clear of the function's
+    // LLVM entry block label in the compiled value namespace.
+    let field_entry = try var_struct_field_entry(text, code, record_pos, field_count, name_span.start, name_span.end, 0);
+    if field_entry < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let slot_pos = field_entry + 2;
+    let slot = try code.get(slot_pos);
+    let kind_pos = field_entry + 3;
+    let slot_kind = try code.get(kind_pos);
+    let load_op = var_struct_load_op(slot_kind);
+    try code.append(load_op);
+    try code.append(next_value);
+    try code.append(slot);
+    try kinds.append(slot_kind);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// var_struct_field_entry walks the VAR_STRUCT record's field entries and returns
+// the matching entry's tape position (-1 when the record does not carry it).
+fn var_struct_field_entry(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    record_pos: i64,
+    field_count: i64,
+    name_start: i64,
+    name_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= field_count {
+        return 0 - 1;
+    }
+    let entry_slots = index * 4;
+    let entry_pos = record_pos + 3 + entry_slots;
+    let entry_name_start = try code.get(entry_pos);
+    let entry_end_pos = entry_pos + 1;
+    let entry_name_end = try code.get(entry_end_pos);
+    let entry_name = text[entry_name_start..entry_name_end];
+    let name = text[name_start..name_end];
+    let after = index + 1;
+    if !std::mem::equal_bytes(entry_name, name) {
+        return try var_struct_field_entry(text, code, record_pos, field_count, name_start, name_end, after);
+    }
+    return entry_pos;
+}
+
+// var_struct_load_op / var_struct_store_op pick the slot trio matching a
+// scalarized field's slot kind.
+fn var_struct_load_op(slot_kind: i64) -> i64 {
+    let kind_i64 = code_kind_i64();
+    if slot_kind == kind_i64 {
+        return code_op_var_load();
+    }
+    return code_op_var_load_slice();
+}
+
+fn var_struct_store_op(slot_kind: i64) -> i64 {
+    let kind_i64 = code_kind_i64();
+    if slot_kind == kind_i64 {
+        return code_op_var_store();
+    }
+    return code_op_var_store_slice();
 }
 
 // lower_code_enum_const lowers 'Enum::Variant': the variant resolves to its

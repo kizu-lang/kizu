@@ -62,6 +62,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderIoWriteCases()...)
 	cases = append(cases, runRenderStructCases()...)
 	cases = append(cases, runRenderEnumMatchCases()...)
+	cases = append(cases, runRenderVarStructCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -491,6 +492,21 @@ func runRenderEnumMatchCases() []runRenderCase {
 				"fn main() {\n    let mode = Mode::Slow;\n    match mode {\n" +
 				"        Fast => print(\"fast\"),\n        _ => print(\"other\"),\n    }\n}\n",
 			wantStdout: "other\n",
+		},
+	}
+}
+
+// runRenderVarStructCases is the var-struct corpus (scalarized field slots:
+// string and i64 field assignment, and a field read feeding its own update).
+func runRenderVarStructCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "var_struct_field_assignment",
+			source: "struct User {\n    name: []u8,\n    age: i64,\n}\n\n" +
+				"fn main() -> void {\n    var user = User { name: \"alice\", age: 30 };\n" +
+				"    user.name = \"bob\";\n    user.age = user.age + 1;\n" +
+				"    print(user.name);\n    print(user.age);\n}\n",
+			wantStdout: "bob\n31\n",
 		},
 	}
 }
