@@ -3550,6 +3550,13 @@ pub fn code_var_slot_base() -> i64 {
     return 1000000000;
 }
 
+// code_loop_label_base offsets a loop label's stored value so a locals lookup can
+// tell a label from a let value or a var slot: a label stores
+// base + loop_begin * 2 + loop_kind, far above the var slot space.
+pub fn code_loop_label_base() -> i64 {
+    return 2000000000;
+}
+
 pub fn code_kind_i64() -> i64 {
     return 1;
 }
@@ -4084,10 +4091,10 @@ fn lower_code_statement(
         ExprStmt(expr_stmt) => try lower_code_expr_statement(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Return(return_node) => try lower_code_return(text, ast, decls, return_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         If(if_node) => try lower_code_if(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
-        While(while_node) => try lower_code_while(text, ast, decls, while_node.condition, while_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
-        For(for_node) => try lower_code_for(text, ast, decls, for_node.name, for_node.start, for_node.end, for_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
-        Break(break_node) => try lower_code_break(code, loop_begin, loop_kind, next_value),
-        Continue(continue_node) => try lower_code_continue(code, loop_begin, loop_kind, next_value),
+        While(while_node) => try lower_code_while(text, ast, decls, while_node.label, while_node.condition, while_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        For(for_node) => try lower_code_for(text, ast, decls, for_node.label, for_node.name, for_node.start, for_node.end, for_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Break(break_node) => try lower_code_break(text, ast, break_node.label, code, local_starts, local_ends, local_values, locals_base, loop_begin, loop_kind, next_value),
+        Continue(continue_node) => try lower_code_continue(text, ast, continue_node.label, code, local_starts, local_ends, local_values, locals_base, loop_begin, loop_kind, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -4376,6 +4383,7 @@ fn lower_code_while(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
+    label: std::kizu::ast::NodeId,
     condition: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
@@ -4388,6 +4396,9 @@ fn lower_code_while(
     next_value: i64
 ) -> !CodeEval {
     let while_begin_index = code.len();
+    let label_mark = local_starts.len();
+    let kind_label_while = code_loop_kind_while();
+    try bind_code_loop_label(text, ast, label, local_starts, local_ends, local_values, while_begin_index, kind_label_while);
     let op_while_begin = code_op_while_begin();
     try code.append(op_while_begin);
     try code.append(while_begin_index);
@@ -4407,6 +4418,7 @@ fn lower_code_while(
     let op_while_end = code_op_while_end();
     try code.append(op_while_end);
     try code.append(while_begin_index);
+    try scrub_code_locals(local_starts, local_ends, label_mark);
     return code_eval_value(0, body_eval.next);
 }
 
@@ -4419,6 +4431,7 @@ fn lower_code_for(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
+    label: std::kizu::ast::NodeId,
     name: std::kizu::ast::NodeId,
     start: std::kizu::ast::NodeId,
     end: std::kizu::ast::NodeId,
@@ -4467,6 +4480,7 @@ fn lower_code_for(
     try code.append(cond_load_value);
     try code.append(cond_cmp_value);
     let kind_for = code_loop_kind_for();
+    try bind_code_loop_label(text, ast, label, local_starts, local_ends, local_values, for_begin_index, kind_for);
     let body_next = cond_cmp_value + 1;
     let body_eval = try lower_code_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, for_begin_index, kind_for, body_next);
     if !body_eval.ok {
@@ -4490,9 +4504,65 @@ fn lower_code_for(
 }
 
 // lower_code_break / lower_code_continue emit the BREAK / CONTINUE record for the
-// enclosing loop. Outside any loop (loop_begin < 0) the statement is not owned.
+// enclosing loop (a bare statement) or for the loop the statement's label names.
+// Outside any loop (loop_begin < 0) a bare statement is not owned.
 fn lower_code_break(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    label: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op_break = code_op_break();
+    if is_empty_node(ast, label) {
+        return try emit_code_loop_exit(code, op_break, loop_begin, loop_kind, next_value);
+    }
+    let target = try code_loop_label_target(text, ast, label, local_starts, local_ends, local_values, locals_base);
+    if target < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let target_begin = code_loop_label_target_begin(target);
+    let target_kind = code_loop_label_target_kind(target, target_begin);
+    return try emit_code_loop_exit(code, op_break, target_begin, target_kind, next_value);
+}
+
+fn lower_code_continue(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    label: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op_continue = code_op_continue();
+    if is_empty_node(ast, label) {
+        return try emit_code_loop_exit(code, op_continue, loop_begin, loop_kind, next_value);
+    }
+    let target = try code_loop_label_target(text, ast, label, local_starts, local_ends, local_values, locals_base);
+    if target < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let target_begin = code_loop_label_target_begin(target);
+    let target_kind = code_loop_label_target_kind(target, target_begin);
+    return try emit_code_loop_exit(code, op_continue, target_begin, target_kind, next_value);
+}
+
+// emit_code_loop_exit appends one BREAK or CONTINUE record targeting the loop
+// whose WHILE/FOR begin index and kind are given.
+fn emit_code_loop_exit(
+    code: &var std::array::Array<i64>,
+    op: i64,
     loop_begin: i64,
     loop_kind: i64,
     next_value: i64
@@ -4500,27 +4570,72 @@ fn lower_code_break(
     if loop_begin < 0 {
         return code_eval_unsupported(next_value);
     }
-    let op_break = code_op_break();
-    try code.append(op_break);
+    try code.append(op);
     try code.append(loop_begin);
     try code.append(loop_kind);
     return code_eval_value(0, next_value);
 }
 
-fn lower_code_continue(
-    code: &var std::array::Array<i64>,
+// bind_code_loop_label registers a loop's label (when present) as a scoped
+// binding whose value encodes the loop's begin index and kind, so a labeled
+// break/continue resolves its target through the ordinary locals lookup and the
+// binding stops resolving once the loop's scrub closes it.
+fn bind_code_loop_label(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    label: std::kizu::ast::NodeId,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
     loop_begin: i64,
-    loop_kind: i64,
-    next_value: i64
-) -> !CodeEval {
-    if loop_begin < 0 {
-        return code_eval_unsupported(next_value);
+    loop_kind: i64
+) -> !void {
+    if is_empty_node(ast, label) {
+        return;
     }
-    let op_continue = code_op_continue();
-    try code.append(op_continue);
-    try code.append(loop_begin);
-    try code.append(loop_kind);
-    return code_eval_value(0, next_value);
+    let name_span = code_node_span(text, ast, label);
+    let doubled = loop_begin * 2;
+    let tagged = doubled + loop_kind;
+    let stored = code_loop_label_base() + tagged;
+    try local_starts.append(name_span.start);
+    try local_ends.append(name_span.end);
+    try local_values.append(stored);
+    return;
+}
+
+// code_loop_label_target resolves a label name to its encoded loop value, or -1
+// when the name is unbound or bound to something that is not a loop label.
+fn code_loop_label_target(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    label: std::kizu::ast::NodeId,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64
+) -> !i64 {
+    let name_span = code_node_span(text, ast, label);
+    let bound = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, name_span.start, name_span.end);
+    let base = code_loop_label_base();
+    if bound < base {
+        return 0 - 1;
+    }
+    return bound;
+}
+
+// code_loop_label_target_begin / code_loop_label_target_kind decode an encoded
+// loop-label value back into the target loop's begin index and kind.
+fn code_loop_label_target_begin(target: i64) -> i64 {
+    let encoded = target - code_loop_label_base();
+    let begin = encoded / 2;
+    return begin;
+}
+
+fn code_loop_label_target_kind(target: i64, target_begin: i64) -> i64 {
+    let encoded = target - code_loop_label_base();
+    let doubled = target_begin * 2;
+    let kind = encoded - doubled;
+    return kind;
 }
 
 // lower_code_expr_statement lowers a statement-position expression; the tape
