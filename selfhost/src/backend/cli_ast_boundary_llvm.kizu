@@ -342,18 +342,50 @@ fn append_parse_fn_decl_function(out: &var std::string::String) -> !void {
     try append_line(out, "  %p_colon_kind = extractvalue %kizu.kizu.lexer.token %p_colon_token, 0");
     try append_line(out, "  %p_colon_ok = icmp eq i64 %p_colon_kind, 35");
     try append_line(out, "  br i1 %p_colon_ok, label %param_type, label %fail");
+    // A parameter type is either one ident token ('i64', 'bool') or the '[' ']'
+    // ident token run of a slice type ('[]u8'); both build one TypeName leaf whose
+    // span covers the whole type text, so the codegen param classifier reads it
+    // without any boundary-specific shape.
     try append_line(out, "param_type:");
     try append_line(out, "  %p_type_index = add i64 %p_cursor, 2");
     try append_line(out,
         "  %p_type_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %p_type_index)");
     try append_line(out, "  %p_type_kind = extractvalue %kizu.kizu.lexer.token %p_type_token, 0");
-    try append_line(out, "  %p_type_ok = icmp eq i64 %p_type_kind, 27");
-    try append_line(out, "  br i1 %p_type_ok, label %param_build, label %fail");
+    try append_line(out, "  %p_type_is_ident = icmp eq i64 %p_type_kind, 27");
+    try append_line(out, "  br i1 %p_type_is_ident, label %param_type_ident, label %param_type_slice");
+    try append_line(out, "param_type_ident:");
+    try append_line(out, "  %p_type_end_ident = extractvalue %kizu.kizu.lexer.token %p_type_token, 2");
+    try append_line(out, "  %p_after_type_ident = add i64 %p_cursor, 3");
+    try append_line(out, "  br label %param_build");
+    try append_line(out, "param_type_slice:");
+    try append_line(out, "  %p_type_is_lbracket = icmp eq i64 %p_type_kind, 44");
+    try append_line(out, "  br i1 %p_type_is_lbracket, label %param_type_slice_close, label %fail");
+    try append_line(out, "param_type_slice_close:");
+    try append_line(out, "  %p_rbracket_index = add i64 %p_cursor, 3");
+    try append_line(out,
+        "  %p_rbracket_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %p_rbracket_index)");
+    try append_line(out, "  %p_rbracket_kind = extractvalue %kizu.kizu.lexer.token %p_rbracket_token, 0");
+    try append_line(out, "  %p_rbracket_ok = icmp eq i64 %p_rbracket_kind, 45");
+    try append_line(out, "  br i1 %p_rbracket_ok, label %param_type_slice_elem, label %fail");
+    try append_line(out, "param_type_slice_elem:");
+    try append_line(out, "  %p_elem_index = add i64 %p_cursor, 4");
+    try append_line(out,
+        "  %p_elem_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %p_elem_index)");
+    try append_line(out, "  %p_elem_kind = extractvalue %kizu.kizu.lexer.token %p_elem_token, 0");
+    try append_line(out, "  %p_elem_ok = icmp eq i64 %p_elem_kind, 27");
+    try append_line(out, "  br i1 %p_elem_ok, label %param_type_slice_build, label %fail");
+    try append_line(out, "param_type_slice_build:");
+    try append_line(out, "  %p_type_end_slice = extractvalue %kizu.kizu.lexer.token %p_elem_token, 2");
+    try append_line(out, "  %p_after_type_slice = add i64 %p_cursor, 5");
+    try append_line(out, "  br label %param_build");
     try append_line(out, "param_build:");
+    try append_line(out,
+        "  %p_type_end = phi i64 [ %p_type_end_ident, %param_type_ident ], [ %p_type_end_slice, %param_type_slice_build ]");
+    try append_line(out,
+        "  %p_sep_index = phi i64 [ %p_after_type_ident, %param_type_ident ], [ %p_after_type_slice, %param_type_slice_build ]");
     try append_line(out, "  %p_name_start = extractvalue %kizu.kizu.lexer.token %p_token, 1");
     try append_line(out, "  %p_name_end = extractvalue %kizu.kizu.lexer.token %p_token, 2");
     try append_line(out, "  %p_type_start = extractvalue %kizu.kizu.lexer.token %p_type_token, 1");
-    try append_line(out, "  %p_type_end = extractvalue %kizu.kizu.lexer.token %p_type_token, 2");
     try append_line(out,
         "  %p_name_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %p_name_start, i64 %p_name_end, i64 4)");
     try append_line(out,
@@ -366,14 +398,13 @@ fn append_parse_fn_decl_function(out: &var std::string::String) -> !void {
     try append_line(out, "  br i1 %p_append_ok, label %param_sep, label %fail");
     try append_line(out, "param_sep:");
     try append_line(out, "  %p_count_next = add i64 %p_count, 1");
-    try append_line(out, "  %p_sep_index = add i64 %p_cursor, 3");
     try append_line(out,
         "  %p_sep_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %p_sep_index)");
     try append_line(out, "  %p_sep_kind = extractvalue %kizu.kizu.lexer.token %p_sep_token, 0");
     try append_line(out, "  %p_is_comma = icmp eq i64 %p_sep_kind, 34");
     try append_line(out, "  br i1 %p_is_comma, label %param_sep_comma, label %param_sep_close");
     try append_line(out, "param_sep_comma:");
-    try append_line(out, "  %p_after_comma = add i64 %p_cursor, 4");
+    try append_line(out, "  %p_after_comma = add i64 %p_sep_index, 1");
     try append_line(out, "  br label %param_loop");
     try append_line(out, "param_sep_close:");
     try append_line(out, "  %p_sep_is_close = icmp eq i64 %p_sep_kind, 32");

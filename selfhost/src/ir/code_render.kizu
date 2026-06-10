@@ -543,15 +543,21 @@ fn render_param_list(
     return;
 }
 
-// render_value_type writes the LLVM scalar type for a tape value kind: bool
-// values are 'i1', every other scalar value the renderer types here is 'i64'.
+// render_value_type writes the LLVM type for a tape value kind: bool values are
+// 'i1', slice values '%kizu.slice.u8', every other scalar value 'i64'.
 fn render_value_type(out: &var std::string::String, kind: i64) -> !void {
     let kind_bool = codegen::code_kind_bool();
+    let kind_slice = codegen::code_kind_slice();
     if kind == kind_bool {
         try w(out, "i1");
     }
+    if kind == kind_slice {
+        try w(out, "%kizu.slice.u8");
+    }
     if kind != kind_bool {
-        try w(out, "i64");
+        if kind != kind_slice {
+            try w(out, "i64");
+        }
     }
     return;
 }
@@ -703,6 +709,10 @@ fn render_one_instruction(
     let print_op = codegen::code_op_print();
     if op == print_op {
         try render_print(out, code, index);
+    }
+    let str_slice = codegen::code_op_str_slice();
+    if op == str_slice {
+        try render_str_slice(out, code, index);
     }
     let call = codegen::code_op_call();
     if op == call {
@@ -1990,6 +2000,32 @@ fn render_print_slice(out: &var std::string::String, value_id: i64) -> !void {
     return;
 }
 
+// render_str_slice materializes a CONST_STR global as a '%kizu.slice.u8' SSA
+// value: an insertvalue pair builds the slice from the '@.kizu.run.s<src>'
+// global pointer and its payload byte length.
+fn render_str_slice(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let src = try code.get(index + 2);
+    let byte_len = try tape_string_length(code, src, 0);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.s");
+    try wi(out, src);
+    try wl(out, ", 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = insertvalue %kizu.slice.u8 %v");
+    try wi(out, dst);
+    try w(out, "_base, i64 ");
+    try wi(out, byte_len);
+    try wl(out, ", 1");
+    return;
+}
+
 // render_print_string_line writes a string print value (its global slice) followed
 // by the trailing newline print() appends.
 fn render_print_string_line(
@@ -2217,6 +2253,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let const_str = codegen::code_op_const_str();
     if op == const_str {
         return try tape_const_str_record_end(code, index);
+    }
+    let str_slice = codegen::code_op_str_slice();
+    if op == str_slice {
+        return index + 3;
     }
     let binary = codegen::code_op_binary();
     if op == binary {
