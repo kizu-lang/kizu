@@ -58,6 +58,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderModPrintBoolCases()...)
 	cases = append(cases, runRenderLabeledLoopCases()...)
 	cases = append(cases, runRenderMultilineStringCases()...)
+	cases = append(cases, runRenderSliceParamCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -396,6 +397,27 @@ func runRenderMultilineStringCases() []runRenderCase {
 			name:       "multiline_string_quote_payload",
 			source:     "fn main() {\n    print(\n        \\\\say \"hi\" twice\n    );\n}\n",
 			wantStdout: "say \"hi\" twice\n",
+		},
+	}
+}
+
+// runRenderSliceParamCases is the []u8-parameter corpus (string literal and local
+// string variable arguments, and a slice parameter passed through to another call).
+func runRenderSliceParamCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "slice_param_literal_and_local",
+			source: "fn echo(message: []u8) -> void {\n    print(message);\n}\n\n" +
+				"fn main() {\n    echo(\"hello\");\n    let greeting = \"good morning\";\n" +
+				"    echo(greeting);\n}\n",
+			wantStdout: "hello\ngood morning\n",
+		},
+		{
+			name: "slice_param_passthrough",
+			source: "fn echo(message: []u8) -> void {\n    print(message);\n}\n\n" +
+				"fn shout(message: []u8) -> void {\n    echo(message);\n    echo(message);\n}\n\n" +
+				"fn main() {\n    shout(\"twice\");\n}\n",
+			wantStdout: "twice\ntwice\n",
 		},
 	}
 }

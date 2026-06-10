@@ -3372,6 +3372,14 @@ pub fn code_op_not() -> i64 {
     return 6;
 }
 
+// STR_SLICE materializes a CONST_STR global as a runtime '%kizu.slice.u8' value:
+// the record is 'op dst src' where src is the CONST_STR value id and dst the
+// resulting slice value (kind slice). User calls take string arguments through it
+// so the call renderer passes every argument as a typed SSA value.
+pub fn code_op_str_slice() -> i64 {
+    return 7;
+}
+
 pub fn code_op_func_begin() -> i64 {
     return 10;
 }
@@ -4021,7 +4029,8 @@ fn lower_code_param(
 
 // code_param_kind classifies a parameter's declared type for the tape: i64
 // parameters are kind i64 (rendered 'i64'), bool parameters kind bool (rendered
-// 'i1'), and any other type is not owned yet (-1).
+// 'i1'), []u8 parameters kind slice (rendered '%kizu.slice.u8'), and any other
+// type is not owned yet (-1).
 fn code_param_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -4033,6 +4042,9 @@ fn code_param_kind(
     let type_text = ast_node_text(text, ast, type_node);
     if std::mem::equal_bytes(type_text, "bool") {
         return code_kind_bool();
+    }
+    if std::mem::equal_bytes(type_text, "[]u8") {
+        return code_kind_slice();
     }
     return 0 - 1;
 }
@@ -5814,9 +5826,37 @@ fn lower_code_args(
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
-    try scratch_put(args_scratch, arg_slot, eval.value_id);
+    let arg_eval = try lower_code_arg_slice(code, kinds, eval.value_id, eval.next);
+    try scratch_put(args_scratch, arg_slot, arg_eval.value_id);
     let after = index + 1;
-    return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, after, eval.next);
+    return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, after, arg_eval.next);
+}
+
+// lower_code_arg_slice materializes a string argument (kind str, a CONST_STR
+// global) as a runtime slice value through a STR_SLICE record, so a user call
+// passes every argument as a typed SSA value. Arguments of any other kind pass
+// through unchanged.
+fn lower_code_arg_slice(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    // 'arg_kind' (not 'kind') keeps the binding clear of the '<name>_slice' temp
+    // names the compiled Array.get lowering derives from it.
+    let arg_kind = try kinds.get(value_id);
+    let kind_str = code_kind_str();
+    if arg_kind != kind_str {
+        return code_eval_value(value_id, next_value);
+    }
+    let op_str_slice = code_op_str_slice();
+    try code.append(op_str_slice);
+    try code.append(next_value);
+    try code.append(value_id);
+    let slice_kind = code_kind_slice();
+    try kinds.append(slice_kind);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
 }
 
 // scratch_put stores value into stack slot pos, growing the array first when a
