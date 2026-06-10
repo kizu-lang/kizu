@@ -52,6 +52,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderBoolCases()...)
 	cases = append(cases, runRenderReturnCases()...)
 	cases = append(cases, runRenderNestedCallCases()...)
+	cases = append(cases, runRenderShadowingCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -246,6 +247,38 @@ func runRenderNestedCallCases() []runRenderCase {
 			source: "fn double(n: i64) -> i64 {\n    return n * 2;\n}\n\n" +
 				"fn main() {\n    let v = double(3) + double(4);\n    print(v);\n}\n",
 			wantStdout: "14\n",
+		},
+	}
+}
+
+// runRenderShadowingCases is the block-scope corpus (inner-scope shadowing, the
+// outer binding resolving again after the block, loop-scoped induction names)
+// the tape renderer covers in this slice.
+func runRenderShadowingCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "block_shadowing",
+			source: "fn main() {\n    let m = 1;\n    if 1 == 1 {\n        let m = 2;\n" +
+				"        print(m);\n    }\n    print(m);\n}\n",
+			wantStdout: "2\n1\n",
+		},
+		{
+			name: "var_block_shadowing",
+			source: "fn main() {\n    var x = 1;\n    if 1 == 1 {\n        var x = 10;\n" +
+				"        x = x + 1;\n        print(x);\n    }\n    print(x);\n}\n",
+			wantStdout: "11\n1\n",
+		},
+		{
+			name: "for_induction_scope",
+			source: "fn main() {\n    let n = 5;\n    for 0..2 |n| {\n        print(n);\n    }\n" +
+				"    print(n);\n}\n",
+			wantStdout: "0\n1\n5\n",
+		},
+		{
+			name: "let_after_loop_reuses_induction_name",
+			source: "fn main() {\n    for 0..2 |i| {\n        print(i);\n    }\n" +
+				"    let i = 9;\n    print(i);\n}\n",
+			wantStdout: "0\n1\n9\n",
 		},
 	}
 }

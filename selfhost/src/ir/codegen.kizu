@@ -3802,7 +3802,10 @@ fn lower_code_fn_decl(
     // local so it reaches lower_code_body as a plain arg (an arith literal like
     // '0 - 1' passed straight to a call is outside the compiled call-arg shape).
     let no_loop = 0 - 1;
-    let body_eval = try lower_code_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, no_loop, no_loop, params_eval.next);
+    // The function's top block shares its scope with the parameters (a let that
+    // re-binds a parameter name is the checker-illegal duplicate), so its scope
+    // base is locals_base rather than the post-params length.
+    let body_eval = try lower_code_body_scoped(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, locals_base, no_loop, no_loop, params_eval.next);
     if !body_eval.ok {
         return code_eval_unsupported(body_eval.next);
     }
@@ -3811,7 +3814,9 @@ fn lower_code_fn_decl(
     return code_eval_value(0, body_eval.next);
 }
 
-// lower_code_body walks a function body block's statements onto the tape.
+// lower_code_body walks a nested block's statements onto the tape inside a fresh
+// binding scope: bindings introduced in the block shadow outer ones while it is
+// open and stop resolving once it closes.
 fn lower_code_body(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -3828,11 +3833,78 @@ fn lower_code_body(
     loop_kind: i64,
     next_value: i64
 ) -> !CodeEval {
+    let scope_base = local_starts.len();
+    return try lower_code_body_scoped(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, loop_begin, loop_kind, next_value);
+}
+
+fn lower_code_body_scoped(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    scope_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
     let body_node = ast.get(body);
     return match body_node.data {
-        Block(block) => try lower_code_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, 0, next_value),
+        Block(block) => try lower_code_scoped_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, loop_begin, loop_kind, next_value),
         _ => code_eval_unsupported(next_value),
     };
+}
+
+// lower_code_scoped_statements lowers one block's statements and then blanks the
+// bindings the block introduced (at or above scope_base), closing the scope.
+fn lower_code_scoped_statements(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    statements: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    scope_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let eval = try lower_code_statements(text, ast, decls, statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, loop_begin, loop_kind, 0, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    try scrub_code_locals(local_starts, local_ends, scope_base);
+    return code_eval_value(0, eval.next);
+}
+
+// scrub_code_locals blanks the name spans of every local bound at or above mark:
+// the locals arrays have no truncate primitive, and an empty span never matches
+// an identifier, so a closed scope's bindings stop resolving in place.
+fn scrub_code_locals(
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    mark: i64
+) -> !void {
+    let used = local_starts.len();
+    if mark >= used {
+        return;
+    }
+    try local_starts.set(mark, 0);
+    try local_ends.set(mark, 0);
+    let after = mark + 1;
+    try scrub_code_locals(local_starts, local_ends, after);
+    return;
 }
 
 // lower_code_params binds every parameter name to the next sequential value
@@ -3931,6 +4003,7 @@ fn lower_code_statements(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
+    scope_base: i64,
     loop_begin: i64,
     loop_kind: i64,
     index: i64,
@@ -3940,12 +4013,12 @@ fn lower_code_statements(
         return code_eval_value(0, next_value);
     }
     let child = try ast.child_at(statements, index);
-    let eval = try lower_code_statement(text, ast, decls, child, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value);
+    let eval = try lower_code_statement(text, ast, decls, child, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, loop_begin, loop_kind, next_value);
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
     let after = index + 1;
-    return try lower_code_statements(text, ast, decls, statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, after, eval.next);
+    return try lower_code_statements(text, ast, decls, statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, loop_begin, loop_kind, after, eval.next);
 }
 
 fn lower_code_statement(
@@ -3960,13 +4033,14 @@ fn lower_code_statement(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
+    scope_base: i64,
     loop_begin: i64,
     loop_kind: i64,
     next_value: i64
 ) -> !CodeEval {
     let node = ast.get(statement);
     return match node.data {
-        Let(let_node) => try lower_code_let(text, ast, decls, let_node.mutable, let_node.name, let_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Let(let_node) => try lower_code_let(text, ast, decls, let_node.mutable, let_node.name, let_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, next_value),
         Assign(assign_node) => try lower_code_assign(text, ast, decls, assign_node.target, assign_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         ExprStmt(expr_stmt) => try lower_code_expr_statement(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Return(return_node) => try lower_code_return(text, ast, decls, return_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
@@ -4050,10 +4124,32 @@ fn lower_code_else_block(
     let node = ast.get(else_block);
     return match node.data {
         Empty => code_eval_value(0, next_value),
-        Block(block) => try lower_code_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, 0, next_value),
+        Block(block) => try lower_code_nested_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
         If(if_node) => try lower_code_if(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
         _ => code_eval_unsupported(next_value),
     };
+}
+
+// lower_code_nested_statements opens a fresh binding scope for a statement list
+// that arrives without its own Block node walk (the else arm's block).
+fn lower_code_nested_statements(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    statements: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let scope_base = local_starts.len();
+    return try lower_code_scoped_statements(text, ast, decls, statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, loop_begin, loop_kind, next_value);
 }
 
 // lower_code_let binds a let local: the value expression lowers to a tape
@@ -4073,10 +4169,14 @@ fn lower_code_let(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
+    scope_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    // Re-binding a name already bound in this same scope is the checker-illegal
+    // duplicate (shadowing an outer scope's binding is fine: the new binding
+    // simply appends and the backward lookup resolves it first).
     let name_span = code_node_span(text, ast, name);
-    let existing = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, name_span.start, name_span.end);
+    let existing = try code_scope_lookup(text, local_starts, local_ends, local_values, scope_base, name_span.start, name_span.end);
     if existing >= 0 {
         return code_eval_unsupported(next_value);
     }
@@ -4301,12 +4401,11 @@ fn lower_code_for(
     if !end_eval.ok {
         return code_eval_unsupported(end_eval.next);
     }
+    // The induction name binds in its own loop scope: it may shadow any outer
+    // binding and is scrubbed once the loop closes.
     let name_span = code_node_span(text, ast, name);
-    let existing = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, name_span.start, name_span.end);
-    if existing >= 0 {
-        return code_eval_unsupported(end_eval.next);
-    }
-    let slot = local_starts.len();
+    let induction_mark = local_starts.len();
+    let slot = induction_mark;
     let stored = code_var_slot_base() + slot;
     try local_starts.append(name_span.start);
     try local_ends.append(name_span.end);
@@ -4346,6 +4445,7 @@ fn lower_code_for(
     try code.append(slot);
     try code.append(latch_load_value);
     try code.append(latch_add_value);
+    try scrub_code_locals(local_starts, local_ends, induction_mark);
     let after_value = latch_add_value + 1;
     return code_eval_value(0, after_value);
 }
@@ -4669,27 +4769,60 @@ fn lower_code_return_value(
     return code_eval_value(eval.value_id, eval.next);
 }
 
-// code_local_lookup scans this function's locals (from locals_base) for a name
-// span match and returns the bound value id, or -1 when the name is unbound.
+// code_local_lookup resolves a name against this function's locals (down to
+// locals_base) and returns the bound value id, or -1 when the name is unbound.
+// The scan walks backward so the newest binding wins: an inner-scope shadowing
+// binding resolves while its block is open, and once scrub_code_locals blanks
+// it the outer binding resolves again.
 fn code_local_lookup(
     text: []u8,
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    locals_base: i64,
+    name_start: i64,
+    name_end: i64
+) -> !i64 {
+    let last = local_starts.len() - 1;
+    return try code_local_lookup_from(text, local_starts, local_ends, local_values, locals_base, last, name_start, name_end);
+}
+
+// code_scope_lookup resolves a name against one open scope only (the bindings at
+// or above scope_base), backing the same-scope duplicate-let rejection.
+fn code_scope_lookup(
+    text: []u8,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    scope_base: i64,
+    name_start: i64,
+    name_end: i64
+) -> !i64 {
+    let last = local_starts.len() - 1;
+    return try code_local_lookup_from(text, local_starts, local_ends, local_values, scope_base, last, name_start, name_end);
+}
+
+// code_local_lookup_from walks the locals backward from index down to floor.
+fn code_local_lookup_from(
+    text: []u8,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    floor: i64,
     index: i64,
     name_start: i64,
     name_end: i64
 ) -> !i64 {
-    if index >= local_starts.len() {
+    if index < floor {
         return 0 - 1;
     }
     let bound_start = try local_starts.get(index);
     let bound_end = try local_ends.get(index);
     let bound_name = text[bound_start..bound_end];
     let name = text[name_start..name_end];
-    let after = index + 1;
+    let before = index - 1;
     if !std::mem::equal_bytes(bound_name, name) {
-        return try code_local_lookup(text, local_starts, local_ends, local_values, after, name_start, name_end);
+        return try code_local_lookup_from(text, local_starts, local_ends, local_values, floor, before, name_start, name_end);
     }
     let bound_value = try local_values.get(index);
     return bound_value;
