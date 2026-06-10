@@ -3415,6 +3415,16 @@ pub fn code_op_io_blocking() -> i64 {
     return 34;
 }
 
+// TRY_CALL_I64 frames a 'try <call>' of an error-union-i64 callee: the renderer
+// emits the %kizu.error.i64 call, branches into a fail block that propagates the
+// error by the surrounding ABI (kizu_run_main exits 1, an error-union function
+// re-wraps the message) or a cont block that extracts the i64 success value into
+// the result. Its record mirrors CALL: 'op result callee_start callee_end
+// arg_count args...', so the CALL record-end walk serves it.
+pub fn code_op_try_call_i64() -> i64 {
+    return 36;
+}
+
 // TRY_FS_READ frames a 'try std::fs::read_file(io, path)' expression: the renderer
 // builds the path slice from the CONST_STR global, calls the runtime read, and
 // branches into a fail block that propagates (kizu_run_main exits 1, an
@@ -3602,7 +3612,7 @@ fn code_binary_kind_is_comparison(kind: i64) -> bool {
 
 // code_return_kind classifies a function's declared return type for the tape:
 // 0 = void (empty or 'void'), 1 = i64, 2 = error-union void ('!void'),
-// -1 = a type the tape does not own yet (e.g. '!i64').
+// 3 = error-union i64 ('!i64'), -1 = a type the tape does not own yet.
 fn code_return_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -3620,6 +3630,9 @@ fn code_return_kind(
     }
     if std::mem::equal_bytes(type_text, "!void") {
         return 2;
+    }
+    if std::mem::equal_bytes(type_text, "!i64") {
+        return 3;
     }
     return 0 - 1;
 }
@@ -4608,9 +4621,35 @@ fn lower_code_try_call(
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
-    if callee_kind != 2 {
-        return code_eval_unsupported(next_value);
+    if callee_kind == 2 {
+        return try emit_code_try_call_void(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    // A statement-position 'try <!i64 callee>();' discards the success value;
+    // the TRY_CALL_I64 record still allocates its result id.
+    if callee_kind == 3 {
+        return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    return code_eval_unsupported(next_value);
+}
+
+// emit_code_try_call_void appends the TRY_CALL record for an error-union-void
+// callee (the try yields no value).
+fn emit_code_try_call_void(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
     let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, 0, next_value);
     if !args_eval.ok {
@@ -4626,6 +4665,46 @@ fn lower_code_try_call(
     try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
     try args_scratch.set(0, scratch_base);
     return code_eval_value(0, args_eval.next);
+}
+
+// emit_code_try_call_i64 appends the TRY_CALL_I64 record for an error-union-i64
+// callee; the try yields the extracted i64 success value as the result.
+fn emit_code_try_call_i64(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_span = code_node_span(text, ast, callee);
+    let scratch_base = try args_scratch.get(0);
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, 0, next_value);
+    if !args_eval.ok {
+        return code_eval_unsupported(args_eval.next);
+    }
+    let op_try_call_i64 = code_op_try_call_i64();
+    try code.append(op_try_call_i64);
+    try code.append(args_eval.next);
+    try code.append(callee_span.start);
+    try code.append(callee_span.end);
+    try code.append(args.len);
+    let arg_count = args.len;
+    let scratch_bound = scratch_base + arg_count;
+    try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
+    try args_scratch.set(0, scratch_base);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    let result_value = args_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
 }
 
 fn lower_code_print_call(
@@ -5292,6 +5371,13 @@ fn lower_code_try_call_expr(
     let callee_text = ast_node_text(text, ast, callee);
     if std::mem::equal_bytes(callee_text, "std::fs::read_file") {
         return try lower_code_try_fs_read(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    // A 'try <callee>(...)' of a declared error-union-i64 function yields the
+    // extracted i64 success value.
+    let callee_span = code_node_span(text, ast, callee);
+    let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
+    if callee_kind == 3 {
+        return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
 }
