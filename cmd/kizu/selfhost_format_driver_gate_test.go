@@ -14,6 +14,7 @@ import (
 // '.deinit()') is classified by the production walk -- a behavior gate, not a source-text check
 // (issue 1165 / 1162). The gate reads the on-disk format.kizu, so it runs from the repo root.
 func TestSelfhostFormatDriverFactsGate(t *testing.T) {
+	requireSelfhostGate(t)
 	out, err := runSelfhostFormatDriverFactsGate(t)
 	if err != nil {
 		t.Fatalf("format driver facts gate failed: %v\n%s", err, out)
@@ -246,6 +247,7 @@ var formatDriverCrossedLoweringBlockers = []string{
 // latch carries scalar aliases such as `previous`, `last`, `at_line_start`, and `after_comment`
 // through typed loop-head phis, so the driver reaches `format-driver-lowering-ok`.
 func TestSelfhostFormatDriverLoweringGate(t *testing.T) {
+	requireSelfhostGate(t)
 	out, err := runSelfhostFormatDriverLoweringGate(t)
 	if err != nil {
 		for _, blocker := range formatDriverCrossedLoweringBlockers {
