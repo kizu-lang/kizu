@@ -33,6 +33,8 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_parse_ident_expr_function(out);
     try append_parse_call_function(out);
     try append_parse_struct_literal_function(out);
+    try append_parse_match_function(out);
+    try append_parse_match_arm_function(out);
     try append_add_leaf_node_function(out);
     try append_add_program_function(out);
     try append_add_param_function(out);
@@ -51,6 +53,8 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_add_field_expr_function(out);
     try append_add_struct_decl_function(out);
     try append_add_enum_decl_function(out);
+    try append_add_match_function(out);
+    try append_add_match_arm_function(out);
     try append_add_struct_field_init_function(out);
     try append_add_struct_literal_function(out);
     try append_add_call_function(out);
@@ -318,6 +322,228 @@ fn append_parse_decl_function(out: &var std::string::String) -> !void {
 // StructDecl node with empty type-param/field ranges: the run tape ignores the
 // declaration (struct literals carry their own field names and the checked AST
 // already validated them), so the boundary records only the name and span.
+// cli_parse_match parses a statement-position 'match <ident> { arm, ... }' with
+// one, two, or three arms (the same bounded SSA buffering the call-argument and
+// struct-literal parsers use; wider matches stay with the real parser until
+// issue 1157 replaces this boundary). Each arm parses through
+// cli_parse_match_arm, which creates its MatchArm node without touching the
+// child array, so the arm children append together at the end and the match
+// node's arm range stays contiguous even though arm bodies append their own
+// call-argument children while parsing.
+fn append_parse_match_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_match(");
+    try append_line(out, "  %kizu.owned %allocator,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.slice.u8 %source,");
+    try append_line(out, "  %kizu.owned %tokens,");
+    try append_line(out, "  i64 %index");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out,
+        "  %match_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %index)");
+    try append_line(out, "  %match_start = extractvalue %kizu.kizu.lexer.token %match_token, 1");
+    try append_line(out, "  %value_index = add i64 %index, 1");
+    try append_line(out,
+        "  %value_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %value_index)");
+    try append_line(out, "  %value_kind = extractvalue %kizu.kizu.lexer.token %value_token, 0");
+    try append_line(out, "  %value_ok = icmp eq i64 %value_kind, 27");
+    try append_line(out, "  br i1 %value_ok, label %check_brace, label %fail");
+    try append_line(out, "check_brace:");
+    try append_line(out, "  %open_index = add i64 %index, 2");
+    try append_line(out,
+        "  %open_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %open_index)");
+    try append_line(out, "  %open_kind = extractvalue %kizu.kizu.lexer.token %open_token, 0");
+    try append_line(out, "  %open_ok = icmp eq i64 %open_kind, 29");
+    try append_line(out, "  br i1 %open_ok, label %arm1, label %fail");
+    try append_line(out, "arm1:");
+    try append_line(out, "  %value_start = extractvalue %kizu.kizu.lexer.token %value_token, 1");
+    try append_line(out, "  %value_end = extractvalue %kizu.kizu.lexer.token %value_token, 2");
+    try append_line(out,
+        "  %value_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %value_start, i64 %value_end, i64 4)");
+    try append_line(out, "  %a1_index = add i64 %index, 3");
+    try append_line(out,
+        "  %a1 = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_match_arm(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %a1_index)");
+    try append_line(out, "  %a1_ok = extractvalue %kizu.selfhost.cli.parse_node_result %a1, 0");
+    try append_line(out, "  br i1 %a1_ok, label %a1_sep, label %fail");
+    try append_line(out, "a1_sep:");
+    try append_line(out, "  %a1_next = extractvalue %kizu.selfhost.cli.parse_node_result %a1, 1");
+    try append_line(out, "  %a1_node = extractvalue %kizu.selfhost.cli.parse_node_result %a1, 2");
+    try append_line(out,
+        "  %a1_sep_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %a1_next)");
+    try append_line(out, "  %a1_sep_kind = extractvalue %kizu.kizu.lexer.token %a1_sep_token, 0");
+    try append_line(out, "  %a1_has_comma = icmp eq i64 %a1_sep_kind, 34");
+    try append_line(out, "  br i1 %a1_has_comma, label %a1_comma, label %fail");
+    try append_line(out, "a1_comma:");
+    try append_line(out, "  %after_a1 = add i64 %a1_next, 1");
+    try append_line(out,
+        "  %after_a1_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %after_a1)");
+    try append_line(out, "  %after_a1_kind = extractvalue %kizu.kizu.lexer.token %after_a1_token, 0");
+    try append_line(out, "  %a1_close = icmp eq i64 %after_a1_kind, 30");
+    try append_line(out, "  br i1 %a1_close, label %emit_one, label %arm2");
+    try append_line(out, "arm2:");
+    try append_line(out,
+        "  %a2 = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_match_arm(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %after_a1)");
+    try append_line(out, "  %a2_ok = extractvalue %kizu.selfhost.cli.parse_node_result %a2, 0");
+    try append_line(out, "  br i1 %a2_ok, label %a2_sep, label %fail");
+    try append_line(out, "a2_sep:");
+    try append_line(out, "  %a2_next = extractvalue %kizu.selfhost.cli.parse_node_result %a2, 1");
+    try append_line(out, "  %a2_node = extractvalue %kizu.selfhost.cli.parse_node_result %a2, 2");
+    try append_line(out,
+        "  %a2_sep_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %a2_next)");
+    try append_line(out, "  %a2_sep_kind = extractvalue %kizu.kizu.lexer.token %a2_sep_token, 0");
+    try append_line(out, "  %a2_has_comma = icmp eq i64 %a2_sep_kind, 34");
+    try append_line(out, "  br i1 %a2_has_comma, label %a2_comma, label %fail");
+    try append_line(out, "a2_comma:");
+    try append_line(out, "  %after_a2 = add i64 %a2_next, 1");
+    try append_line(out,
+        "  %after_a2_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %after_a2)");
+    try append_line(out, "  %after_a2_kind = extractvalue %kizu.kizu.lexer.token %after_a2_token, 0");
+    try append_line(out, "  %a2_close = icmp eq i64 %after_a2_kind, 30");
+    try append_line(out, "  br i1 %a2_close, label %emit_two, label %arm3");
+    try append_line(out, "arm3:");
+    try append_line(out,
+        "  %a3 = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_match_arm(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %after_a2)");
+    try append_line(out, "  %a3_ok = extractvalue %kizu.selfhost.cli.parse_node_result %a3, 0");
+    try append_line(out, "  br i1 %a3_ok, label %a3_sep, label %fail");
+    try append_line(out, "a3_sep:");
+    try append_line(out, "  %a3_next = extractvalue %kizu.selfhost.cli.parse_node_result %a3, 1");
+    try append_line(out, "  %a3_node = extractvalue %kizu.selfhost.cli.parse_node_result %a3, 2");
+    try append_line(out,
+        "  %a3_sep_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %a3_next)");
+    try append_line(out, "  %a3_sep_kind = extractvalue %kizu.kizu.lexer.token %a3_sep_token, 0");
+    try append_line(out, "  %a3_has_comma = icmp eq i64 %a3_sep_kind, 34");
+    try append_line(out, "  br i1 %a3_has_comma, label %a3_comma, label %fail");
+    try append_line(out, "a3_comma:");
+    try append_line(out, "  %after_a3 = add i64 %a3_next, 1");
+    try append_line(out,
+        "  %after_a3_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %after_a3)");
+    try append_line(out, "  %after_a3_kind = extractvalue %kizu.kizu.lexer.token %after_a3_token, 0");
+    try append_line(out, "  %a3_close = icmp eq i64 %after_a3_kind, 30");
+    try append_line(out, "  br i1 %a3_close, label %emit_three, label %fail");
+    try append_line(out, "emit_one:");
+    try append_line(out, "  %one_close_end = extractvalue %kizu.kizu.lexer.token %after_a1_token, 2");
+    try append_line(out, "  %one_child_start = call i64 @kizu_selfhost__cli_ast_child_len(%kizu.kizu.ast.ast %ast)");
+    try append_line(out,
+        "  %one_append = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %a1_node)");
+    try append_line(out, "  %one_append_ok = extractvalue %kizu.error.void %one_append, 0");
+    try append_line(out, "  br i1 %one_append_ok, label %emit_one_node, label %fail");
+    try append_line(out, "emit_one_node:");
+    try append_line(out,
+        "  %one_match = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_match(%kizu.kizu.ast.ast %ast, i64 %match_start, i64 %one_close_end, %kizu.kizu.ast.node_id %value_node, i64 %one_child_start, i64 1)");
+    try append_line(out, "  %one_next = add i64 %after_a1, 1");
+    try append_line(out, "  %one_ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
+    try append_line(out, "  %one_ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %one_ok0, i64 %one_next, 1");
+    try append_line(out,
+        "  %one_ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %one_ok1, %kizu.kizu.ast.node_id %one_match, 2");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %one_ok2");
+    try append_line(out, "emit_two:");
+    try append_line(out, "  %two_close_end = extractvalue %kizu.kizu.lexer.token %after_a2_token, 2");
+    try append_line(out, "  %two_child_start = call i64 @kizu_selfhost__cli_ast_child_len(%kizu.kizu.ast.ast %ast)");
+    try append_line(out,
+        "  %two_append1 = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %a1_node)");
+    try append_line(out, "  %two_append1_ok = extractvalue %kizu.error.void %two_append1, 0");
+    try append_line(out, "  br i1 %two_append1_ok, label %emit_two_second, label %fail");
+    try append_line(out, "emit_two_second:");
+    try append_line(out,
+        "  %two_append2 = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %a2_node)");
+    try append_line(out, "  %two_append2_ok = extractvalue %kizu.error.void %two_append2, 0");
+    try append_line(out, "  br i1 %two_append2_ok, label %emit_two_node, label %fail");
+    try append_line(out, "emit_two_node:");
+    try append_line(out,
+        "  %two_match = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_match(%kizu.kizu.ast.ast %ast, i64 %match_start, i64 %two_close_end, %kizu.kizu.ast.node_id %value_node, i64 %two_child_start, i64 2)");
+    try append_line(out, "  %two_next = add i64 %after_a2, 1");
+    try append_line(out, "  %two_ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
+    try append_line(out, "  %two_ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %two_ok0, i64 %two_next, 1");
+    try append_line(out,
+        "  %two_ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %two_ok1, %kizu.kizu.ast.node_id %two_match, 2");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %two_ok2");
+    try append_line(out, "emit_three:");
+    try append_line(out, "  %three_close_end = extractvalue %kizu.kizu.lexer.token %after_a3_token, 2");
+    try append_line(out, "  %three_child_start = call i64 @kizu_selfhost__cli_ast_child_len(%kizu.kizu.ast.ast %ast)");
+    try append_line(out,
+        "  %three_append1 = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %a1_node)");
+    try append_line(out, "  %three_append1_ok = extractvalue %kizu.error.void %three_append1, 0");
+    try append_line(out, "  br i1 %three_append1_ok, label %emit_three_second, label %fail");
+    try append_line(out, "emit_three_second:");
+    try append_line(out,
+        "  %three_append2 = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %a2_node)");
+    try append_line(out, "  %three_append2_ok = extractvalue %kizu.error.void %three_append2, 0");
+    try append_line(out, "  br i1 %three_append2_ok, label %emit_three_third, label %fail");
+    try append_line(out, "emit_three_third:");
+    try append_line(out,
+        "  %three_append3 = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %a3_node)");
+    try append_line(out, "  %three_append3_ok = extractvalue %kizu.error.void %three_append3, 0");
+    try append_line(out, "  br i1 %three_append3_ok, label %emit_three_node, label %fail");
+    try append_line(out, "emit_three_node:");
+    try append_line(out,
+        "  %three_match = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_match(%kizu.kizu.ast.ast %ast, i64 %match_start, i64 %three_close_end, %kizu.kizu.ast.node_id %value_node, i64 %three_child_start, i64 3)");
+    try append_line(out, "  %three_next = add i64 %after_a3, 1");
+    try append_line(out, "  %three_ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
+    try append_line(out, "  %three_ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %three_ok0, i64 %three_next, 1");
+    try append_line(out,
+        "  %three_ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %three_ok1, %kizu.kizu.ast.node_id %three_match, 2");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %three_ok2");
+    try append_line(out, "fail:");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result zeroinitializer");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+// cli_parse_match_arm parses one '<pattern> => <expr>' arm: the pattern is one
+// ident token ('_' included), the body parses as a general expression, and the
+// MatchArm node (with an Empty binding) is created without touching the child
+// array so the caller appends the arm children contiguously at the end.
+fn append_parse_match_arm_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_match_arm(");
+    try append_line(out, "  %kizu.owned %allocator,");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.slice.u8 %source,");
+    try append_line(out, "  %kizu.owned %tokens,");
+    try append_line(out, "  i64 %index");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out,
+        "  %p_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %index)");
+    try append_line(out, "  %p_kind = extractvalue %kizu.kizu.lexer.token %p_token, 0");
+    try append_line(out, "  %p_ok = icmp eq i64 %p_kind, 27");
+    try append_line(out, "  br i1 %p_ok, label %check_arrow, label %fail");
+    try append_line(out, "check_arrow:");
+    try append_line(out, "  %arrow_index = add i64 %index, 1");
+    try append_line(out,
+        "  %arrow_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %arrow_index)");
+    try append_line(out, "  %arrow_kind = extractvalue %kizu.kizu.lexer.token %arrow_token, 0");
+    try append_line(out, "  %arrow_ok = icmp eq i64 %arrow_kind, 39");
+    try append_line(out, "  br i1 %arrow_ok, label %body, label %fail");
+    try append_line(out, "body:");
+    try append_line(out, "  %body_index = add i64 %index, 2");
+    try append_line(out,
+        "  %body_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %body_index)");
+    try append_line(out, "  %body_ok = extractvalue %kizu.selfhost.cli.parse_node_result %body_result, 0");
+    try append_line(out, "  br i1 %body_ok, label %build, label %fail");
+    try append_line(out, "build:");
+    try append_line(out, "  %body_next = extractvalue %kizu.selfhost.cli.parse_node_result %body_result, 1");
+    try append_line(out, "  %body_node = extractvalue %kizu.selfhost.cli.parse_node_result %body_result, 2");
+    try append_line(out, "  %p_start = extractvalue %kizu.kizu.lexer.token %p_token, 1");
+    try append_line(out, "  %p_end = extractvalue %kizu.kizu.lexer.token %p_token, 2");
+    try append_line(out,
+        "  %p_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %p_start, i64 %p_end, i64 4)");
+    try append_line(out,
+        "  %b_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %p_end, i64 %p_end, i64 44)");
+    try append_line(out,
+        "  %arm_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_match_arm(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %p_node, %kizu.kizu.ast.node_id %b_node, %kizu.kizu.ast.node_id %body_node)");
+    try append_line(out, "  %ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
+    try append_line(out, "  %ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %ok0, i64 %body_next, 1");
+    try append_line(out,
+        "  %ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %ok1, %kizu.kizu.ast.node_id %arm_node, 2");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %ok2");
+    try append_line(out, "fail:");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result zeroinitializer");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
 // cli_parse_enum_decl parses 'enum Name { Variant, ... }': every variant ident
 // appends one name leaf as a contiguous child (an enum body carries no nested
 // parses), so the EnumDecl node's tag range lets the run tape resolve
@@ -926,11 +1152,18 @@ fn append_parse_statement_function(out: &var std::string::String) -> !void {
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %break_result");
     try append_line(out, "maybe_continue:");
     try append_line(out, "  %is_continue = icmp eq i64 %kind, 18");
-    try append_line(out, "  br i1 %is_continue, label %parse_continue, label %maybe_expr");
+    try append_line(out, "  br i1 %is_continue, label %parse_continue, label %maybe_match");
     try append_line(out, "parse_continue:");
     try append_line(out,
         "  %continue_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_continue(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %continue_result");
+    try append_line(out, "maybe_match:");
+    try append_line(out, "  %is_match = icmp eq i64 %kind, 19");
+    try append_line(out, "  br i1 %is_match, label %parse_match, label %maybe_expr");
+    try append_line(out, "parse_match:");
+    try append_line(out,
+        "  %match_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_match(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %match_result");
     try append_line(out, "maybe_expr:");
     try append_line(out, "  %is_ident = icmp eq i64 %kind, 27");
     try append_line(out, "  br i1 %is_ident, label %maybe_assign, label %maybe_try_expr");
@@ -2610,6 +2843,56 @@ fn append_parse_struct_literal_function(out: &var std::string::String) -> !void 
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result zeroinitializer");
     try append_line(out, "}");
     try append_line(out, "");
+    return;
+}
+
+// cli_add_match records a Match node (variant tag 39) carrying the matched
+// value node and the contiguous arm child range.
+fn append_add_match_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_match(");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  i64 %start,");
+    try append_line(out, "  i64 %end,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %value,");
+    try append_line(out, "  i64 %arm_start,");
+    try append_line(out, "  i64 %arm_len");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %range0 = insertvalue %kizu.kizu.ast.child_range poison, i64 %arm_start, 0");
+    try append_line(out, "  %range = insertvalue %kizu.kizu.ast.child_range %range0, i64 %arm_len, 1");
+    try append_line(out,
+        "  %p0 = insertvalue %kizu.kizu.ast.match_node poison, %kizu.kizu.ast.node_id %value, 0");
+    try append_line(out,
+        "  %payload = insertvalue %kizu.kizu.ast.match_node %p0, %kizu.kizu.ast.child_range %range, 1");
+    try append_node_with_payload(out, "%kizu.kizu.ast.match_node", "payload", "39");
+    return;
+}
+
+// cli_add_match_arm records a MatchArm node (variant tag 40) spanning the
+// pattern's start to the body's end.
+fn append_add_match_arm_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_match_arm(");
+    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %pattern,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %binding,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %body");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out,
+        "  %pattern_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %pattern)");
+    try append_line(out, "  %pattern_span = extractvalue %kizu.kizu.ast.ast_node %pattern_node, 0");
+    try append_line(out, "  %start = extractvalue %kizu.kizu.ast.span %pattern_span, 0");
+    try append_line(out,
+        "  %body_ast_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %body)");
+    try append_line(out, "  %body_span = extractvalue %kizu.kizu.ast.ast_node %body_ast_node, 0");
+    try append_line(out, "  %end = extractvalue %kizu.kizu.ast.span %body_span, 1");
+    try append_line(out,
+        "  %p0 = insertvalue %kizu.kizu.ast.match_arm_node poison, %kizu.kizu.ast.node_id %pattern, 0");
+    try append_line(out,
+        "  %p1 = insertvalue %kizu.kizu.ast.match_arm_node %p0, %kizu.kizu.ast.node_id %binding, 1");
+    try append_line(out,
+        "  %payload = insertvalue %kizu.kizu.ast.match_arm_node %p1, %kizu.kizu.ast.node_id %body, 2");
+    try append_node_with_payload(out, "%kizu.kizu.ast.match_arm_node", "payload", "40");
     return;
 }
 
