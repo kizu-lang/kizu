@@ -57,6 +57,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderExpectCases()...)
 	cases = append(cases, runRenderModPrintBoolCases()...)
 	cases = append(cases, runRenderLabeledLoopCases()...)
+	cases = append(cases, runRenderMultilineStringCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -375,6 +376,26 @@ func runRenderLabeledLoopCases() []runRenderCase {
 				"            if j == 1 {\n                continue :rows;\n            }\n" +
 				"            print(i * 10 + j);\n        }\n    }\n}\n",
 			wantStdout: "0\n10\n20\n",
+		},
+	}
+}
+
+// runRenderMultilineStringCases is the multiline string literal corpus ('\\'
+// lines joined with newlines, including an empty line and an embedded quote).
+func runRenderMultilineStringCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "multiline_string_let_print",
+			source: "fn main() {\n    let help =\n        \\\\Usage: kizu <command>\n" +
+				"        \\\\\n        \\\\Commands:\n        \\\\  build    Build the project\n" +
+				"        \\\\  run      Run the project\n    ;\n    print(help);\n}\n",
+			wantStdout: "Usage: kizu <command>\n\nCommands:\n" +
+				"  build    Build the project\n  run      Run the project\n",
+		},
+		{
+			name:       "multiline_string_quote_payload",
+			source:     "fn main() {\n    print(\n        \\\\say \"hi\" twice\n    );\n}\n",
+			wantStdout: "say \"hi\" twice\n",
 		},
 	}
 }

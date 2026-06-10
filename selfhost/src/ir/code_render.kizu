@@ -255,19 +255,60 @@ fn render_one_string_global(
     index: i64
 ) -> !void {
     let dst = try code.get(index + 1);
-    let payload_start = try code.get(index + 2);
-    let payload_end = try code.get(index + 3);
-    let payload = text[payload_start..payload_end];
-    let byte_len = payload_end - payload_start;
+    let byte_len = try tape_const_str_payload_length(code, index);
     try w(out, "@.kizu.run.s");
     try wi(out, dst);
     try w(out, " = private unnamed_addr constant [");
     try wi(out, byte_len);
     try w(out, " x i8] c");
     try out.append_byte(cast<u8>(34));
-    try render_llvm_c_bytes(out, payload);
+    try render_const_str_segments(out, text, code, index);
     try out.append_byte(cast<u8>(34));
     try nl(out);
+    return;
+}
+
+// render_const_str_segments renders every payload span segment of the CONST_STR
+// record at index, joining consecutive segments with an escaped newline byte.
+fn render_const_str_segments(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let seg_count = try code.get(index + 2);
+    try render_const_str_segment(out, text, code, index, seg_count, 0);
+    return;
+}
+
+// render_const_str_segment renders the segment at seg then recurses to the next,
+// prefixing every segment after the first with an escaped newline byte.
+fn render_const_str_segment(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    index: i64,
+    seg_count: i64,
+    seg: i64
+) -> !void {
+    if seg >= seg_count {
+        return;
+    }
+    // Bind each span slot so the get() calls take locals rather than nested
+    // binary args (the call-arg lowering only models 'base + <int literal>').
+    let span_slots = seg * 2;
+    let start_slot = index + 3 + span_slots;
+    let end_slot = start_slot + 1;
+    let seg_start = try code.get(start_slot);
+    let seg_end = try code.get(end_slot);
+    let payload = text[seg_start..seg_end];
+    let newline = cast<u8>(10);
+    if seg > 0 {
+        try render_llvm_c_byte(out, newline);
+    }
+    try render_llvm_c_bytes(out, payload);
+    let after = seg + 1;
+    try render_const_str_segment(out, text, code, index, seg_count, after);
     return;
 }
 
@@ -2026,12 +2067,37 @@ fn tape_string_length(
 }
 
 // tape_const_str_payload_length returns the payload byte length of the CONST_STR
-// record at index (its end span minus its start span), kept in its own function so
-// the matching guard stays a single-statement 'return try <call>;'.
+// record at index: the sum of its segment span lengths plus one joining newline
+// byte between consecutive segments.
 fn tape_const_str_payload_length(code: &std::array::Array<i64>, index: i64) -> !i64 {
-    let payload_start = try code.get(index + 2);
-    let payload_end = try code.get(index + 3);
-    return payload_end - payload_start;
+    let seg_count = try code.get(index + 2);
+    let joins = seg_count - 1;
+    let spans = try tape_const_str_spans_length(code, index, seg_count, 0);
+    return spans + joins;
+}
+
+// tape_const_str_spans_length sums the payload span lengths of the CONST_STR
+// record's segments [seg, seg_count).
+fn tape_const_str_spans_length(
+    code: &std::array::Array<i64>,
+    index: i64,
+    seg_count: i64,
+    seg: i64
+) -> !i64 {
+    if seg >= seg_count {
+        return 0;
+    }
+    // Bind each span slot so the get() calls take locals rather than nested
+    // binary args (the call-arg lowering only models 'base + <int literal>').
+    let span_slots = seg * 2;
+    let start_slot = index + 3 + span_slots;
+    let end_slot = start_slot + 1;
+    let seg_start = try code.get(start_slot);
+    let seg_end = try code.get(end_slot);
+    let seg_len = seg_end - seg_start;
+    let after = seg + 1;
+    let rest = try tape_const_str_spans_length(code, index, seg_count, after);
+    return seg_len + rest;
 }
 
 fn render_print_string(
@@ -2123,6 +2189,14 @@ fn tape_try_call_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     return index + 4 + arg_count;
 }
 
+// tape_const_str_record_end returns the index past a CONST_STR record, reading
+// its segment count ('op dst seg_count start1 end1 ... startN endN').
+fn tape_const_str_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let seg_count = try code.get(index + 2);
+    let span_slots = seg_count * 2;
+    return index + 3 + span_slots;
+}
+
 // tape_record_end returns the tape index just past the record beginning at index,
 // using each opcode's fixed arity (CALL carries a trailing variable arg-id list).
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
@@ -2141,7 +2215,7 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let const_str = codegen::code_op_const_str();
     if op == const_str {
-        return index + 4;
+        return try tape_const_str_record_end(code, index);
     }
     let binary = codegen::code_op_binary();
     if op == binary {

@@ -5134,6 +5134,11 @@ fn lower_code_int(
     return code_eval_value(next_value, after_value);
 }
 
+// lower_code_string lowers a string literal (a quoted one-line literal or a
+// '\\'-prefixed multiline literal) to a CONST_STR record. The record is
+// 'op dst seg_count start1 end1 ... startN endN': each segment is a raw source
+// payload span and the renderer joins consecutive segments with one newline byte,
+// matching the reference lexer's decoded multiline payload.
 fn lower_code_string(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -5142,19 +5147,191 @@ fn lower_code_string(
     kinds: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
+    let node = ast.get(node_id);
+    let span_start = node.span.start;
+    let span_end = node.span.end;
+    if is_multiline_literal(text, span_start, span_end) {
+        return try lower_code_multiline_string(text, span_start, span_end, code, kinds, next_value);
+    }
     let payload = string_literal_span(text, ast, node_id);
     if payload.start < 0 {
         return code_eval_unsupported(next_value);
     }
     let op_const_str = code_op_const_str();
+    let one_segment = 1;
     try code.append(op_const_str);
     try code.append(next_value);
+    try code.append(one_segment);
     try code.append(payload.start);
     try code.append(payload.end);
     let kind_str = code_kind_str();
     try kinds.append(kind_str);
     let after_value = next_value + 1;
     return code_eval_value(next_value, after_value);
+}
+
+// is_multiline_literal reports whether the literal span starts with the '\\'
+// multiline marker (two backslash bytes).
+fn is_multiline_literal(text: []u8, start: i64, end: i64) -> bool {
+    if end - start < 2 {
+        return false;
+    }
+    let backslash = cast<u8>(92);
+    if text[start] != backslash {
+        return false;
+    }
+    return text[start + 1] == backslash;
+}
+
+// lower_code_multiline_string lowers a '\\'-prefixed multiline literal: every
+// '\\' line contributes one payload span segment to the CONST_STR record.
+fn lower_code_multiline_string(
+    text: []u8,
+    span_start: i64,
+    span_end: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let seg_count = multiline_segment_count(text, span_start, span_end);
+    if seg_count <= 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let op_const_str = code_op_const_str();
+    try code.append(op_const_str);
+    try code.append(next_value);
+    try code.append(seg_count);
+    try append_multiline_segments(text, span_start, span_end, code);
+    let kind_str = code_kind_str();
+    try kinds.append(kind_str);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// multiline_segment_count walks the literal's '\\' lines and returns how many
+// segments it contains, or 0 when the shape or a payload byte is unsupported.
+fn multiline_segment_count(text: []u8, span_start: i64, span_end: i64) -> i64 {
+    return multiline_count_from(text, span_start, span_end, 0);
+}
+
+// multiline_count_from counts the segments from the '\\' marker at marker_pos to
+// the end of the literal span (0 on an unsupported payload byte or marker shape).
+fn multiline_count_from(
+    text: []u8,
+    marker_pos: i64,
+    span_end: i64,
+    count: i64
+) -> i64 {
+    let seg_start = marker_pos + 2;
+    let seg_end = multiline_segment_line_end(text, seg_start, span_end);
+    let payload = text[seg_start..seg_end];
+    if !is_multiline_payload_supported(payload) {
+        return 0;
+    }
+    let next = multiline_next_segment(text, seg_end, span_end);
+    let total = count + 1;
+    if next == 0 - 1 {
+        return total;
+    }
+    if next < 0 {
+        return 0;
+    }
+    return multiline_count_from(text, next, span_end, total);
+}
+
+// append_multiline_segments appends each segment's payload span (start then end)
+// to the CONST_STR record from the '\\' marker at marker_pos, mirroring the
+// multiline_count_from walk (which already validated every segment).
+fn append_multiline_segments(
+    text: []u8,
+    marker_pos: i64,
+    span_end: i64,
+    code: &var std::array::Array<i64>
+) -> !void {
+    let seg_start = marker_pos + 2;
+    let seg_end = multiline_segment_line_end(text, seg_start, span_end);
+    try code.append(seg_start);
+    try code.append(seg_end);
+    let next = multiline_next_segment(text, seg_end, span_end);
+    if next < 0 {
+        return;
+    }
+    try append_multiline_segments(text, next, span_end, code);
+    return;
+}
+
+// multiline_segment_line_end returns the segment's payload end: the next newline
+// byte at or after pos inside the literal span, or the span end for the final line.
+fn multiline_segment_line_end(text: []u8, pos: i64, span_end: i64) -> i64 {
+    if pos >= span_end {
+        return span_end;
+    }
+    let newline = cast<u8>(10);
+    if text[pos] == newline {
+        return pos;
+    }
+    let after = pos + 1;
+    return multiline_segment_line_end(text, after, span_end);
+}
+
+// multiline_next_segment returns the next segment's '\\' position after a line's
+// newline, -1 at the clean end of the literal, or -2 on an unexpected byte.
+fn multiline_next_segment(text: []u8, line_end: i64, span_end: i64) -> i64 {
+    if line_end >= span_end {
+        return 0 - 1;
+    }
+    let after_newline = line_end + 1;
+    let pos = skip_multiline_indent(text, after_newline, span_end);
+    let marker_end = pos + 1;
+    if marker_end >= span_end {
+        return 0 - 2;
+    }
+    let backslash = cast<u8>(92);
+    if text[pos] != backslash or text[pos + 1] != backslash {
+        return 0 - 2;
+    }
+    return pos;
+}
+
+// skip_multiline_indent returns the first position at or after pos whose byte is
+// not the whitespace the lexer skips between a line's newline and the next '\\'.
+fn skip_multiline_indent(text: []u8, pos: i64, span_end: i64) -> i64 {
+    if pos >= span_end {
+        return pos;
+    }
+    if !is_multiline_indent_byte(text[pos]) {
+        return pos;
+    }
+    let after = pos + 1;
+    return skip_multiline_indent(text, after, span_end);
+}
+
+// is_multiline_indent_byte reports whether byte is the whitespace the lexer skips
+// between a multiline line's newline and the next '\\' marker.
+fn is_multiline_indent_byte(byte: u8) -> bool {
+    let space = cast<u8>(32);
+    let tab = cast<u8>(9);
+    let carriage = cast<u8>(13);
+    return byte == space or byte == tab or byte == carriage;
+}
+
+// is_multiline_payload_supported accepts printable ASCII segment bytes; the quote
+// byte is allowed because the CONST_STR renderer escapes it.
+fn is_multiline_payload_supported(payload: []u8) -> bool {
+    var index = 0;
+    let min = cast<u8>(32);
+    let max = cast<u8>(126);
+    while index < std::mem::len(payload) {
+        let byte = payload[index];
+        if byte < min {
+            return false;
+        }
+        if byte > max {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
 }
 
 // lower_code_bool lowers a 'true'/'false' literal to a CONST_BOOL record producing
