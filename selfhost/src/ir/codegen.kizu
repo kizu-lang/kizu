@@ -5718,7 +5718,10 @@ fn lower_code_print_call(
 
 // lower_code_print_record keeps 'print(<enum>)' on the tape (the PRINT record
 // carries the record kind so the renderer resolves the ENUM_CONST span) and
-// rejects every other record-backed value.
+// rejects every other record-backed value. UNION_CONST stays rejected on
+// purpose: the renderer's string-globals walk emits '@.kizu.run.e' globals for
+// ENUM_CONST records only, so admitting a union here would reference an
+// undefined global (lift both sides together if union printing ever lands).
 fn lower_code_print_record(
     code: &var std::array::Array<i64>,
     value_id: i64,
@@ -7039,11 +7042,13 @@ fn lower_code_call(
         return try lower_code_io_blocking(args, code, kinds, next_value);
     }
     // The union-constructor probe resolves the callee against the union
-    // declarations before lowering anything, so a non-union callee falls
-    // through to the user-call path with the tape untouched.
-    let union_eval = try lower_code_union_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
-    if union_eval.ok {
-        return code_eval_value(union_eval.value_id, union_eval.next);
+    // declarations without touching the tape; only a resolved constructor
+    // commits to the union path, so a failure past this point (an unsupported
+    // payload) stays a final unsupported program instead of falling through to
+    // the user-call path over a partially written tape.
+    let union_tag = try code_callee_union_tag(text, ast, decls, callee);
+    if union_tag >= 0 {
+        return try lower_code_union_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     let callee_span = code_node_span(text, ast, callee);
     let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
@@ -7051,6 +7056,38 @@ fn lower_code_call(
         return code_eval_unsupported(next_value);
     }
     return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+// code_callee_union_tag resolves a call's callee against the union declarations
+// without touching the tape (-1 when the callee is not a union constructor), so
+// the call dispatch commits to the union path before any lowering side effect.
+fn code_callee_union_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(callee);
+    return match node.data {
+        FieldExpr(field_expr) => try code_callee_union_field_tag(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace),
+        _ => code_assign_no_field(),
+    };
+}
+
+fn code_callee_union_field_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool
+) -> !i64 {
+    if !namespace {
+        return 0 - 1;
+    }
+    let union_span = code_node_span(text, ast, receiver);
+    let variant_span = code_node_span(text, ast, name);
+    return try union_variant_tag_lookup(text, ast, decls, union_span.start, union_span.end, variant_span.start, variant_span.end, 0);
 }
 
 // lower_code_union_call routes a call whose callee is a namespaced
