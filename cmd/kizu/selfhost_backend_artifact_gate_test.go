@@ -3257,16 +3257,17 @@ func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
 }
 
 // countHostedCompilerCLIRunFailures runs a non-fixture source through `run`.
-// The probe must stay outside the run tape's supported surface (bool-literal
-// branches now lower, so it uses a struct literal the tape does not own yet).
+// The probe must stay outside the run tape's supported surface (struct literals
+// and field reads now lower, so it uses an enum match the tape does not own yet).
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	failures := countHostedCompilerCLIUnsupportedRunSourceFailures(
 		t,
 		exePath,
-		"hosted_run_struct_unsupported.kizu",
-		"hosted_run_struct_unsupported",
-		"struct Point {\n    x: i64,\n}\n\nfn main(){let p = Point { x: 1 };print(p.x);}\n",
+		"hosted_run_match_unsupported.kizu",
+		"hosted_run_match_unsupported",
+		"enum Color {\n    Red,\n}\n\nfn main() {\n    let color = Color::Red;\n"+
+			"    match color {\n        Red => print(\"red\"),\n    }\n}\n",
 	)
 	return failures
 }
