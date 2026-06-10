@@ -10,18 +10,14 @@ import selfhost::ir::codegen;
 // '@.kizu.run.s<id>'; PRINT dispatches on the recorded value kind to the string
 // or i64 writer.
 //
-// Kizu string literals do not interpret backslash escapes, so every emitted line
-// is written through wl (append the bytes then a real newline byte) and partial
-// fragments through w; the quote/newline bytes the LLVM text needs are appended as
-// explicit byte values.
-//
-// render_functions walks every FUNC_BEGIN..FUNC_END span: 'main' renders the
-// kizu_run_main entry (io + body + exit), every other function a
-// kizu_run_user_<name> i64 define whose parameters are named from the value-id
-// base recorded on FUNC_BEGIN; CALL records lower to call instructions and
-// RET_VALUE to a return. Any function (main or user) that prints binds the io
-// handle at entry. The preamble (types, runtime declarations, the i64 decimal
-// helper) and the C main wrapper frame the module.
+// The cluster is written to compile into stage2 through the generic compiled-MIR
+// subset: opcode constants are bound to locals before they are compared (no call
+// in a condition), control flow uses early-return guards and tail recursion (no
+// loop-carried scalars), and i64 formatting uses the local recursive wi helper
+// rather than the std::fmt String builder. Kizu string literals do not interpret
+// backslash escapes, so every emitted line is written through wl (bytes then a
+// real newline byte) and partial fragments through w; quote/newline bytes are
+// appended as explicit byte values.
 
 pub fn render_tape_module(
     allocator: Allocator,
@@ -38,143 +34,75 @@ pub fn render_tape_module(
     return out;
 }
 
-// render_functions walks the tape function by function: each FUNC_BEGIN..FUNC_END
-// span renders one LLVM define ('main' is the kizu_run_main entry, every other
-// function a kizu_run_user_<name> i64 define), then the walk resumes past FUNC_END.
-fn render_functions(
-    out: &var std::string::String,
+// render_run_artifact is the generic run pipeline entry: it lowers a parsed run
+// source into the run codegen IR v1 tape (codegen::lower_code_module) and renders
+// that tape to the executable LLVM module text. It replaces the per-shape hosted
+// renderers -- a single tape walk handles any program the lowering accepts.
+pub fn render_run_artifact(
+    allocator: Allocator,
+    source_path: []u8,
     text: []u8,
-    code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
-    index: i64
-) -> !void {
-    if index >= code.len() {
-        return;
+    parsed: std::kizu::ast::ParseResult
+) -> !std::string::String {
+    var code = std::array::Array<i64>(allocator);
+    var kinds = std::array::Array<i64>(allocator);
+    var local_starts = std::array::Array<i64>(allocator);
+    var local_ends = std::array::Array<i64>(allocator);
+    var local_values = std::array::Array<i64>(allocator);
+    var args_scratch = std::array::Array<i64>(allocator);
+    let eval = try codegen::lower_code_module(
+        text,
+        parsed.ast,
+        parsed.root,
+        &var code,
+        &var kinds,
+        &var local_starts,
+        &var local_ends,
+        &var local_values,
+        &var args_scratch
+    );
+    if !eval.ok {
+        return error("render run artifact: run source lowering not supported");
     }
-    let op = try code.get(index);
-    if op != codegen::code_op_func_begin() {
-        // Records outside a function frame are not expected; skip defensively.
-        let skip = try tape_record_end(code, index);
-        try render_functions(out, text, code, kinds, skip);
-        return;
-    }
-    let after = try render_one_function(out, text, code, kinds, index);
-    try render_functions(out, text, code, kinds, after);
-    return;
+    return try render_tape_module(allocator, source_path, text, &code, &kinds);
 }
 
-// render_one_function renders the function whose FUNC_BEGIN is at func_index and
-// returns the tape index past its FUNC_END.
-fn render_one_function(
+// render_bool_print_global emits one of the bool print payload globals
+// ('true'/'false' plus a newline byte) behind its constant header.
+fn render_bool_print_global(
     out: &var std::string::String,
-    text: []u8,
-    code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
-    func_index: i64
-) -> !i64 {
-    let name_start = try code.get(func_index + 1);
-    let name_end = try code.get(func_index + 2);
-    let param_count = try code.get(func_index + 3);
-    let param_base = try code.get(func_index + 5);
-    let name = text[name_start..name_end];
-    let body_start = func_index + 6;
-    let func_end = try tape_function_end(code, body_start);
-    if std::mem::equal_bytes(name, "main") {
-        try wl(out, "define i64 @kizu_run_main() {");
-        try wl(out, "entry:");
-        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
-        try render_body(out, text, code, kinds, body_start, func_end);
-        try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
-        try wl(out, "  ret i64 %exit_code");
-        try wl(out, "}");
-        try nl(out);
-        return func_end + 1;
-    }
-    try w(out, "define i64 @kizu_run_user_");
-    try w(out, name);
-    try w(out, "(");
-    try render_param_list(out, param_base, param_count, 0);
-    try wl(out, ") {");
-    try wl(out, "entry:");
-    // A user function that prints needs the io handle the print writers reference;
-    // bind it at entry only when the body actually contains a PRINT record so a
-    // pure-arithmetic function carries no unused handle.
-    if try body_has_print(code, body_start, func_end) {
-        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
-    }
-    try render_body(out, text, code, kinds, body_start, func_end);
-    try wl(out, "}");
+    header: []u8,
+    word: []u8
+) -> !void {
+    try w(out, header);
+    try out.append_byte(cast<u8>(34));
+    try w(out, word);
+    try w(out, "\0A");
+    try out.append_byte(cast<u8>(34));
     try nl(out);
-    return func_end + 1;
-}
-
-// render_param_list emits 'i64 %v<param_base+i>' separated by commas.
-fn render_param_list(
-    out: &var std::string::String,
-    param_base: i64,
-    param_count: i64,
-    index: i64
-) -> !void {
-    if index >= param_count {
-        return;
-    }
-    if index > 0 {
-        try w(out, ", ");
-    }
-    try w(out, "i64 %v");
-    try wi(out, param_base + index);
-    let after = index + 1;
-    try render_param_list(out, param_base, param_count, after);
     return;
 }
 
-// tape_function_end returns the index of the FUNC_END record closing the function
-// whose body begins at index.
-fn tape_function_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
-    if index >= code.len() {
-        return code.len();
-    }
-    let op = try code.get(index);
-    if op == codegen::code_op_func_end() {
-        return index;
-    }
-    let next = try tape_record_end(code, index);
-    return try tape_function_end(code, next);
+// expect_fail_message is the runtime expectation-failure line
+// std::testing::expect traps with (matching the reference compiler's message).
+fn expect_fail_message() -> []u8 {
+    return "error: runtime error: expected condition to be true";
 }
 
-// body_has_print reports whether the records in [index, func_end) include a PRINT.
-fn body_has_print(
-    code: &std::array::Array<i64>,
-    index: i64,
-    func_end: i64
-) -> !bool {
-    if index >= func_end {
-        return false;
-    }
-    let op = try code.get(index);
-    if op == codegen::code_op_print() {
-        return true;
-    }
-    let next = try tape_record_end(code, index);
-    return try body_has_print(code, next, func_end);
-}
-
-// render_body renders the records in [index, func_end) of one function body.
-fn render_body(
-    out: &var std::string::String,
-    text: []u8,
-    code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
-    index: i64,
-    func_end: i64
-) -> !void {
-    if index >= func_end {
-        return;
-    }
-    let op = try code.get(index);
-    let next = try tape_record_end(code, index);
-    try render_one_instruction(out, text, code, kinds, op, index);
-    try render_body(out, text, code, kinds, next, func_end);
+// render_expect_fail_global emits the expectation-failure message global the
+// EXPECT fail blocks point their trap slice at (message plus a newline byte).
+fn render_expect_fail_global(out: &var std::string::String) -> !void {
+    let message = expect_fail_message();
+    let message_len = std::mem::len(message);
+    let payload_len = message_len + 1;
+    try w(out, "@.kizu.run.expect_fail = private unnamed_addr constant [");
+    try wi(out, payload_len);
+    try w(out, " x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try w(out, message);
+    try w(out, "\0A");
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
     return;
 }
 
@@ -197,9 +125,23 @@ fn nl(out: &var std::string::String) -> !void {
     return;
 }
 
-// wi appends a decimal i64.
+// wi appends a non-negative i64 as decimal digits. The renderer only emits
+// non-negative ids/spans/literals, so a most-significant-first recursive digit
+// walk (each frame appends one digit byte) avoids the std::fmt String builder,
+// which is outside the compiled-MIR subset this cluster lowers through.
 fn wi(out: &var std::string::String, value: i64) -> !void {
-    try std::fmt::append_i64(out, value);
+    // Emit the high-order digits first by recursing on value/10 when there is a
+    // carry, then append this frame's least-significant digit. Written without an
+    // early return so the body stays a single fall-through path the compiled-MIR
+    // void then-body lowering models (the renderer compiles into stage2).
+    if value >= 10 {
+        let high = value / 10;
+        try wi(out, high);
+    }
+    let tens = value / 10;
+    let digit = value - tens * 10;
+    let digit_byte = cast<u8>(48 + digit);
+    try out.append_byte(digit_byte);
     return;
 }
 
@@ -214,17 +156,22 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.slice.u8 = type { ptr, i64 }");
     try wl(out, "%kizu.owned = type { ptr }");
     try wl(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
-    try nl(out);
+    try wl(out, "%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
     try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
     try wl(out, "declare %kizu.owned @kizu_rt_io_blocking()");
     try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare i64 @kizu_rt_process_exit_code(i64)");
+    try wl(out, "declare void @kizu_rt_trap(%kizu.slice.u8)");
     try wl(out, "declare void @kizu_host_init(i32, ptr)");
     try nl(out);
     try wl(out, "@.kizu.run.newline = private unnamed_addr constant [1 x i8] [i8 10]");
+    try render_bool_print_global(out, "@.kizu.run.bool_true = private unnamed_addr constant [5 x i8] c", "true");
+    try render_bool_print_global(out, "@.kizu.run.bool_false = private unnamed_addr constant [6 x i8] c", "false");
+    try render_expect_fail_global(out);
     try nl(out);
     try render_i64_decimal_helper(out);
     return;
@@ -232,8 +179,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
 
 // render_i64_decimal_helper emits @kizu_run_i64_decimal: format an i64 into a
 // page-allocated 20-byte buffer and return the trimmed decimal slice. It backs the
-// PRINT path for i64 values, mirroring the runtime helper the old hosted i64 renderer
-// emitted.
+// PRINT path for i64 values.
 fn render_i64_decimal_helper(out: &var std::string::String) -> !void {
     try wl(out, "define %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %value) {");
     try wl(out, "entry:");
@@ -293,12 +239,10 @@ fn render_string_globals(
         return;
     }
     let op = try code.get(index);
+    let const_str = codegen::code_op_const_str();
     let next = try tape_record_end(code, index);
-    if op == codegen::code_op_const_str() {
-        let dst = try code.get(index + 1);
-        let payload_start = try code.get(index + 2);
-        let payload_end = try code.get(index + 3);
-        try render_one_string_global(out, text, dst, payload_start, payload_end);
+    if op == const_str {
+        try render_one_string_global(out, text, code, index);
     }
     try render_string_globals(out, text, code, next);
     return;
@@ -307,10 +251,12 @@ fn render_string_globals(
 fn render_one_string_global(
     out: &var std::string::String,
     text: []u8,
-    dst: i64,
-    payload_start: i64,
-    payload_end: i64
+    code: &std::array::Array<i64>,
+    index: i64
 ) -> !void {
+    let dst = try code.get(index + 1);
+    let payload_start = try code.get(index + 2);
+    let payload_end = try code.get(index + 3);
     let payload = text[payload_start..payload_end];
     let byte_len = payload_end - payload_start;
     try w(out, "@.kizu.run.s");
@@ -325,88 +271,1077 @@ fn render_one_string_global(
     return;
 }
 
+// render_functions walks the tape function by function: each FUNC_BEGIN..FUNC_END
+// span renders one LLVM define ('main' is the kizu_run_main entry, every other
+// function a kizu_run_user_<name> i64 define), then the walk resumes past FUNC_END.
+fn render_functions(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    if index >= code.len() {
+        return;
+    }
+    let after = try render_function_or_skip(out, text, code, kinds, index);
+    try render_functions(out, text, code, kinds, after);
+    return;
+}
+
+// render_function_or_skip renders the function whose FUNC_BEGIN is at index (or
+// skips a stray non-function record) and returns the next tape index to walk from.
+fn render_function_or_skip(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !i64 {
+    let op = try code.get(index);
+    let func_begin = codegen::code_op_func_begin();
+    if op != func_begin {
+        return try tape_record_end(code, index);
+    }
+    return try render_one_function(out, text, code, kinds, index);
+}
+
+// render_one_function renders the function whose FUNC_BEGIN is at func_index and
+// returns the tape index past its FUNC_END.
+fn render_one_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    func_index: i64
+) -> !i64 {
+    let name_start = try code.get(func_index + 1);
+    let name_end = try code.get(func_index + 2);
+    let param_count = try code.get(func_index + 3);
+    let ret_kind = try code.get(func_index + 4);
+    let param_base = try code.get(func_index + 5);
+    let name = text[name_start..name_end];
+    let body_start = func_index + 6;
+    let func_end = try tape_function_end(code, body_start);
+    // Each renderer returns the tape index past its FUNC_END so this stays a pair of
+    // single-statement early-return guards (the shape the compiled-MIR if-lowering
+    // models), keeping render_one_function free of a multi-statement then-body.
+    if std::mem::equal_bytes(name, "main") {
+        return try render_main_function(out, text, code, kinds, body_start, func_end);
+    }
+    return try render_user_function(out, text, code, kinds, name, param_base, param_count, ret_kind, body_start, func_end);
+}
+
+// The return ABI selects how returns and try-propagations render: MAIN is the
+// kizu_run_main i64 entry (a void return is exit 0, a try failure exits 1),
+// USER_I64 is an ordinary i64-returning user define, and USER_ERR_VOID is a
+// '%kizu.error.void'-returning user define (a void return is the ok union, a try
+// failure returns the propagated error).
+fn ret_abi_main() -> i64 {
+    return 0;
+}
+
+fn ret_abi_user_i64() -> i64 {
+    return 1;
+}
+
+fn ret_abi_user_err_void() -> i64 {
+    return 2;
+}
+
+fn ret_abi_user_err_i64() -> i64 {
+    return 3;
+}
+
+// user_ret_abi maps a user function's declared return kind (0 void, 1 i64, 2
+// error-union void, 3 error-union i64) to its render ABI.
+fn user_ret_abi(ret_kind: i64) -> i64 {
+    if ret_kind == 2 {
+        return ret_abi_user_err_void();
+    }
+    if ret_kind == 3 {
+        return ret_abi_user_err_i64();
+    }
+    return ret_abi_user_i64();
+}
+
+fn render_main_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    body_start: i64,
+    func_end: i64
+) -> !i64 {
+    try wl(out, "define i64 @kizu_run_main() {");
+    try wl(out, "entry:");
+    try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    try render_var_allocas(out, code, body_start, func_end);
+    let main_abi = ret_abi_main();
+    try render_body(out, text, code, kinds, body_start, func_end, main_abi);
+    // Every return record terminates its block and opens a fresh dead label, so
+    // the body always leaves one open block; the process-exit tail terminates it
+    // (as the live void fall-through or as dead code after a trailing return).
+    try render_main_tail(out);
+    try wl(out, "}");
+    try nl(out);
+    return func_end + 1;
+}
+
+// render_main_tail emits the process-exit terminator closing kizu_run_main's
+// final open block.
+fn render_main_tail(out: &var std::string::String) -> !void {
+    try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
+    try wl(out, "  ret i64 %exit_code");
+    return;
+}
+
+fn render_user_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    name: []u8,
+    param_base: i64,
+    param_count: i64,
+    ret_kind: i64,
+    body_start: i64,
+    func_end: i64
+) -> !i64 {
+    try render_user_define_head(out, name, ret_kind);
+    try w(out, "(");
+    try render_param_list(out, kinds, param_base, param_count, 0);
+    try wl(out, ") {");
+    try wl(out, "entry:");
+    // A user function that prints needs the io handle the print writers reference;
+    // bind it at entry only when the body actually contains a PRINT record.
+    let prints = try body_has_print(code, body_start, func_end);
+    if prints {
+        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    }
+    try render_var_allocas(out, code, body_start, func_end);
+    let abi = user_ret_abi(ret_kind);
+    try render_body(out, text, code, kinds, body_start, func_end, abi);
+    // Every return record terminates its block and opens a fresh dead label, so
+    // the body always leaves one open block; the ABI default terminator closes it
+    // (an i64 function returns 0, an error-union-void function the ok union).
+    try render_user_tail(out, abi);
+    try wl(out, "}");
+    try nl(out);
+    return func_end + 1;
+}
+
+// render_user_define_head writes the 'define <ret> @kizu_run_user_<name>' opener
+// whose return type follows the declared kind: '%kizu.error.void' for '!void',
+// '%kizu.error.i64' for '!i64', and 'i64' for every other user function.
+fn render_user_define_head(
+    out: &var std::string::String,
+    name: []u8,
+    ret_kind: i64
+) -> !void {
+    let is_err_void = ret_kind == 2;
+    let is_err_i64 = ret_kind == 3;
+    if is_err_void {
+        try w(out, "define %kizu.error.void @kizu_run_user_");
+    }
+    if is_err_i64 {
+        try w(out, "define %kizu.error.i64 @kizu_run_user_");
+    }
+    if !is_err_void {
+        if !is_err_i64 {
+            try w(out, "define i64 @kizu_run_user_");
+        }
+    }
+    try w(out, name);
+    return;
+}
+
+// render_user_tail closes a user function body's final open block with the
+// default terminator for its ABI.
+fn render_user_tail(out: &var std::string::String, abi: i64) -> !void {
+    let err_void = ret_abi_user_err_void();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == err_void {
+        try render_ret_err_ok(out);
+    }
+    if abi == err_i64 {
+        try wl(out, "  ret %kizu.error.i64 { i1 true, i64 0, %kizu.slice.u8 zeroinitializer }");
+    }
+    if abi != err_void {
+        if abi != err_i64 {
+            try wl(out, "  ret i64 0");
+        }
+    }
+    return;
+}
+
+// render_param_list emits '<type> %v<param_base+i>' separated by commas, typing
+// each parameter from its value kind (i1 for bool, i64 otherwise).
+fn render_param_list(
+    out: &var std::string::String,
+    kinds: &std::array::Array<i64>,
+    param_base: i64,
+    param_count: i64,
+    index: i64
+) -> !void {
+    if index >= param_count {
+        return;
+    }
+    if index > 0 {
+        try w(out, ", ");
+    }
+    // Bind the slot id so the wi() call takes a local rather than a 'base + index'
+    // binary arg (the call-arg lowering only models 'base + <int literal>').
+    let slot = param_base + index;
+    let kind = try kinds.get(slot);
+    try render_value_type(out, kind);
+    try w(out, " %v");
+    try wi(out, slot);
+    let after = index + 1;
+    try render_param_list(out, kinds, param_base, param_count, after);
+    return;
+}
+
+// render_value_type writes the LLVM scalar type for a tape value kind: bool
+// values are 'i1', every other scalar value the renderer types here is 'i64'.
+fn render_value_type(out: &var std::string::String, kind: i64) -> !void {
+    let kind_bool = codegen::code_kind_bool();
+    if kind == kind_bool {
+        try w(out, "i1");
+    }
+    if kind != kind_bool {
+        try w(out, "i64");
+    }
+    return;
+}
+
+// tape_function_end returns the index of the FUNC_END record closing the function
+// whose body begins at index.
+fn tape_function_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    // Bind the tape length once so the bounds guard returns a local rather than a
+    // 'return code.len();' the compiled-MIR if-then early-return path would treat as
+    // a free-function call.
+    let total = code.len();
+    if index >= total {
+        return total;
+    }
+    let op = try code.get(index);
+    let func_end = codegen::code_op_func_end();
+    if op == func_end {
+        return index;
+    }
+    let next = try tape_record_end(code, index);
+    return try tape_function_end(code, next);
+}
+
+// body_has_print reports whether the records in [index, func_end) include a PRINT.
+fn body_has_print(
+    code: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64
+) -> !bool {
+    if index >= func_end {
+        return false;
+    }
+    let op = try code.get(index);
+    let print_op = codegen::code_op_print();
+    if op == print_op {
+        return true;
+    }
+    let next = try tape_record_end(code, index);
+    return try body_has_print(code, next, func_end);
+}
+
+// render_var_allocas hoists one 'alloca i64' to the function entry for every var
+// slot the body declares: a VAR_DECL slot (a 'var' local) or a FOR_BEGIN slot (a
+// for-loop induction var). Hoisting all slots to entry keeps every VAR_LOAD/STORE
+// and the for latch dominated by the alloca regardless of loop nesting.
+fn render_var_allocas(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64
+) -> !void {
+    if index >= func_end {
+        return;
+    }
+    let op = try code.get(index);
+    let var_decl = codegen::code_op_var_decl();
+    if op == var_decl {
+        let decl_slot = try code.get(index + 1);
+        try render_one_alloca(out, decl_slot);
+    }
+    let for_begin = codegen::code_op_for_begin();
+    if op == for_begin {
+        let for_slot = try code.get(index + 2);
+        try render_one_alloca(out, for_slot);
+    }
+    let sc_begin = codegen::code_op_sc_begin();
+    if op == sc_begin {
+        let sc_slot = try code.get(index + 1);
+        try render_one_sc_alloca(out, sc_slot);
+    }
+    let next = try tape_record_end(code, index);
+    try render_var_allocas(out, code, next, func_end);
+    return;
+}
+
+// render_one_alloca emits '%slot<id> = alloca i64' for one var slot.
+fn render_one_alloca(out: &var std::string::String, slot: i64) -> !void {
+    try w(out, "  %slot");
+    try wi(out, slot);
+    try wl(out, " = alloca i64");
+    return;
+}
+
+// render_one_sc_alloca emits '%sc<id> = alloca i1' for one short-circuit slot
+// (named by its SC_BEGIN tape index and hoisted to the function entry).
+fn render_one_sc_alloca(out: &var std::string::String, slot: i64) -> !void {
+    try w(out, "  %sc");
+    try wi(out, slot);
+    try wl(out, " = alloca i1");
+    return;
+}
+
+// render_body renders the records in [index, func_end) of one function body.
+fn render_body(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    func_end: i64,
+    abi: i64
+) -> !void {
+    if index >= func_end {
+        return;
+    }
+    let next = try tape_record_end(code, index);
+    try render_one_instruction(out, text, code, kinds, index, abi);
+    try render_body(out, text, code, kinds, next, func_end, abi);
+    return;
+}
+
 fn render_one_instruction(
     out: &var std::string::String,
     text: []u8,
     code: &std::array::Array<i64>,
     kinds: &std::array::Array<i64>,
-    op: i64,
-    index: i64
+    index: i64,
+    abi: i64
 ) -> !void {
-    if op == codegen::code_op_const_int() {
-        let dst = try code.get(index + 1);
-        let literal = try code.get(index + 2);
-        try w(out, "  %v");
-        try wi(out, dst);
-        try w(out, " = add i64 0, ");
-        try wi(out, literal);
-        try nl(out);
-        return;
+    // The opcodes are mutually exclusive, so each writer runs under its own void
+    // then-body guard and the function falls through to a single return -- the shape
+    // both the Go reference compiler and the compiled-MIR void if-lowering accept (a
+    // 'return try <void call>;' identity tail is rejected by the former).
+    let op = try code.get(index);
+    let const_int = codegen::code_op_const_int();
+    if op == const_int {
+        try render_const_int(out, code, index);
     }
-    if op == codegen::code_op_binary() {
+    let const_bool = codegen::code_op_const_bool();
+    if op == const_bool {
+        try render_const_bool(out, code, index);
+    }
+    let not_op = codegen::code_op_not();
+    if op == not_op {
+        try render_not(out, code, index);
+    }
+    let binary = codegen::code_op_binary();
+    if op == binary {
         try render_binary(out, code, index);
-        return;
     }
-    if op == codegen::code_op_print() {
-        try render_print(out, code, kinds, index);
-        return;
+    let sc_begin = codegen::code_op_sc_begin();
+    if op == sc_begin {
+        try render_sc_begin(out, code, index);
     }
-    if op == codegen::code_op_call() {
-        try render_call(out, text, code, index);
-        return;
+    let sc_end = codegen::code_op_sc_end();
+    if op == sc_end {
+        try render_sc_end(out, code, index);
     }
-    if op == codegen::code_op_ret_value() {
-        let value_id = try code.get(index + 1);
-        try w(out, "  ret i64 %v");
-        try wi(out, value_id);
-        try nl(out);
-        return;
+    let print_op = codegen::code_op_print();
+    if op == print_op {
+        try render_print(out, code, index);
+    }
+    let call = codegen::code_op_call();
+    if op == call {
+        try render_call(out, text, code, kinds, index);
+    }
+    let try_call = codegen::code_op_try_call();
+    if op == try_call {
+        try render_try_call(out, text, code, kinds, index, abi);
+    }
+    let try_call_i64 = codegen::code_op_try_call_i64();
+    if op == try_call_i64 {
+        try render_try_call_i64(out, text, code, kinds, index, abi);
+    }
+    let expect_op = codegen::code_op_expect();
+    if op == expect_op {
+        try render_expect(out, code, index);
+    }
+    let ret_value = codegen::code_op_ret_value();
+    if op == ret_value {
+        try render_ret_value(out, code, index, abi);
+    }
+    let ret_void = codegen::code_op_ret_void();
+    if op == ret_void {
+        try render_ret_void(out, index, abi);
+    }
+    let ret_err_fail = codegen::code_op_ret_err_fail();
+    if op == ret_err_fail {
+        try render_ret_err_fail(out, code, index, abi);
+    }
+    let io_blocking = codegen::code_op_io_blocking();
+    if op == io_blocking {
+        try render_io_blocking(out, code, index);
+    }
+    let try_fs_read = codegen::code_op_try_fs_read();
+    if op == try_fs_read {
+        try render_try_fs_read(out, code, index, abi);
+    }
+    let if_begin = codegen::code_op_if_begin();
+    if op == if_begin {
+        try render_if_begin(out, code, index);
+    }
+    let if_else = codegen::code_op_if_else();
+    if op == if_else {
+        try render_if_else(out, code, index);
+    }
+    let if_end = codegen::code_op_if_end();
+    if op == if_end {
+        try render_if_end(out, code, index);
+    }
+    let var_decl = codegen::code_op_var_decl();
+    if op == var_decl {
+        try render_var_decl(out, code, index);
+    }
+    let var_load = codegen::code_op_var_load();
+    if op == var_load {
+        try render_var_load(out, code, index);
+    }
+    let var_store = codegen::code_op_var_store();
+    if op == var_store {
+        try render_var_store(out, code, index);
+    }
+    let while_begin = codegen::code_op_while_begin();
+    if op == while_begin {
+        try render_while_begin(out, code, index);
+    }
+    let while_cond = codegen::code_op_while_cond();
+    if op == while_cond {
+        try render_while_cond(out, code, index);
+    }
+    let while_end = codegen::code_op_while_end();
+    if op == while_end {
+        try render_while_end(out, code, index);
+    }
+    let for_begin = codegen::code_op_for_begin();
+    if op == for_begin {
+        try render_for_begin(out, code, index);
+    }
+    let for_end = codegen::code_op_for_end();
+    if op == for_end {
+        try render_for_end(out, code, index);
+    }
+    let break_op = codegen::code_op_break();
+    if op == break_op {
+        try render_break(out, code, index);
+    }
+    let continue_op = codegen::code_op_continue();
+    if op == continue_op {
+        try render_continue(out, code, index);
     }
     return;
 }
 
-// render_call emits '%v<dst> = call i64 @kizu_run_user_<callee>(i64 %v<arg>, ...)'.
-fn render_call(
+// render_var_decl stores a var local's init value into its alloca slot; the
+// '%slot<id>' alloca is hoisted to the function entry by render_var_allocas.
+fn render_var_decl(
     out: &var std::string::String,
-    text: []u8,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let slot = try code.get(index + 1);
+    let init_value = try code.get(index + 2);
+    try w(out, "  store i64 %v");
+    try wi(out, init_value);
+    try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+// render_var_load reads a var local's alloca slot into a fresh SSA value.
+fn render_var_load(
+    out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64
 ) -> !void {
     let dst = try code.get(index + 1);
-    let callee_start = try code.get(index + 2);
-    let callee_end = try code.get(index + 3);
-    let arg_count = try code.get(index + 4);
-    let callee = text[callee_start..callee_end];
+    let slot = try code.get(index + 2);
     try w(out, "  %v");
     try wi(out, dst);
-    try w(out, " = call i64 @kizu_run_user_");
-    try w(out, callee);
-    try w(out, "(");
-    try render_call_args(out, code, index, arg_count, 0);
-    try wl(out, ")");
+    try w(out, " = load i64, ptr %slot");
+    try wi(out, slot);
+    try nl(out);
     return;
 }
 
-// render_call_args emits the 'i64 %v<arg>' operands read from the CALL record's
-// trailing arg-id list (which begins at index + 5).
-fn render_call_args(
+// render_var_store writes an SSA value back into a var local's alloca slot.
+fn render_var_store(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let slot = try code.get(index + 1);
+    let value_id = try code.get(index + 2);
+    try w(out, "  store i64 %v");
+    try wi(out, value_id);
+    try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+// render_while_begin closes the current block into the condition block and opens
+// it; the condition expression records follow and produce the i1 WHILE_COND tests.
+fn render_while_begin(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    try w(out, "  br label %wcond_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "wcond_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_while_cond branches on the lowered i1 condition into the loop body or
+// past the loop, then opens the body block.
+fn render_while_cond(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let cond = try code.get(index + 1);
+    let begin = try code.get(index + 2);
+    try w(out, "  br i1 %v");
+    try wi(out, cond);
+    try w(out, ", label %wbody_");
+    try wi(out, begin);
+    try w(out, ", label %wend_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "wbody_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_while_end closes the body back to the condition block and opens the exit
+// block break targets.
+fn render_while_end(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    try w(out, "  br label %wcond_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "wend_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_for_begin seeds the induction slot from the start value and opens the
+// bounded condition block: it loads the slot and compares it against the end
+// value, branching into the body or past the loop.
+fn render_for_begin(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let slot = try code.get(index + 2);
+    let start_value = try code.get(index + 3);
+    let end_value = try code.get(index + 4);
+    let load_value = try code.get(index + 5);
+    let cmp_value = try code.get(index + 6);
+    try w(out, "  store i64 %v");
+    try wi(out, start_value);
+    try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    try w(out, "  br label %fcond_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "fcond_");
+    try wi(out, begin);
+    try wl(out, ":");
+    try w(out, "  %v");
+    try wi(out, load_value);
+    try w(out, " = load i64, ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    try w(out, "  %v");
+    try wi(out, cmp_value);
+    try w(out, " = icmp slt i64 %v");
+    try wi(out, load_value);
+    try w(out, ", %v");
+    try wi(out, end_value);
+    try nl(out);
+    try w(out, "  br i1 %v");
+    try wi(out, cmp_value);
+    try w(out, ", label %fbody_");
+    try wi(out, begin);
+    try w(out, ", label %fend_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "fbody_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_for_end emits the increment latch (the continue target) and opens the
+// exit block (the break target): the body falls through to the latch, which loads
+// the slot, adds one, stores it back, and branches to the condition block.
+fn render_for_end(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let slot = try code.get(index + 2);
+    let load_value = try code.get(index + 3);
+    let add_value = try code.get(index + 4);
+    try w(out, "  br label %flatch_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "flatch_");
+    try wi(out, begin);
+    try wl(out, ":");
+    try w(out, "  %v");
+    try wi(out, load_value);
+    try w(out, " = load i64, ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    try w(out, "  %v");
+    try wi(out, add_value);
+    try w(out, " = add i64 %v");
+    try wi(out, load_value);
+    try wl(out, ", 1");
+    try w(out, "  store i64 %v");
+    try wi(out, add_value);
+    try w(out, ", ptr %slot");
+    try wi(out, slot);
+    try nl(out);
+    try w(out, "  br label %fcond_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "fend_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_break branches to the enclosing loop's exit label and opens a fresh dead
+// block so any records the lowering emitted after the break stay well-formed LLVM.
+fn render_break(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    let exit_prefix = loop_exit_label_prefix(kind);
+    try w(out, "  br label %");
+    try w(out, exit_prefix);
+    try wi(out, begin);
+    try nl(out);
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_continue branches to the enclosing loop's continue label (the while
+// condition block or the for latch) and opens a fresh dead block.
+fn render_continue(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    let cont_prefix = loop_continue_label_prefix(kind);
+    try w(out, "  br label %");
+    try w(out, cont_prefix);
+    try wi(out, begin);
+    try nl(out);
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_dead_label opens a uniquely named block after a break/continue terminator
+// so the records following it in the same statement list remain in a labeled block.
+fn render_dead_label(
+    out: &var std::string::String,
+    index: i64
+) -> !void {
+    try w(out, "dead_");
+    try wi(out, index);
+    try wl(out, ":");
+    return;
+}
+
+// loop_exit_label_prefix maps a loop kind to its break-target label prefix.
+fn loop_exit_label_prefix(kind: i64) -> []u8 {
+    let kind_for = codegen::code_loop_kind_for();
+    if kind == kind_for {
+        return "fend_";
+    }
+    return "wend_";
+}
+
+// loop_continue_label_prefix maps a loop kind to its continue-target label prefix
+// (for loops continue at their increment latch, while loops at the condition).
+fn loop_continue_label_prefix(kind: i64) -> []u8 {
+    let kind_for = codegen::code_loop_kind_for();
+    if kind == kind_for {
+        return "flatch_";
+    }
+    return "wcond_";
+}
+
+// render_if_begin emits the conditional branch for an IF_BEGIN record: it tests the
+// i1 condition value and branches to the then/else labels keyed by this record's
+// own tape index, then opens the then label.
+fn render_if_begin(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let cond = try code.get(index + 1);
+    try w(out, "  br i1 %v");
+    try wi(out, cond);
+    try w(out, ", label %then_");
+    try wi(out, index);
+    try w(out, ", label %else_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "then_");
+    try wi(out, index);
+    try wl(out, ":");
+    return;
+}
+
+// render_if_else closes the then block (branch to the end label) and opens the else
+// label; the IF_ELSE record carries its IF_BEGIN tape index so the labels match.
+fn render_if_else(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    try w(out, "  br label %end_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "else_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_if_end closes the else block (branch to the end label) and opens the end
+// label; the IF_END record carries its IF_BEGIN tape index so the labels match.
+fn render_if_end(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    try w(out, "  br label %end_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "end_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+fn render_const_int(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let literal = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = add i64 0, ");
+    try wi(out, literal);
+    try nl(out);
+    return;
+}
+
+// render_const_bool materializes a bool literal as an i1 SSA value: the tape
+// literal is 1 (true) or 0 (false), compared against zero.
+fn render_const_bool(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let literal = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = icmp ne i64 ");
+    try wi(out, literal);
+    try wl(out, ", 0");
+    return;
+}
+
+// render_not emits the logical negation of an i1 operand ('xor i1 <op>, true').
+fn render_not(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let operand = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = xor i1 %v");
+    try wi(out, operand);
+    try wl(out, ", true");
+    return;
+}
+
+// render_sc_begin opens a short-circuit 'and'/'or': store the left i1 into the
+// record's slot, then branch into the right-operand block only when the left does
+// not already decide the result (an 'and' skips on false, an 'or' skips on true).
+fn render_sc_begin(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let lhs = try code.get(index + 2);
+    let is_or = try code.get(index + 3);
+    try w(out, "  store i1 %v");
+    try wi(out, lhs);
+    try w(out, ", ptr %sc");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "  br i1 %v");
+    try wi(out, lhs);
+    if is_or == 1 {
+        try render_sc_branch(out, begin, "scend_", "scrhs_");
+    }
+    if is_or != 1 {
+        try render_sc_branch(out, begin, "scrhs_", "scend_");
+    }
+    try w(out, "scrhs_");
+    try wi(out, begin);
+    try wl(out, ":");
+    return;
+}
+
+// render_sc_branch writes the ', label %<a><begin>, label %<b><begin>' tail of the
+// SC_BEGIN conditional branch.
+fn render_sc_branch(
+    out: &var std::string::String,
+    begin: i64,
+    true_prefix: []u8,
+    false_prefix: []u8
+) -> !void {
+    try w(out, ", label %");
+    try w(out, true_prefix);
+    try wi(out, begin);
+    try w(out, ", label %");
+    try w(out, false_prefix);
+    try wi(out, begin);
+    try nl(out);
+    return;
+}
+
+// render_sc_end closes a short-circuit 'and'/'or': store the right i1 into the
+// slot, fall into the join block, and load the slot into the result value.
+fn render_sc_end(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let begin = try code.get(index + 1);
+    let rhs = try code.get(index + 2);
+    let dst = try code.get(index + 3);
+    try w(out, "  store i1 %v");
+    try wi(out, rhs);
+    try w(out, ", ptr %sc");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "  br label %scend_");
+    try wi(out, begin);
+    try nl(out);
+    try w(out, "scend_");
+    try wi(out, begin);
+    try wl(out, ":");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load i1, ptr %sc");
+    try wi(out, begin);
+    try nl(out);
+    return;
+}
+
+// render_ret_value emits the value-return terminator for the surrounding ABI,
+// then opens a fresh dead block (like break/continue do) so a return in a nested
+// block leaves the structural records that follow it in a labeled block. The
+// kizu_run_main entry discards its return value (a run process exits 0 on
+// success, matching the reference compiler); an error-union-i64 function wraps
+// the value into its ok union.
+fn render_ret_value(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64,
-    arg_count: i64,
-    arg_index: i64
+    abi: i64
 ) -> !void {
-    if arg_index >= arg_count {
-        return;
+    let value_id = try code.get(index + 1);
+    let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == main_abi {
+        try wl(out, "  ret i64 0");
     }
-    if arg_index > 0 {
-        try w(out, ", ");
+    if abi == err_i64 {
+        try render_ret_value_err_i64(out, index, value_id);
     }
-    let arg_value = try code.get(index + 5 + arg_index);
-    try w(out, "i64 %v");
-    try wi(out, arg_value);
-    let after = arg_index + 1;
-    try render_call_args(out, code, index, arg_count, after);
+    if abi != main_abi {
+        if abi != err_i64 {
+            try render_ret_value_plain(out, value_id);
+        }
+    }
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_ret_value_plain emits the ordinary i64 return terminator.
+fn render_ret_value_plain(out: &var std::string::String, value_id: i64) -> !void {
+    try w(out, "  ret i64 %v");
+    try wi(out, value_id);
+    try nl(out);
+    return;
+}
+
+// render_ret_value_err_i64 wraps an i64 return value into the ok
+// '%kizu.error.i64' union through an index-suffixed temp.
+fn render_ret_value_err_i64(
+    out: &var std::string::String,
+    index: i64,
+    value_id: i64
+) -> !void {
+    try w(out, "  %rv");
+    try wi(out, index);
+    try w(out, " = insertvalue %kizu.error.i64 { i1 true, i64 0, %kizu.slice.u8 zeroinitializer }, i64 %v");
+    try wi(out, value_id);
+    try wl(out, ", 1");
+    try w(out, "  ret %kizu.error.i64 %rv");
+    try wi(out, index);
+    try nl(out);
+    return;
+}
+
+// render_ret_void emits the terminator for a 'return;' statement, then opens a
+// fresh dead block. An i64 function (and the kizu_run_main entry, which maps it
+// to process exit 0) yields 'ret i64 0'; an error-union-void function yields the
+// ok union.
+fn render_ret_void(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    let err_void = ret_abi_user_err_void();
+    if abi == err_void {
+        try render_ret_err_ok(out);
+    }
+    if abi != err_void {
+        try wl(out, "  ret i64 0");
+    }
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_ret_err_ok returns the success '%kizu.error.void' union (ok flag true,
+// empty message slice) as an inline aggregate constant so no SSA temp is needed.
+fn render_ret_err_ok(out: &var std::string::String) -> !void {
+    try wl(out, "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    return;
+}
+
+// render_ret_err_fail returns the failure '%kizu.error.void' union for a
+// 'return error("msg")': the ok flag is false and the message slice points at the
+// message string global the CONST_STR record emitted ('@.kizu.run.s<value_id>').
+fn render_ret_err_fail(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let value_id = try code.get(index + 1);
+    let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == main_abi {
+        try render_ret_err_fail_exit(out, index);
+    }
+    if abi == err_i64 {
+        try render_ret_err_fail_i64(out, code, value_id);
+    }
+    if abi != main_abi {
+        if abi != err_i64 {
+            try render_ret_err_fail_void(out, code, value_id);
+        }
+    }
+    try render_dead_label(out, index);
+    return;
+}
+
+// render_ret_err_fail_exit maps a 'return error("msg")' in kizu_run_main to the
+// process-exit-1 path.
+fn render_ret_err_fail_exit(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %ef");
+    try wi(out, index);
+    try wl(out, "_exit = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try w(out, "  ret i64 %ef");
+    try wi(out, index);
+    try wl(out, "_exit");
+    return;
+}
+
+fn render_ret_err_fail_void(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64
+) -> !void {
+    let byte_len = try tape_string_length(code, value_id, 0);
+    try w(out, "  ret %kizu.error.void { i1 false, %kizu.slice.u8 { ptr @.kizu.run.s");
+    try wi(out, value_id);
+    try w(out, ", i64 ");
+    try wi(out, byte_len);
+    try wl(out, " } }");
+    return;
+}
+
+fn render_ret_err_fail_i64(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64
+) -> !void {
+    let byte_len = try tape_string_length(code, value_id, 0);
+    try w(out, "  ret %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 { ptr @.kizu.run.s");
+    try wi(out, value_id);
+    try w(out, ", i64 ");
+    try wi(out, byte_len);
+    try wl(out, " } }");
     return;
 }
 
@@ -419,10 +1354,52 @@ fn render_binary(
     let kind = try code.get(index + 2);
     let left = try code.get(index + 3);
     let right = try code.get(index + 4);
+    // A comparison kind (5..10) lowers to an i1 'icmp <pred>'; the arithmetic
+    // kinds (including 11 = srem) lower to their i64 mnemonic. Both branches are
+    // void then-bodies falling through to a single return (the shape the
+    // compiled-MIR if-lowering models).
+    let is_compare = kind >= 5 and kind <= 10;
+    if is_compare {
+        try render_binary_compare(out, dst, kind, left, right);
+    }
+    if !is_compare {
+        try render_binary_arith(out, dst, kind, left, right);
+    }
+    return;
+}
+
+fn render_binary_arith(
+    out: &var std::string::String,
+    dst: i64,
+    kind: i64,
+    left: i64,
+    right: i64
+) -> !void {
     try w(out, "  %v");
     try wi(out, dst);
     try w(out, " = ");
-    try w(out, binary_op_mnemonic(kind));
+    let mnemonic = binary_op_mnemonic(kind);
+    try w(out, mnemonic);
+    try w(out, " i64 %v");
+    try wi(out, left);
+    try w(out, ", %v");
+    try wi(out, right);
+    try nl(out);
+    return;
+}
+
+fn render_binary_compare(
+    out: &var std::string::String,
+    dst: i64,
+    kind: i64,
+    left: i64,
+    right: i64
+) -> !void {
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = icmp ");
+    let predicate = binary_compare_predicate(kind);
+    try w(out, predicate);
     try w(out, " i64 %v");
     try wi(out, left);
     try w(out, ", %v");
@@ -441,7 +1418,479 @@ fn binary_op_mnemonic(kind: i64) -> []u8 {
     if kind == 3 {
         return "mul";
     }
+    if kind == 11 {
+        return "srem";
+    }
     return "sdiv";
+}
+
+// binary_compare_predicate maps a comparison binary kind (5..10) to its signed
+// LLVM icmp predicate.
+fn binary_compare_predicate(kind: i64) -> []u8 {
+    if kind == 5 {
+        return "eq";
+    }
+    if kind == 6 {
+        return "ne";
+    }
+    if kind == 7 {
+        return "slt";
+    }
+    if kind == 8 {
+        return "sle";
+    }
+    if kind == 9 {
+        return "sgt";
+    }
+    return "sge";
+}
+
+// render_call emits '%v<dst> = call i64 @kizu_run_user_<callee>(<type> %v<arg>, ...)'.
+fn render_call(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let callee_start = try code.get(index + 2);
+    let callee_end = try code.get(index + 3);
+    let arg_count = try code.get(index + 4);
+    let callee = text[callee_start..callee_end];
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call i64 @kizu_run_user_");
+    try w(out, callee);
+    try w(out, "(");
+    try render_call_args(out, code, kinds, index, arg_count, 0);
+    try wl(out, ")");
+    return;
+}
+
+// render_call_args emits the '<type> %v<arg>' operands read from the CALL record's
+// trailing arg-id list (which begins at index + 5), typing each argument from its
+// value kind.
+fn render_call_args(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    arg_count: i64,
+    arg_index: i64
+) -> !void {
+    if arg_index >= arg_count {
+        return;
+    }
+    if arg_index > 0 {
+        try w(out, ", ");
+    }
+    let arg_value = try code.get(index + 5 + arg_index);
+    let arg_kind = try kinds.get(arg_value);
+    try render_value_type(out, arg_kind);
+    try w(out, " %v");
+    try wi(out, arg_value);
+    let after = arg_index + 1;
+    try render_call_args(out, code, kinds, index, arg_count, after);
+    return;
+}
+
+// render_try_call emits a 'try <callee>()' of an error-union-void function: call
+// the '%kizu.error.void' callee, extract its ok flag, and branch into a fail block
+// that propagates the error or a cont block that resumes the body. SSA temps and
+// labels are suffixed with the record's tape index so they stay unique.
+fn render_try_call(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let callee_start = try code.get(index + 1);
+    let callee_end = try code.get(index + 2);
+    let arg_count = try code.get(index + 3);
+    let callee = text[callee_start..callee_end];
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_run_user_");
+    try w(out, callee);
+    try w(out, "(");
+    try render_try_call_args(out, code, kinds, index, arg_count, 0);
+    try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    return;
+}
+
+// render_try_call_args emits the '<type> %v<arg>' operands read from the TRY_CALL
+// record's trailing arg-id list (which begins at index + 4: TRY_CALL has no
+// leading result value id), typing each argument from its value kind.
+fn render_try_call_args(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    arg_count: i64,
+    arg_index: i64
+) -> !void {
+    if arg_index >= arg_count {
+        return;
+    }
+    if arg_index > 0 {
+        try w(out, ", ");
+    }
+    let arg_value = try code.get(index + 4 + arg_index);
+    let arg_kind = try kinds.get(arg_value);
+    try render_value_type(out, arg_kind);
+    try w(out, " %v");
+    try wi(out, arg_value);
+    let after = arg_index + 1;
+    try render_try_call_args(out, code, kinds, index, arg_count, after);
+    return;
+}
+
+// render_try_call_i64 emits a 'try <callee>(...)' of an error-union-i64 function:
+// call the '%kizu.error.i64' callee, extract its ok flag, and branch into a fail
+// block that propagates the error by the surrounding ABI or a cont block that
+// extracts the i64 success value into the result. SSA temps and labels are
+// suffixed with the record's tape index so they stay unique.
+fn render_try_call_i64(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let callee_start = try code.get(index + 2);
+    let callee_end = try code.get(index + 3);
+    let arg_count = try code.get(index + 4);
+    let callee = text[callee_start..callee_end];
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.i64 @kizu_run_user_");
+    try w(out, callee);
+    try w(out, "(");
+    try render_call_args(out, code, kinds, index, arg_count, 0);
+    try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_i64_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 1");
+    return;
+}
+
+// render_try_i64_propagate emits the fail-block terminator for a try over an
+// error-union-i64 callee: kizu_run_main exits 1, an error-union-void function
+// re-wraps the message into its own union, and an error-union-i64 function
+// propagates a fresh failed union carrying the message.
+fn render_try_i64_propagate(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == main_abi {
+        try render_try_propagate_exit(out, index);
+    }
+    if abi == err_i64 {
+        try render_try_i64_propagate_err_i64(out, index);
+    }
+    if abi != main_abi {
+        if abi != err_i64 {
+            try render_try_i64_propagate_err_void(out, index);
+        }
+    }
+    return;
+}
+
+// render_try_i64_propagate_err_i64 forwards a failed error-union-i64 try as the
+// surrounding error-union-i64 function's own failed union.
+fn render_try_i64_propagate_err_i64(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pv = insertvalue %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_pm, 2");
+    try w(out, "  ret %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, "_pv");
+    return;
+}
+
+// render_try_i64_propagate_err_void re-wraps a failed error-union-i64 try into the
+// surrounding error-union-void function's own union.
+fn render_try_i64_propagate_err_void(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pv = insertvalue %kizu.error.void { i1 false, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_pm, 1");
+    try w(out, "  ret %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, "_pv");
+    return;
+}
+
+// render_expect branches on the lowered i1 expectation: the fail block traps the
+// process with the runtime expectation message (stderr + exit 1, noreturn), and
+// the cont block resumes the body. Labels are suffixed with the record's tape
+// index so they stay unique.
+fn render_expect(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let cond = try code.get(index + 1);
+    let message_len = std::mem::len(expect_fail_message());
+    let payload_len = message_len + 1;
+    try w(out, "  br i1 %v");
+    try wi(out, cond);
+    try w(out, ", label %ex");
+    try wi(out, index);
+    try w(out, "_cont, label %ex");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "ex");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %ex");
+    try wi(out, index);
+    try wl(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.expect_fail, 0");
+    try w(out, "  %ex");
+    try wi(out, index);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %ex");
+    try wi(out, index);
+    try w(out, "_base, i64 ");
+    try wi(out, payload_len);
+    try wl(out, ", 1");
+    try w(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %ex");
+    try wi(out, index);
+    try wl(out, "_slice)");
+    try wl(out, "  unreachable");
+    try w(out, "ex");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    return;
+}
+
+// render_try_propagate emits the fail-block terminator for a try: the kizu_run_main
+// entry exits the process with code 1, every other (error-union-void) function
+// returns the propagated error union.
+fn render_try_propagate(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    let main_abi = ret_abi_main();
+    if abi == main_abi {
+        try render_try_propagate_exit(out, index);
+    }
+    if abi != main_abi {
+        try render_try_propagate_error(out, index, abi);
+    }
+    return;
+}
+
+fn render_try_propagate_exit(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try wl(out, "_exit = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try w(out, "  ret i64 %tc");
+    try wi(out, index);
+    try wl(out, "_exit");
+    return;
+}
+
+fn render_try_propagate_error(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == err_i64 {
+        try render_try_propagate_error_i64(out, index);
+    }
+    if abi != err_i64 {
+        try render_try_propagate_error_void(out, index);
+    }
+    return;
+}
+
+// render_try_propagate_error_i64 re-wraps a failed '%kizu.error.void' try into the
+// surrounding error-union-i64 function's own union.
+fn render_try_propagate_error_i64(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_emsg = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_eu = insertvalue %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_emsg, 2");
+    try w(out, "  ret %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, "_eu");
+    return;
+}
+
+fn render_try_propagate_error_void(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  ret %kizu.error.void %tc");
+    try wi(out, index);
+    try nl(out);
+    return;
+}
+
+// render_io_blocking emits 'std::io::blocking()': a runtime io handle into the
+// result value (a '%kizu.owned' SSA value).
+fn render_io_blocking(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try wl(out, " = call %kizu.owned @kizu_rt_io_blocking()");
+    return;
+}
+
+// render_try_fs_read emits 'try std::fs::read_file(io, path)': build the path slice
+// from its CONST_STR global, call the runtime read, extract the ok flag, and branch
+// into a fail block that propagates the error or a cont block that extracts the read
+// bytes slice into the result value. SSA temps and labels are suffixed with the
+// result value id so they stay unique.
+fn render_try_fs_read(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let io_value = try code.get(index + 2);
+    let path_value = try code.get(index + 3);
+    let path_len = try tape_string_length(code, path_value, 0);
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, "_pathbase = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.s");
+    try wi(out, path_value);
+    try wl(out, ", 0");
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, "_path = insertvalue %kizu.slice.u8 %fr");
+    try wi(out, dst);
+    try w(out, "_pathbase, i64 ");
+    try wi(out, path_len);
+    try wl(out, ", 1");
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %v");
+    try wi(out, io_value);
+    try w(out, ", %kizu.slice.u8 %fr");
+    try wi(out, dst);
+    try wl(out, "_path)");
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %fr");
+    try wi(out, dst);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %fr");
+    try wi(out, dst);
+    try w(out, "_ok, label %fr");
+    try wi(out, dst);
+    try w(out, "_cont, label %fr");
+    try wi(out, dst);
+    try wl(out, "_fail");
+    try w(out, "fr");
+    try wi(out, dst);
+    try wl(out, "_fail:");
+    try render_fs_read_propagate(out, dst, abi);
+    try w(out, "fr");
+    try wi(out, dst);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.slice.u8 %fr");
+    try wi(out, dst);
+    try wl(out, ", 1");
+    return;
+}
+
+// render_fs_read_propagate emits the fail-block terminator for a try fs read: the
+// kizu_run_main entry exits the process with code 1, every other (error-union-void)
+// function returns a failed error union.
+fn render_fs_read_propagate(out: &var std::string::String, dst: i64, abi: i64) -> !void {
+    let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == main_abi {
+        try render_fs_read_propagate_exit(out, dst);
+    }
+    if abi == err_i64 {
+        try wl(out, "  ret %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }");
+    }
+    if abi != main_abi {
+        if abi != err_i64 {
+            try render_ret_err_void_fail(out);
+        }
+    }
+    return;
+}
+
+fn render_fs_read_propagate_exit(out: &var std::string::String, dst: i64) -> !void {
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try wl(out, "_exit = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try w(out, "  ret i64 %fr");
+    try wi(out, dst);
+    try wl(out, "_exit");
+    return;
+}
+
+// render_ret_err_void_fail returns a failed '%kizu.error.void' union with an empty
+// message slice as an inline aggregate constant (no SSA temp needed).
+fn render_ret_err_void_fail(out: &var std::string::String) -> !void {
+    try wl(out, "  ret %kizu.error.void { i1 false, %kizu.slice.u8 zeroinitializer }");
+    return;
 }
 
 // render_print emits the write for a print(<value>) record then the trailing
@@ -450,17 +1899,105 @@ fn binary_op_mnemonic(kind: i64) -> []u8 {
 fn render_print(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
     index: i64
 ) -> !void {
     let value_id = try code.get(index + 1);
     let value_kind = try code.get(index + 2);
-    if value_kind == codegen::code_kind_str() {
-        let byte_len = try tape_string_length(code, value_id, 0);
-        try render_print_string(out, value_id, byte_len);
-        try render_print_newline(out, value_id);
-        return;
+    let kind_str = codegen::code_kind_str();
+    let kind_slice = codegen::code_kind_slice();
+    let kind_bool = codegen::code_kind_bool();
+    // Dispatch on the recorded value kind through mutually exclusive void then-body
+    // guards (each leaf writer also emits the trailing newline) and fall through to a
+    // single return -- the shape both the Go reference compiler and the compiled-MIR
+    // void if-lowering accept. A str value writes its global slice, a slice value
+    // writes its SSA slice directly, a bool selects its word payload, and any
+    // other value formats as i64.
+    let is_string = value_kind == kind_str;
+    let is_slice = value_kind == kind_slice;
+    let is_bool = value_kind == kind_bool;
+    let not_str_slice = !is_string and !is_slice;
+    let is_i64 = not_str_slice and !is_bool;
+    if is_string {
+        try render_print_string_line(out, code, value_id);
     }
+    if is_slice {
+        try render_print_slice_line(out, value_id);
+    }
+    if is_bool {
+        try render_print_bool_line(out, value_id);
+    }
+    if is_i64 {
+        try render_print_i64_line(out, value_id);
+    }
+    return;
+}
+
+// render_print_slice_line writes a runtime slice print value (its '%v<id>' SSA
+// '%kizu.slice.u8') followed by the trailing newline print() appends.
+fn render_print_slice_line(out: &var std::string::String, value_id: i64) -> !void {
+    try render_print_slice(out, value_id);
+    try render_print_newline(out, value_id);
+    return;
+}
+
+fn render_print_slice(out: &var std::string::String, value_id: i64) -> !void {
+    try w(out, "  %psl");
+    try wi(out, value_id);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %v");
+    try wi(out, value_id);
+    try wl(out, ")");
+    return;
+}
+
+// render_print_string_line writes a string print value (its global slice) followed
+// by the trailing newline print() appends.
+fn render_print_string_line(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64
+) -> !void {
+    let byte_len = try tape_string_length(code, value_id, 0);
+    try render_print_string(out, value_id, byte_len);
+    try render_print_newline(out, value_id);
+    return;
+}
+
+// render_print_bool_line selects the 'true'/'false' word payload (each carries
+// its own trailing newline) from the i1 value and writes it to stdout.
+fn render_print_bool_line(out: &var std::string::String, value_id: i64) -> !void {
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_ptr = select i1 %v");
+    try wi(out, value_id);
+    try wl(out, ", ptr @.kizu.run.bool_true, ptr @.kizu.run.bool_false");
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_len = select i1 %v");
+    try wi(out, value_id);
+    try wl(out, ", i64 5, i64 6");
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %pb");
+    try wi(out, value_id);
+    try wl(out, "_ptr, 0");
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %pb");
+    try wi(out, value_id);
+    try w(out, "_base, i64 %pb");
+    try wi(out, value_id);
+    try wl(out, "_len, 1");
+    try w(out, "  %pb");
+    try wi(out, value_id);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pb");
+    try wi(out, value_id);
+    try wl(out, "_slice)");
+    return;
+}
+
+// render_print_i64_line formats an i64 print value through the decimal helper then
+// writes the trailing newline.
+fn render_print_i64_line(out: &var std::string::String, value_id: i64) -> !void {
     try render_print_i64(out, value_id);
     try render_print_newline(out, value_id);
     return;
@@ -477,16 +2014,24 @@ fn tape_string_length(
         return error("render: print string value has no CONST_STR record");
     }
     let op = try code.get(index);
+    let const_str = codegen::code_op_const_str();
     let next = try tape_record_end(code, index);
-    if op == codegen::code_op_const_str() {
+    if op == const_str {
         let dst = try code.get(index + 1);
         if dst == value_id {
-            let payload_start = try code.get(index + 2);
-            let payload_end = try code.get(index + 3);
-            return payload_end - payload_start;
+            return try tape_const_str_payload_length(code, index);
         }
     }
     return try tape_string_length(code, value_id, next);
+}
+
+// tape_const_str_payload_length returns the payload byte length of the CONST_STR
+// record at index (its end span minus its start span), kept in its own function so
+// the matching guard stays a single-statement 'return try <call>;'.
+fn tape_const_str_payload_length(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let payload_start = try code.get(index + 2);
+    let payload_end = try code.get(index + 3);
+    return payload_end - payload_start;
 }
 
 fn render_print_string(
@@ -562,37 +2107,153 @@ fn render_main_wrapper(out: &var std::string::String) -> !void {
     return;
 }
 
+// tape_call_record_end returns the index past a CALL record, reading its trailing
+// variable arg-id count (kept out of tape_record_end so the call branch stays a
+// single-statement return the compiled-MIR if-lowering models).
+fn tape_call_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let arg_count = try code.get(index + 4);
+    return index + 5 + arg_count;
+}
+
+// tape_try_call_record_end returns the index past a TRY_CALL record. TRY_CALL has
+// no result value, so its arg-id list begins at index + 4 (one slot earlier than
+// CALL's, which carries a leading result value id).
+fn tape_try_call_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let arg_count = try code.get(index + 3);
+    return index + 4 + arg_count;
+}
+
 // tape_record_end returns the tape index just past the record beginning at index,
 // using each opcode's fixed arity (CALL carries a trailing variable arg-id list).
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let op = try code.get(index);
-    if op == codegen::code_op_const_int() {
+    let const_int = codegen::code_op_const_int();
+    if op == const_int {
         return index + 3;
     }
-    if op == codegen::code_op_const_str() {
+    let const_bool = codegen::code_op_const_bool();
+    if op == const_bool {
+        return index + 3;
+    }
+    let not_op = codegen::code_op_not();
+    if op == not_op {
+        return index + 3;
+    }
+    let const_str = codegen::code_op_const_str();
+    if op == const_str {
         return index + 4;
     }
-    if op == codegen::code_op_binary() {
+    let binary = codegen::code_op_binary();
+    if op == binary {
         return index + 5;
     }
-    if op == codegen::code_op_call() {
-        let arg_count = try code.get(index + 4);
-        return index + 5 + arg_count;
+    let sc_begin = codegen::code_op_sc_begin();
+    if op == sc_begin {
+        return index + 4;
     }
-    if op == codegen::code_op_print() {
+    let sc_end = codegen::code_op_sc_end();
+    if op == sc_end {
+        return index + 4;
+    }
+    let call = codegen::code_op_call();
+    if op == call {
+        return try tape_call_record_end(code, index);
+    }
+    let try_call = codegen::code_op_try_call();
+    if op == try_call {
+        return try tape_try_call_record_end(code, index);
+    }
+    let try_call_i64 = codegen::code_op_try_call_i64();
+    if op == try_call_i64 {
+        return try tape_call_record_end(code, index);
+    }
+    let expect_op = codegen::code_op_expect();
+    if op == expect_op {
+        return index + 2;
+    }
+    let ret_err_fail = codegen::code_op_ret_err_fail();
+    if op == ret_err_fail {
+        return index + 2;
+    }
+    let io_blocking = codegen::code_op_io_blocking();
+    if op == io_blocking {
+        return index + 2;
+    }
+    let try_fs_read = codegen::code_op_try_fs_read();
+    if op == try_fs_read {
+        return index + 4;
+    }
+    let print_op = codegen::code_op_print();
+    if op == print_op {
         return index + 3;
     }
-    if op == codegen::code_op_func_begin() {
+    let func_begin = codegen::code_op_func_begin();
+    if op == func_begin {
         return index + 6;
     }
-    if op == codegen::code_op_func_end() {
+    let func_end = codegen::code_op_func_end();
+    if op == func_end {
         return index + 1;
     }
-    if op == codegen::code_op_ret_void() {
+    let ret_void = codegen::code_op_ret_void();
+    if op == ret_void {
         return index + 1;
     }
-    if op == codegen::code_op_ret_value() {
+    let ret_value = codegen::code_op_ret_value();
+    if op == ret_value {
         return index + 2;
+    }
+    let if_begin = codegen::code_op_if_begin();
+    if op == if_begin {
+        return index + 2;
+    }
+    let if_else = codegen::code_op_if_else();
+    if op == if_else {
+        return index + 2;
+    }
+    let if_end = codegen::code_op_if_end();
+    if op == if_end {
+        return index + 2;
+    }
+    let var_decl = codegen::code_op_var_decl();
+    if op == var_decl {
+        return index + 3;
+    }
+    let var_load = codegen::code_op_var_load();
+    if op == var_load {
+        return index + 3;
+    }
+    let var_store = codegen::code_op_var_store();
+    if op == var_store {
+        return index + 3;
+    }
+    let while_begin = codegen::code_op_while_begin();
+    if op == while_begin {
+        return index + 2;
+    }
+    let while_cond = codegen::code_op_while_cond();
+    if op == while_cond {
+        return index + 3;
+    }
+    let while_end = codegen::code_op_while_end();
+    if op == while_end {
+        return index + 2;
+    }
+    let for_begin = codegen::code_op_for_begin();
+    if op == for_begin {
+        return index + 7;
+    }
+    let for_end = codegen::code_op_for_end();
+    if op == for_end {
+        return index + 5;
+    }
+    let break_op = codegen::code_op_break();
+    if op == break_op {
+        return index + 3;
+    }
+    let continue_op = codegen::code_op_continue();
+    if op == continue_op {
+        return index + 3;
     }
     return code.len();
 }
@@ -609,18 +2270,25 @@ fn render_llvm_c_bytes(out: &var std::string::String, payload: []u8) -> !void {
 }
 
 fn render_llvm_c_byte(out: &var std::string::String, byte: u8) -> !void {
-    if byte == cast<u8>(34) {
+    // Escape the three c-string metacharacters through mutually exclusive void
+    // then-body guards and append any other byte verbatim, falling through to a
+    // single return -- the shape both the Go reference compiler and the compiled-MIR
+    // void if-lowering accept (a 'return try <void call>;' tail is rejected by the former).
+    let quote = cast<u8>(34);
+    let backslash = cast<u8>(92);
+    let newline = cast<u8>(10);
+    let is_special = byte == quote or byte == backslash or byte == newline;
+    if byte == quote {
         try w(out, "\22");
-        return;
     }
-    if byte == cast<u8>(92) {
+    if byte == backslash {
         try w(out, "\5C");
-        return;
     }
-    if byte == cast<u8>(10) {
+    if byte == newline {
         try w(out, "\0A");
-        return;
     }
-    try out.append_byte(byte);
+    if !is_special {
+        try out.append_byte(byte);
+    }
     return;
 }

@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -33,6 +34,12 @@ func TestEmitSnapshots(t *testing.T) {
 			got, err := Emit(module)
 			if err != nil {
 				t.Fatalf("emit failed: %v", err)
+			}
+			if os.Getenv("KIZU_UPDATE_LLVM_SNAPSHOTS") == "1" {
+				if err := os.WriteFile("/tmp/llvm_snap_"+tt.name+".ll", []byte(got), 0o644); err != nil {
+					t.Fatalf("dump snapshot: %v", err)
+				}
+				return
 			}
 			if got != tt.want {
 				t.Fatalf("got:\n%s\nwant:\n%s", got, tt.want)
@@ -604,7 +611,9 @@ func TestEmitErrorUnionFailure(t *testing.T) {
 		"define %kizu.error.i64 @read()",
 		"%kizu.2 = insertvalue %kizu.error.i64 %kizu.2.base, %kizu.slice.u8 %kizu.1, 2",
 		"ret %kizu.error.i64 %kizu.2",
-		"kizu.2.try.err:\n  ret i32 1",
+		// A failed try in main reports its message before exiting 1.
+		"kizu.2.try.err:\n  %kizu.main.err.msg",
+		"call void @kizu_main_error_message(",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -1092,6 +1101,7 @@ const helloLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
@@ -1111,6 +1121,7 @@ const functionsLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
@@ -1135,6 +1146,7 @@ const variablesLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
@@ -1160,6 +1172,7 @@ const ifLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
@@ -1192,6 +1205,7 @@ const whileLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
@@ -1217,6 +1231,7 @@ const structLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
@@ -1237,6 +1252,7 @@ const errorUnionLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+declare void @kizu_main_error_message(ptr, i64)
 
 declare void @kizu_runtime_init_args(i32, ptr)
 
@@ -1255,13 +1271,24 @@ entry:
   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
   br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
 kizu.2.try.err:
+  %kizu.main.err.msg.1 = extractvalue %kizu.error.i64 %kizu.1, 2
+  %kizu.main.err.msg.1.ptr = extractvalue %kizu.slice.u8 %kizu.main.err.msg.1, 0
+  %kizu.main.err.msg.1.len = extractvalue %kizu.slice.u8 %kizu.main.err.msg.1, 1
+  call void @kizu_main_error_message(ptr %kizu.main.err.msg.1.ptr, i64 %kizu.main.err.msg.1.len)
   ret i32 1
 kizu.2.try.ok:
   %kizu.2 = extractvalue %kizu.error.i64 %kizu.1, 1
   call void @kizu_print_int(i64 %kizu.2)
   %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-  %kizu.main.ok.1 = extractvalue %kizu.error.void %kizu.4, 0
-  %kizu.main.ok.1.bool = icmp ne i8 %kizu.main.ok.1, 0
-  %kizu.main.code.2 = select i1 %kizu.main.ok.1.bool, i32 0, i32 1
-  ret i32 %kizu.main.code.2
+  %kizu.main.ok.2 = extractvalue %kizu.error.void %kizu.4, 0
+  %kizu.main.ok.2.bool = icmp ne i8 %kizu.main.ok.2, 0
+  br i1 %kizu.main.ok.2.bool, label %kizu.main.exit.ok.4, label %kizu.main.exit.fail.5
+kizu.main.exit.fail.5:
+  %kizu.main.err.msg.6 = extractvalue %kizu.error.void %kizu.4, 1
+  %kizu.main.err.msg.6.ptr = extractvalue %kizu.slice.u8 %kizu.main.err.msg.6, 0
+  %kizu.main.err.msg.6.len = extractvalue %kizu.slice.u8 %kizu.main.err.msg.6, 1
+  call void @kizu_main_error_message(ptr %kizu.main.err.msg.6.ptr, i64 %kizu.main.err.msg.6.len)
+  ret i32 1
+kizu.main.exit.ok.4:
+  ret i32 0
 }`

@@ -1448,9 +1448,12 @@ fn main() -> !void {
 		"define %kizu.error.i64 @read()",
 		"insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0",
 		"br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err",
-		"kizu.2.try.err:\n  ret i32 1",
+		// A failed try in main reports its message before exiting 1 instead of
+		// failing silently.
+		"call void @kizu_main_error_message(",
+		"  ret i32 1",
 		"call void @kizu_print_int(i64 %kizu.2)",
-		"ret i32 %kizu.main.code",
+		"  ret i32 0",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("got %q, want substring %q", out, want)
@@ -1625,8 +1628,9 @@ fn main() -> !void {
 	if !ok || exitErr.ExitCode() != 1 {
 		t.Fatalf("got err=%v output=%q, want exit 1", err, failRunOut)
 	}
-	if len(failRunOut) != 0 {
-		t.Fatalf("got unexpected output %q", failRunOut)
+	// A failed main reports its error message on stderr before exiting 1.
+	if string(failRunOut) != "error: bad\n" {
+		t.Fatalf("got output %q, want %q", failRunOut, "error: bad\n")
 	}
 }
 

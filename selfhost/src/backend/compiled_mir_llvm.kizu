@@ -414,6 +414,7 @@ fn append_multi_stmt(
         IfNotTryCallReturnBool(payload) => try append_multi_if_not_try_call_return_bool(out, function, payload, local_prefix);,
         StringTryAppend(payload) => try append_multi_string_try_append(out, function, payload, local_prefix);,
         ArrayTryAppend(payload) => try append_multi_array_try_append(out, function, payload, local_prefix);,
+        ArrayTrySet(payload) => try append_multi_array_try_set(out, function, payload, local_prefix);,
         VoidTryCall(payload) => try append_multi_void_try_call(out, function, payload, local_prefix);,
         OwnedDeinit(payload) => try append_multi_owned_deinit(out, payload);,
         CountRange(payload) => try append_multi_count_range(out, payload);,
@@ -554,7 +555,8 @@ fn append_try_call_body(
     try out.append_bytes(stmt.called_error_union);
     try out.append_bytes(" ");
     try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try append_ll_line(out, "_call, 2");
+    try out.append_bytes("_call, ");
+    try append_ll_line(out, error_union_msg_index_text(stmt.called_error_union));
     try out.append_bytes("  ");
     try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes("_fail_flag = insertvalue ");
@@ -568,7 +570,8 @@ fn append_try_call_body(
     try append_try_call_bind_name(out, stmt.name, bind_suffix);
     try out.append_bytes("_fail_flag, %kizu.slice.u8 ");
     try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try append_ll_line(out, "_msg, 2");
+    try out.append_bytes("_msg, ");
+    try append_ll_line(out, error_union_msg_index_text(stmt.own_error_union));
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.own_error_union);
     try out.append_bytes(" ");
@@ -711,6 +714,82 @@ fn append_multi_array_try_append(
     return;
 }
 
+// append_multi_array_try_set renders a mutating 'try <receiver>.set(<index>, <value>);'
+// statement on a std::array::Array<T> value. call_args holds [index, value]: the index renders
+// as a plain i64 operand, the element is stored into a statement-local slot and wrapped into the
+// (pointer, element size) %kizu.slice.u8 the element-size-generic @kizu_rt_array_set ABI takes,
+// and the failure tail propagates the runtime message exactly like ArrayTryAppend.
+fn append_multi_array_try_set(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirArrayTrySetStmt,
+    local_prefix: i64
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function.name, &stmt.call_args, local_prefix
+    );
+    try out.append_bytes("  %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_slot = alloca ");
+    try append_ll_line(out, stmt.element_llvm);
+    try out.append_bytes("  store ");
+    try out.append_bytes(stmt.element_llvm);
+    try out.append_bytes(" ");
+    let set_args = &stmt.call_args;
+    let element_arg = try set_args.at(1);
+    try compiled_mir_llvm_call::append_call_arg_value_with_prefix(out, &element_arg, local_prefix, 1);
+    try out.append_bytes(", ptr %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_slot");
+    try out.append_bytes("  %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_es0 = insertvalue %kizu.slice.u8 poison, ptr %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_slot, 0");
+    try out.append_bytes("  %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_eslice = insertvalue %kizu.slice.u8 %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_es0, i64 ptrtoint (ptr getelementptr (");
+    try out.append_bytes(stmt.element_llvm);
+    try append_ll_line(out, ", ptr null, i32 1) to i64), 1");
+    try out.append_bytes("  %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_call = call %kizu.error.void @kizu_rt_array_set(%kizu.owned %");
+    try out.append_bytes(stmt.receiver_name);
+    try out.append_bytes(", i64 ");
+    let index_arg = try set_args.at(0);
+    try compiled_mir_llvm_call::append_call_arg_value_with_prefix(out, &index_arg, local_prefix, 0);
+    try out.append_bytes(", %kizu.slice.u8 %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_eslice)");
+    try out.append_bytes("  %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_ok = extractvalue %kizu.error.void %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_call, 0");
+    try out.append_bytes("  br i1 %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_ok, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_cont, label %try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail");
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_fail:");
+    try out.append_bytes("  %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try out.append_bytes("_msg = extractvalue %kizu.error.void %aset");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_call, 1");
+    try append_error_void_try_fail_return(out, "%aset", stmt.try_index, stmt.own_error_union);
+    try out.append_bytes("try");
+    try std::fmt::append_i64(out, stmt.try_index);
+    try append_ll_line(out, "_cont:");
+    return;
+}
+
 // append_string_try_fail_return emits the failure-propagation tail of a StringTryAppend: it
 // wraps the extracted runtime message into this function's own error union and returns it,
 // sharing append_error_void_try_fail_return with the VoidTryCall path (both call a
@@ -729,6 +808,16 @@ fn append_string_try_fail_return(
 // returned. The message field index depends on the own error-union shape -- %kizu.error.void
 // carries it at field 1, while the 3-field unions (%kizu.error.owned / %kizu.error.slice.u8) carry
 // it at field 2 with the success value left zero-initialized.
+// error_union_msg_index_text returns the runtime-message field index of an error
+// union: %kizu.error.void is { i1, %kizu.slice.u8 } (message at 1), every
+// value-carrying union is { i1, <value>, %kizu.slice.u8 } (message at 2).
+fn error_union_msg_index_text(error_union: []u8) -> []u8 {
+    if std::mem::equal_bytes(error_union, "%kizu.error.void") {
+        return "1";
+    }
+    return "2";
+}
+
 fn append_error_void_try_fail_return(
     out: &var std::string::String,
     ssa_prefix: []u8,
@@ -4839,6 +4928,7 @@ fn append_stmt_globals(
         IfNotTryCallReturnBool(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         StringTryAppend(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ArrayTryAppend(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        ArrayTrySet(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         VoidTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         OwnedDeinit(_) => return;,
         CountRange(payload) => try append_count_range_globals(payload);,
@@ -6533,7 +6623,72 @@ fn append_expr_inst(
         Call(payload) => try append_call_expr(out, llvm_symbol, payload);,
         ArrayLen(payload) => try append_array_len_expr(out, payload);,
         StringLen(payload) => try append_string_len_expr(out, payload);,
+        IntCast(payload) => try append_int_cast_expr(out, payload, insts);,
     }
+    return;
+}
+
+// llvm_int_width parses the bit width of an LLVM integer type spelling ("iN");
+// any non-integer spelling yields 0 so the caller can reject it.
+fn llvm_int_width(ty: []u8) -> i64 {
+    let n = std::mem::len(ty);
+    if n < 2 or ty[0] != cast<u8>(105) {
+        return 0;
+    }
+    var value = 0;
+    var index = 1;
+    while index < n {
+        let digit = ty[index];
+        if digit < cast<u8>(48) or digit > cast<u8>(57) {
+            return 0;
+        }
+        value = value * 10 + cast<i64>(digit) - 48;
+        index = index + 1;
+    }
+    return value;
+}
+
+// append_int_cast_expr renders an integer 'cast<iN>(<expr>)': it truncates a
+// wider source, sign-extends a narrower one, and copies (add 0) when the widths
+// already match, producing the target integer type.
+fn append_int_cast_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirIntCastExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    let src_width = llvm_int_width(inst.source_llvm);
+    let dst_width = llvm_int_width(inst.llvm_type);
+    if src_width == 0 or dst_width == 0 {
+        return error("compiled mir llvm: int cast requires integer operands");
+    }
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    if dst_width < src_width {
+        try out.append_bytes(" = trunc ");
+        try out.append_bytes(inst.source_llvm);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, insts, inst.operand);
+        try out.append_bytes(" to ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if dst_width > src_width {
+        try out.append_bytes(" = sext ");
+        try out.append_bytes(inst.source_llvm);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, insts, inst.operand);
+        try out.append_bytes(" to ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    try out.append_bytes(" = add ");
+    try out.append_bytes(inst.llvm_type);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.operand);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
     return;
 }
 // append_array_len_expr renders a local/param 'tokens.len()' read: the receiver is a

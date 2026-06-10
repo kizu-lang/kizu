@@ -4115,6 +4115,41 @@ fn lower_multi_expr_statement(
     );
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var consumed_string = 0;
+    // 'try <receiver>.set(<index>, <value>);' on a std::array::Array<T> receiver
+    // lowers through the element-size-generic @kizu_rt_array_set ABI: the index is
+    // a plain i64 argument, the receiver's declared Array<T> type supplies the
+    // element LLVM type, and both arguments lower through the shared method-arg path.
+    if std::mem::equal_bytes(method_name, "set") {
+        let set_receiver_kizu = try compiled_mir_types::resolve_receiver_value_kizu_type(
+            ir_bytes, function_name, module_prefix, receiver_name, bs
+        );
+        let set_element_kizu = compiled_mir_types::array_value_element_kizu_type_or_empty(
+            array_receiver_lookup_kizu_type(set_receiver_kizu)
+        );
+        if std::mem::len(set_element_kizu) == 0 {
+            return error("compiled mir: set receiver is not a std::array::Array");
+        }
+        let set_element_llvm = try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, module_prefix, set_element_kizu
+        );
+        let consumed_index = try lower_string_method_arg(
+            ir_bytes, function_name, module_prefix, "i64",
+            arg_node, string_counter, aliases, &var args, bs
+        );
+        let set_value_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, inner, "arg", 1, bs
+        );
+        let set_value_string_counter = string_counter + consumed_index;
+        let consumed_value = try lower_string_method_arg(
+            ir_bytes, function_name, module_prefix, set_element_llvm,
+            set_value_node, set_value_string_counter, aliases, &var args, bs
+        );
+        consumed_string = consumed_index + consumed_value;
+        try stmts.append(compiled_mir::array_try_set_stmt(
+            receiver_alias, set_element_llvm, llvm_return_type,
+            string_counter, try_counter, args
+        ));
+    } else {
     // 'try <receiver>.append(<value>);' on a std::array::Array<T> receiver lowers
     // through the element-size-generic @kizu_rt_array_append ABI: the receiver's
     // declared Array<T> type supplies the element LLVM type and the single value
@@ -4163,6 +4198,7 @@ fn lower_multi_expr_statement(
         } else {
             return error("compiled mir: unsupported string method");
         }
+    }
     }
     }
     return MultiExprLowerResult {
@@ -4379,6 +4415,16 @@ fn lower_string_method_arg(
         ));
         return 0;
     }
+    // A bare integer literal argument (e.g. 'args_scratch.append(0)' growing the
+    // call-arg scratch stack, or a slot-0 stack-pointer read/write index) lowers
+    // to an inline literal; it consumes no string slot.
+    if std::mem::equal_bytes(arg_kind, "Int") {
+        let literal = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, arg_node, bs
+        );
+        try args.append(compiled_mir::int_literal_call_arg(arg_type, literal));
+        return 0;
+    }
     return error("compiled mir: unsupported string method argument");
 }
 fn lower_multi_let_statement(
@@ -4488,6 +4534,50 @@ fn lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, locals_spec,
                 let_name, let_value, string_counter, temp_counter, try_counter, stmts, bs
             );
+        }
+        // 'var code = std::array::Array<T>(<allocator>);' is a standalone runtime-owned
+        // array constructor (the run pipeline entry seeds six scratch arrays this way). It
+        // lowers to the element-size-generic @kizu_rt_array_new builtin (an ArrayNew stmt),
+        // binding the owned handle and registering the Array<T> local so later borrows of it
+        // resolve to %kizu.owned.
+        let ctor_callee = try ir_contract::body_call_callee_or_empty_from(
+            ir_bytes, function_name, let_value, bs
+        );
+        if std::mem::starts_with(ctor_callee, "std::array::Array<") {
+            let ctor_len = std::mem::len(ctor_callee);
+            if ctor_callee[ctor_len - 1] != cast<u8>(62) {
+                return error("compiled mir: malformed array constructor type");
+            }
+            let prefix_len = std::mem::len("std::array::Array<");
+            let element_kizu = ctor_callee[prefix_len..ctor_len - 1];
+            let element_llvm = try compiled_type_lower::kizu_type_to_llvm(
+                ir_bytes, module_prefix, element_kizu
+            );
+            let ctor_arg_count = try compiled_mir_types::count_call_args(
+                ir_bytes, function_name, let_value, bs
+            );
+            if ctor_arg_count != 1 {
+                return error("compiled mir: array constructor takes exactly the allocator argument");
+            }
+            let alloc_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, let_value, "arg", 0, bs
+            );
+            let alloc_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, alloc_node, bs
+            );
+            let alloc_alias = try local_alias_current_name(aliases, alloc_name);
+            let array_locals = try compiled_signature::extend_locals_spec(
+                ir_bytes, locals_spec, let_name, ctor_callee
+            );
+            try stmts.append(compiled_mir::array_new_stmt(
+                let_name, "%kizu.owned", alloc_alias, element_llvm
+            ));
+            return MultiLowerResult {
+                locals_spec: array_locals,
+                string_counter: string_counter,
+                temp_counter: temp_counter,
+                try_counter: try_counter
+            };
         }
         // 'let comparison = compare_bytes(token_text(source, left_token), token_text(source,
         // right_token));' carries nested call arguments the inline call-arg descriptors cannot
@@ -5246,6 +5336,26 @@ fn lower_multi_return_statement(
             return compiled_mir::return_error_stmt(
                 string_counter, message_result, message_insts
             );
+        }
+        // 'return <value>.len();' on an Array<T>/String value receiver reads the length
+        // through its runtime helper; it lowers through the generic expression path (the
+        // same value-receiver len lowering conditions use) as a return-expr statement.
+        if try callee_is_field_expr(ir_bytes, function_name, value, bs) and
+            (try call_method_name_is(ir_bytes, function_name, value, "len", bs)) {
+            var len_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+            let len_result_id = try lower_expr_with_local_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                value,
+                string_counter,
+                temp_counter,
+                &var len_insts,
+                aliases,
+                bs
+            );
+            return compiled_mir::return_expr_stmt(string_counter, len_result_id, len_insts);
         }
         // A Call whose callee is a FieldExpr is a struct-field method call. The only
         // supported multi-statement method return is the checked Array<T>.get
@@ -9038,7 +9148,28 @@ fn lower_multi_while_statement(
                 body_try_counter = if_result.try_counter;
                 body_alias_counter = if_result.alias_counter;
             } else {
-                return error("compiled mir: unsupported while body statement");
+                if std::mem::equal_bytes(body_kind, "ExprStmt") {
+                    // A void try-call statement inside the loop body (e.g.
+                    // 'try render_llvm_c_byte(out, byte);') lowers through the same
+                    // expression-statement path the then-body uses.
+                    let expr_result = try lower_multi_expr_statement(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        llvm_return_type,
+                        locals_spec,
+                        body_stmt,
+                        body_string_counter,
+                        body_try_counter,
+                        &body_aliases,
+                        &var body_stmts,
+                        bs
+                    );
+                    body_string_counter = expr_result.string_counter;
+                    body_try_counter = expr_result.try_counter;
+                } else {
+                    return error("compiled mir: unsupported while body statement");
+                }
             }
         }
         body_index = body_index + 1;
@@ -11466,14 +11597,26 @@ fn lower_expr_into_local_aliases(
         let value_kind = try ir_contract::body_node_kind_from(
             ir_bytes, function_name, value_node, bs
         );
-        if !std::mem::equal_bytes(value_kind, "Int") {
-            return error("compiled mir: unsupported cast operand");
+        if std::mem::equal_bytes(value_kind, "Int") {
+            let int_value = try ir_contract::body_int_value_from(
+                ir_bytes, function_name, value_node, bs
+            );
+            try insts.append(compiled_mir::typed_int_expr_inst(id, int_value, target_llvm));
+            return id;
         }
-        let int_value = try ir_contract::body_int_value_from(
-            ir_bytes, function_name, value_node, bs
+        // A non-literal integer operand ('cast<u8>(48 + value)') lowers the operand
+        // into a preceding temp, then casts that result to the target integer width
+        // (trunc/sext/copy in the renderer).
+        let operand_id = try lower_expr_into_local_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, value_node,
+            string_index, id_base, insts, aliases, bs
         );
-        try insts.append(compiled_mir::typed_int_expr_inst(id, int_value, target_llvm));
-        return id;
+        let source_llvm = try expr_inst_llvm_type_by_id(insts, operand_id);
+        let cast_id = id_base + insts.len();
+        try insts.append(compiled_mir::int_cast_expr_inst(
+            cast_id, operand_id, source_llvm, target_llvm
+        ));
+        return cast_id;
     }
     if std::mem::equal_bytes(kind, "FieldExpr") {
         return try lower_expr_field_with_local_aliases(

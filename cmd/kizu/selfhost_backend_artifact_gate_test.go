@@ -356,8 +356,8 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__format_source_file_write",
 		"%run_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
-		"%run_ast_result = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_run_parse_result",
+		"%run_render = call %kizu.error.owned " +
+			"@kizu_selfhost__ir_code_render_render_run_artifact",
 		"%test_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%test_executable = call %kizu.selfhost.executable " +
@@ -456,7 +456,6 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
-		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
 		"%payload = call %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"%from_codegen_lowering = extractvalue %kizu.selfhost.codegen.program %program, 15",
 		"%shape_ok = and i1 %shape_12, %from_codegen_lowering",
@@ -3258,14 +3257,16 @@ func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
 }
 
 // countHostedCompilerCLIRunFailures runs a non-fixture source through `run`.
+// The probe must stay outside the run tape's supported surface (bool-literal
+// branches now lower, so it uses a struct literal the tape does not own yet).
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	failures := countHostedCompilerCLIUnsupportedRunSourceFailures(
 		t,
 		exePath,
-		"hosted_run_if_unsupported.kizu",
-		"hosted_run_if_unsupported",
-		"fn main(){if true {print(\"ok\");}else{print(\"no\");}}\n",
+		"hosted_run_struct_unsupported.kizu",
+		"hosted_run_struct_unsupported",
+		"struct Point {\n    x: i64,\n}\n\nfn main(){let p = Point { x: 1 };print(p.x);}\n",
 	)
 	return failures
 }

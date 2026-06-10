@@ -11,6 +11,7 @@ pub fn append_facts(
 ) -> !void {
     var execute_found = false;
     var codegen_found = false;
+    var code_render_found = false;
     var backend_found = false;
     var executable_found = false;
     var hosted_found = false;
@@ -57,6 +58,10 @@ pub fn append_facts(
                 try append_codegen_function_facts(allocator, out, file);
                 codegen_found = true;
             }
+            if std::mem::equal_bytes(module, "ir/code_render") {
+                try append_code_render_function_facts(allocator, out, file);
+                code_render_found = true;
+            }
             if std::mem::equal_bytes(module, "backend") {
                 try append_backend_function_facts(allocator, out, file);
                 backend_found = true;
@@ -97,6 +102,9 @@ pub fn append_facts(
     }
     if !codegen_found {
         return error("missing codegen source");
+    }
+    if !code_render_found {
+        return error("missing code render source");
     }
     if !backend_found {
         return error("missing backend source");
@@ -938,6 +946,16 @@ pub fn append_ast_function_facts(
         "BinaryOp",
         "std::kizu::ast::BinaryOp"
     );
+    // PrefixOp backs the run codegen tape's logical-not lowering (lower_code_prefix
+    // compares the matched Prefix payload op against prefix_not()).
+    try append_selected_enum_variant_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "PrefixOp",
+        "std::kizu::ast::PrefixOp"
+    );
     // The BinaryOp constant accessors back the run codegen tape lowering's operator
     // mapping (code_binary_kind compares the matched Binary payload op against
     // them). Each body is a single 'return BinaryOp::<Variant>;' enum-field return,
@@ -978,6 +996,103 @@ pub fn append_ast_function_facts(
         parsed.root,
         "binary_div",
         "std::kizu::ast::binary_div",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_mod",
+        "std::kizu::ast::binary_mod",
+        "checked-ast-readonly"
+    );
+    // The comparison BinaryOp accessors back the run codegen tape's if-condition
+    // lowering (code_binary_kind eq/not_eq/lt/lte/gt/gte); they compile through the
+    // same enum-field-return path as the arithmetic accessors above.
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_eq",
+        "std::kizu::ast::binary_eq",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_not_eq",
+        "std::kizu::ast::binary_not_eq",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_lt",
+        "std::kizu::ast::binary_lt",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_lte",
+        "std::kizu::ast::binary_lte",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_gt",
+        "std::kizu::ast::binary_gt",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_gte",
+        "std::kizu::ast::binary_gte",
+        "checked-ast-readonly"
+    );
+    // The logical BinaryOp accessors back the tape's short-circuit 'and'/'or'
+    // lowering (lower_code_binary routes them to lower_code_logical), and
+    // prefix_not backs the logical-not lowering (lower_code_prefix); each body is
+    // the same single enum-field return the accessors above compile through.
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_and",
+        "std::kizu::ast::binary_and",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "binary_or",
+        "std::kizu::ast::binary_or",
+        "checked-ast-readonly"
+    );
+    try append_selected_helper_body(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "prefix_not",
+        "std::kizu::ast::prefix_not",
         "checked-ast-readonly"
     );
     try append_selected_impl_method_body(
@@ -2110,6 +2225,9 @@ fn collect_catalog_closure_external_callee_allowed(
     if std::mem::equal_bytes(qualified_prefix, "selfhost::ir::codegen::") {
         return codegen_closure_external_callee_allowed(callee_text);
     }
+    if std::mem::equal_bytes(qualified_prefix, "selfhost::ir::code_render::") {
+        return code_render_closure_external_callee_allowed(callee_text);
+    }
     if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::executable::") {
         return executable_closure_external_callee_allowed(callee_text);
     }
@@ -2162,6 +2280,22 @@ fn backend_wrapper_external_callee_allowed(callee_text: []u8) -> bool {
         std::mem::equal_bytes(callee_text, "hosted::emit_run_codegen_artifact");
 }
 
+// code_render_closure_external_callee_allowed enumerates the cross-module callees the
+// run tape renderer references: the selfhost::ir::codegen opcode/value-kind constant
+// accessors (codegen::code_op_* / codegen::code_kind_*), pure i64 returns already
+// compiled by the codegen closure, referenced here without re-walking them.
+fn code_render_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    // render_run_artifact lowers the parsed run source into the tape through the
+    // codegen module's lower_code_module entry, already compiled by the codegen
+    // closure, so the render closure references it without re-walking it.
+    if std::mem::equal_bytes(callee_text, "codegen::lower_code_module") {
+        return true;
+    }
+    return std::mem::starts_with(callee_text, "codegen::code_op_") or
+        std::mem::starts_with(callee_text, "codegen::code_kind_") or
+        std::mem::starts_with(callee_text, "codegen::code_loop_kind_");
+}
+
 fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
     if std::mem::equal_bytes(callee_text, "ast.get") {
         return true;
@@ -2171,6 +2305,10 @@ fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
     }
     if std::mem::starts_with(callee_text, "std::kizu::ast::binary_") {
         return codegen_closure_binary_op_accessor_allowed(callee_text);
+    }
+    // prefix_not backs the tape's logical-not lowering (lower_code_prefix).
+    if std::mem::equal_bytes(callee_text, "std::kizu::ast::prefix_not") {
+        return true;
     }
     // lower_run_int_program is documented in codegen.kizu as outside the selected
     // stage2 IR body-fact set because it depends on mutable String scratch APIs.
@@ -2182,6 +2320,7 @@ fn codegen_closure_binary_op_accessor_allowed(callee_text: []u8) -> bool {
         std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_sub") or
         std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_mul") or
         std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_div") or
+        std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_mod") or
         std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_eq") or
         std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_not_eq") or
         std::mem::equal_bytes(callee_text, "std::kizu::ast::binary_lt") or
@@ -2671,6 +2810,74 @@ fn append_codegen_closure_seed(
     local_name: []u8
 ) -> !void {
     try pending.append(try component_function_catalog::find_local_function_index(catalog, local_name));
+    return;
+}
+
+pub fn append_code_render_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "selfhost::ir::code_render"
+    );
+    defer catalog.deinit();
+    try append_runtime_stdlib_symbol_preamble(out);
+    try append_code_render_reachable_helper_bodies(out, file.text, parsed.ast, &catalog);
+    return;
+}
+
+fn append_code_render_reachable_helper_bodies(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog
+) -> !void {
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try append_codegen_closure_seed(&var pending, catalog, "render_run_artifact");
+    var index = 0;
+    while index < pending.len() {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
+            try append_code_render_closure_helper_body(
+                out, text, ast, catalog, function_index, &var pending
+            );
+            try emitted.append(function_index);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_code_render_closure_helper_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_catalog_helper_body_ir(
+        out, text, ast, catalog, function_index, "checked-run-codegen-lowering", body
+    );
+    try collect_catalog_closure_direct_callees(
+        text, ast, body, catalog, pending,
+        "selfhost::ir::code_render::",
+        "code_render closure: unsupported call form",
+        "code_render closure: unsupported qualified callee"
+    );
     return;
 }
 

@@ -3,7 +3,6 @@ import selfhost::backend::cli_artifact_path_llvm;
 import selfhost::backend::cli_ast_boundary_llvm;
 import selfhost::backend::cli_check_gate_llvm;
 import selfhost::backend::cli_codegen_llvm;
-import selfhost::backend::cli_hosted_renderer_llvm;
 import selfhost::backend::cli_hosted_metadata_llvm;
 import selfhost::backend::cli_match_llvm;
 import selfhost::backend::cli_parse_llvm;
@@ -38,7 +37,6 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try cli_artifact_dir_llvm::append_globals(out);
     try cli_ast_boundary_llvm::append_globals(out);
     try cli_codegen_llvm::append_globals(out, ir_bytes);
-    try cli_hosted_renderer_llvm::append_globals(out);
     try cli_parse_llvm::append_globals(out);
     try cli_run_llvm::append_globals(out, ir_bytes);
     try cli_run_i64_codegen_llvm::append_globals(out);
@@ -2432,7 +2430,6 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     try cli_artifact_path_llvm::append_functions(out);
     try cli_ast_boundary_llvm::append_functions(out);
     try cli_codegen_llvm::append_functions(out, ir_bytes);
-    try cli_hosted_renderer_llvm::append_functions(out, ir_bytes);
     try cli_run_llvm::append_functions(out, ir_bytes);
     try cli_parse_llvm::append_functions(out);
     try cli_match_llvm::append_functions(out);
@@ -2448,6 +2445,11 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     // signature facts, so the cluster no longer needs a handwritten
     // append_compiled_function_auto per helper.
     try append_codegen_reachable_compiled_functions(out, ir_bytes);
+    // The selfhost::ir::code_render run tape renderer closure compiled into stage2:
+    // render_run_artifact lowers a parsed run source to the tape (via the codegen
+    // closure's lower_code_module) and renders it to the executable LLVM module text,
+    // the generic replacement for the per-shape hosted run renderers.
+    try append_code_render_reachable_compiled_functions(out, ir_bytes);
     // artifact_path is the first selfhost std::string::String builder compiled into
     // stage2 (issue 1165 slice 1): it lowers through the generic multi-statement path,
     // calling the runtime string intrinsics to concatenate the directory, the borrowed
@@ -2857,6 +2859,72 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "kizu_kizu__ast_binary_div",
         ""
     );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_mod",
+        "kizu_kizu__ast_binary_mod",
+        ""
+    );
+    // The comparison BinaryOp accessors back the run codegen tape's if-condition
+    // lowering; they compile through the same enum-field-return path.
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_eq",
+        "kizu_kizu__ast_binary_eq",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_not_eq",
+        "kizu_kizu__ast_binary_not_eq",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_lt",
+        "kizu_kizu__ast_binary_lt",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_lte",
+        "kizu_kizu__ast_binary_lte",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_gt",
+        "kizu_kizu__ast_binary_gt",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_gte",
+        "kizu_kizu__ast_binary_gte",
+        ""
+    );
+    // The logical BinaryOp accessors back the run codegen tape's short-circuit
+    // and/or routing (lower_code_binary -> lower_code_logical), and prefix_not
+    // backs its logical-not lowering (lower_code_prefix); each compiles through
+    // the same enum-field-return path as the accessors above.
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_and",
+        "kizu_kizu__ast_binary_and",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::binary_or",
+        "kizu_kizu__ast_binary_or",
+        ""
+    );
+    try compiled_llvm::append_compiled_function_auto(
+        out, ir_bytes,
+        "std::kizu::ast::prefix_not",
+        "kizu_kizu__ast_prefix_not",
+        ""
+    );
     // Ast.get is the first Arena<T>.get accessor compiled into stage2 (tracker 961): it
     // reads an AstNode back out of the nodes Arena by value via the checked
     // @kizu_rt_arena_get, reusing the AstNode/AstData union value-type ABI, and traps on
@@ -3179,6 +3247,11 @@ fn collect_component_compiled_callee(
     if std::mem::starts_with(callee, "std::mem::") {
         return;
     }
+    // 'error(<message>)' is the error-union builtin lowered inline as a return-error
+    // statement, not a component function, so the BFS neither emits nor walks it.
+    if std::mem::equal_bytes(callee, "error") {
+        return;
+    }
     if compiled_external_accessor_allowed(prefix, callee) {
         return;
     }
@@ -3258,6 +3331,17 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         }
         return false;
     }
+    if std::mem::equal_bytes(prefix, "selfhost::ir::code_render::") {
+        // render_run_artifact reaches the tape lowering through codegen::lower_code_module,
+        // emitted by the codegen closure, so the render closure references it without
+        // re-emitting or walking it.
+        if std::mem::equal_bytes(callee, "codegen::lower_code_module") {
+            return true;
+        }
+        return std::mem::starts_with(callee, "codegen::code_op_") or
+            std::mem::starts_with(callee, "codegen::code_kind_") or
+            std::mem::starts_with(callee, "codegen::code_loop_kind_");
+    }
     if std::mem::equal_bytes(prefix, "selfhost::ir::codegen::") {
         // The tape's recursive list walks bind children through the compiled external
         // std::kizu::ast accessor (spelled ast.child_at), emitted separately as
@@ -3276,13 +3360,26 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
             return true;
         }
         // The run codegen tape's operator mapping calls the compiled std::kizu::ast
-        // BinaryOp constant accessors cross-module (code_binary_kind); they are
-        // emitted separately as kizu_kizu__ast_binary_* enum-field returns, so the
-        // codegen closure references them without re-emitting or walking them.
+        // BinaryOp constant accessors cross-module (code_binary_kind, and the
+        // short-circuit and/or routing in lower_code_binary), plus the PrefixOp
+        // accessor backing the logical-not lowering (lower_code_prefix); they are
+        // emitted separately as kizu_kizu__ast_binary_* / kizu_kizu__ast_prefix_not
+        // enum-field returns, so the codegen closure references them without
+        // re-emitting or walking them.
         return std::mem::equal_bytes(callee, "std::kizu::ast::binary_add") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_mod") or
             std::mem::equal_bytes(callee, "std::kizu::ast::binary_sub") or
             std::mem::equal_bytes(callee, "std::kizu::ast::binary_mul") or
-            std::mem::equal_bytes(callee, "std::kizu::ast::binary_div");
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_div") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_eq") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_not_eq") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_lt") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_lte") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_gt") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_gte") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_and") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::binary_or") or
+            std::mem::equal_bytes(callee, "std::kizu::ast::prefix_not");
     }
     if !std::mem::equal_bytes(prefix, "selfhost::ast::") {
         return false;
@@ -3479,6 +3576,23 @@ pub fn append_codegen_reachable_compiled_functions(
         out,
         ir_bytes,
         "selfhost::ir::codegen::",
+        &var pending,
+        true
+    );
+    pending.deinit();
+    return;
+}
+
+pub fn append_code_render_reachable_compiled_functions(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("render_run_artifact");
+    try append_component_reachable_compiled_functions(
+        out,
+        ir_bytes,
+        "selfhost::ir::code_render::",
         &var pending,
         true
     );

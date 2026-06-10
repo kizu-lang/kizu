@@ -715,7 +715,18 @@ fn resolve_let_value_kizu_type(
         let callee_kind = try ir_contract::body_node_kind_from(
             ir_bytes, function_name, callee_node, bs
         );
+        // A field-mode FieldExpr callee is a value-receiver method (Ast.get / .len /
+        // Arena.add); a namespace-mode FieldExpr callee is a qualified free function
+        // (e.g. codegen::code_op_const_str) resolved through the signature facts below,
+        // so only the field mode takes the method binding.
+        var callee_field_mode = false;
         if std::mem::equal_bytes(callee_kind, "FieldExpr") {
+            let callee_mode = try ir_contract::sequence_fact_second_value_from(
+                ir_bytes, "body-field-expr ", function_name, callee_node, bs
+            );
+            callee_field_mode = std::mem::equal_bytes(callee_mode, "field");
+        }
+        if callee_field_mode {
             let method_name = try ir_contract::body_field_expr_name_from(
                 ir_bytes, function_name, callee_node, "field", bs
             );
@@ -745,10 +756,22 @@ fn resolve_let_value_kizu_type(
         let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
             ir_bytes, "function-signature-return ", module_prefix, callee_name
         );
-        if std::mem::len(ret_type) == 0 {
-            return error("compiled mir: local call return type not found");
+        if std::mem::len(ret_type) > 0 {
+            return ret_type;
         }
-        return ret_type;
+        // A qualified cross-module callee (e.g. codegen::code_op_const_str) resolves to
+        // its fully-qualified function name, whose return type is keyed with an empty
+        // module prefix.
+        let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
+        if std::mem::len(qualified) > 0 {
+            let cross_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+                ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified
+            );
+            if std::mem::len(cross_ret) > 0 {
+                return cross_ret;
+            }
+        }
+        return error("compiled mir: local call return type not found");
     }
     if std::mem::equal_bytes(value_kind, "Binary") {
         return try resolve_binary_kizu_type(ir_bytes, function_name, value, bs);

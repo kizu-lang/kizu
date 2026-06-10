@@ -1846,17 +1846,13 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	cliRun := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
 	cliAstBoundary := readSelfhostFile(t, "../../selfhost/src/backend/cli_ast_boundary_llvm.kizu")
 	cliCodegen := readSelfhostFile(t, "../../selfhost/src/backend/cli_codegen_llvm.kizu")
-	cliHostedRenderer := readSelfhostFile(
-		t,
-		"../../selfhost/src/backend/cli_hosted_renderer_llvm.kizu",
-	)
 	assertExecuteRoutesRunThroughCodegenIR(t, execute)
 	assertHostedOmitsRunCodegenArtifact(t, hosted)
 	assertHostedMainPrintUsesCodegenRenderer(t, hosted)
 	assertHostedReturnVoidUsesCodegenRenderer(t, hosted)
 	assertCodegenIRShape(t, codegen)
 	assertCodegenIRForbiddenBridges(t, hosted, codegen)
-	assertHostedRunLLVMResponsibilities(t, cliRun, cliAstBoundary, cliCodegen, cliHostedRenderer)
+	assertHostedRunLLVMResponsibilities(t, cliRun, cliAstBoundary, cliCodegen)
 }
 
 // TestSelfhostRunFrontendScannerRemoved keeps run/test dispatch on the
@@ -1887,7 +1883,7 @@ func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
 	for _, fragment := range []string{
 		"@kizu_selfhost__cli_parse_validated_ast",
 		"@kizu_kizu__lexer_tokenize",
-		"@kizu_selfhost__ir_codegen_lower_run_parse_result",
+		"@kizu_selfhost__ir_code_render_render_run_artifact",
 		"@kizu_selfhost__cli_lower_test_parse_result",
 	} {
 		if !strings.Contains(combined, fragment) {
@@ -2111,15 +2107,13 @@ func assertHostedRunLLVMResponsibilities(
 	cliRun string,
 	cliAstBoundary string,
 	cliCodegen string,
-	cliHostedRenderer string,
 ) {
 	t.Helper()
 	requiredRun := []string{
 		"@kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_selfhost__ir_codegen_lower_run_parse_result",
-		"@kizu_selfhost__cli_codegen_lower_run_ast",
+		"@kizu_selfhost__ir_code_render_render_run_artifact",
 		"@kizu_selfhost__cli_emit_run_codegen_artifact",
-		"@kizu_selfhost__cli_hosted_write_stdout_ll",
+		"@kizu_rt_fs_write_file",
 		"@kizu_rt_process_spawn_wait8",
 	}
 	for _, fragment := range requiredRun {
@@ -2139,7 +2133,6 @@ func assertHostedRunLLVMResponsibilities(
 		}
 	}
 	assertHostedRunLLVMForbiddenDetails(t, cliRun, cliCodegen)
-	assertHostedRunLLVMHostedRenderer(t, cliHostedRenderer)
 	assertMetadataLineBodyDerivedCodegen(t, cliCodegen)
 	assertConstStringValueBodyDerivedCodegen(t, cliCodegen)
 	assertConstStringInstructionBodyDerivedCodegen(t, cliCodegen)
@@ -2178,20 +2171,6 @@ func assertHostedRunLLVMForbiddenDetails(t *testing.T, cliRun string, cliCodegen
 		}
 		if strings.Contains(cliCodegen, forbidden) {
 			t.Fatalf("codegen LLVM path owns forbidden frontend/static detail %q", forbidden)
-		}
-	}
-}
-
-// assertHostedRunLLVMHostedRenderer keeps hosted rendering responsibilities in
-// the hosted renderer LLVM module.
-func assertHostedRunLLVMHostedRenderer(t *testing.T, cliHostedRenderer string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
-		"hosted::run_print_executable()",
-	} {
-		if !strings.Contains(cliHostedRenderer, fragment) {
-			t.Fatalf("hosted renderer missing %q", fragment)
 		}
 	}
 }
@@ -2633,7 +2612,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"cli_artifact_dir_llvm::append_functions(",
 		"cli_ast_boundary_llvm::append_functions(",
 		"cli_test_ast_llvm::append_functions(",
-		"cli_hosted_renderer_llvm::append_functions(",
 		"compiled_llvm::append_compiled_function_auto(",
 	},
 	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
@@ -2674,11 +2652,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
-		"@kizu_selfhost__ir_codegen_stdout_payload",
 		"cli_check_gate_llvm::append_static_check_gate(",
 		"@kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_selfhost__ir_codegen_lower_run_parse_result",
-		"@kizu_selfhost__cli_codegen_lower_run_ast",
+		"@kizu_selfhost__ir_code_render_render_run_artifact",
+		"@kizu_selfhost__cli_emit_run_codegen_artifact",
 	},
 	"../../selfhost/src/backend/cli_ast_boundary_llvm.kizu": {
 		"pub fn append_globals(",
@@ -2694,12 +2671,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"fn append_codegen_payload_llvm_c_string_function(",
 		"fn append_write_llvm_escape_function(",
-	},
-	"../../selfhost/src/backend/cli_hosted_renderer_llvm.kizu": {
-		"pub fn append_globals(",
-		"pub fn append_functions(",
-		"fn append_write_stdout_ll_function(",
-		"@kizu_selfhost__cli_hosted_write_stdout_ll",
 	},
 	"../../selfhost/src/backend/cli_test_llvm.kizu": {
 		"pub fn append_globals(",
