@@ -3258,7 +3258,9 @@ func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
 
 // countHostedCompilerCLIRunFailures runs a non-fixture source through `run`.
 // The probe must stay outside the run tape's supported surface (enum matches
-// now lower, so it uses a union payload match the tape does not own yet).
+// now lower, so it uses a union payload match: the boundary's one-ident arm
+// pattern rejects `Circle(radius)` before the tape sees it, and the tape owns
+// no union payload dispatch either, so the run stays unsupported end to end).
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	failures := countHostedCompilerCLIUnsupportedRunSourceFailures(
