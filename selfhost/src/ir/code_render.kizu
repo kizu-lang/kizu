@@ -163,6 +163,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
     try wl(out, "declare %kizu.owned @kizu_rt_io_blocking()");
     try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare i64 @kizu_rt_process_exit_code(i64)");
     try wl(out, "declare void @kizu_rt_trap(%kizu.slice.u8)");
@@ -749,6 +750,10 @@ fn render_one_instruction(
     let try_fs_read = codegen::code_op_try_fs_read();
     if op == try_fs_read {
         try render_try_fs_read(out, code, index, abi);
+    }
+    let try_io_write = codegen::code_op_try_io_write();
+    if op == try_io_write {
+        try render_try_io_write(out, code, index, abi);
     }
     let if_begin = codegen::code_op_if_begin();
     if op == if_begin {
@@ -1907,6 +1912,57 @@ fn render_try_fs_read(
     return;
 }
 
+// render_try_io_write emits a 'try std::io::write_stdout/write_stderr(io, bytes)'
+// statement: call the stream's runtime write with the io handle and the message
+// slice, extract the ok flag, and branch into a fail block that propagates the
+// error by the surrounding ABI or a cont block that resumes the body. The '%tc'
+// temp prefix matches TRY_CALL's so render_try_propagate serves both records.
+fn render_try_io_write(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let io_value = try code.get(index + 1);
+    let msg_value = try code.get(index + 2);
+    let stream = try code.get(index + 3);
+    let stderr_stream = codegen::code_io_stream_stderr();
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_rt_io_write_");
+    if stream == stderr_stream {
+        try w(out, "stderr");
+    }
+    if stream != stderr_stream {
+        try w(out, "stdout");
+    }
+    try w(out, "(%kizu.owned %v");
+    try wi(out, io_value);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, msg_value);
+    try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    return;
+}
+
 // render_fs_read_propagate emits the fail-block terminator for a try fs read: the
 // kizu_run_main entry exits the process with code 1, every other (error-union-void)
 // function returns a failed error union.
@@ -2257,6 +2313,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let str_slice = codegen::code_op_str_slice();
     if op == str_slice {
         return index + 3;
+    }
+    let try_io_write = codegen::code_op_try_io_write();
+    if op == try_io_write {
+        return index + 4;
     }
     let binary = codegen::code_op_binary();
     if op == binary {
