@@ -40,12 +40,14 @@ func TestSelfhostRunInterpreterDebugGatesStayOffJustfile(t *testing.T) {
 		t.Fatalf("read justfile: %v", err)
 	}
 	content := string(bytes)
-	for _, recipe := range []string{
+	for _, forbidden := range []string{
 		"selfhost-run-tape-gate:",
 		"selfhost-run-render-gate:",
+		"KIZU_RUN_SELFHOST_RUN_TAPE=1",
+		"KIZU_RUN_SELFHOST_RUN_RENDER=1",
 	} {
-		if strings.Contains(content, recipe) {
-			t.Fatalf("interpreter-heavy debug recipe %q must stay out of justfile", recipe)
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("interpreter-heavy debug entry %q must stay out of justfile", forbidden)
 		}
 	}
 }

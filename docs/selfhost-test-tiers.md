@@ -234,6 +234,7 @@ When one of these interpreter-only internals is necessary, run the raw command
 with a clear budget and keep full logs, for example:
 
 ```sh
+mkdir -p target/selfhost/reports
 KIZU_RUN_SELFHOST_RUN_TAPE=1 \
   go test -timeout=30m ./cmd/kizu \
   -run 'TestSelfhostRunTapeLoweringGate$' -count=1 -v \
