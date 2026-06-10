@@ -63,6 +63,9 @@ pre-commit run --all-files
 Selfhost compiler checks are split into daily and heavyweight tiers in
 [`docs/selfhost-test-tiers.md`](selfhost-test-tiers.md). The daily gate must not
 hide multi-minute interpreted selfhost oracle work inside default `go test`.
+Run tape / renderer internals that execute selfhost backend entries through
+`internal/interp` are debug-only and intentionally have no `just` recipes; use
+hosted stage2 or native-source gates for routine evidence.
 
 Hosted `run <file>` and `kizu test <file>` parity gates use backend artifact
 emit/link/execute as decided by #531. Those gates must record elapsed time,
@@ -91,6 +94,12 @@ gate になり、backend artifact rendering を Go interpreter 上で走らせ�
 回せる proxy を併用し、最後に該当する oracle / integration gate で確認する二段
 ループにする。2026-05-31 の `just selfhost-backend-artifact-gate` 実測は 10.14s real
 (9.97s in `go test`)。
+
+`KIZU_RUN_SELFHOST_RUN_TAPE=1` and `KIZU_RUN_SELFHOST_RUN_RENDER=1` run the
+selfhost run backend internals through the Go interpreter. They can take many
+minutes after a blocker is crossed, so they are not a routine ground truth for
+performance work. If one is needed to pin a blocker, run the raw `go test`
+command with full logs instead of hiding output behind `tail`.
 
 ### 計測ツール
 

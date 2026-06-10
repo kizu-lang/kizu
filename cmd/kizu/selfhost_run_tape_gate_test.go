@@ -31,6 +31,27 @@ func TestSelfhostRunTapeLoweringGate(t *testing.T) {
 	}
 }
 
+// TestSelfhostRunInterpreterDebugGatesStayOffJustfile keeps the multi-minute
+// interpreted run backend internals out of routine recipe discovery. They remain
+// available through explicit raw go test commands when a blocker needs them.
+func TestSelfhostRunInterpreterDebugGatesStayOffJustfile(t *testing.T) {
+	bytes, err := os.ReadFile("../../justfile")
+	if err != nil {
+		t.Fatalf("read justfile: %v", err)
+	}
+	content := string(bytes)
+	for _, forbidden := range []string{
+		"selfhost-run-tape-gate:",
+		"selfhost-run-render-gate:",
+		"KIZU_RUN_SELFHOST_RUN_TAPE=1",
+		"KIZU_RUN_SELFHOST_RUN_RENDER=1",
+	} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("interpreter-heavy debug entry %q must stay out of justfile", forbidden)
+		}
+	}
+}
+
 // runSelfhostRunTapeLoweringGate loads the selfhost package and drives the gate.
 func runSelfhostRunTapeLoweringGate(t *testing.T) (string, error) {
 	t.Helper()
