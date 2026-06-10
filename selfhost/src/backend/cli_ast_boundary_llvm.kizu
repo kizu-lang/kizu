@@ -625,6 +625,42 @@ fn append_parse_statement_function(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %index)");
     try append_line(out, "  %kind = extractvalue %kizu.kizu.lexer.token %token, 0");
+    try append_line(out, "  %stmt_start = extractvalue %kizu.kizu.lexer.token %token, 1");
+    // An 'ident: while/for' prefix labels the loop; anything else falls through
+    // to the ordinary statement dispatch.
+    try append_line(out, "  %is_label_ident = icmp eq i64 %kind, 27");
+    try append_line(out, "  br i1 %is_label_ident, label %label_check_colon, label %dispatch");
+    try append_line(out, "label_check_colon:");
+    try append_line(out, "  %label_colon_probe = add i64 %index, 1");
+    try append_line(out,
+        "  %label_colon_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %label_colon_probe)");
+    try append_line(out, "  %label_colon_kind = extractvalue %kizu.kizu.lexer.token %label_colon_token, 0");
+    try append_line(out, "  %label_has_colon = icmp eq i64 %label_colon_kind, 35");
+    try append_line(out, "  br i1 %label_has_colon, label %label_check_loop, label %dispatch");
+    try append_line(out, "label_check_loop:");
+    try append_line(out, "  %label_loop_probe = add i64 %index, 2");
+    try append_line(out,
+        "  %label_loop_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %label_loop_probe)");
+    try append_line(out, "  %label_loop_kind = extractvalue %kizu.kizu.lexer.token %label_loop_token, 0");
+    try append_line(out, "  %label_is_while = icmp eq i64 %label_loop_kind, 15");
+    try append_line(out, "  %label_is_for = icmp eq i64 %label_loop_kind, 16");
+    try append_line(out, "  %label_is_loop = or i1 %label_is_while, %label_is_for");
+    try append_line(out, "  br i1 %label_is_loop, label %parse_labeled_loop, label %dispatch");
+    try append_line(out, "parse_labeled_loop:");
+    try append_line(out, "  %label_end_pos = extractvalue %kizu.kizu.lexer.token %token, 2");
+    try append_line(out,
+        "  %label_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %stmt_start, i64 %label_end_pos, i64 4)");
+    try append_line(out, "  %labeled_index = add i64 %index, 2");
+    try append_line(out, "  br i1 %label_is_while, label %parse_labeled_while, label %parse_labeled_for");
+    try append_line(out, "parse_labeled_while:");
+    try append_line(out,
+        "  %labeled_while_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_while(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, %kizu.kizu.ast.node_id %label_node, i64 %labeled_index)");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %labeled_while_result");
+    try append_line(out, "parse_labeled_for:");
+    try append_line(out,
+        "  %labeled_for_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_for(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, %kizu.kizu.ast.node_id %label_node, i64 %labeled_index)");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %labeled_for_result");
+    try append_line(out, "dispatch:");
     try append_line(out, "  %is_let = icmp eq i64 %kind, 8");
     try append_line(out, "  br i1 %is_let, label %parse_let, label %maybe_var");
     try append_line(out, "maybe_var:");
@@ -653,14 +689,18 @@ fn append_parse_statement_function(out: &var std::string::String) -> !void {
     try append_line(out, "  br i1 %is_while, label %parse_while, label %maybe_for");
     try append_line(out, "parse_while:");
     try append_line(out,
-        "  %while_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_while(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
+        "  %while_label_empty = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %stmt_start, i64 %stmt_start, i64 44)");
+    try append_line(out,
+        "  %while_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_while(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, %kizu.kizu.ast.node_id %while_label_empty, i64 %index)");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %while_result");
     try append_line(out, "maybe_for:");
     try append_line(out, "  %is_for = icmp eq i64 %kind, 16");
     try append_line(out, "  br i1 %is_for, label %parse_for, label %maybe_break");
     try append_line(out, "parse_for:");
     try append_line(out,
-        "  %for_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_for(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
+        "  %for_label_empty = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %stmt_start, i64 %stmt_start, i64 44)");
+    try append_line(out,
+        "  %for_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_for(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, %kizu.kizu.ast.node_id %for_label_empty, i64 %index)");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %for_result");
     try append_line(out, "maybe_break:");
     try append_line(out, "  %is_break = icmp eq i64 %kind, 17");
@@ -996,6 +1036,7 @@ fn append_parse_while_function(out: &var std::string::String) -> !void {
     try append_line(out, "  %kizu.kizu.ast.ast %ast,");
     try append_line(out, "  %kizu.slice.u8 %source,");
     try append_line(out, "  %kizu.owned %tokens,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %label,");
     try append_line(out, "  i64 %index");
     try append_line(out, ") {");
     try append_line(out, "entry:");
@@ -1022,9 +1063,7 @@ fn append_parse_while_function(out: &var std::string::String) -> !void {
         "  %body_close = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %body_close_index)");
     try append_line(out, "  %while_end = extractvalue %kizu.kizu.lexer.token %body_close, 2");
     try append_line(out,
-        "  %label_empty = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %while_start, i64 %while_start, i64 44)");
-    try append_line(out,
-        "  %while_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_while(%kizu.kizu.ast.ast %ast, i64 %while_start, i64 %while_end, %kizu.kizu.ast.node_id %label_empty, %kizu.kizu.ast.node_id %condition_node, %kizu.kizu.ast.node_id %body_node)");
+        "  %while_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_while(%kizu.kizu.ast.ast %ast, i64 %while_start, i64 %while_end, %kizu.kizu.ast.node_id %label, %kizu.kizu.ast.node_id %condition_node, %kizu.kizu.ast.node_id %body_node)");
     try append_line(out,
         "  %ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
     try append_line(out,
@@ -1045,6 +1084,7 @@ fn append_parse_for_function(out: &var std::string::String) -> !void {
     try append_line(out, "  %kizu.kizu.ast.ast %ast,");
     try append_line(out, "  %kizu.slice.u8 %source,");
     try append_line(out, "  %kizu.owned %tokens,");
+    try append_line(out, "  %kizu.kizu.ast.node_id %label,");
     try append_line(out, "  i64 %index");
     try append_line(out, ") {");
     try append_line(out, "entry:");
@@ -1107,11 +1147,9 @@ fn append_parse_for_function(out: &var std::string::String) -> !void {
         "  %body_close = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %body_close_index)");
     try append_line(out, "  %for_end = extractvalue %kizu.kizu.lexer.token %body_close, 2");
     try append_line(out,
-        "  %label_empty = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %for_start, i64 %for_start, i64 44)");
-    try append_line(out,
         "  %name_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %name_start, i64 %name_end, i64 4)");
     try append_line(out,
-        "  %for_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_for(%kizu.kizu.ast.ast %ast, i64 %for_start, i64 %for_end, %kizu.kizu.ast.node_id %label_empty, %kizu.kizu.ast.node_id %name_node, %kizu.kizu.ast.node_id %start_node, %kizu.kizu.ast.node_id %end_node, %kizu.kizu.ast.node_id %body_node)");
+        "  %for_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_for(%kizu.kizu.ast.ast %ast, i64 %for_start, i64 %for_end, %kizu.kizu.ast.node_id %label, %kizu.kizu.ast.node_id %name_node, %kizu.kizu.ast.node_id %start_node, %kizu.kizu.ast.node_id %end_node, %kizu.kizu.ast.node_id %body_node)");
     try append_line(out,
         "  %ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
     try append_line(out,
@@ -1137,20 +1175,54 @@ fn append_parse_break_function(out: &var std::string::String) -> !void {
     try append_line(out, "entry:");
     try append_line(out,
         "  %token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %index)");
-    try append_line(out, "  %semicolon_index = add i64 %index, 1");
+    try append_line(out, "  %start = extractvalue %kizu.kizu.lexer.token %token, 1");
+    try append_line(out, "  %after_index = add i64 %index, 1");
     try append_line(out,
-        "  %semicolon = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %semicolon_index)");
-    try append_line(out, "  %semicolon_kind = extractvalue %kizu.kizu.lexer.token %semicolon, 0");
-    try append_line(out, "  %semicolon_ok = icmp eq i64 %semicolon_kind, 33");
+        "  %after = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %after_index)");
+    try append_line(out, "  %after_kind = extractvalue %kizu.kizu.lexer.token %after, 0");
+    // ': <ident>' between the keyword and the semicolon names the target loop.
+    try append_line(out, "  %has_label = icmp eq i64 %after_kind, 35");
+    try append_line(out, "  br i1 %has_label, label %parse_label, label %plain");
+    try append_line(out, "parse_label:");
+    try append_line(out, "  %label_name_index = add i64 %index, 2");
+    try append_line(out,
+        "  %label_name_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %label_name_index)");
+    try append_line(out, "  %label_name_kind = extractvalue %kizu.kizu.lexer.token %label_name_token, 0");
+    try append_line(out, "  %label_name_ok = icmp eq i64 %label_name_kind, 27");
+    try append_line(out, "  br i1 %label_name_ok, label %label_semi, label %fail");
+    try append_line(out, "label_semi:");
+    try append_line(out, "  %label_semi_index = add i64 %index, 3");
+    try append_line(out,
+        "  %label_semi_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %label_semi_index)");
+    try append_line(out, "  %label_semi_kind = extractvalue %kizu.kizu.lexer.token %label_semi_token, 0");
+    try append_line(out, "  %label_semi_ok = icmp eq i64 %label_semi_kind, 33");
+    try append_line(out, "  br i1 %label_semi_ok, label %build_labeled, label %fail");
+    try append_line(out, "build_labeled:");
+    try append_line(out, "  %label_name_start = extractvalue %kizu.kizu.lexer.token %label_name_token, 1");
+    try append_line(out, "  %label_name_end = extractvalue %kizu.kizu.lexer.token %label_name_token, 2");
+    try append_line(out, "  %labeled_end = extractvalue %kizu.kizu.lexer.token %label_semi_token, 2");
+    try append_line(out,
+        "  %label_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %label_name_start, i64 %label_name_end, i64 4)");
+    try append_line(out,
+        "  %labeled_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_break(%kizu.kizu.ast.ast %ast, i64 %start, i64 %labeled_end, %kizu.kizu.ast.node_id %label_node)");
+    try append_line(out, "  %labeled_next = add i64 %label_semi_index, 1");
+    try append_line(out,
+        "  %labeled_ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
+    try append_line(out,
+        "  %labeled_ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %labeled_ok0, i64 %labeled_next, 1");
+    try append_line(out,
+        "  %labeled_ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %labeled_ok1, %kizu.kizu.ast.node_id %labeled_node, 2");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %labeled_ok2");
+    try append_line(out, "plain:");
+    try append_line(out, "  %semicolon_ok = icmp eq i64 %after_kind, 33");
     try append_line(out, "  br i1 %semicolon_ok, label %build, label %fail");
     try append_line(out, "build:");
-    try append_line(out, "  %start = extractvalue %kizu.kizu.lexer.token %token, 1");
-    try append_line(out, "  %end = extractvalue %kizu.kizu.lexer.token %semicolon, 2");
+    try append_line(out, "  %end = extractvalue %kizu.kizu.lexer.token %after, 2");
     try append_line(out,
         "  %label_empty = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %start, i64 %start, i64 44)");
     try append_line(out,
         "  %node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_break(%kizu.kizu.ast.ast %ast, i64 %start, i64 %end, %kizu.kizu.ast.node_id %label_empty)");
-    try append_line(out, "  %next = add i64 %semicolon_index, 1");
+    try append_line(out, "  %next = add i64 %after_index, 1");
     try append_line(out,
         "  %ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
     try append_line(out,
@@ -1176,20 +1248,54 @@ fn append_parse_continue_function(out: &var std::string::String) -> !void {
     try append_line(out, "entry:");
     try append_line(out,
         "  %token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %index)");
-    try append_line(out, "  %semicolon_index = add i64 %index, 1");
+    try append_line(out, "  %start = extractvalue %kizu.kizu.lexer.token %token, 1");
+    try append_line(out, "  %after_index = add i64 %index, 1");
     try append_line(out,
-        "  %semicolon = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %semicolon_index)");
-    try append_line(out, "  %semicolon_kind = extractvalue %kizu.kizu.lexer.token %semicolon, 0");
-    try append_line(out, "  %semicolon_ok = icmp eq i64 %semicolon_kind, 33");
+        "  %after = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %after_index)");
+    try append_line(out, "  %after_kind = extractvalue %kizu.kizu.lexer.token %after, 0");
+    // ': <ident>' between the keyword and the semicolon names the target loop.
+    try append_line(out, "  %has_label = icmp eq i64 %after_kind, 35");
+    try append_line(out, "  br i1 %has_label, label %parse_label, label %plain");
+    try append_line(out, "parse_label:");
+    try append_line(out, "  %label_name_index = add i64 %index, 2");
+    try append_line(out,
+        "  %label_name_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %label_name_index)");
+    try append_line(out, "  %label_name_kind = extractvalue %kizu.kizu.lexer.token %label_name_token, 0");
+    try append_line(out, "  %label_name_ok = icmp eq i64 %label_name_kind, 27");
+    try append_line(out, "  br i1 %label_name_ok, label %label_semi, label %fail");
+    try append_line(out, "label_semi:");
+    try append_line(out, "  %label_semi_index = add i64 %index, 3");
+    try append_line(out,
+        "  %label_semi_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %label_semi_index)");
+    try append_line(out, "  %label_semi_kind = extractvalue %kizu.kizu.lexer.token %label_semi_token, 0");
+    try append_line(out, "  %label_semi_ok = icmp eq i64 %label_semi_kind, 33");
+    try append_line(out, "  br i1 %label_semi_ok, label %build_labeled, label %fail");
+    try append_line(out, "build_labeled:");
+    try append_line(out, "  %label_name_start = extractvalue %kizu.kizu.lexer.token %label_name_token, 1");
+    try append_line(out, "  %label_name_end = extractvalue %kizu.kizu.lexer.token %label_name_token, 2");
+    try append_line(out, "  %labeled_end = extractvalue %kizu.kizu.lexer.token %label_semi_token, 2");
+    try append_line(out,
+        "  %label_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %label_name_start, i64 %label_name_end, i64 4)");
+    try append_line(out,
+        "  %labeled_node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_continue(%kizu.kizu.ast.ast %ast, i64 %start, i64 %labeled_end, %kizu.kizu.ast.node_id %label_node)");
+    try append_line(out, "  %labeled_next = add i64 %label_semi_index, 1");
+    try append_line(out,
+        "  %labeled_ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
+    try append_line(out,
+        "  %labeled_ok1 = insertvalue %kizu.selfhost.cli.parse_node_result %labeled_ok0, i64 %labeled_next, 1");
+    try append_line(out,
+        "  %labeled_ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %labeled_ok1, %kizu.kizu.ast.node_id %labeled_node, 2");
+    try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %labeled_ok2");
+    try append_line(out, "plain:");
+    try append_line(out, "  %semicolon_ok = icmp eq i64 %after_kind, 33");
     try append_line(out, "  br i1 %semicolon_ok, label %build, label %fail");
     try append_line(out, "build:");
-    try append_line(out, "  %start = extractvalue %kizu.kizu.lexer.token %token, 1");
-    try append_line(out, "  %end = extractvalue %kizu.kizu.lexer.token %semicolon, 2");
+    try append_line(out, "  %end = extractvalue %kizu.kizu.lexer.token %after, 2");
     try append_line(out,
         "  %label_empty = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 %start, i64 %start, i64 44)");
     try append_line(out,
         "  %node = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_continue(%kizu.kizu.ast.ast %ast, i64 %start, i64 %end, %kizu.kizu.ast.node_id %label_empty)");
-    try append_line(out, "  %next = add i64 %semicolon_index, 1");
+    try append_line(out, "  %next = add i64 %after_index, 1");
     try append_line(out,
         "  %ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
     try append_line(out,

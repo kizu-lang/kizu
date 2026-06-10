@@ -56,6 +56,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderErrorUnionI64Cases()...)
 	cases = append(cases, runRenderExpectCases()...)
 	cases = append(cases, runRenderModPrintBoolCases()...)
+	cases = append(cases, runRenderLabeledLoopCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -352,6 +353,28 @@ func runRenderModPrintBoolCases() []runRenderCase {
 			source: "fn main() {\n    let t = 1 == 1;\n    print(t);\n    print(false);\n" +
 				"    print(2 < 1 or true);\n}\n",
 			wantStdout: "true\nfalse\ntrue\n",
+		},
+	}
+}
+
+// runRenderLabeledLoopCases is the labeled-loop corpus (break/continue naming an
+// outer while/for target).
+func runRenderLabeledLoopCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "labeled_while_break",
+			source: "fn main() -> void {\n    var i = 0;\n    outer: while i < 3 {\n" +
+				"        var j = 0;\n        while j < 3 {\n            if i == 1 {\n" +
+				"                break :outer;\n            }\n            print(i * 10 + j);\n" +
+				"            j = j + 1;\n        }\n        i = i + 1;\n    }\n}\n",
+			wantStdout: "0\n1\n2\n",
+		},
+		{
+			name: "labeled_for_continue",
+			source: "fn main() {\n    rows: for 0..3 |i| {\n        for 0..3 |j| {\n" +
+				"            if j == 1 {\n                continue :rows;\n            }\n" +
+				"            print(i * 10 + j);\n        }\n    }\n}\n",
+			wantStdout: "0\n10\n20\n",
 		},
 	}
 }
