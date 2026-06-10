@@ -4361,8 +4361,10 @@ fn lower_code_match_arm(
     next_value: i64
 ) -> !CodeEval {
     let pattern_text = ast_node_text(text, ast, pattern);
+    let tail_index = index + 1;
+    let is_tail = tail_index == arms.len;
     if std::mem::equal_bytes(pattern_text, "_") {
-        return try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value);
+        return try lower_code_match_wildcard(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, is_tail, next_value);
     }
     let enum_start_pos = record_pos + 4;
     let enum_start = try code.get(enum_start_pos);
@@ -4411,6 +4413,33 @@ fn lower_code_match_arm(
     try code.append(op_if_end);
     try code.append(if_begin_index);
     return code_eval_value(0, rest_eval.next);
+}
+
+// lower_code_match_wildcard lowers a '_' arm body unconditionally. The checker
+// rejects a non-final wildcard ('wildcard match arm must be last'); the is_tail
+// guard keeps a hypothetical unchecked tape from silently dropping the arms
+// behind one.
+fn lower_code_match_wildcard(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    is_tail: bool,
+    next_value: i64
+) -> !CodeEval {
+    if !is_tail {
+        return code_eval_unsupported(next_value);
+    }
+    return try lower_code_match_body(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value);
 }
 
 // lower_code_match_body lowers one arm body: a bare call or try-call lowers as
