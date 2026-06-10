@@ -54,6 +54,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderNestedCallCases()...)
 	cases = append(cases, runRenderShadowingCases()...)
 	cases = append(cases, runRenderErrorUnionI64Cases()...)
+	cases = append(cases, runRenderExpectCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -316,6 +317,22 @@ func runRenderErrorUnionI64Cases() []runRenderCase {
 			name:       "main_return_value_exits_zero",
 			source:     "fn main() -> i64 {\n    print(\"v\");\n    return 5;\n}\n",
 			wantStdout: "v\n",
+		},
+	}
+}
+
+// runRenderExpectCases is the std::testing::expect corpus (passing expectations
+// over comparisons and short-circuit logic; the failing trap path is covered by
+// the parity manifest).
+func runRenderExpectCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "expect_passing_conditions",
+			source: "fn main() -> !void {\n    let age = 30;\n    let admin = false;\n" +
+				"    std::testing::expect(age >= 20 and age < 130);\n" +
+				"    std::testing::expect(age < 20 or age >= 30);\n" +
+				"    std::testing::expect(!admin);\n    print(\"ok\");\n    return;\n}\n",
+			wantStdout: "ok\n",
 		},
 	}
 }

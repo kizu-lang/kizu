@@ -67,6 +67,29 @@ pub fn render_run_artifact(
     return try render_tape_module(allocator, source_path, text, &code, &kinds);
 }
 
+// expect_fail_message is the runtime expectation-failure line
+// std::testing::expect traps with (matching the reference compiler's message).
+fn expect_fail_message() -> []u8 {
+    return "error: runtime error: expected condition to be true";
+}
+
+// render_expect_fail_global emits the expectation-failure message global the
+// EXPECT fail blocks point their trap slice at (message plus a newline byte).
+fn render_expect_fail_global(out: &var std::string::String) -> !void {
+    let message = expect_fail_message();
+    let message_len = std::mem::len(message);
+    let payload_len = message_len + 1;
+    try w(out, "@.kizu.run.expect_fail = private unnamed_addr constant [");
+    try wi(out, payload_len);
+    try w(out, " x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try w(out, message);
+    try w(out, "\0A");
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
+    return;
+}
+
 // w appends a fragment with no trailing newline.
 fn w(out: &var std::string::String, text: []u8) -> !void {
     try out.append_bytes(text);
@@ -126,9 +149,11 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare i64 @kizu_rt_process_exit_code(i64)");
+    try wl(out, "declare void @kizu_rt_trap(%kizu.slice.u8)");
     try wl(out, "declare void @kizu_host_init(i32, ptr)");
     try nl(out);
     try wl(out, "@.kizu.run.newline = private unnamed_addr constant [1 x i8] [i8 10]");
+    try render_expect_fail_global(out);
     try nl(out);
     try render_i64_decimal_helper(out);
     return;
@@ -631,6 +656,10 @@ fn render_one_instruction(
     let try_call_i64 = codegen::code_op_try_call_i64();
     if op == try_call_i64 {
         try render_try_call_i64(out, text, code, kinds, index, abi);
+    }
+    let expect_op = codegen::code_op_expect();
+    if op == expect_op {
+        try render_expect(out, code, index);
     }
     let ret_value = codegen::code_op_ret_value();
     if op == ret_value {
@@ -1627,6 +1656,48 @@ fn render_try_i64_propagate_err_void(out: &var std::string::String, index: i64) 
     return;
 }
 
+// render_expect branches on the lowered i1 expectation: the fail block traps the
+// process with the runtime expectation message (stderr + exit 1, noreturn), and
+// the cont block resumes the body. Labels are suffixed with the record's tape
+// index so they stay unique.
+fn render_expect(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let cond = try code.get(index + 1);
+    let message_len = std::mem::len(expect_fail_message());
+    let payload_len = message_len + 1;
+    try w(out, "  br i1 %v");
+    try wi(out, cond);
+    try w(out, ", label %ex");
+    try wi(out, index);
+    try w(out, "_cont, label %ex");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "ex");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %ex");
+    try wi(out, index);
+    try wl(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.expect_fail, 0");
+    try w(out, "  %ex");
+    try wi(out, index);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %ex");
+    try wi(out, index);
+    try w(out, "_base, i64 ");
+    try wi(out, payload_len);
+    try wl(out, ", 1");
+    try w(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %ex");
+    try wi(out, index);
+    try wl(out, "_slice)");
+    try wl(out, "  unreachable");
+    try w(out, "ex");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    return;
+}
+
 // render_try_propagate emits the fail-block terminator for a try: the kizu_run_main
 // entry exits the process with code 1, every other (error-union-void) function
 // returns the propagated error union.
@@ -2033,6 +2104,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let try_call_i64 = codegen::code_op_try_call_i64();
     if op == try_call_i64 {
         return try tape_call_record_end(code, index);
+    }
+    let expect_op = codegen::code_op_expect();
+    if op == expect_op {
+        return index + 2;
     }
     let ret_err_fail = codegen::code_op_ret_err_fail();
     if op == ret_err_fail {
