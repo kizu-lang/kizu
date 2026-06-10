@@ -4376,10 +4376,64 @@ fn lower_code_expr_statement(
 ) -> !CodeEval {
     let node = ast.get(expr);
     return match node.data {
-        Call(call_node) => try lower_code_print_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Call(call_node) => try lower_code_statement_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         TryExpr(try_expr) => try lower_code_try_statement(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
+}
+
+// lower_code_statement_call routes a statement-position call: print(<expr>) keeps
+// its PRINT record, every other callee lowers as an ordinary user CALL whose
+// result value simply stays unused.
+fn lower_code_statement_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_text = ast_node_text(text, ast, callee);
+    if std::mem::equal_bytes(callee_text, "print") {
+        return try lower_code_print_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    return try lower_code_user_call_statement(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+// lower_code_user_call_statement lowers a statement-position call to a declared
+// void (kind 0) or i64 (kind 1) function as a CALL record; a void callee compiles
+// as an i64 define returning 0, so the same record shape serves both.
+fn lower_code_user_call_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_span = code_node_span(text, ast, callee);
+    let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
+    if callee_kind == 0 {
+        return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if callee_kind == 1 {
+        return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    return code_eval_unsupported(next_value);
 }
 
 // lower_code_try_statement lowers a 'try <call>;' statement: the try value must be
@@ -4967,6 +5021,28 @@ fn lower_code_call(
     if callee_kind != 1 {
         return code_eval_unsupported(next_value);
     }
+    return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+// emit_code_user_call lowers the arguments and appends the CALL record for a
+// declared user callee (shared by expression calls and statement calls). The
+// result value takes a fresh i64 id whether or not the caller consumes it.
+fn emit_code_user_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_span = code_node_span(text, ast, callee);
     let scratch_base = args_scratch.len();
     let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 0, next_value);
     if !args_eval.ok {

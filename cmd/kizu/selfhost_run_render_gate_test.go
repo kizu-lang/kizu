@@ -50,6 +50,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	}
 	cases := append(runRenderCases(), runRenderLoopCases()...)
 	cases = append(cases, runRenderBoolCases()...)
+	cases = append(cases, runRenderReturnCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -186,6 +187,38 @@ func runRenderBoolCases() []runRenderCase {
 				"        result = 1;\n    }\n    return result;\n}\n" +
 				"\nfn main() {\n    print(pick(true));\n    print(pick(false));\n}\n",
 			wantStdout: "1\n2\n",
+		},
+	}
+}
+
+// runRenderReturnCases is the early-return corpus (returns inside nested blocks,
+// statement-position void/i64 user calls) the tape renderer covers in this slice.
+func runRenderReturnCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "early_return_in_if_i64",
+			source: "fn pick(flag: bool) -> i64 {\n    if flag {\n        return 1;\n    }\n" +
+				"    return 2;\n}\n\nfn main() {\n    print(pick(true));\n    print(pick(false));\n}\n",
+			wantStdout: "1\n2\n",
+		},
+		{
+			name: "void_call_statement_early_return",
+			source: "fn done(ok: bool) -> void {\n    if ok {\n        print(\"done\");\n" +
+				"        return;\n    }\n\n    print(\"not done\");\n}\n\nfn main() {\n    done(true);\n}\n",
+			wantStdout: "done\n",
+		},
+		{
+			name: "main_early_return",
+			source: "fn main() {\n    print(\"a\");\n    if 1 == 1 {\n        return;\n    }\n" +
+				"    print(\"b\");\n}\n",
+			wantStdout: "a\n",
+		},
+		{
+			name: "early_return_in_while",
+			source: "fn first_over(limit: i64) -> i64 {\n    var i = 0;\n    while true {\n" +
+				"        if i > limit {\n            return i;\n        }\n        i = i + 1;\n    }\n" +
+				"    return 0;\n}\n\nfn main() {\n    print(first_over(3));\n}\n",
+			wantStdout: "4\n",
 		},
 	}
 }

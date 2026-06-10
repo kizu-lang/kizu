@@ -328,22 +328,18 @@ fn render_main_function(
     try render_var_allocas(out, code, body_start, func_end);
     let main_abi = ret_abi_main();
     try render_body(out, text, code, kinds, body_start, func_end, main_abi);
-    // The entry block needs exactly one terminator. A trailing 'return;' (RET_VOID)
-    // already rendered its own 'ret', so only emit the process-exit tail when the
-    // body did not end in a return.
-    let main_terminated = try body_last_is_return(code, body_start, func_end);
-    try render_main_tail(out, main_terminated);
+    // Every return record terminates its block and opens a fresh dead label, so
+    // the body always leaves one open block; the process-exit tail terminates it
+    // (as the live void fall-through or as dead code after a trailing return).
+    try render_main_tail(out);
     try wl(out, "}");
     try nl(out);
     return func_end + 1;
 }
 
-// render_main_tail emits the process-exit terminator for kizu_run_main unless the
-// body already ended in a return record (which rendered its own terminator).
-fn render_main_tail(out: &var std::string::String, terminated: bool) -> !void {
-    if terminated {
-        return;
-    }
+// render_main_tail emits the process-exit terminator closing kizu_run_main's
+// final open block.
+fn render_main_tail(out: &var std::string::String) -> !void {
     try wl(out, "  %exit_code = call i64 @kizu_rt_process_exit_code(i64 0)");
     try wl(out, "  ret i64 %exit_code");
     return;
@@ -375,12 +371,10 @@ fn render_user_function(
     try render_var_allocas(out, code, body_start, func_end);
     let abi = user_ret_abi(ret_kind);
     try render_body(out, text, code, kinds, body_start, func_end, abi);
-    // A void body (or a trailing 'return;') needs a terminator matching the ABI:
-    // an i64 function returns 0, an error-union-void function returns the ok union.
-    // Emit it only when the body did not already end in a return record that
-    // rendered its own terminator.
-    let user_terminated = try body_last_is_return(code, body_start, func_end);
-    try render_user_tail(out, user_terminated, abi);
+    // Every return record terminates its block and opens a fresh dead label, so
+    // the body always leaves one open block; the ABI default terminator closes it
+    // (an i64 function returns 0, an error-union-void function the ok union).
+    try render_user_tail(out, abi);
     try wl(out, "}");
     try nl(out);
     return func_end + 1;
@@ -405,12 +399,9 @@ fn render_user_define_head(
     return;
 }
 
-// render_user_tail closes a user function body that did not end in a return with
-// the default terminator for its ABI.
-fn render_user_tail(out: &var std::string::String, terminated: bool, abi: i64) -> !void {
-    if terminated {
-        return;
-    }
+// render_user_tail closes a user function body's final open block with the
+// default terminator for its ABI.
+fn render_user_tail(out: &var std::string::String, abi: i64) -> !void {
     let err_void = ret_abi_user_err_void();
     if abi == err_void {
         try render_ret_err_ok(out);
@@ -419,48 +410,6 @@ fn render_user_tail(out: &var std::string::String, terminated: bool, abi: i64) -
         try wl(out, "  ret i64 0");
     }
     return;
-}
-
-// body_last_is_return reports whether the final tape record in [index, func_end)
-// is a return record (RET_VALUE or RET_VOID), i.e. the body already emitted its
-// own terminator for the entry block.
-fn body_last_is_return(
-    code: &std::array::Array<i64>,
-    index: i64,
-    func_end: i64
-) -> !bool {
-    if index >= func_end {
-        return false;
-    }
-    let next = try tape_record_end(code, index);
-    let is_last = next >= func_end;
-    if is_last {
-        return try last_record_is_return(code, index);
-    }
-    return try body_last_is_return(code, next, func_end);
-}
-
-// last_record_is_return reads the opcode at index and classifies it as a return.
-fn last_record_is_return(code: &std::array::Array<i64>, index: i64) -> !bool {
-    let op = try code.get(index);
-    return op_is_return(op);
-}
-
-// op_is_return classifies a tape opcode as a function-terminating return.
-fn op_is_return(op: i64) -> bool {
-    let ret_value = codegen::code_op_ret_value();
-    if op == ret_value {
-        return true;
-    }
-    let ret_void = codegen::code_op_ret_void();
-    if op == ret_void {
-        return true;
-    }
-    let ret_err_fail = codegen::code_op_ret_err_fail();
-    if op == ret_err_fail {
-        return true;
-    }
-    return false;
 }
 
 // render_param_list emits '<type> %v<param_base+i>' separated by commas, typing
@@ -665,7 +614,7 @@ fn render_one_instruction(
     }
     let ret_void = codegen::code_op_ret_void();
     if op == ret_void {
-        try render_ret_void(out, abi);
+        try render_ret_void(out, index, abi);
     }
     let ret_err_fail = codegen::code_op_ret_err_fail();
     if op == ret_err_fail {
@@ -1179,6 +1128,9 @@ fn render_sc_end(
     return;
 }
 
+// render_ret_value emits the i64 return terminator, then opens a fresh dead block
+// (like break/continue do) so a return in a nested block leaves the structural
+// records that follow it (IF_ELSE/IF_END/loop closers) in a labeled block.
 fn render_ret_value(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
@@ -1188,13 +1140,15 @@ fn render_ret_value(
     try w(out, "  ret i64 %v");
     try wi(out, value_id);
     try nl(out);
+    try render_dead_label(out, index);
     return;
 }
 
-// render_ret_void emits the terminator for a 'return;' statement. An i64 function
-// (and the kizu_run_main entry, which maps it to process exit 0) yields 'ret i64 0';
-// an error-union-void function yields the ok union.
-fn render_ret_void(out: &var std::string::String, abi: i64) -> !void {
+// render_ret_void emits the terminator for a 'return;' statement, then opens a
+// fresh dead block. An i64 function (and the kizu_run_main entry, which maps it
+// to process exit 0) yields 'ret i64 0'; an error-union-void function yields the
+// ok union.
+fn render_ret_void(out: &var std::string::String, index: i64, abi: i64) -> !void {
     let err_void = ret_abi_user_err_void();
     if abi == err_void {
         try render_ret_err_ok(out);
@@ -1202,6 +1156,7 @@ fn render_ret_void(out: &var std::string::String, abi: i64) -> !void {
     if abi != err_void {
         try wl(out, "  ret i64 0");
     }
+    try render_dead_label(out, index);
     return;
 }
 
@@ -1227,6 +1182,7 @@ fn render_ret_err_fail(
     try w(out, ", i64 ");
     try wi(out, byte_len);
     try wl(out, " } }");
+    try render_dead_label(out, index);
     return;
 }
 
