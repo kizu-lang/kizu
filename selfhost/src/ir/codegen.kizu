@@ -3684,6 +3684,33 @@ pub fn lower_code_module(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>
 ) -> !CodeEval {
+    try scratch_init(args_scratch);
+    return try lower_code_program(text, ast, root, code, kinds, local_starts, local_ends, local_values, args_scratch);
+}
+
+// scratch_init seeds the call-arg scratch as an explicit stack: slot 0 holds the
+// stack pointer (the next free slot) and the argument slots start at 1. A nested
+// call argument allocates its own frame above its caller's reserved slots and the
+// pointer pops back when each CALL record copies its frame, so arbitrarily nested
+// call arguments keep every frame contiguous without an array-truncate primitive
+// (dead deeper slots are overwritten through scratch_put).
+fn scratch_init(args_scratch: &var std::array::Array<i64>) -> !void {
+    try args_scratch.append(1);
+    return;
+}
+
+// lower_code_program dispatches the checked file's root onto the declaration walk.
+fn lower_code_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>
+) -> !CodeEval {
     let node = ast.get(root);
     return match node.data {
         Program(program) => try lower_code_declarations(text, ast, program.declarations, code, kinds, local_starts, local_ends, local_values, args_scratch, 0, 0),
@@ -4484,8 +4511,8 @@ fn lower_code_try_call(
     if callee_kind != 2 {
         return code_eval_unsupported(next_value);
     }
-    let scratch_base = args_scratch.len();
-    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 0, next_value);
+    let scratch_base = try args_scratch.get(0);
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
@@ -4494,7 +4521,10 @@ fn lower_code_try_call(
     try code.append(callee_span.start);
     try code.append(callee_span.end);
     try code.append(args.len);
-    try copy_code_args(code, args_scratch, scratch_base);
+    let arg_count = args.len;
+    let scratch_bound = scratch_base + arg_count;
+    try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
+    try args_scratch.set(0, scratch_base);
     return code_eval_value(0, args_eval.next);
 }
 
@@ -5024,9 +5054,11 @@ fn lower_code_call(
     return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
 }
 
-// emit_code_user_call lowers the arguments and appends the CALL record for a
-// declared user callee (shared by expression calls and statement calls). The
-// result value takes a fresh i64 id whether or not the caller consumes it.
+// emit_code_user_call lowers the arguments into a fresh scratch frame and appends
+// the CALL record for a declared user callee (shared by expression calls and
+// statement calls). The frame pops back to its base once the record copies it,
+// so a call nested inside another call's argument leaves its caller's frame
+// intact. The result value takes a fresh i64 id whether or not it is consumed.
 fn emit_code_user_call(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -5043,8 +5075,8 @@ fn emit_code_user_call(
     next_value: i64
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
-    let scratch_base = args_scratch.len();
-    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 0, next_value);
+    let scratch_base = try args_scratch.get(0);
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
@@ -5054,7 +5086,10 @@ fn emit_code_user_call(
     try code.append(callee_span.start);
     try code.append(callee_span.end);
     try code.append(args.len);
-    try copy_code_args(code, args_scratch, scratch_base);
+    let arg_count = args.len;
+    let scratch_bound = scratch_base + arg_count;
+    try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
+    try args_scratch.set(0, scratch_base);
     let kind_i64 = code_kind_i64();
     try kinds.append(kind_i64);
     let result_value = args_eval.next;
@@ -5062,13 +5097,6 @@ fn emit_code_user_call(
     return code_eval_value(result_value, after_value);
 }
 
-// lower_code_args lowers each call argument and collects its value id onto the
-// shared scratch tail (the CALL record then copies [scratch_base, end)). A nested
-// call argument would leave its own argument ids on the scratch below this call's,
-// and the tape has no scratch-truncate primitive yet, so a Call-valued argument is
-// rejected here: the tape's only contiguous-scratch invariant holds because every
-// other argument kind (Int / String / Var / Binary) appends exactly its own single
-// result id. Nested call arguments lower once a scratch-truncate capability lands.
 // lower_code_io_blocking lowers a 'std::io::blocking()' call to the IO_BLOCKING
 // record producing a '%kizu.owned' io handle value (kind owned).
 fn lower_code_io_blocking(
@@ -5177,18 +5205,12 @@ fn lower_code_try_fs_read(
     return code_eval_value(result_value, after_value);
 }
 
-// code_node_is_call reports whether a node is a Call expression. It is the single
-// let+return-match accessor shape the compiled traversal path lowers (bool-literal
-// arms), so the nested-call rejection in lower_code_args stays out of a mid-function
-// match-over-union that the multi-statement path does not model.
-fn code_node_is_call(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
-    let node = ast.get(node_id);
-    return match node.data {
-        Call(call_node) => true,
-        _ => false,
-    };
-}
-
+// lower_code_args lowers each call argument into its caller's scratch frame
+// [scratch_base, scratch_base + args.len): before an argument lowers, the stack
+// pointer (args_scratch slot 0) moves past the argument's reserved slot so any
+// nested call inside it allocates its own frame strictly above, and after it
+// lowers, scratch_put writes the result id into the reserved slot (overwriting
+// whatever a nested frame left there).
 fn lower_code_args(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -5201,6 +5223,7 @@ fn lower_code_args(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
+    scratch_base: i64,
     index: i64,
     next_value: i64
 ) -> !CodeEval {
@@ -5208,30 +5231,59 @@ fn lower_code_args(
         return code_eval_value(0, next_value);
     }
     let arg = try ast.child_at(args, index);
-    if code_node_is_call(ast, arg) {
-        return code_eval_unsupported(next_value);
-    }
+    let arg_slot = scratch_base + index;
+    let next_free = arg_slot + 1;
+    try args_scratch.set(0, next_free);
     let eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
-    try args_scratch.append(eval.value_id);
+    try scratch_put(args_scratch, arg_slot, eval.value_id);
     let after = index + 1;
-    return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, after, eval.next);
+    return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, after, eval.next);
 }
 
+// scratch_put stores value into stack slot pos, growing the array first when a
+// reserved slot has not been written yet (a slot is written only after its
+// argument lowers, so the array may still be shorter than pos).
+fn scratch_put(
+    args_scratch: &var std::array::Array<i64>,
+    pos: i64,
+    value: i64
+) -> !void {
+    try scratch_grow(args_scratch, pos);
+    try args_scratch.set(pos, value);
+    return;
+}
+
+// scratch_grow appends zero slots until the stack array covers slot pos.
+fn scratch_grow(
+    args_scratch: &var std::array::Array<i64>,
+    pos: i64
+) -> !void {
+    let used = args_scratch.len();
+    if used > pos {
+        return;
+    }
+    try args_scratch.append(0);
+    try scratch_grow(args_scratch, pos);
+    return;
+}
+
+// copy_code_args copies one call's scratch frame [index, bound) onto the tape.
 fn copy_code_args(
     code: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
-    index: i64
+    index: i64,
+    bound: i64
 ) -> !void {
-    if index >= args_scratch.len() {
+    if index >= bound {
         return;
     }
     let value = try args_scratch.get(index);
     try code.append(value);
     let after = index + 1;
-    try copy_code_args(code, args_scratch, after);
+    try copy_code_args(code, args_scratch, after, bound);
     return;
 }
 
