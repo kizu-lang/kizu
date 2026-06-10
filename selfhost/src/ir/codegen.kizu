@@ -3380,6 +3380,15 @@ pub fn code_op_str_slice() -> i64 {
     return 7;
 }
 
+// STRUCT_LIT scalarizes a struct literal at lowering time: the record is
+// 'op dst field_count name_start1 name_end1 value1 ...' where each value id is
+// the field initializer's lowered tape value. The renderer emits nothing for it
+// (the dst value is never referenced by LLVM); a field read resolves through
+// the record back to the field's own value id.
+pub fn code_op_struct_lit() -> i64 {
+    return 8;
+}
+
 pub fn code_op_func_begin() -> i64 {
     return 10;
 }
@@ -3610,6 +3619,14 @@ pub fn code_kind_slice() -> i64 {
     return 5;
 }
 
+// code_kind_struct_base marks a struct literal value on the kinds array: the
+// entry stores base + <STRUCT_LIT record tape index>, so a field read recovers
+// the record position directly from the kind while every scalar kind check
+// rejects struct values without a dedicated guard.
+pub fn code_kind_struct_base() -> i64 {
+    return 1000;
+}
+
 fn code_binary_kind(op: std::kizu::ast::BinaryOp) -> i64 {
     if op == std::kizu::ast::binary_add() {
         return 1;
@@ -3813,8 +3830,11 @@ fn lower_code_function(
     next_value: i64
 ) -> !CodeEval {
     let node = ast.get(decl_id);
+    // A struct declaration emits nothing: literals carry their own field names
+    // and the checked AST already validated them against the declaration.
     return match node.data {
         FnDecl(fn_decl) => try lower_code_fn_decl(text, ast, decls, fn_decl.name, fn_decl.params, fn_decl.return_type, fn_decl.body, code, kinds, local_starts, local_ends, local_values, args_scratch, next_value),
+        StructDecl(struct_decl) => code_eval_value(0, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -5236,6 +5256,8 @@ fn lower_code_expr(
         Prefix(prefix_node) => try lower_code_prefix(text, ast, decls, prefix_node.op, prefix_node.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Binary(binary) => try lower_code_binary(text, ast, decls, binary.op, binary.left, binary.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Call(call_node) => try lower_code_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        FieldExpr(field_expr) => try lower_code_field_expr(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        StructLiteralExpr(struct_lit) => try lower_code_struct_literal(text, ast, decls, struct_lit.fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         TryExpr(try_expr) => try lower_code_try_expr(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
@@ -5579,6 +5601,212 @@ fn lower_code_var(
         return try emit_code_var_load(slot, code, kinds, next_value);
     }
     return code_eval_value(bound, next_value);
+}
+
+// lower_code_struct_literal scalarizes a struct literal: every field initializer
+// lowers to its own tape value (through the same scratch-stack frames call
+// arguments use), then the STRUCT_LIT record stores each field's name span and
+// value id. The literal's own value renders nothing -- its kinds entry stores
+// the record position so field reads resolve through it.
+fn lower_code_struct_literal(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    fields: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let scratch_base = try args_scratch.get(0);
+    let fields_eval = try lower_code_struct_fields(text, ast, decls, fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, 0, next_value);
+    if !fields_eval.ok {
+        return code_eval_unsupported(fields_eval.next);
+    }
+    let record_pos = code.len();
+    let op_struct_lit = code_op_struct_lit();
+    try code.append(op_struct_lit);
+    try code.append(fields_eval.next);
+    try code.append(fields.len);
+    // The fields walk left [name_start, name_end, value] per field on the
+    // scratch frame, so the record copies the frame verbatim.
+    let entry_slots = fields.len * 3;
+    let scratch_bound = scratch_base + entry_slots;
+    try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
+    try args_scratch.set(0, scratch_base);
+    let struct_base = code_kind_struct_base();
+    let struct_kind = struct_base + record_pos;
+    try kinds.append(struct_kind);
+    let result_value = fields_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+// lower_code_struct_fields lowers each field initializer into the literal's
+// scratch frame: field i owns slots [scratch_base + 3i, scratch_base + 3i + 2]
+// holding its name span start, name span end, and lowered value id, mirroring
+// the call-argument stack discipline so nested literals and calls keep their
+// frames.
+fn lower_code_struct_fields(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    fields: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    scratch_base: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= fields.len {
+        return code_eval_value(0, next_value);
+    }
+    let field = try ast.child_at(fields, index);
+    let eval = try lower_code_struct_field_node(text, ast, decls, field, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, index, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try lower_code_struct_fields(text, ast, decls, fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, after, eval.next);
+}
+
+fn lower_code_struct_field_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    field: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    scratch_base: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(field);
+    return match node.data {
+        StructFieldInit(init) => try lower_code_struct_field(text, ast, decls, init.name, init.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, index, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_struct_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    scratch_base: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    let entry_slots = index * 3;
+    let entry_base = scratch_base + entry_slots;
+    let name_end_slot = entry_base + 1;
+    let value_slot = entry_base + 2;
+    let next_free = value_slot + 1;
+    try args_scratch.set(0, next_free);
+    let eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let name_span = code_node_span(text, ast, name);
+    try scratch_put(args_scratch, entry_base, name_span.start);
+    try scratch_put(args_scratch, name_end_slot, name_span.end);
+    try scratch_put(args_scratch, value_slot, eval.value_id);
+    return code_eval_value(eval.value_id, eval.next);
+}
+
+// lower_code_field_expr resolves a '.' field read at lowering time: the receiver
+// must evaluate to a struct literal value (its kinds entry stores the STRUCT_LIT
+// record position) and the read resolves to the field's own value id without
+// emitting any record. Nested struct fields chain through the same resolution.
+fn lower_code_field_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if namespace {
+        return code_eval_unsupported(next_value);
+    }
+    let base_eval = try lower_code_expr(text, ast, decls, receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !base_eval.ok {
+        return code_eval_unsupported(base_eval.next);
+    }
+    let base_kind = try kinds.get(base_eval.value_id);
+    let struct_base = code_kind_struct_base();
+    if base_kind < struct_base {
+        return code_eval_unsupported(base_eval.next);
+    }
+    let record_pos = base_kind - struct_base;
+    let count_pos = record_pos + 2;
+    let field_count = try code.get(count_pos);
+    let name_span = code_node_span(text, ast, name);
+    let field_value = try struct_record_field(text, code, record_pos, field_count, name_span.start, name_span.end, 0);
+    if field_value < 0 {
+        return code_eval_unsupported(base_eval.next);
+    }
+    return code_eval_value(field_value, base_eval.next);
+}
+
+// struct_record_field walks the STRUCT_LIT record's field entries and returns
+// the value id bound to the named field (-1 when the record does not carry it).
+fn struct_record_field(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    record_pos: i64,
+    field_count: i64,
+    name_start: i64,
+    name_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= field_count {
+        return 0 - 1;
+    }
+    let entry_slots = index * 3;
+    let entry_pos = record_pos + 3 + entry_slots;
+    let entry_name_start = try code.get(entry_pos);
+    let entry_end_pos = entry_pos + 1;
+    let entry_name_end = try code.get(entry_end_pos);
+    let entry_name = text[entry_name_start..entry_name_end];
+    let name = text[name_start..name_end];
+    let after = index + 1;
+    if !std::mem::equal_bytes(entry_name, name) {
+        return try struct_record_field(text, code, record_pos, field_count, name_start, name_end, after);
+    }
+    let value_pos = entry_pos + 2;
+    let entry_value = try code.get(value_pos);
+    return entry_value;
 }
 
 // emit_code_var_load appends a VAR_LOAD record reading var slot into a fresh i64

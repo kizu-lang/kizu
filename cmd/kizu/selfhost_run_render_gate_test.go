@@ -60,6 +60,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderMultilineStringCases()...)
 	cases = append(cases, runRenderSliceParamCases()...)
 	cases = append(cases, runRenderIoWriteCases()...)
+	cases = append(cases, runRenderStructCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -435,6 +436,31 @@ func runRenderIoWriteCases() []runRenderCase {
 				"    try std::io::write_stderr(io, \"to stderr\");\n" +
 				"    try std::io::write_stdout(io, \"beta\");\n    return;\n}\n",
 			wantStdout: "alpha beta",
+		},
+	}
+}
+
+// runRenderStructCases is the struct-scalarization corpus (let-bound struct
+// literals, scalar and slice field reads, nested struct fields, and a field
+// read as a user-call argument).
+func runRenderStructCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "struct_field_reads",
+			source: "struct User {\n    name: []u8,\n    age: i64,\n}\n\n" +
+				"fn main() {\n    let user = User {\n        name: \"alice\",\n        age: 30,\n    };\n\n" +
+				"    print(user.name);\n    print(user.age);\n}\n",
+			wantStdout: "alice\n30\n",
+		},
+		{
+			name: "nested_struct_field_call_arg",
+			source: "struct Inner {\n    value: i64,\n}\n\n" +
+				"struct Outer {\n    inner: Inner,\n    label: []u8,\n}\n\n" +
+				"fn double(n: i64) -> i64 {\n    return n * 2;\n}\n\n" +
+				"fn main() {\n    let outer = Outer {\n        inner: Inner { value: 21 },\n" +
+				"        label: \"deep\",\n    };\n" +
+				"    print(double(outer.inner.value));\n    print(outer.label);\n}\n",
+			wantStdout: "42\ndeep\n",
 		},
 	}
 }
