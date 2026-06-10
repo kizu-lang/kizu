@@ -109,7 +109,8 @@ func (e *emitter) writeHeader() {
 	}
 	e.out.WriteString("declare void @kizu_print_string(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_print_int(i64)\n")
-	e.out.WriteString("declare void @kizu_print_bool(i1)\n\n")
+	e.out.WriteString("declare void @kizu_print_bool(i1)\n")
+	e.out.WriteString("declare void @kizu_main_error_message(ptr, i64)\n\n")
 	e.out.WriteString("declare void @kizu_runtime_init_args(i32, ptr)\n\n")
 	e.writeArrayRuntimeDecls()
 	e.writeMapRuntimeDecls()
@@ -1689,14 +1690,22 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	errorName, success, _ := errorUnionParts(value.Type)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, unionType, valueInfo.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBoolName, okName)
-	if errorName == "" && success == "i64" {
-		successName := "%" + e.nextSyntheticValue("main.success")
-		code64Name := "%" + e.nextSyntheticValue("main.code64")
-		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, unionType, valueInfo.operand)
-		fmt.Fprintf(&e.out, "  %s = select i1 %s, i64 %s, i64 1\n",
-			code64Name, okBoolName, successName)
-		fmt.Fprintf(&e.out, "  %s = trunc i64 %s to i32\n", codeName, code64Name)
-		fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
+	if errorName == "" {
+		okLabel := e.nextSyntheticValue("main.exit.ok")
+		failLabel := e.nextSyntheticValue("main.exit.fail")
+		fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBoolName, okLabel, failLabel)
+		fmt.Fprintf(&e.out, "%s:\n", failLabel)
+		e.writeMainErrorMessage(value)
+		e.out.WriteString("  ret i32 1\n")
+		fmt.Fprintf(&e.out, "%s:\n", okLabel)
+		if success == "i64" {
+			successName := "%" + e.nextSyntheticValue("main.success")
+			fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, unionType, valueInfo.operand)
+			fmt.Fprintf(&e.out, "  %s = trunc i64 %s to i32\n", codeName, successName)
+			fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
+			return nil
+		}
+		e.out.WriteString("  ret i32 0\n")
 		return nil
 	}
 	fmt.Fprintf(&e.out, "  %s = select i1 %s, i32 0, i32 1\n", codeName, okBoolName)
@@ -1704,9 +1713,30 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	return nil
 }
 
+// writeMainErrorMessage writes a failed error union's message slice to stderr
+// through @kizu_main_error_message, so a process built from `main -> !T` reports
+// why it exits 1 instead of failing silently. Typed error unions carry an enum
+// payload rather than a message slice, so only string-message unions print.
+func (e *emitter) writeMainErrorMessage(source ir.Value) {
+	errorName, _, ok := errorUnionParts(source.Type)
+	if !ok || errorName != "" {
+		return
+	}
+	sourceInfo := e.value(source)
+	msgName := "%" + e.nextSyntheticValue("main.err.msg")
+	ptrName := msgName + ".ptr"
+	lenName := msgName + ".len"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+		msgName, e.llvmType(source.Type), sourceInfo.operand, errorUnionFailureIndex(source.Type))
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, msgName)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, msgName)
+	fmt.Fprintf(&e.out, "  call void @kizu_main_error_message(ptr %s, i64 %s)\n", ptrName, lenName)
+}
+
 // writeErrorFailureReturn propagates a failed try from the current function.
 func (e *emitter) writeErrorFailureReturn(source ir.Value) error {
 	if e.mainReturnsInt {
+		e.writeMainErrorMessage(source)
 		e.out.WriteString("  ret i32 1\n")
 		return nil
 	}

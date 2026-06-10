@@ -4115,6 +4115,41 @@ fn lower_multi_expr_statement(
     );
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var consumed_string = 0;
+    // 'try <receiver>.set(<index>, <value>);' on a std::array::Array<T> receiver
+    // lowers through the element-size-generic @kizu_rt_array_set ABI: the index is
+    // a plain i64 argument, the receiver's declared Array<T> type supplies the
+    // element LLVM type, and both arguments lower through the shared method-arg path.
+    if std::mem::equal_bytes(method_name, "set") {
+        let set_receiver_kizu = try compiled_mir_types::resolve_receiver_value_kizu_type(
+            ir_bytes, function_name, module_prefix, receiver_name, bs
+        );
+        let set_element_kizu = compiled_mir_types::array_value_element_kizu_type_or_empty(
+            array_receiver_lookup_kizu_type(set_receiver_kizu)
+        );
+        if std::mem::len(set_element_kizu) == 0 {
+            return error("compiled mir: set receiver is not a std::array::Array");
+        }
+        let set_element_llvm = try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, module_prefix, set_element_kizu
+        );
+        let consumed_index = try lower_string_method_arg(
+            ir_bytes, function_name, module_prefix, "i64",
+            arg_node, string_counter, aliases, &var args, bs
+        );
+        let set_value_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, inner, "arg", 1, bs
+        );
+        let set_value_string_counter = string_counter + consumed_index;
+        let consumed_value = try lower_string_method_arg(
+            ir_bytes, function_name, module_prefix, set_element_llvm,
+            set_value_node, set_value_string_counter, aliases, &var args, bs
+        );
+        consumed_string = consumed_index + consumed_value;
+        try stmts.append(compiled_mir::array_try_set_stmt(
+            receiver_alias, set_element_llvm, llvm_return_type,
+            string_counter, try_counter, args
+        ));
+    } else {
     // 'try <receiver>.append(<value>);' on a std::array::Array<T> receiver lowers
     // through the element-size-generic @kizu_rt_array_append ABI: the receiver's
     // declared Array<T> type supplies the element LLVM type and the single value
@@ -4163,6 +4198,7 @@ fn lower_multi_expr_statement(
         } else {
             return error("compiled mir: unsupported string method");
         }
+    }
     }
     }
     return MultiExprLowerResult {
@@ -4377,6 +4413,16 @@ fn lower_string_method_arg(
             ir_bytes, function_name, module_prefix, "", arg_type, arg_node,
             string_index, bs
         ));
+        return 0;
+    }
+    // A bare integer literal argument (e.g. 'args_scratch.append(0)' growing the
+    // call-arg scratch stack, or a slot-0 stack-pointer read/write index) lowers
+    // to an inline literal; it consumes no string slot.
+    if std::mem::equal_bytes(arg_kind, "Int") {
+        let literal = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, arg_node, bs
+        );
+        try args.append(compiled_mir::int_literal_call_arg(arg_type, literal));
         return 0;
     }
     return error("compiled mir: unsupported string method argument");

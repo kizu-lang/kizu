@@ -51,6 +51,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases := append(runRenderCases(), runRenderLoopCases()...)
 	cases = append(cases, runRenderBoolCases()...)
 	cases = append(cases, runRenderReturnCases()...)
+	cases = append(cases, runRenderNestedCallCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -219,6 +220,32 @@ func runRenderReturnCases() []runRenderCase {
 				"        if i > limit {\n            return i;\n        }\n        i = i + 1;\n    }\n" +
 				"    return 0;\n}\n\nfn main() {\n    print(first_over(3));\n}\n",
 			wantStdout: "4\n",
+		},
+	}
+}
+
+// runRenderNestedCallCases is the nested-call-argument corpus (calls inside call
+// arguments at arbitrary depth) the tape renderer covers in this slice.
+func runRenderNestedCallCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "nested_call_argument",
+			source: "fn add(a: i64, b: i64) -> i64 {\n    return a + b;\n}\n\n" +
+				"fn mul(a: i64, b: i64) -> i64 {\n    return a * b;\n}\n\n" +
+				"fn main() {\n    print(add(mul(2, 3), 4));\n}\n",
+			wantStdout: "10\n",
+		},
+		{
+			name: "deeply_nested_call_arguments",
+			source: "fn add(a: i64, b: i64) -> i64 {\n    return a + b;\n}\n\n" +
+				"fn main() {\n    print(add(add(add(1, 2), add(3, 4)), add(5, 6)));\n}\n",
+			wantStdout: "21\n",
+		},
+		{
+			name: "nested_call_in_binary",
+			source: "fn double(n: i64) -> i64 {\n    return n * 2;\n}\n\n" +
+				"fn main() {\n    let v = double(3) + double(4);\n    print(v);\n}\n",
+			wantStdout: "14\n",
 		},
 	}
 }
