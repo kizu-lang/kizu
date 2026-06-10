@@ -57,6 +57,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderExpectCases()...)
 	cases = append(cases, runRenderModPrintBoolCases()...)
 	cases = append(cases, runRenderLabeledLoopCases()...)
+	cases = append(cases, runRenderComptimeCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -375,6 +376,24 @@ func runRenderLabeledLoopCases() []runRenderCase {
 				"            if j == 1 {\n                continue :rows;\n            }\n" +
 				"            print(i * 10 + j);\n        }\n    }\n}\n",
 			wantStdout: "0\n10\n20\n",
+		},
+	}
+}
+
+// runRenderComptimeCases is the comptime corpus (comptime expressions and
+// comptime if lower as their runtime equivalents).
+func runRenderComptimeCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name:       "comptime_expressions",
+			source:     "fn main() {\n    let size = comptime 4 * 1024;\n    print(size);\n}\n",
+			wantStdout: "4096\n",
+		},
+		{
+			name: "comptime_if",
+			source: "fn main() {\n    comptime if 1 + 1 == 2 {\n" +
+				"        print(\"yes\");\n    } else {\n        print(\"no\");\n    }\n}\n",
+			wantStdout: "yes\n",
 		},
 	}
 }
