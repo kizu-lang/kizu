@@ -158,6 +158,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
+    try wl(out, "%kizu.run.union = type { i64, i64, %kizu.slice.u8 }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
     try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
@@ -485,7 +486,7 @@ fn render_user_function(
 ) -> !i64 {
     try render_user_define_head(out, name, ret_kind);
     try w(out, "(");
-    try render_param_list(out, kinds, param_base, param_count, 0);
+    try render_param_list(out, code, kinds, param_base, param_count, 0);
     try wl(out, ") {");
     try wl(out, "entry:");
     // A user function that prints needs the io handle the print writers reference;
@@ -554,6 +555,7 @@ fn render_user_tail(out: &var std::string::String, abi: i64) -> !void {
 // each parameter from its value kind (i1 for bool, i64 otherwise).
 fn render_param_list(
     out: &var std::string::String,
+    code: &std::array::Array<i64>,
     kinds: &std::array::Array<i64>,
     param_base: i64,
     param_count: i64,
@@ -569,31 +571,54 @@ fn render_param_list(
     // binary arg (the call-arg lowering only models 'base + <int literal>').
     let slot = param_base + index;
     let kind = try kinds.get(slot);
-    try render_value_type(out, kind);
+    try render_value_type(out, code, kind);
     try w(out, " %v");
     try wi(out, slot);
     let after = index + 1;
-    try render_param_list(out, kinds, param_base, param_count, after);
+    try render_param_list(out, code, kinds, param_base, param_count, after);
     return;
 }
 
 // render_value_type writes the LLVM type for a tape value kind: bool values are
-// 'i1', slice values '%kizu.slice.u8', every other scalar value 'i64'.
-fn render_value_type(out: &var std::string::String, kind: i64) -> !void {
+// 'i1', slice values '%kizu.slice.u8', UNION_DECL-backed values the runtime
+// union aggregate, every other scalar value 'i64'.
+fn render_value_type(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kind: i64
+) -> !void {
     let kind_bool = codegen::code_kind_bool();
     let kind_slice = codegen::code_kind_slice();
-    if kind == kind_bool {
+    let is_bool = kind == kind_bool;
+    let is_slice = kind == kind_slice;
+    let is_union = try value_kind_is_union(code, kind);
+    if is_bool {
         try w(out, "i1");
     }
-    if kind == kind_slice {
+    if is_slice {
         try w(out, "%kizu.slice.u8");
     }
-    if kind != kind_bool {
-        if kind != kind_slice {
-            try w(out, "i64");
-        }
+    if is_union {
+        try w(out, "%kizu.run.union");
+    }
+    let scalar = !is_bool and !is_slice and !is_union;
+    if scalar {
+        try w(out, "i64");
     }
     return;
+}
+
+// value_kind_is_union reports whether a record-backed value kind references a
+// UNION_DECL record (a value of the runtime union aggregate type).
+fn value_kind_is_union(code: &std::array::Array<i64>, kind: i64) -> !bool {
+    let record_base = codegen::code_kind_struct_base();
+    if kind < record_base {
+        return false;
+    }
+    let record_pos = kind - record_base;
+    let op = try code.get(record_pos);
+    let op_union_decl = codegen::code_op_union_decl();
+    return op == op_union_decl;
 }
 
 // tape_function_end returns the index of the FUNC_END record closing the function
@@ -785,6 +810,18 @@ fn render_one_instruction(
     let union_const = codegen::code_op_union_const();
     if op == union_const {
         try render_enum_const(out, code, index);
+    }
+    let union_pack = codegen::code_op_union_pack();
+    if op == union_pack {
+        try render_union_pack(out, code, index);
+    }
+    let union_tag = codegen::code_op_union_tag();
+    if op == union_tag {
+        try render_union_tag(out, code, index);
+    }
+    let union_payload = codegen::code_op_union_payload();
+    if op == union_payload {
+        try render_union_payload(out, code, index);
     }
     let call = codegen::code_op_call();
     if op == call {
@@ -1732,7 +1769,7 @@ fn render_call_args(
     }
     let arg_value = try code.get(index + 5 + arg_index);
     let arg_kind = try kinds.get(arg_value);
-    try render_value_type(out, arg_kind);
+    try render_value_type(out, code, arg_kind);
     try w(out, " %v");
     try wi(out, arg_value);
     let after = arg_index + 1;
@@ -1804,7 +1841,7 @@ fn render_try_call_args(
     }
     let arg_value = try code.get(index + 4 + arg_index);
     let arg_kind = try kinds.get(arg_value);
-    try render_value_type(out, arg_kind);
+    try render_value_type(out, code, arg_kind);
     try w(out, " %v");
     try wi(out, arg_value);
     let after = arg_index + 1;
@@ -2306,6 +2343,121 @@ fn render_enum_const(
     return;
 }
 
+// render_union_pack materializes a runtime union aggregate: the tag inserts
+// into field 0, an i64 payload into field 1, a slice payload into field 2 (a
+// payload-less variant zeroes field 1 so the dst is a fully named value).
+fn render_union_pack(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let tag_value = try code.get(index + 2);
+    let payload_value = try code.get(index + 3);
+    let payload_kind = try code.get(index + 4);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_tag = insertvalue %kizu.run.union poison, i64 %v");
+    try wi(out, tag_value);
+    try wl(out, ", 0");
+    let kind_slice = codegen::code_kind_slice();
+    let has_payload = payload_value >= 0;
+    let is_slice = has_payload and payload_kind == kind_slice;
+    let is_word = has_payload and payload_kind != kind_slice;
+    if is_slice {
+        try render_union_pack_field(out, dst, payload_value, 2);
+    }
+    if is_word {
+        try render_union_pack_field(out, dst, payload_value, 1);
+    }
+    if !has_payload {
+        try render_union_pack_empty(out, dst);
+    }
+    return;
+}
+
+// render_union_pack_field writes the payload insert closing a UNION_PACK.
+fn render_union_pack_field(
+    out: &var std::string::String,
+    dst: i64,
+    payload_value: i64,
+    field: i64
+) -> !void {
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = insertvalue %kizu.run.union %v");
+    try wi(out, dst);
+    try w(out, "_tag, ");
+    if field == 2 {
+        try w(out, "%kizu.slice.u8");
+    }
+    if field != 2 {
+        try w(out, "i64");
+    }
+    try w(out, " %v");
+    try wi(out, payload_value);
+    try w(out, ", ");
+    try wi(out, field);
+    try nl(out);
+    return;
+}
+
+// render_union_pack_empty closes a payload-less UNION_PACK by zeroing field 1.
+fn render_union_pack_empty(out: &var std::string::String, dst: i64) -> !void {
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = insertvalue %kizu.run.union %v");
+    try wi(out, dst);
+    try wl(out, "_tag, i64 0, 1");
+    return;
+}
+
+// render_union_tag reads a runtime union value's declaration-order tag.
+fn render_union_tag(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let src = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.run.union %v");
+    try wi(out, src);
+    try wl(out, ", 0");
+    return;
+}
+
+// render_union_payload extracts a runtime union value's payload field: field 1
+// carries an i64 payload, field 2 a slice payload.
+fn render_union_payload(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let src = try code.get(index + 2);
+    let payload_kind = try code.get(index + 3);
+    let kind_slice = codegen::code_kind_slice();
+    let field = union_payload_field(payload_kind, kind_slice);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.run.union %v");
+    try wi(out, src);
+    try w(out, ", ");
+    try wi(out, field);
+    try nl(out);
+    return;
+}
+
+// union_payload_field maps a payload kind to its aggregate field index.
+fn union_payload_field(payload_kind: i64, kind_slice: i64) -> i64 {
+    if payload_kind == kind_slice {
+        return 2;
+    }
+    return 1;
+}
+
 // render_str_slice materializes a CONST_STR global as a '%kizu.slice.u8' SSA
 // value: an insertvalue pair builds the slice from the '@.kizu.run.s<src>'
 // global pointer and its payload byte length.
@@ -2564,6 +2716,14 @@ fn tape_var_struct_record_end(code: &std::array::Array<i64>, index: i64) -> !i64
 
 // tape_record_end returns the tape index just past the record beginning at index,
 // using each opcode's fixed arity (CALL carries a trailing variable arg-id list).
+// tape_union_decl_record_end steps past a UNION_DECL record: the fixed head
+// ('op name_start name_end variant_count') plus three slots per variant.
+fn tape_union_decl_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let variant_count = try code.get(index + 3);
+    let entry_slots = variant_count * 3;
+    return index + 4 + entry_slots;
+}
+
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let op = try code.get(index);
     let const_int = codegen::code_op_const_int();
@@ -2601,6 +2761,22 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let union_const = codegen::code_op_union_const();
     if op == union_const {
         return index + 8;
+    }
+    let union_decl = codegen::code_op_union_decl();
+    if op == union_decl {
+        return try tape_union_decl_record_end(code, index);
+    }
+    let union_pack = codegen::code_op_union_pack();
+    if op == union_pack {
+        return index + 5;
+    }
+    let union_tag = codegen::code_op_union_tag();
+    if op == union_tag {
+        return index + 3;
+    }
+    let union_payload = codegen::code_op_union_payload();
+    if op == union_payload {
+        return index + 4;
     }
     let binary = codegen::code_op_binary();
     if op == binary {

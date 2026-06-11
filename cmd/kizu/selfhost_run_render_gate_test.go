@@ -64,6 +64,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderEnumMatchCases()...)
 	cases = append(cases, runRenderVarStructCases()...)
 	cases = append(cases, runRenderUnionPayloadCases()...)
+	cases = append(cases, runRenderUnionAbiCases()...)
 	cases = append(cases, runRenderValueExprCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -528,6 +529,25 @@ func runRenderUnionPayloadCases() []runRenderCase {
 				"        Label(text) => print(text),\n    }\n" +
 				"    let point = Shape::Point;\n    match point {\n" +
 				"        Point => print(\"point\"),\n        _ => print(\"other\"),\n    }\n}\n",
+			wantStdout: "10\nname\npoint\n",
+		},
+	}
+}
+
+// runRenderUnionAbiCases is the runtime union ABI corpus: a union value
+// crossing a function boundary (the examples/union.kizu shape) and a runtime
+// match on the union-typed parameter with i64/slice payload bindings.
+func runRenderUnionAbiCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "union_param_describe",
+			source: "union Shape {\n    Point,\n    Circle(i64),\n    Label([]u8),\n}\n\n" +
+				"fn describe(shape: &Shape) -> void {\n    match shape {\n" +
+				"        Point => print(\"point\"),\n        Circle(radius) => print(radius),\n" +
+				"        Label(text) => print(text),\n    }\n}\n\n" +
+				"fn main() {\n    let circle = Shape::Circle(10);\n" +
+				"    let label = Shape::Label(\"name\");\n    describe(circle);\n" +
+				"    describe(label);\n    describe(Shape::Point);\n}\n",
 			wantStdout: "10\nname\npoint\n",
 		},
 	}
