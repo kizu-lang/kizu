@@ -4604,6 +4604,220 @@ fn lower_code_match_body(
     };
 }
 
+// lower_code_if_expr lowers a value-position 'if <cond> { <value> } else
+// { <value> }': every branch's trailing expression stores into one result slot
+// (the then branch declares it and picks the slot kind; the else branch must
+// match) and the merged load past IF_END yields the expression value. The
+// reference grammar requires a block else for the expression form, and the
+// checker guarantees both branches yield agreeing values.
+fn lower_code_if_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    // The result slot reserves a blank locals row like the match expression's.
+    let slot = local_starts.len();
+    try local_starts.append(0);
+    try local_ends.append(0);
+    try local_values.append(0);
+    let unknown_kind = 0 - 1;
+    let chain_eval = try lower_code_if_expr_chain(text, ast, decls, condition, then_block, else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, unknown_kind, next_value);
+    if !chain_eval.ok {
+        return code_eval_unsupported(chain_eval.next);
+    }
+    let slot_kind = chain_eval.value_id;
+    let load_op = value_slot_load_op(slot_kind);
+    try code.append(load_op);
+    try code.append(chain_eval.next);
+    try code.append(slot);
+    try kinds.append(slot_kind);
+    let after_value = chain_eval.next + 1;
+    return code_eval_value(chain_eval.next, after_value);
+}
+
+// lower_code_if_expr_chain lowers one if link of a value-position if into the
+// shared result slot and returns the slot kind through the eval's value_id
+// (the declaring branch picks it when slot_kind arrives as -1).
+fn lower_code_if_expr_chain(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    slot: i64,
+    slot_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let cond_eval = try lower_code_expr(text, ast, decls, condition, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !cond_eval.ok {
+        return code_eval_unsupported(cond_eval.next);
+    }
+    let if_begin_index = code.len();
+    let op_if_begin = code_op_if_begin();
+    try code.append(op_if_begin);
+    try code.append(cond_eval.value_id);
+    let then_eval = try lower_code_branch_value(text, ast, decls, then_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, slot_kind, cond_eval.next);
+    if !then_eval.ok {
+        return code_eval_unsupported(then_eval.next);
+    }
+    let chosen_kind = then_eval.value_id;
+    let op_if_else = code_op_if_else();
+    try code.append(op_if_else);
+    try code.append(if_begin_index);
+    let else_eval = try lower_code_else_value(text, ast, decls, else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, chosen_kind, then_eval.next);
+    if !else_eval.ok {
+        return code_eval_unsupported(else_eval.next);
+    }
+    let op_if_end = code_op_if_end();
+    try code.append(op_if_end);
+    try code.append(if_begin_index);
+    return code_eval_value(chosen_kind, else_eval.next);
+}
+
+// lower_code_else_value routes a value-position else arm: a block stores its
+// trailing value, an 'else if' chains into the shared slot, and a missing else
+// (checker-illegal for an if expression) stays unsupported.
+fn lower_code_else_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    else_block: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    slot: i64,
+    slot_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(else_block);
+    return match node.data {
+        Block(block) => try lower_code_block_value(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, slot_kind, next_value),
+        If(if_node) => try lower_code_if_expr_chain(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, slot_kind, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_branch_value dispatches a value branch (a Block whose trailing
+// ExprStmt is the branch value).
+fn lower_code_branch_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    block: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    slot: i64,
+    slot_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(block);
+    return match node.data {
+        Block(b) => try lower_code_block_value(text, ast, decls, b.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, slot_kind, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_block_value lowers a value branch body: the leading statements
+// lower in their own scope, the trailing expression lowers to the branch value
+// (strings materialize through STR_SLICE), and the value stores into the
+// result slot through lower_code_value_store.
+fn lower_code_block_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    statements: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    slot: i64,
+    slot_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    if statements.len == 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let mark = local_starts.len();
+    let lead_len = statements.len - 1;
+    let lead_eval = try lower_code_value_leads(text, ast, decls, statements, lead_len, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, mark, 0, next_value);
+    if !lead_eval.ok {
+        return code_eval_unsupported(lead_eval.next);
+    }
+    let trailing = try ast.child_at(statements, lead_len);
+    let value_eval = try lower_code_trailing_value(text, ast, decls, trailing, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, lead_eval.next);
+    if !value_eval.ok {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let stored_eval = try lower_code_arg_slice(code, kinds, value_eval.value_id, value_eval.next);
+    let stored_kind = try kinds.get(stored_eval.value_id);
+    try scrub_code_locals(local_starts, local_ends, mark);
+    return try lower_code_value_store(code, slot, slot_kind, stored_kind, stored_eval.value_id, stored_eval.next);
+}
+
+// lower_code_value_leads lowers the branch statements before the trailing
+// value expression (break/continue carry no enclosing loop context here, so
+// they stay unsupported inside a value branch).
+fn lower_code_value_leads(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    statements: std::kizu::ast::ChildRange,
+    bound: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    scope_base: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= bound {
+        return code_eval_value(0, next_value);
+    }
+    let child = try ast.child_at(statements, index);
+    let no_loop = 0 - 1;
+    let eval = try lower_code_statement(text, ast, decls, child, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, no_loop, 0, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try lower_code_value_leads(text, ast, decls, statements, bound, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scope_base, after, eval.next);
+}
+
 // lower_code_trailing_value lowers a trailing value expression: the real
 // parser wraps it as an ExprStmt (unwrapped here), the hosted CLI boundary
 // hands the bare expression node directly, and any non-expression node falls
@@ -6359,6 +6573,7 @@ fn lower_code_expr(
         FieldExpr(field_expr) => try lower_code_field_expr(text, ast, decls, node_id, field_expr.receiver, field_expr.name, field_expr.namespace, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         StructLiteralExpr(struct_lit) => try lower_code_struct_literal(text, ast, decls, struct_lit.fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         TryExpr(try_expr) => try lower_code_try_expr(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        If(if_node) => try lower_code_if_expr(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Match(match_node) => try lower_code_match_expr(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
