@@ -3551,6 +3551,21 @@ pub fn code_op_var_struct() -> i64 {
     return 56;
 }
 
+// VAR_DECL_BOOL / VAR_LOAD_BOOL / VAR_STORE_BOOL mirror the var slot trios for
+// i1 slots ('%bslot<id>'), backing value-position if/match results whose
+// branches yield bool values.
+pub fn code_op_var_decl_bool() -> i64 {
+    return 57;
+}
+
+pub fn code_op_var_load_bool() -> i64 {
+    return 58;
+}
+
+pub fn code_op_var_store_bool() -> i64 {
+    return 59;
+}
+
 // While-loop opcodes frame a 'while <cond> { <body> }': WHILE_BEGIN opens the
 // condition block, WHILE_COND branches on the lowered i1 condition into the body
 // or past the loop, WHILE_END closes the body back to the condition block. Each
@@ -4587,6 +4602,417 @@ fn lower_code_match_body(
         Block(block) => try lower_code_nested_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, loop_begin, loop_kind, next_value),
         _ => code_eval_unsupported(next_value),
     };
+}
+
+// lower_code_trailing_value lowers a trailing value expression: the real
+// parser wraps it as an ExprStmt (unwrapped here), the hosted CLI boundary
+// hands the bare expression node directly, and any non-expression node falls
+// to the expression dispatch's own unsupported result.
+fn lower_code_trailing_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    trailing: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(trailing);
+    return match node.data {
+        ExprStmt(expr_stmt) => try lower_code_expr(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => try lower_code_expr(text, ast, decls, trailing, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+    };
+}
+
+// lower_code_value_store writes a branch value into the result slot: the
+// declaring branch (slot_kind -1) emits the slot's decl and returns the chosen
+// kind through the eval's value_id, every other branch kind-checks and stores.
+fn lower_code_value_store(
+    code: &var std::array::Array<i64>,
+    slot: i64,
+    slot_kind: i64,
+    stored_kind: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let unknown_kind = 0 - 1;
+    if slot_kind == unknown_kind {
+        return try lower_code_value_decl(code, slot, stored_kind, value_id, next_value);
+    }
+    if stored_kind != slot_kind {
+        return code_eval_unsupported(next_value);
+    }
+    let store_op = value_slot_store_op(slot_kind);
+    try code.append(store_op);
+    try code.append(slot);
+    try code.append(value_id);
+    return code_eval_value(slot_kind, next_value);
+}
+
+// lower_code_value_decl emits the declaring branch's slot decl and returns the
+// chosen kind through the eval's value_id.
+fn lower_code_value_decl(
+    code: &var std::array::Array<i64>,
+    slot: i64,
+    stored_kind: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let decl_op = value_slot_decl_op(stored_kind);
+    if decl_op < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    try code.append(decl_op);
+    try code.append(slot);
+    try code.append(value_id);
+    return code_eval_value(stored_kind, next_value);
+}
+
+// value_slot_decl_op / value_slot_store_op / value_slot_load_op pick the slot
+// trio for a value-position if/match result kind (-1 = not slot-backed).
+fn value_slot_decl_op(stored_kind: i64) -> i64 {
+    let kind_i64 = code_kind_i64();
+    if stored_kind == kind_i64 {
+        return code_op_var_decl();
+    }
+    let kind_bool = code_kind_bool();
+    if stored_kind == kind_bool {
+        return code_op_var_decl_bool();
+    }
+    let kind_slice = code_kind_slice();
+    if stored_kind == kind_slice {
+        return code_op_var_decl_slice();
+    }
+    return 0 - 1;
+}
+
+fn value_slot_store_op(slot_kind: i64) -> i64 {
+    let kind_i64 = code_kind_i64();
+    if slot_kind == kind_i64 {
+        return code_op_var_store();
+    }
+    let kind_bool = code_kind_bool();
+    if slot_kind == kind_bool {
+        return code_op_var_store_bool();
+    }
+    return code_op_var_store_slice();
+}
+
+fn value_slot_load_op(slot_kind: i64) -> i64 {
+    let kind_i64 = code_kind_i64();
+    if slot_kind == kind_i64 {
+        return code_op_var_load();
+    }
+    let kind_bool = code_kind_bool();
+    if slot_kind == kind_bool {
+        return code_op_var_load_bool();
+    }
+    return code_op_var_load_slice();
+}
+
+// lower_code_match_expr lowers a value-position 'match <enum/union> { ... }':
+// the arms reuse the statement match's tag chain, every arm's value expression
+// stores into one result slot (the first arm declares it), and the merged load
+// past the chain yields the expression value. The lowering leans on the
+// checker's exhaustiveness guarantee: if no arm matched at runtime the result
+// slot would read uninitialized, so an unchecked tape must not reach this.
+fn lower_code_match_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let value_eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !value_eval.ok {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let value_kind = try kinds.get(value_eval.value_id);
+    let record_base = code_kind_struct_base();
+    if value_kind < record_base {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let record_pos = value_kind - record_base;
+    let record_op = try code.get(record_pos);
+    let op_enum_const = code_op_enum_const();
+    let op_union_const = code_op_union_const();
+    if record_op != op_enum_const {
+        if record_op != op_union_const {
+            return code_eval_unsupported(value_eval.next);
+        }
+    }
+    if arms.len == 0 {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let slot = local_starts.len();
+    try local_starts.append(0);
+    try local_ends.append(0);
+    try local_values.append(0);
+    let unknown_kind = 0 - 1;
+    let arms_eval = try lower_code_match_expr_arms(text, ast, decls, value_eval.value_id, record_pos, arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, unknown_kind, 0, value_eval.next);
+    if !arms_eval.ok {
+        return code_eval_unsupported(arms_eval.next);
+    }
+    let slot_kind = arms_eval.value_id;
+    let load_op = value_slot_load_op(slot_kind);
+    try code.append(load_op);
+    try code.append(arms_eval.next);
+    try code.append(slot);
+    try kinds.append(slot_kind);
+    let after_value = arms_eval.next + 1;
+    return code_eval_value(arms_eval.next, after_value);
+}
+
+// lower_code_match_expr_arms dispatches the value arm at index into the nested
+// if chain (the chain kind flows through the eval's value_id).
+fn lower_code_match_expr_arms(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value_id: i64,
+    record_pos: i64,
+    arms: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    slot: i64,
+    slot_kind: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= arms.len {
+        return code_eval_value(slot_kind, next_value);
+    }
+    let arm = try ast.child_at(arms, index);
+    return try lower_code_match_expr_arm_node(text, ast, decls, value_id, record_pos, arms, arm, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, slot_kind, index, next_value);
+}
+
+fn lower_code_match_expr_arm_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value_id: i64,
+    record_pos: i64,
+    arms: std::kizu::ast::ChildRange,
+    arm: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    slot: i64,
+    slot_kind: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(arm);
+    return match node.data {
+        MatchArm(match_arm) => try lower_code_match_expr_arm(text, ast, decls, value_id, record_pos, arms, match_arm.pattern, match_arm.binding, match_arm.body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, slot_kind, index, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// lower_code_match_expr_arm lowers one value arm: a '_' tail stores its value
+// unconditionally, any other pattern compares the tag and the remaining arms
+// nest in the else branch (sharing the slot kind the first arm chose).
+fn lower_code_match_expr_arm(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    value_id: i64,
+    record_pos: i64,
+    arms: std::kizu::ast::ChildRange,
+    pattern: std::kizu::ast::NodeId,
+    binding: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    slot: i64,
+    slot_kind: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    let pattern_text = ast_node_text(text, ast, pattern);
+    let tail_index = index + 1;
+    let is_tail = tail_index == arms.len;
+    if std::mem::equal_bytes(pattern_text, "_") {
+        return try lower_code_match_expr_wildcard(text, ast, decls, binding, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, record_pos, slot, slot_kind, is_tail, next_value);
+    }
+    let pattern_span = code_node_span(text, ast, pattern);
+    let tag = try match_pattern_tag(text, ast, decls, code, record_pos, pattern_span.start, pattern_span.end);
+    if tag < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let op_const = code_op_const_int();
+    try code.append(op_const);
+    try code.append(next_value);
+    try code.append(tag);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    let tag_value = next_value;
+    let cond_value = next_value + 1;
+    let op_binary = code_op_binary();
+    let eq_kind = code_binary_kind(std::kizu::ast::binary_eq());
+    try code.append(op_binary);
+    try code.append(cond_value);
+    try code.append(eq_kind);
+    try code.append(value_id);
+    try code.append(tag_value);
+    let kind_bool = code_kind_bool();
+    try kinds.append(kind_bool);
+    let after_cond = cond_value + 1;
+    let if_begin_index = code.len();
+    let op_if_begin = code_op_if_begin();
+    try code.append(op_if_begin);
+    try code.append(cond_value);
+    let body_eval = try lower_code_match_expr_arm_value(text, ast, decls, binding, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, record_pos, slot, slot_kind, after_cond);
+    if !body_eval.ok {
+        return code_eval_unsupported(body_eval.next);
+    }
+    let chosen_kind = body_eval.value_id;
+    let op_if_else = code_op_if_else();
+    try code.append(op_if_else);
+    try code.append(if_begin_index);
+    let after = index + 1;
+    let rest_eval = try lower_code_match_expr_arms(text, ast, decls, value_id, record_pos, arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slot, chosen_kind, after, body_eval.next);
+    if !rest_eval.ok {
+        return code_eval_unsupported(rest_eval.next);
+    }
+    let op_if_end = code_op_if_end();
+    try code.append(op_if_end);
+    try code.append(if_begin_index);
+    return code_eval_value(chosen_kind, rest_eval.next);
+}
+
+// lower_code_match_expr_wildcard stores the '_' arm's value unconditionally
+// (the guard mirrors the statement match: a non-final wildcard is rejected).
+fn lower_code_match_expr_wildcard(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    binding: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    record_pos: i64,
+    slot: i64,
+    slot_kind: i64,
+    is_tail: bool,
+    next_value: i64
+) -> !CodeEval {
+    if !is_tail {
+        return code_eval_unsupported(next_value);
+    }
+    return try lower_code_match_expr_arm_value(text, ast, decls, binding, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, record_pos, slot, slot_kind, next_value);
+}
+
+// lower_code_match_expr_arm_value lowers one value arm's body expression (with
+// the union payload bound under the arm's binding name when the matched record
+// carries one) and stores it into the result slot.
+fn lower_code_match_expr_arm_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    binding: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    record_pos: i64,
+    slot: i64,
+    slot_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let row = try match_expr_bind_payload(text, ast, binding, code, local_starts, local_ends, local_values, record_pos);
+    let value_eval = try lower_code_trailing_value(text, ast, decls, body, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    try match_expr_unbind_payload(local_starts, local_ends, row);
+    if !value_eval.ok {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let stored_eval = try lower_code_arg_slice(code, kinds, value_eval.value_id, value_eval.next);
+    let stored_kind = try kinds.get(stored_eval.value_id);
+    return try lower_code_value_store(code, slot, slot_kind, stored_kind, stored_eval.value_id, stored_eval.next);
+}
+
+// match_expr_bind_payload binds the union payload under the arm's binding name
+// (returning the binding row, or -1 when nothing binds).
+fn match_expr_bind_payload(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    binding: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    record_pos: i64
+) -> !i64 {
+    let record_op = try code.get(record_pos);
+    let op_union_const = code_op_union_const();
+    if record_op != op_union_const {
+        return 0 - 1;
+    }
+    let payload_pos = record_pos + 7;
+    let payload_value = try code.get(payload_pos);
+    if payload_value < 0 {
+        return 0 - 1;
+    }
+    let binding_empty = match_binding_is_empty(ast, binding);
+    if binding_empty {
+        return 0 - 1;
+    }
+    let binding_span = code_node_span(text, ast, binding);
+    let row = local_starts.len();
+    try local_starts.append(binding_span.start);
+    try local_ends.append(binding_span.end);
+    try local_values.append(payload_value);
+    return row;
+}
+
+// match_expr_unbind_payload blanks the payload binding row after the arm body.
+fn match_expr_unbind_payload(
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    row: i64
+) -> !void {
+    if row < 0 {
+        return;
+    }
+    try local_starts.set(row, 0);
+    try local_ends.set(row, 0);
+    return;
 }
 
 // lower_code_nested_statements opens a fresh binding scope for a statement list
@@ -5933,6 +6359,7 @@ fn lower_code_expr(
         FieldExpr(field_expr) => try lower_code_field_expr(text, ast, decls, node_id, field_expr.receiver, field_expr.name, field_expr.namespace, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         StructLiteralExpr(struct_lit) => try lower_code_struct_literal(text, ast, decls, struct_lit.fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         TryExpr(try_expr) => try lower_code_try_expr(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Match(match_node) => try lower_code_match_expr(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
