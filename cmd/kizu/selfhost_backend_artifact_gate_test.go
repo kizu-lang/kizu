@@ -3257,19 +3257,20 @@ func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
 }
 
 // countHostedCompilerCLIRunFailures runs a non-fixture source through `run`.
-// The probe must stay outside the run tape's supported surface (enum matches
-// now lower, so it uses a union payload match: the boundary's one-ident arm
-// pattern rejects `Circle(radius)` before the tape sees it, and the tape owns
-// no union payload dispatch either, so the run stays unsupported end to end).
+// The probe must stay outside the run tape's supported surface (union payload
+// matches now lower, so it uses an impl method with a defer: the boundary
+// parses neither impl declarations nor defer statements, and the tape owns no
+// method dispatch either, so the run stays unsupported end to end).
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	failures := countHostedCompilerCLIUnsupportedRunSourceFailures(
 		t,
 		exePath,
-		"hosted_run_union_match_unsupported.kizu",
-		"hosted_run_union_match_unsupported",
-		"union Shape {\n    Circle(i64),\n}\n\nfn main() {\n    let shape = Shape::Circle(3);\n"+
-			"    match shape {\n        Circle(radius) => print(radius),\n    }\n}\n",
+		"hosted_run_defer_unsupported.kizu",
+		"hosted_run_defer_unsupported",
+		"struct T {\n    label: []u8,\n}\n\nimpl T {\n    fn deinit(self: T) -> void {\n"+
+			"        print(self.label);\n    }\n}\n\nfn main() {\n    let t = T { label: \"x\" };\n"+
+			"    defer t.deinit();\n    print(\"main\");\n}\n",
 	)
 	return failures
 }
