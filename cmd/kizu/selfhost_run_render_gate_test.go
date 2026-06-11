@@ -533,11 +533,20 @@ func runRenderUnionPayloadCases() []runRenderCase {
 	}
 }
 
-// runRenderValueExprCases is the value-position match corpus (string and i64
-// match expressions, a wildcard arm, and a union payload binding in an arm
-// value). Value-position if stays a linked std-parser gap.
+// runRenderValueExprCases is the value-position if/match corpus (bool, string,
+// and i64 results; a wildcard arm; a union payload binding in an arm value).
 func runRenderValueExprCases() []runRenderCase {
 	return []runRenderCase{
+		{
+			name: "value_if_expressions",
+			source: "fn main() {\n    let age = 20;\n    let adult = if age >= 18 {\n" +
+				"        true\n    } else {\n        false\n    };\n    print(adult);\n" +
+				"    let label = if age >= 20 {\n        \"adult\"\n    } else {\n" +
+				"        \"minor\"\n    };\n    print(label);\n" +
+				"    let bonus = if age == 20 {\n        let base = 5;\n        base * 2\n" +
+				"    } else {\n        0\n    };\n    print(bonus);\n}\n",
+			wantStdout: "true\nadult\n10\n",
+		},
 		{
 			name: "value_match_expressions",
 			source: "enum Color {\n    Red,\n    Green,\n    Blue,\n}\n\n" +
