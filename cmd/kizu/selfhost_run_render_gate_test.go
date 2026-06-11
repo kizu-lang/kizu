@@ -64,6 +64,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderEnumMatchCases()...)
 	cases = append(cases, runRenderVarStructCases()...)
 	cases = append(cases, runRenderUnionPayloadCases()...)
+	cases = append(cases, runRenderValueExprCases()...)
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			runOneRenderCase(t, program, clang, item)
@@ -528,6 +529,32 @@ func runRenderUnionPayloadCases() []runRenderCase {
 				"    let point = Shape::Point;\n    match point {\n" +
 				"        Point => print(\"point\"),\n        _ => print(\"other\"),\n    }\n}\n",
 			wantStdout: "10\nname\npoint\n",
+		},
+	}
+}
+
+// runRenderValueExprCases is the value-position match corpus (string and i64
+// match expressions, a wildcard arm, and a union payload binding in an arm
+// value). Value-position if stays a linked std-parser gap.
+func runRenderValueExprCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "value_match_expressions",
+			source: "enum Color {\n    Red,\n    Green,\n    Blue,\n}\n\n" +
+				"fn main() {\n    let color = Color::Blue;\n    let name = match color {\n" +
+				"        Red => \"red\",\n        _ => \"other\",\n    };\n    print(name);\n" +
+				"    let rank = match color {\n        Red => 1,\n        Green => 2,\n" +
+				"        Blue => 3,\n    };\n" +
+				"    print(rank);\n}\n",
+			wantStdout: "other\n3\n",
+		},
+		{
+			name: "value_match_union_payload",
+			source: "union Shape {\n    Point,\n    Circle(i64),\n}\n\n" +
+				"fn main() {\n    let circle = Shape::Circle(7);\n    let area = match circle {\n" +
+				"        Point => 0,\n        Circle(radius) => radius * radius,\n    };\n" +
+				"    print(area);\n}\n",
+			wantStdout: "49\n",
 		},
 	}
 }
