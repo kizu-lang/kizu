@@ -30,7 +30,18 @@ pub struct CacheKey {
     pub fingerprint: i64,
 }
 
-pub fn compute_key(input: CacheKeyInput) -> CacheKey {
+pub struct CacheEntryMetadata {
+    pub key: CacheKey,
+    pub input_description: []u8,
+    pub artifact_path: []u8,
+}
+
+pub struct CacheLookup {
+    pub found: bool,
+    pub metadata: CacheEntryMetadata,
+}
+
+pub fn compute_key(input: &CacheKeyInput) -> CacheKey {
     var state = 17;
     state = mix_field(state, "compiler-version", input.compiler_version);
     state = mix_field(state, "manifest-path", input.manifest_path);
@@ -46,11 +57,140 @@ pub fn compute_key(input: CacheKeyInput) -> CacheKey {
     return CacheKey { fingerprint: state };
 }
 
+pub fn cache_root_dir() -> []u8 {
+    return "target/selfhost/cache";
+}
+
+// Entries use target/selfhost/cache/entries/*.meta and artifacts/*.artifact.
+pub fn cache_entry_dir() -> []u8 {
+    return "target/selfhost/cache/entries";
+}
+
+pub fn cache_artifact_dir() -> []u8 {
+    return "target/selfhost/cache/artifacts";
+}
+
+pub fn cache_entry_metadata_path(
+    allocator: Allocator,
+    key: &CacheKey
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try out.append_bytes(cache_entry_dir());
+    try out.append_byte(cast<u8>(47));
+    try std::fmt::append_i64(out, key.fingerprint);
+    try out.append_bytes(".meta");
+    return out;
+}
+
+pub fn cache_entry_artifact_path(
+    allocator: Allocator,
+    key: &CacheKey
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try out.append_bytes(cache_artifact_dir());
+    try out.append_byte(cast<u8>(47));
+    try std::fmt::append_i64(out, key.fingerprint);
+    try out.append_bytes(".artifact");
+    return out;
+}
+
+pub fn ensure_cache_layout(io: Io) -> !void {
+    if !(try std::fs::exists(io, "target")) {
+        try std::fs::create_dir(io, "target");
+    }
+    if !(try std::fs::exists(io, "target/selfhost")) {
+        try std::fs::create_dir(io, "target/selfhost");
+    }
+    if !(try std::fs::exists(io, cache_root_dir())) {
+        try std::fs::create_dir(io, cache_root_dir());
+    }
+    if !(try std::fs::exists(io, cache_entry_dir())) {
+        try std::fs::create_dir(io, cache_entry_dir());
+    }
+    if !(try std::fs::exists(io, cache_artifact_dir())) {
+        try std::fs::create_dir(io, cache_artifact_dir());
+    }
+    return;
+}
+
+pub fn write_entry(
+    allocator: Allocator,
+    io: Io,
+    input: CacheKeyInput,
+    artifact: []u8
+) -> !CacheEntryMetadata {
+    try ensure_cache_layout(io);
+
+    let key = compute_key(&input);
+    var artifact_path = try cache_entry_artifact_path(allocator, &key);
+    let artifact_path_bytes = artifact_path.as_bytes();
+    try std::fs::write_file(io, artifact_path_bytes, artifact);
+
+    var input_description = try render_input_description(allocator, &input);
+    let input_description_bytes = input_description.as_bytes();
+    var metadata_path = try cache_entry_metadata_path(allocator, &key);
+    var metadata_bytes = std::string::String(allocator);
+    try append_line(metadata_bytes, "kizu-cache-entry-v0");
+    try metadata_bytes.append_bytes("fingerprint ");
+    try std::fmt::append_i64(metadata_bytes, key.fingerprint);
+    try metadata_bytes.append_byte(cast<u8>(10));
+    try metadata_bytes.append_bytes("input-description ");
+    try metadata_bytes.append_bytes(input_description_bytes);
+    try metadata_bytes.append_byte(cast<u8>(10));
+    try metadata_bytes.append_bytes("artifact ");
+    try metadata_bytes.append_bytes(artifact_path_bytes);
+    try metadata_bytes.append_byte(cast<u8>(10));
+    let metadata_path_bytes = metadata_path.as_bytes();
+    let metadata_view = metadata_bytes.as_bytes();
+    try std::fs::write_file(io, metadata_path_bytes, metadata_view);
+    metadata_path.deinit();
+    metadata_bytes.deinit();
+    input_description.deinit();
+    artifact_path.deinit();
+    return try read_entry(allocator, io, &key);
+}
+
+pub fn read_entry(
+    allocator: Allocator,
+    io: Io,
+    key: &CacheKey
+) -> !CacheEntryMetadata {
+    var metadata_path = try cache_entry_metadata_path(allocator, key);
+    let metadata_path_bytes = metadata_path.as_bytes();
+    let metadata_text = try std::fs::read_file(io, metadata_path_bytes);
+    metadata_path.deinit();
+    let metadata = try parse_entry_metadata(allocator, metadata_text);
+    return metadata;
+}
+
+pub fn lookup_entry(
+    allocator: Allocator,
+    io: Io,
+    key: &CacheKey
+) -> !CacheLookup {
+    var metadata_path = try cache_entry_metadata_path(allocator, key);
+    let metadata_path_bytes = metadata_path.as_bytes();
+    let found = try std::fs::exists(io, metadata_path_bytes);
+    metadata_path.deinit();
+    if !found {
+        return CacheLookup {
+            found: false,
+            metadata: empty_entry_metadata(allocator)
+        };
+    }
+
+    let metadata = try read_entry(allocator, io, key);
+    return CacheLookup {
+        found: true,
+        metadata: metadata
+    };
+}
+
 pub fn gate() -> !void {
     let base = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
     let same = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
-    let base_key = compute_key(base);
-    let same_key = compute_key(same);
+    let base_key = compute_key(&base);
+    let same_key = compute_key(&same);
     std::testing::expect_equal<i64>(base_key.fingerprint, same_key.fingerprint);
 
     expect_changed(&base_key, sample_input("0.3.1", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0"));
@@ -91,6 +231,10 @@ pub fn gate() -> !void {
 
     print("cache-key");
     print(base_key.fingerprint);
+
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    try gate_storage_roundtrip(allocator, io, base);
     return;
 }
 
@@ -136,9 +280,168 @@ fn sample_input_at_path(manifest_path: []u8) -> CacheKeyInput {
 }
 
 fn expect_changed(base_key: &CacheKey, input: CacheKeyInput) -> void {
-    let changed_key = compute_key(input);
+    let changed_key = compute_key(&input);
     std::testing::expect(base_key.fingerprint != changed_key.fingerprint);
     return;
+}
+
+fn gate_storage_roundtrip(
+    allocator: Allocator,
+    io: Io,
+    input: CacheKeyInput
+) -> !void {
+    var written = try write_entry(allocator, io, input, "selfhost-cache-artifact\n");
+    var read = try read_entry(allocator, io, &written.key);
+    var lookup = try lookup_entry(allocator, io, &written.key);
+
+    expect_metadata_equal(&written, &read);
+    std::testing::expect(lookup.found);
+    expect_metadata_equal(&written, &lookup.metadata);
+    let artifact = try std::fs::read_file(io, read.artifact_path);
+    std::testing::expect_equal<[]u8>("selfhost-cache-artifact\n", artifact);
+
+    print("cache-entry");
+    print(read.key.fingerprint);
+    print("cache-lookup");
+    print(lookup.metadata.key.fingerprint);
+
+    return;
+}
+
+fn expect_metadata_equal(
+    expected: &CacheEntryMetadata,
+    actual: &CacheEntryMetadata
+) -> void {
+    std::testing::expect_equal<i64>(
+        expected.key.fingerprint,
+        actual.key.fingerprint
+    );
+    std::testing::expect(std::mem::equal_bytes(
+        expected.input_description,
+        actual.input_description
+    ));
+    std::testing::expect(std::mem::equal_bytes(
+        expected.artifact_path,
+        actual.artifact_path
+    ));
+    return;
+}
+
+fn empty_entry_metadata(allocator: Allocator) -> CacheEntryMetadata {
+    return CacheEntryMetadata {
+        key: CacheKey { fingerprint: 0 },
+        input_description: "",
+        artifact_path: ""
+    };
+}
+
+fn render_input_description(
+    allocator: Allocator,
+    input: &CacheKeyInput
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_input_pair(out, "compiler-version", input.compiler_version);
+    try append_input_pair(out, "manifest-path", input.manifest_path);
+    try append_input_pair(out, "manifest-hash", input.manifest_hash);
+    try append_input_pair(out, "module-graph-hash", input.module_graph_hash);
+    try append_input_pair(out, "source-hashes", input.source_hashes);
+    try append_input_pair(out, "public-interface-hash", input.public_interface_hash);
+    try append_input_pair(out, "target", input.target);
+    try append_input_pair(out, "backend", backend_name(input.backend));
+    try append_input_pair(out, "optimization-mode", optimization_mode_name(input.optimization_mode));
+    try append_input_pair(out, "stdlib-hash", input.stdlib_hash);
+    try append_input_pair(out, "stdlib-version", input.stdlib_version);
+    return out;
+}
+
+fn append_input_pair(
+    out: &var std::string::String,
+    name: []u8,
+    value: []u8
+) -> !void {
+    if out.len() > 0 {
+        try out.append_byte(cast<u8>(59));
+    }
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(61));
+    try out.append_bytes(value);
+    return;
+}
+
+fn parse_entry_metadata(
+    allocator: Allocator,
+    bytes: []u8
+) -> !CacheEntryMetadata {
+    if !std::mem::equal_bytes(first_line(bytes), "kizu-cache-entry-v0") {
+        return error("invalid cache metadata");
+    }
+    let fingerprint_text = try metadata_value(bytes, "fingerprint ");
+    let input_description_text = try metadata_value(bytes, "input-description ");
+    let artifact_text = try metadata_value(bytes, "artifact ");
+    let fingerprint = try parse_i64(fingerprint_text);
+    return CacheEntryMetadata {
+        key: CacheKey { fingerprint: fingerprint },
+        input_description: input_description_text,
+        artifact_path: artifact_text
+    };
+}
+
+fn first_line(bytes: []u8) -> []u8 {
+    var index = 0;
+    let length = std::mem::len(bytes);
+    while index < length and bytes[index] != cast<u8>(10) {
+        index = index + 1;
+    }
+    return bytes[0..index];
+}
+
+fn metadata_value(bytes: []u8, prefix: []u8) -> ![]u8 {
+    var index = 0;
+    let length = std::mem::len(bytes);
+    while index < length {
+        let line_start = index;
+        while index < length and bytes[index] != cast<u8>(10) {
+            index = index + 1;
+        }
+        let line = bytes[line_start..index];
+        if std::mem::starts_with(line, prefix) {
+            return line[std::mem::len(prefix)..std::mem::len(line)];
+        }
+        if index < length {
+            index = index + 1;
+        }
+    }
+    return error("cache metadata missing field");
+}
+
+fn parse_i64(bytes: []u8) -> !i64 {
+    let length = std::mem::len(bytes);
+    if length == 0 {
+        return error("empty i64");
+    }
+    var index = 0;
+    var negative = false;
+    if bytes[0] == cast<u8>(45) {
+        negative = true;
+        index = 1;
+        if index == length {
+            return error("invalid i64");
+        }
+    }
+
+    var value = 0;
+    while index < length {
+        let byte = bytes[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("invalid i64");
+        }
+        value = (value * 10) + cast<i64>(byte - cast<u8>(48));
+        index = index + 1;
+    }
+    if negative {
+        return 0 - value;
+    }
+    return value;
 }
 
 fn mix_field(state: i64, name: []u8, value: []u8) -> i64 {
@@ -203,4 +506,10 @@ fn optimization_mode_name(mode: OptimizationMode) -> []u8 {
         return "release-fast";
     }
     return "release-small";
+}
+
+fn append_line(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
 }

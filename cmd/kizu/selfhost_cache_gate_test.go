@@ -9,6 +9,10 @@ import (
 
 const selfhostCacheGateOutput = `cache-key
 755768063
+cache-entry
+755768063
+cache-lookup
+755768063
 `
 
 // TestSelfhostCacheGate executes the Kizu-owned cache key gate.
