@@ -41,6 +41,37 @@ pub struct CacheLookup {
     pub metadata: CacheEntryMetadata,
 }
 
+pub struct CacheStatus {
+    pub dir: []u8,
+    pub entries: i64,
+    pub size_bytes: i64,
+}
+
+pub struct CachePrunePolicy {
+    pub delete_all: bool,
+    pub max_entries: i64,
+    pub max_bytes: i64,
+}
+
+pub struct CachePruneReport {
+    pub removed_entries: i64,
+    pub freed_bytes: i64,
+}
+
+pub struct CacheRebuildReason {
+    pub hit: bool,
+    pub no_previous_build: bool,
+    pub compiler_version_changed: bool,
+    pub manifest_changed: bool,
+    pub module_graph_changed: bool,
+    pub source_changed: bool,
+    pub public_interface_changed: bool,
+    pub target_changed: bool,
+    pub backend_changed: bool,
+    pub optimization_mode_changed: bool,
+    pub stdlib_changed: bool,
+}
+
 pub fn compute_key(input: &CacheKeyInput) -> CacheKey {
     var state = 17;
     state = mix_field(state, "compiler-version", input.compiler_version);
@@ -186,6 +217,160 @@ pub fn lookup_entry(
     };
 }
 
+pub fn cache_status(io: Io) -> !CacheStatus {
+    try ensure_cache_layout(io);
+    var entry_files = try std::fs::read_dir(io, cache_entry_dir());
+    var artifact_files = try std::fs::read_dir(io, cache_artifact_dir());
+    var entries = 0;
+    var bytes = 0;
+
+    var entry_index = 0;
+    while entry_index < entry_files.len() {
+        let entry = try entry_files.get(entry_index);
+        if !entry.is_dir {
+            entries = entries + 1;
+        }
+        entry_index = entry_index + 1;
+    }
+
+    var artifact_index = 0;
+    while artifact_index < artifact_files.len() {
+        let artifact = try artifact_files.get(artifact_index);
+        if !artifact.is_dir {
+            let metadata = try std::fs::metadata(io, artifact.path);
+            bytes = bytes + metadata.size;
+        }
+        artifact_index = artifact_index + 1;
+    }
+
+    entry_files.deinit();
+    artifact_files.deinit();
+    return CacheStatus {
+        dir: cache_root_dir(),
+        entries: entries,
+        size_bytes: bytes
+    };
+}
+
+pub fn cache_prune_all_policy() -> CachePrunePolicy {
+    return CachePrunePolicy {
+        delete_all: true,
+        max_entries: -1,
+        max_bytes: -1
+    };
+}
+
+pub fn prune_cache(io: Io, policy: CachePrunePolicy) -> !CachePruneReport {
+    let bounded = policy.max_entries >= 0 or policy.max_bytes >= 0;
+    if !policy.delete_all and !bounded {
+        return error("cache prune requires explicit policy");
+    }
+    if !policy.delete_all {
+        return error("bounded cache prune not implemented");
+    }
+
+    try ensure_cache_layout(io);
+    var entry_files = try std::fs::read_dir(io, cache_entry_dir());
+    var artifact_files = try std::fs::read_dir(io, cache_artifact_dir());
+    var entries = 0;
+    var bytes = 0;
+
+    var entry_index = 0;
+    while entry_index < entry_files.len() {
+        let entry = try entry_files.get(entry_index);
+        if !entry.is_dir {
+            try std::fs::remove_file(io, entry.path);
+            entries = entries + 1;
+        }
+        entry_index = entry_index + 1;
+    }
+
+    var artifact_index = 0;
+    while artifact_index < artifact_files.len() {
+        let artifact = try artifact_files.get(artifact_index);
+        if !artifact.is_dir {
+            let metadata = try std::fs::metadata(io, artifact.path);
+            bytes = bytes + metadata.size;
+            try std::fs::remove_file(io, artifact.path);
+        }
+        artifact_index = artifact_index + 1;
+    }
+
+    entry_files.deinit();
+    artifact_files.deinit();
+    return CachePruneReport {
+        removed_entries: entries,
+        freed_bytes: bytes
+    };
+}
+
+pub fn compare_rebuild_inputs(
+    current: &CacheKeyInput,
+    previous_found: bool,
+    previous_input_description: []u8
+) -> !CacheRebuildReason {
+    if !previous_found {
+        return no_previous_rebuild_reason();
+    }
+
+    var reason = empty_rebuild_reason();
+    reason.compiler_version_changed = try input_field_changed(
+        previous_input_description,
+        "compiler-version",
+        current.compiler_version
+    );
+    reason.manifest_changed = (try input_field_changed(
+        previous_input_description,
+        "manifest-path",
+        current.manifest_path
+    )) or (try input_field_changed(
+        previous_input_description,
+        "manifest-hash",
+        current.manifest_hash
+    ));
+    reason.module_graph_changed = try input_field_changed(
+        previous_input_description,
+        "module-graph-hash",
+        current.module_graph_hash
+    );
+    reason.source_changed = try input_field_changed(
+        previous_input_description,
+        "source-hashes",
+        current.source_hashes
+    );
+    reason.public_interface_changed = try input_field_changed(
+        previous_input_description,
+        "public-interface-hash",
+        current.public_interface_hash
+    );
+    reason.target_changed = try input_field_changed(
+        previous_input_description,
+        "target",
+        current.target
+    );
+    reason.backend_changed = try input_field_changed(
+        previous_input_description,
+        "backend",
+        backend_name(current.backend)
+    );
+    reason.optimization_mode_changed = try input_field_changed(
+        previous_input_description,
+        "optimization-mode",
+        optimization_mode_name(current.optimization_mode)
+    );
+    reason.stdlib_changed = (try input_field_changed(
+        previous_input_description,
+        "stdlib-hash",
+        current.stdlib_hash
+    )) or (try input_field_changed(
+        previous_input_description,
+        "stdlib-version",
+        current.stdlib_version
+    ));
+    reason.hit = !rebuild_reason_changed(&reason);
+    return reason;
+}
+
 pub fn gate() -> !void {
     let base = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
     let same = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
@@ -234,6 +419,10 @@ pub fn gate() -> !void {
 
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
+    let status_base = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
+    let why_base = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
+    try gate_status_and_prune(allocator, io, status_base);
+    try gate_why_rebuild(why_base);
     try gate_storage_roundtrip(allocator, io, base);
     return;
 }
@@ -308,6 +497,127 @@ fn gate_storage_roundtrip(
     return;
 }
 
+fn gate_status_and_prune(
+    allocator: Allocator,
+    io: Io,
+    base: CacheKeyInput
+) -> !void {
+    let artifact_a = "artifact-a\n";
+    let artifact_b = "artifact-b\n";
+    let cleanup = try prune_cache(io, cache_prune_all_policy());
+    std::testing::expect(cleanup.removed_entries >= 0);
+    std::testing::expect(cleanup.freed_bytes >= 0);
+
+    let empty = try cache_status(io);
+    std::testing::expect(std::mem::equal_bytes(empty.dir, cache_root_dir()));
+    std::testing::expect_equal<i64>(0, empty.entries);
+    std::testing::expect_equal<i64>(0, empty.size_bytes);
+
+    let other = sample_input("0.3.0", "manifest-prune", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
+    let first = try write_entry(allocator, io, base, artifact_a);
+    let second = try write_entry(allocator, io, other, artifact_b);
+    std::testing::expect(first.key.fingerprint != second.key.fingerprint);
+
+    let filled = try cache_status(io);
+    std::testing::expect_equal<i64>(2, filled.entries);
+    std::testing::expect_equal<i64>(
+        std::mem::len(artifact_a) + std::mem::len(artifact_b),
+        filled.size_bytes
+    );
+
+    let pruned = try prune_cache(io, cache_prune_all_policy());
+    std::testing::expect_equal<i64>(2, pruned.removed_entries);
+    std::testing::expect_equal<i64>(
+        std::mem::len(artifact_a) + std::mem::len(artifact_b),
+        pruned.freed_bytes
+    );
+
+    let after = try cache_status(io);
+    std::testing::expect_equal<i64>(0, after.entries);
+    std::testing::expect_equal<i64>(0, after.size_bytes);
+    return;
+}
+
+fn gate_why_rebuild(base: CacheKeyInput) -> !void {
+    let previous_bytes = "compiler-version=0.3.0;manifest-path=selfhost/kizu.toml;manifest-hash=manifest-a;module-graph-hash=graph-a;source-hashes=source-a;public-interface-hash=iface-a;target=x86_64-linux;backend=llvm;optimization-mode=debug;stdlib-hash=stdlib-a;stdlib-version=0.3.0";
+    let hit = try compare_rebuild_inputs(&base, true, previous_bytes);
+    expect_hit_reason(&hit);
+
+    let no_previous = try compare_rebuild_inputs(&base, false, "");
+    expect_no_previous_reason(&no_previous);
+
+    let compiler_changed = sample_input("0.3.1", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&compiler_changed, true, previous_bytes),
+        "compiler-version"
+    );
+    let manifest_changed = sample_input_at_path("package/kizu.toml");
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&manifest_changed, true, previous_bytes),
+        "manifest"
+    );
+    let graph_changed = sample_input("0.3.0", "manifest-a", "graph-b", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&graph_changed, true, previous_bytes),
+        "module-graph"
+    );
+    let source_changed = sample_input("0.3.0", "manifest-a", "graph-a", "source-b", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&source_changed, true, previous_bytes),
+        "source"
+    );
+    let interface_changed = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-b", "x86_64-linux", "stdlib-a", "0.3.0");
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&interface_changed, true, previous_bytes),
+        "public-interface"
+    );
+    let target_changed = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "aarch64-linux", "stdlib-a", "0.3.0");
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&target_changed, true, previous_bytes),
+        "target"
+    );
+    let backend_changed = CacheKeyInput {
+        compiler_version: "0.3.0",
+        manifest_path: "selfhost/kizu.toml",
+        manifest_hash: "manifest-a",
+        module_graph_hash: "graph-a",
+        source_hashes: "source-a",
+        public_interface_hash: "iface-a",
+        target: "x86_64-linux",
+        backend: CacheBackend::Wat,
+        optimization_mode: OptimizationMode::Debug,
+        stdlib_hash: "stdlib-a",
+        stdlib_version: "0.3.0"
+    };
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&backend_changed, true, previous_bytes),
+        "backend"
+    );
+    let optimization_changed = CacheKeyInput {
+        compiler_version: "0.3.0",
+        manifest_path: "selfhost/kizu.toml",
+        manifest_hash: "manifest-a",
+        module_graph_hash: "graph-a",
+        source_hashes: "source-a",
+        public_interface_hash: "iface-a",
+        target: "x86_64-linux",
+        backend: CacheBackend::Llvm,
+        optimization_mode: OptimizationMode::ReleaseSafe,
+        stdlib_hash: "stdlib-a",
+        stdlib_version: "0.3.0"
+    };
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&optimization_changed, true, previous_bytes),
+        "optimization-mode"
+    );
+    let stdlib_changed = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-b", "0.3.0");
+    expect_single_rebuild_input_change(
+        try compare_rebuild_inputs(&stdlib_changed, true, previous_bytes),
+        "stdlib"
+    );
+    return;
+}
+
 fn expect_metadata_equal(
     expected: &CacheEntryMetadata,
     actual: &CacheEntryMetadata
@@ -333,6 +643,101 @@ fn empty_entry_metadata(allocator: Allocator) -> CacheEntryMetadata {
         input_description: "",
         artifact_path: ""
     };
+}
+
+fn empty_rebuild_reason() -> CacheRebuildReason {
+    return rebuild_reason_with_no_previous(false);
+}
+
+fn no_previous_rebuild_reason() -> CacheRebuildReason {
+    return rebuild_reason_with_no_previous(true);
+}
+
+fn rebuild_reason_with_no_previous(no_previous_build: bool) -> CacheRebuildReason {
+    return CacheRebuildReason {
+        hit: false,
+        no_previous_build: no_previous_build,
+        compiler_version_changed: false,
+        manifest_changed: false,
+        module_graph_changed: false,
+        source_changed: false,
+        public_interface_changed: false,
+        target_changed: false,
+        backend_changed: false,
+        optimization_mode_changed: false,
+        stdlib_changed: false
+    };
+}
+
+fn rebuild_reason_changed(reason: &CacheRebuildReason) -> bool {
+    return reason.compiler_version_changed or
+        reason.manifest_changed or
+        reason.module_graph_changed or
+        reason.source_changed or
+        reason.public_interface_changed or
+        reason.target_changed or
+        reason.backend_changed or
+        reason.optimization_mode_changed or
+        reason.stdlib_changed;
+}
+
+fn expect_hit_reason(reason: &CacheRebuildReason) -> void {
+    std::testing::expect(reason.hit);
+    std::testing::expect(!reason.no_previous_build);
+    std::testing::expect(!rebuild_reason_changed(reason));
+    return;
+}
+
+fn expect_no_previous_reason(reason: &CacheRebuildReason) -> void {
+    std::testing::expect(!reason.hit);
+    std::testing::expect(reason.no_previous_build);
+    std::testing::expect(!rebuild_reason_changed(reason));
+    return;
+}
+
+fn expect_single_rebuild_input_change(
+    reason: CacheRebuildReason,
+    name: []u8
+) -> void {
+    std::testing::expect(!reason.hit);
+    std::testing::expect(!reason.no_previous_build);
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "compiler-version"),
+        reason.compiler_version_changed
+    );
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "manifest"),
+        reason.manifest_changed
+    );
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "module-graph"),
+        reason.module_graph_changed
+    );
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "source"),
+        reason.source_changed
+    );
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "public-interface"),
+        reason.public_interface_changed
+    );
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "target"),
+        reason.target_changed
+    );
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "backend"),
+        reason.backend_changed
+    );
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "optimization-mode"),
+        reason.optimization_mode_changed
+    );
+    std::testing::expect_equal<bool>(
+        std::mem::equal_bytes(name, "stdlib"),
+        reason.stdlib_changed
+    );
+    return;
 }
 
 fn render_input_description(
@@ -366,6 +771,45 @@ fn append_input_pair(
     try out.append_byte(cast<u8>(61));
     try out.append_bytes(value);
     return;
+}
+
+fn input_field_changed(
+    description: []u8,
+    name: []u8,
+    current: []u8
+) -> !bool {
+    let previous = try input_description_value(description, name);
+    return !std::mem::equal_bytes(previous, current);
+}
+
+fn input_description_value(description: []u8, name: []u8) -> ![]u8 borrows description {
+    var index = 0;
+    let length = std::mem::len(description);
+    while index < length {
+        let field_start = index;
+        while index < length and description[index] != cast<u8>(59) {
+            index = index + 1;
+        }
+        let field = description[field_start..index];
+        if input_description_field_name_matches(field, name) {
+            return field[std::mem::len(name) + 1..std::mem::len(field)];
+        }
+        if index < length {
+            index = index + 1;
+        }
+    }
+    return error("cache input description missing field");
+}
+
+fn input_description_field_name_matches(field: []u8, name: []u8) -> bool {
+    let name_len = std::mem::len(name);
+    if std::mem::len(field) <= name_len {
+        return false;
+    }
+    if field[name_len] != cast<u8>(61) {
+        return false;
+    }
+    return std::mem::equal_bytes(field[0..name_len], name);
 }
 
 fn parse_entry_metadata(
