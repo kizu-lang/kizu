@@ -1,5 +1,6 @@
 import selfhost::backend;
 import selfhost::backend::data;
+import selfhost::cache;
 import selfhost::cli::check;
 import selfhost::cli::diagnostics;
 import selfhost::cli::execute;
@@ -119,10 +120,10 @@ pub fn cli_main() -> !i64 {
         if arg_count == 2 {
             let subcommand = try std::process::arg(1);
             if std::mem::equal_bytes(subcommand, "status") {
-                return try deferred_public_command_cli(allocator, io, "cache status");
+                return try cache_status_cli(allocator, io);
             }
             if std::mem::equal_bytes(subcommand, "prune") {
-                return try deferred_public_command_cli(allocator, io, "cache prune");
+                return try cache_prune_cli(allocator, io);
             }
         }
         return try usage_cli(allocator, io);
@@ -211,6 +212,29 @@ fn usage_cli(allocator: Allocator, io: Io) -> !i64 {
 fn deferred_public_command_cli(allocator: Allocator, io: Io, command: []u8) -> !i64 {
     try output::deferred_public_command(allocator, io, command);
     return std::process::exit_code(64);
+}
+
+fn cache_status_cli(allocator: Allocator, io: Io) -> !i64 {
+    let status = try cache::cache_status(io);
+    try output::prefixed_line(allocator, io, "cache dir: ", status.dir);
+    try output::prefixed_i64_line(allocator, io, "entries: ", status.entries);
+    try output::prefixed_i64_line(allocator, io, "size bytes: ", status.size_bytes);
+    return std::process::exit_code(0);
+}
+
+fn cache_prune_cli(allocator: Allocator, io: Io) -> !i64 {
+    let report = try cache::prune_cache(io, cache::cache_prune_all_policy());
+    var line_text = std::string::String(allocator);
+    try line_text.append_bytes("cache pruned: removed ");
+    try std::fmt::append_i64(line_text, report.removed_entries);
+    try line_text.append_bytes(" entries, freed ");
+    try std::fmt::append_i64(line_text, report.freed_bytes);
+    try line_text.append_bytes(" bytes");
+    let bytes = line_text.as_bytes();
+    try std::io::write_stdout(io, bytes);
+    try output::stdout_newline(allocator, io);
+    line_text.deinit();
+    return std::process::exit_code(0);
 }
 
 fn is_public_build_deferral_shape(arg_count: i64) -> !bool {

@@ -98,6 +98,7 @@ func runSelfhostNativeSourceExecutable(t *testing.T) (string, int) {
 	appendNativeSourceCommandResult(&report, "stage", stage)
 	failures += expectNativeSourceCommand(t, "stage selfhost", stage, bootstrapStageStdout(), "", 0)
 	failures += countNativeSourceStageArtifactFailures(t, &report)
+	failures += countNativeSourceCacheCommandFailures(t, &report, nativeSourceRunnerPath)
 	failures += countNativeSourceDeferralFailures(t, &report, nativeSourceRunnerPath)
 	if failures == 0 {
 		failures += countNativeSourceRunCaseFailures(t, &report, clang, nativeSourceRunnerPath)
@@ -254,6 +255,101 @@ func countNativeSourceStageArtifactFailures(t *testing.T, report *strings.Builde
 	return failures
 }
 
+// countNativeSourceCacheCommandFailures checks selfhost-owned cache status and prune.
+func countNativeSourceCacheCommandFailures(
+	t *testing.T,
+	report *strings.Builder,
+	runner string,
+) int {
+	t.Helper()
+	if err := prepareNativeSourceCacheDir(); err != nil {
+		t.Errorf("prepare native source cache command dir: %v", err)
+		return 1
+	}
+	failures := 0
+	empty := runNativeSourceCommand(t, runner, "cache", "status")
+	appendNativeSourceCommandResult(report, "cache.status.empty", empty)
+	failures += expectNativeSourceCommand(
+		t,
+		"cache status empty",
+		empty,
+		nativeSourceCacheStatusStdout(0, 0),
+		"",
+		0,
+	)
+
+	artifact := []byte("artifact\n")
+	if err := seedNativeSourceCacheEntry(artifact); err != nil {
+		t.Errorf("seed native source cache command entry: %v", err)
+		return failures + 1
+	}
+	filled := runNativeSourceCommand(t, runner, "cache", "status")
+	appendNativeSourceCommandResult(report, "cache.status.filled", filled)
+	failures += expectNativeSourceCommand(
+		t,
+		"cache status filled",
+		filled,
+		nativeSourceCacheStatusStdout(1, len(artifact)),
+		"",
+		0,
+	)
+
+	prune := runNativeSourceCommand(t, runner, "cache", "prune")
+	appendNativeSourceCommandResult(report, "cache.prune", prune)
+	failures += expectNativeSourceCommand(
+		t,
+		"cache prune",
+		prune,
+		fmt.Sprintf("cache pruned: removed 1 entries, freed %d bytes\n", len(artifact)),
+		"",
+		0,
+	)
+
+	after := runNativeSourceCommand(t, runner, "cache", "status")
+	appendNativeSourceCommandResult(report, "cache.status.after_prune", after)
+	failures += expectNativeSourceCommand(
+		t,
+		"cache status after prune",
+		after,
+		nativeSourceCacheStatusStdout(0, 0),
+		"",
+		0,
+	)
+	return failures
+}
+
+// prepareNativeSourceCacheDir clears the documented selfhost cache root.
+func prepareNativeSourceCacheDir() error {
+	return os.RemoveAll("target/selfhost/cache")
+}
+
+// seedNativeSourceCacheEntry writes one metadata/artifact pair for CLI status.
+func seedNativeSourceCacheEntry(artifact []byte) error {
+	if err := os.MkdirAll("target/selfhost/cache/entries", 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll("target/selfhost/cache/artifacts", 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(
+		"target/selfhost/cache/entries/seed.meta",
+		[]byte("seed\n"),
+		0o644,
+	); err != nil {
+		return err
+	}
+	return os.WriteFile("target/selfhost/cache/artifacts/seed.artifact", artifact, 0o644)
+}
+
+// nativeSourceCacheStatusStdout renders expected cache status stdout.
+func nativeSourceCacheStatusStdout(entries int, sizeBytes int) string {
+	return fmt.Sprintf(
+		"cache dir: target/selfhost/cache\nentries: %d\nsize bytes: %d\n",
+		entries,
+		sizeBytes,
+	)
+}
+
 // countNativeSourceRunCaseFailures emits, links, and executes run artifacts.
 func countNativeSourceRunCaseFailures(
 	t *testing.T,
@@ -306,8 +402,6 @@ func nativeSourceDeferralCases() []nativeSourceDeferralCase {
 	return []nativeSourceDeferralCase{
 		nativeSourceDeferral("build_emit_llvm", "build", "build", "--emit-llvm", hello),
 		nativeSourceDeferral("build_target_native", "build", "build", "--target", "native", hello),
-		nativeSourceDeferral("cache_status", "cache status", "cache", "status"),
-		nativeSourceDeferral("cache_prune", "cache prune", "cache", "prune"),
 		nativeSourceDeferral("why_rebuild", "why-rebuild", "why-rebuild", hello),
 		nativeSourceDeferral("init_default", "init", "init"),
 		nativeSourceDeferral("ir_opt", "ir", "ir", "--opt", hello),
