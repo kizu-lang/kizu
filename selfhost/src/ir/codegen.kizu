@@ -10068,11 +10068,37 @@ fn code_struct_decl_arena_size(
     if !std::mem::equal_bytes(decl_name, type_text) {
         return 0 - 1;
     }
-    if fields.len != 1 {
+    if fields.len == 0 {
         return 0 - 1;
     }
-    let field_id = try ast.child_at(fields, 0);
-    return try code_arena_struct_field_size(text, ast, field_id);
+    return try code_arena_struct_fields_size(text, ast, fields, 0, 0, 1);
+}
+
+fn code_arena_struct_fields_size(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    fields: std::kizu::ast::ChildRange,
+    index: i64,
+    size: i64,
+    align: i64
+) -> !i64 {
+    if index >= fields.len {
+        return code_arena_round_up(size, align);
+    }
+    let field_id = try ast.child_at(fields, index);
+    let field_size = try code_arena_struct_field_size(text, ast, field_id);
+    if field_size < 0 {
+        return 0 - 1;
+    }
+    let field_align = try code_arena_struct_field_align(text, ast, field_id);
+    if field_align < 0 {
+        return 0 - 1;
+    }
+    let field_offset = code_arena_round_up(size, field_align);
+    let next_size = field_offset + field_size;
+    let next_align = code_arena_max_align(align, field_align);
+    let after = index + 1;
+    return try code_arena_struct_fields_size(text, ast, fields, after, next_size, next_align);
 }
 
 fn code_arena_struct_field_size(
@@ -10083,6 +10109,18 @@ fn code_arena_struct_field_size(
     let node = ast.get(field_id);
     return match node.data {
         Field(field_node) => code_arena_field_type_size(text, ast, field_node.type_node),
+        _ => code_arena_missing_size(),
+    };
+}
+
+fn code_arena_struct_field_align(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    field_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(field_id);
+    return match node.data {
+        Field(field_node) => code_arena_field_type_align(text, ast, field_node.type_node),
         _ => code_arena_missing_size(),
     };
 }
@@ -10107,6 +10145,39 @@ fn code_arena_field_type_size(
         return 16;
     }
     return 0 - 1;
+}
+
+fn code_arena_field_type_align(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> i64 {
+    if type_node_is_i64(text, ast, type_node) {
+        return 8;
+    }
+    let type_text = ast_node_text(text, ast, type_node);
+    if std::mem::equal_bytes(type_text, "bool") {
+        return 1;
+    }
+    if std::mem::equal_bytes(type_text, "[]u8") {
+        return 8;
+    }
+    return 0 - 1;
+}
+
+fn code_arena_round_up(value: i64, align: i64) -> i64 {
+    if align <= 1 {
+        return value;
+    }
+    let adjusted = value + align - 1;
+    return (adjusted / align) * align;
+}
+
+fn code_arena_max_align(left: i64, right: i64) -> i64 {
+    if right > left {
+        return right;
+    }
+    return left;
 }
 
 fn lower_code_mem_page_allocator(
