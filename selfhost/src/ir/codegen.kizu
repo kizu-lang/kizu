@@ -3750,6 +3750,14 @@ pub fn code_op_arena_get_slice_struct_field() -> i64 {
     return 110;
 }
 
+pub fn code_op_arena_new() -> i64 {
+    return 111;
+}
+
+pub fn code_op_arena_deinit() -> i64 {
+    return 112;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -3823,8 +3831,12 @@ pub fn code_kind_owned_map_i64() -> i64 {
     return 9;
 }
 
-pub fn code_kind_owned_arena_slice_struct() -> i64 {
+pub fn code_kind_arena() -> i64 {
     return 10;
+}
+
+pub fn code_kind_owned_arena_slice_struct() -> i64 {
+    return code_kind_arena();
 }
 
 fn code_kind_is_owned_resource(kind: i64) -> bool {
@@ -3837,7 +3849,7 @@ fn code_kind_is_owned_resource(kind: i64) -> bool {
     if kind == code_kind_owned_map_i64() {
         return true;
     }
-    return kind == code_kind_owned_arena_slice_struct();
+    return kind == code_kind_arena();
 }
 
 // code_kind_struct_base marks a record-backed value on the kinds array: the
@@ -4831,10 +4843,16 @@ fn emit_code_defer_runtime_deinit(
     let receiver_kind = try defer_records.get(receiver_kind_pos);
     let receiver_pos = record_index + 5;
     let receiver_value = try defer_records.get(receiver_pos);
-    let op_deinit = code_op_storage_deinit();
-    try code.append(op_deinit);
-    try code.append(receiver_value);
-    try code.append(receiver_kind);
+    if receiver_kind == code_kind_arena() {
+        let op_arena_deinit = code_op_arena_deinit();
+        try code.append(op_arena_deinit);
+        try code.append(receiver_value);
+    } else {
+        let op_deinit = code_op_storage_deinit();
+        try code.append(op_deinit);
+        try code.append(receiver_value);
+        try code.append(receiver_kind);
+    }
     let active_pos = record_index + 4;
     try defer_records.set(active_pos, 0);
     return code_eval_value(0, next_value);
@@ -7326,10 +7344,16 @@ fn lower_code_runtime_field_statement_call(
     if !code_kind_is_owned_resource(receiver_kind) {
         return code_eval_unsupported(receiver_eval.next);
     }
-    let op_deinit = code_op_storage_deinit();
-    try code.append(op_deinit);
-    try code.append(receiver_eval.value_id);
-    try code.append(receiver_kind);
+    if receiver_kind == code_kind_arena() {
+        let op_arena_deinit = code_op_arena_deinit();
+        try code.append(op_arena_deinit);
+        try code.append(receiver_eval.value_id);
+    } else {
+        let op_deinit = code_op_storage_deinit();
+        try code.append(op_deinit);
+        try code.append(receiver_eval.value_id);
+        try code.append(receiver_kind);
+    }
     return code_eval_value(0, receiver_eval.next);
 }
 
@@ -9746,20 +9770,189 @@ fn lower_code_runtime_constructor(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let arena_new = try lower_code_arena_new(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if arena_new.ok {
+        return arena_new;
+    }
     let callee_text = ast_node_text(text, ast, callee);
     let kind_array = code_kind_owned_array_i64();
     let kind_map = code_kind_owned_map_i64();
-    let kind_arena = code_kind_owned_arena_slice_struct();
     if std::mem::starts_with(callee_text, "std::array::Array") {
         return try lower_code_storage_new(text, ast, decls, args, kind_array, 8, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     if std::mem::starts_with(callee_text, "std::map::Map") {
         return try lower_code_storage_new(text, ast, decls, args, kind_map, 0, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
-    if std::mem::starts_with(callee_text, "std::arena::Arena") {
-        return try lower_code_storage_new(text, ast, decls, args, kind_arena, 16, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
-    }
     return code_eval_unsupported(next_value);
+}
+
+fn lower_code_arena_new(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let element_size = try code_arena_callee_element_size(text, ast, decls, callee);
+    if element_size < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let allocator_arg = try ast.child_at(args, 0);
+    let allocator_eval = try lower_code_expr(text, ast, decls, allocator_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !allocator_eval.ok {
+        return code_eval_unsupported(allocator_eval.next);
+    }
+    let allocator_kind = try kinds.get(allocator_eval.value_id);
+    if allocator_kind != code_kind_owned() {
+        return code_eval_unsupported(allocator_eval.next);
+    }
+    let op = code_op_arena_new();
+    try code.append(op);
+    try code.append(allocator_eval.next);
+    try code.append(allocator_eval.value_id);
+    try code.append(element_size);
+    let kind_arena = code_kind_arena();
+    try kinds.append(kind_arena);
+    let result_value = allocator_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+fn code_arena_callee_element_size(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(callee);
+    return match node.data {
+        TypeApplyExpr(type_apply) => try code_arena_type_apply_element_size(text, ast, decls, type_apply.callee, type_apply.type_args),
+        _ => code_arena_missing_size(),
+    };
+}
+
+fn code_arena_type_apply_element_size(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    type_callee: std::kizu::ast::NodeId,
+    type_args: std::kizu::ast::ChildRange
+) -> !i64 {
+    if type_args.len != 1 {
+        return 0 - 1;
+    }
+    let callee_text = ast_node_text(text, ast, type_callee);
+    if !std::mem::equal_bytes(callee_text, "std::arena::Arena") {
+        return 0 - 1;
+    }
+    let element_type = try ast.child_at(type_args, 0);
+    return try code_arena_element_size(text, ast, decls, element_type, 0);
+}
+
+fn code_arena_element_size(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    type_node: std::kizu::ast::NodeId,
+    index: i64
+) -> !i64 {
+    if type_node_is_i64(text, ast, type_node) {
+        return 8;
+    }
+    let type_text = ast_node_text(text, ast, type_node);
+    if std::mem::equal_bytes(type_text, "bool") {
+        return 1;
+    }
+    if std::mem::equal_bytes(type_text, "[]u8") {
+        return 16;
+    }
+    if index >= decls.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(decls, index);
+    let size = try code_decl_arena_struct_size(text, ast, child, type_node);
+    if size >= 0 {
+        return size;
+    }
+    let after = index + 1;
+    return try code_arena_element_size(text, ast, decls, type_node, after);
+}
+
+fn code_decl_arena_struct_size(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(child);
+    return match node.data {
+        StructDecl(struct_decl) => try code_struct_decl_arena_size(text, ast, struct_decl.name, struct_decl.fields, type_node),
+        _ => code_arena_missing_size(),
+    };
+}
+
+fn code_struct_decl_arena_size(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    type_node: std::kizu::ast::NodeId
+) -> !i64 {
+    let decl_name = ast_node_text(text, ast, name);
+    let type_text = ast_node_text(text, ast, type_node);
+    if !std::mem::equal_bytes(decl_name, type_text) {
+        return 0 - 1;
+    }
+    if fields.len != 1 {
+        return 0 - 1;
+    }
+    let field_id = try ast.child_at(fields, 0);
+    return try code_arena_struct_field_size(text, ast, field_id);
+}
+
+fn code_arena_struct_field_size(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    field_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(field_id);
+    return match node.data {
+        Field(field_node) => code_arena_field_type_size(text, ast, field_node.type_node),
+        _ => code_arena_missing_size(),
+    };
+}
+
+fn code_arena_missing_size() -> i64 {
+    return 0 - 1;
+}
+
+fn code_arena_field_type_size(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> i64 {
+    if type_node_is_i64(text, ast, type_node) {
+        return 8;
+    }
+    let type_text = ast_node_text(text, ast, type_node);
+    if std::mem::equal_bytes(type_text, "bool") {
+        return 1;
+    }
+    if std::mem::equal_bytes(type_text, "[]u8") {
+        return 16;
+    }
+    return 0 - 1;
 }
 
 fn lower_code_mem_page_allocator(
