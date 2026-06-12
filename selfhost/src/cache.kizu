@@ -1,3 +1,10 @@
+import selfhost::cache::key;
+import selfhost::cache::layout;
+import selfhost::cache::metadata;
+import selfhost::cache::prune;
+import selfhost::cache::status;
+import selfhost::cache::storage;
+
 pub enum CacheBackend {
     Interpreter,
     Llvm,
@@ -81,74 +88,51 @@ struct PruneFourKeys {
 }
 
 pub fn compute_key(input: &CacheKeyInput) -> CacheKey {
-    var state = 17;
-    state = mix_field(state, "compiler-version", input.compiler_version);
-    state = mix_field(state, "manifest-path", input.manifest_path);
-    state = mix_field(state, "manifest-hash", input.manifest_hash);
-    state = mix_field(state, "module-graph-hash", input.module_graph_hash);
-    state = mix_field(state, "source-hashes", input.source_hashes);
-    state = mix_field(state, "public-interface-hash", input.public_interface_hash);
-    state = mix_field(state, "target", input.target);
-    state = mix_field(state, "backend", backend_name(input.backend));
-    state = mix_field(state, "optimization-mode", optimization_mode_name(input.optimization_mode));
-    state = mix_field(state, "stdlib-hash", input.stdlib_hash);
-    state = mix_field(state, "stdlib-version", input.stdlib_version);
-    return CacheKey { fingerprint: state };
+    return CacheKey {
+        fingerprint: key::compute_fingerprint(
+            input.compiler_version,
+            input.manifest_path,
+            input.manifest_hash,
+            input.module_graph_hash,
+            input.source_hashes,
+            input.public_interface_hash,
+            input.target,
+            backend_name(input.backend),
+            optimization_mode_name(input.optimization_mode),
+            input.stdlib_hash,
+            input.stdlib_version
+        )
+    };
 }
 
 pub fn cache_root_dir() -> []u8 {
-    return "target/selfhost/cache";
+    return layout::cache_root_dir();
 }
 
-// Entries use target/selfhost/cache/entries/*.meta and artifacts/*.artifact.
 pub fn cache_entry_dir() -> []u8 {
-    return "target/selfhost/cache/entries";
+    return layout::cache_entry_dir();
 }
 
 pub fn cache_artifact_dir() -> []u8 {
-    return "target/selfhost/cache/artifacts";
+    return layout::cache_artifact_dir();
 }
 
 pub fn cache_entry_metadata_path(
     allocator: Allocator,
     key: &CacheKey
 ) -> !std::string::String {
-    var out = std::string::String(allocator);
-    try out.append_bytes(cache_entry_dir());
-    try out.append_byte(cast<u8>(47));
-    try std::fmt::append_i64(out, key.fingerprint);
-    try out.append_bytes(".meta");
-    return out;
+    return try layout::cache_entry_metadata_path(allocator, key.fingerprint);
 }
 
 pub fn cache_entry_artifact_path(
     allocator: Allocator,
     key: &CacheKey
 ) -> !std::string::String {
-    var out = std::string::String(allocator);
-    try out.append_bytes(cache_artifact_dir());
-    try out.append_byte(cast<u8>(47));
-    try std::fmt::append_i64(out, key.fingerprint);
-    try out.append_bytes(".artifact");
-    return out;
+    return try layout::cache_entry_artifact_path(allocator, key.fingerprint);
 }
 
 pub fn ensure_cache_layout(io: Io) -> !void {
-    if !(try std::fs::exists(io, "target")) {
-        try std::fs::create_dir(io, "target");
-    }
-    if !(try std::fs::exists(io, "target/selfhost")) {
-        try std::fs::create_dir(io, "target/selfhost");
-    }
-    if !(try std::fs::exists(io, cache_root_dir())) {
-        try std::fs::create_dir(io, cache_root_dir());
-    }
-    if !(try std::fs::exists(io, cache_entry_dir())) {
-        try std::fs::create_dir(io, cache_entry_dir());
-    }
-    if !(try std::fs::exists(io, cache_artifact_dir())) {
-        try std::fs::create_dir(io, cache_artifact_dir());
-    }
+    try layout::ensure_cache_layout(io);
     return;
 }
 
@@ -158,35 +142,23 @@ pub fn write_entry(
     input: CacheKeyInput,
     artifact: []u8
 ) -> !CacheEntryMetadata {
-    try ensure_cache_layout(io);
-
-    let key = compute_key(&input);
-    var artifact_path = try cache_entry_artifact_path(allocator, &key);
-    let artifact_path_bytes = artifact_path.as_bytes();
-    try std::fs::write_file(io, artifact_path_bytes, artifact);
-
-    var input_description = try render_input_description(allocator, &input);
-    let input_description_bytes = input_description.as_bytes();
-    var metadata_path = try cache_entry_metadata_path(allocator, &key);
-    var metadata_bytes = std::string::String(allocator);
-    try append_line(metadata_bytes, "kizu-cache-entry-v0");
-    try metadata_bytes.append_bytes("fingerprint ");
-    try std::fmt::append_i64(metadata_bytes, key.fingerprint);
-    try metadata_bytes.append_byte(cast<u8>(10));
-    try metadata_bytes.append_bytes("input-description ");
-    try metadata_bytes.append_bytes(input_description_bytes);
-    try metadata_bytes.append_byte(cast<u8>(10));
-    try metadata_bytes.append_bytes("artifact ");
-    try metadata_bytes.append_bytes(artifact_path_bytes);
-    try metadata_bytes.append_byte(cast<u8>(10));
-    let metadata_path_bytes = metadata_path.as_bytes();
-    let metadata_view = metadata_bytes.as_bytes();
-    try std::fs::write_file(io, metadata_path_bytes, metadata_view);
-    metadata_path.deinit();
-    metadata_bytes.deinit();
-    input_description.deinit();
-    artifact_path.deinit();
-    return try read_entry(allocator, io, &key);
+    let entry_metadata = try storage::write_entry(
+        allocator,
+        io,
+        input.compiler_version,
+        input.manifest_path,
+        input.manifest_hash,
+        input.module_graph_hash,
+        input.source_hashes,
+        input.public_interface_hash,
+        input.target,
+        backend_name(input.backend),
+        optimization_mode_name(input.optimization_mode),
+        input.stdlib_hash,
+        input.stdlib_version,
+        artifact
+    );
+    return cache_entry_metadata_from_storage(entry_metadata);
 }
 
 pub fn read_entry(
@@ -194,12 +166,8 @@ pub fn read_entry(
     io: Io,
     key: &CacheKey
 ) -> !CacheEntryMetadata {
-    var metadata_path = try cache_entry_metadata_path(allocator, key);
-    let metadata_path_bytes = metadata_path.as_bytes();
-    let metadata_text = try std::fs::read_file(io, metadata_path_bytes);
-    metadata_path.deinit();
-    let metadata = try parse_entry_metadata(allocator, metadata_text);
-    return metadata;
+    let entry_metadata = try storage::read_entry(allocator, io, key.fingerprint);
+    return cache_entry_metadata_from_storage(entry_metadata);
 }
 
 pub fn lookup_entry(
@@ -207,56 +175,31 @@ pub fn lookup_entry(
     io: Io,
     key: &CacheKey
 ) -> !CacheLookup {
-    var metadata_path = try cache_entry_metadata_path(allocator, key);
-    let metadata_path_bytes = metadata_path.as_bytes();
-    let found = try std::fs::exists(io, metadata_path_bytes);
-    metadata_path.deinit();
-    if !found {
-        return CacheLookup {
-            found: false,
-            metadata: empty_entry_metadata(allocator)
-        };
-    }
-
-    let metadata = try read_entry(allocator, io, key);
+    let lookup = try storage::lookup_entry(allocator, io, key.fingerprint);
     return CacheLookup {
-        found: true,
-        metadata: metadata
+        found: lookup.found,
+        metadata: CacheEntryMetadata {
+            key: CacheKey { fingerprint: lookup.fingerprint },
+            input_description: lookup.input_description,
+            artifact_path: lookup.artifact_path
+        }
+    };
+}
+
+fn cache_entry_metadata_from_storage(entry_metadata: metadata::EntryMetadata) -> CacheEntryMetadata {
+    return CacheEntryMetadata {
+        key: CacheKey { fingerprint: entry_metadata.fingerprint },
+        input_description: entry_metadata.input_description,
+        artifact_path: entry_metadata.artifact_path
     };
 }
 
 pub fn cache_status(io: Io) -> !CacheStatus {
-    try ensure_cache_layout(io);
-    var entry_files = try std::fs::read_dir(io, cache_entry_dir());
-    var artifact_files = try std::fs::read_dir(io, cache_artifact_dir());
-    var entries = 0;
-    var bytes = 0;
-
-    var entry_index = 0;
-    while entry_index < entry_files.len() {
-        let entry = try entry_files.get(entry_index);
-        if !entry.is_dir {
-            entries = entries + 1;
-        }
-        entry_index = entry_index + 1;
-    }
-
-    var artifact_index = 0;
-    while artifact_index < artifact_files.len() {
-        let artifact = try artifact_files.get(artifact_index);
-        if !artifact.is_dir {
-            let metadata = try std::fs::metadata(io, artifact.path);
-            bytes = bytes + metadata.size;
-        }
-        artifact_index = artifact_index + 1;
-    }
-
-    entry_files.deinit();
-    artifact_files.deinit();
+    let counts = try status::cache_status(io);
     return CacheStatus {
         dir: cache_root_dir(),
-        entries: entries,
-        size_bytes: bytes
+        entries: counts.entries,
+        size_bytes: counts.size_bytes
     };
 }
 
@@ -269,178 +212,17 @@ pub fn cache_prune_all_policy() -> CachePrunePolicy {
 }
 
 pub fn prune_cache(io: Io, policy: CachePrunePolicy) -> !CachePruneReport {
-    let bounded = policy.max_entries >= 0 or policy.max_bytes >= 0;
-    if !policy.delete_all and !bounded {
-        return error("cache prune requires explicit policy");
-    }
-
-    try ensure_cache_layout(io);
-    if !policy.delete_all {
-        return try prune_cache_bounded(io, policy);
-    }
-
-    var entry_files = try std::fs::read_dir(io, cache_entry_dir());
-    var artifact_files = try std::fs::read_dir(io, cache_artifact_dir());
-    var entries = 0;
-    var bytes = 0;
-
-    var entry_index = 0;
-    while entry_index < entry_files.len() {
-        let entry = try entry_files.get(entry_index);
-        if !entry.is_dir {
-            try std::fs::remove_file(io, entry.path);
-            entries = entries + 1;
-        }
-        entry_index = entry_index + 1;
-    }
-
-    var artifact_index = 0;
-    while artifact_index < artifact_files.len() {
-        let artifact = try artifact_files.get(artifact_index);
-        if !artifact.is_dir {
-            let metadata = try std::fs::metadata(io, artifact.path);
-            bytes = bytes + metadata.size;
-            try std::fs::remove_file(io, artifact.path);
-        }
-        artifact_index = artifact_index + 1;
-    }
-
-    entry_files.deinit();
-    artifact_files.deinit();
+    let report = try prune::prune_cache(
+        io,
+        policy.delete_all,
+        policy.max_entries,
+        policy.max_bytes
+    );
     return CachePruneReport {
-        removed_entries: entries,
-        freed_bytes: bytes,
-        remaining_entries: 0
+        removed_entries: report.removed_entries,
+        freed_bytes: report.freed_bytes,
+        remaining_entries: report.remaining_entries
     };
-}
-
-/// Bounded prune deletes entries in ascending cache fingerprint order until all
-/// configured limits are satisfied. It does not use directory order or wall-clock
-/// timestamps, so the same cache contents produce the same removal order.
-fn prune_cache_bounded(io: Io, policy: CachePrunePolicy) -> !CachePruneReport {
-    let allocator = std::mem::page_allocator();
-    var entry_files = try std::fs::read_dir(io, cache_entry_dir());
-    var fingerprints = std::array::Array<i64>(allocator);
-    var remaining_entries = 0;
-    var remaining_bytes = 0;
-
-    var entry_index = 0;
-    while entry_index < entry_files.len() {
-        let entry = try entry_files.get(entry_index);
-        if !entry.is_dir {
-            let metadata_bytes = try std::fs::read_file(io, entry.path);
-            let metadata = try parse_entry_metadata(allocator, metadata_bytes);
-            remaining_entries = remaining_entries + 1;
-            remaining_bytes = remaining_bytes + try artifact_size_for_key(allocator, io, &metadata.key);
-            try fingerprints.append(metadata.key.fingerprint);
-        }
-        entry_index = entry_index + 1;
-    }
-    entry_files.deinit();
-
-    try sort_prune_fingerprints(&var fingerprints);
-
-    var removed_entries = 0;
-    var freed_bytes = 0;
-    var remove_index = 0;
-    while remove_index < fingerprints.len() and prune_policy_exceeded(policy, remaining_entries, remaining_bytes) {
-        let key = CacheKey { fingerprint: try fingerprints.get(remove_index) };
-        let removed_bytes = try remove_cache_entry_for_key(allocator, io, &key);
-        removed_entries = removed_entries + 1;
-        freed_bytes = freed_bytes + removed_bytes;
-        remaining_entries = remaining_entries - 1;
-        remaining_bytes = remaining_bytes - removed_bytes;
-        remove_index = remove_index + 1;
-    }
-
-    fingerprints.deinit();
-    return CachePruneReport {
-        removed_entries: removed_entries,
-        freed_bytes: freed_bytes,
-        remaining_entries: remaining_entries
-    };
-}
-
-fn remove_cache_entry_for_key(
-    allocator: Allocator,
-    io: Io,
-    key: &CacheKey
-) -> !i64 {
-    var entry_path = try cache_entry_metadata_path(allocator, key);
-    let entry_path_bytes = entry_path.as_bytes();
-    if try std::fs::exists(io, entry_path_bytes) {
-        try std::fs::remove_file(io, entry_path_bytes);
-    }
-    entry_path.deinit();
-
-    var artifact_path = try cache_entry_artifact_path(allocator, key);
-    let artifact_path_bytes = artifact_path.as_bytes();
-    let artifact_bytes = try artifact_size_at_path(io, artifact_path_bytes);
-    if artifact_bytes >= 0 {
-        try std::fs::remove_file(io, artifact_path_bytes);
-    }
-    artifact_path.deinit();
-    if artifact_bytes < 0 {
-        return 0;
-    }
-    return artifact_bytes;
-}
-
-fn artifact_size_for_key(allocator: Allocator, io: Io, key: &CacheKey) -> !i64 {
-    var artifact_path = try cache_entry_artifact_path(allocator, key);
-    let artifact_path_bytes = artifact_path.as_bytes();
-    let size = try artifact_size_at_path(io, artifact_path_bytes);
-    artifact_path.deinit();
-    if size < 0 {
-        return 0;
-    }
-    return size;
-}
-
-fn artifact_size_at_path(io: Io, path: &[]u8) -> !i64 {
-    let artifact_exists = try std::fs::exists(io, path);
-    if artifact_exists {
-        let artifact_metadata = try std::fs::metadata(io, path);
-        if !artifact_metadata.is_dir {
-            return artifact_metadata.size;
-        }
-    }
-    return -1;
-}
-
-fn prune_policy_exceeded(
-    policy: CachePrunePolicy,
-    entries: i64,
-    bytes: i64
-) -> bool {
-    if policy.max_entries >= 0 and entries > policy.max_entries {
-        return true;
-    }
-    if policy.max_bytes >= 0 and bytes > policy.max_bytes {
-        return true;
-    }
-    return false;
-}
-
-fn sort_prune_fingerprints(fingerprints: &var std::array::Array<i64>) -> !void {
-    var index = 1;
-    while index < fingerprints.len() {
-        var cursor = index;
-        var scanning = true;
-        while scanning and cursor > 0 {
-            let left = try fingerprints.get(cursor - 1);
-            let right = try fingerprints.get(cursor);
-            if right < left {
-                try fingerprints.set(cursor - 1, right);
-                try fingerprints.set(cursor, left);
-                cursor = cursor - 1;
-            } else {
-                scanning = false;
-            }
-        }
-        index = index + 1;
-    }
-    return;
 }
 
 pub fn compare_rebuild_inputs(
@@ -453,55 +235,55 @@ pub fn compare_rebuild_inputs(
     }
 
     var reason = empty_rebuild_reason();
-    reason.compiler_version_changed = try input_field_changed(
+    reason.compiler_version_changed = try metadata::input_field_changed(
         previous_input_description,
         "compiler-version",
         current.compiler_version
     );
-    reason.manifest_changed = (try input_field_changed(
+    reason.manifest_changed = (try metadata::input_field_changed(
         previous_input_description,
         "manifest-path",
         current.manifest_path
-    )) or (try input_field_changed(
+    )) or (try metadata::input_field_changed(
         previous_input_description,
         "manifest-hash",
         current.manifest_hash
     ));
-    reason.module_graph_changed = try input_field_changed(
+    reason.module_graph_changed = try metadata::input_field_changed(
         previous_input_description,
         "module-graph-hash",
         current.module_graph_hash
     );
-    reason.source_changed = try input_field_changed(
+    reason.source_changed = try metadata::input_field_changed(
         previous_input_description,
         "source-hashes",
         current.source_hashes
     );
-    reason.public_interface_changed = try input_field_changed(
+    reason.public_interface_changed = try metadata::input_field_changed(
         previous_input_description,
         "public-interface-hash",
         current.public_interface_hash
     );
-    reason.target_changed = try input_field_changed(
+    reason.target_changed = try metadata::input_field_changed(
         previous_input_description,
         "target",
         current.target
     );
-    reason.backend_changed = try input_field_changed(
+    reason.backend_changed = try metadata::input_field_changed(
         previous_input_description,
         "backend",
         backend_name(current.backend)
     );
-    reason.optimization_mode_changed = try input_field_changed(
+    reason.optimization_mode_changed = try metadata::input_field_changed(
         previous_input_description,
         "optimization-mode",
         optimization_mode_name(current.optimization_mode)
     );
-    reason.stdlib_changed = (try input_field_changed(
+    reason.stdlib_changed = (try metadata::input_field_changed(
         previous_input_description,
         "stdlib-hash",
         current.stdlib_hash
-    )) or (try input_field_changed(
+    )) or (try metadata::input_field_changed(
         previous_input_description,
         "stdlib-version",
         current.stdlib_version
@@ -909,14 +691,6 @@ fn expect_metadata_equal(
     return;
 }
 
-fn empty_entry_metadata(allocator: Allocator) -> CacheEntryMetadata {
-    return CacheEntryMetadata {
-        key: CacheKey { fingerprint: 0 },
-        input_description: "",
-        artifact_path: ""
-    };
-}
-
 fn empty_rebuild_reason() -> CacheRebuildReason {
     return rebuild_reason_with_no_previous(false);
 }
@@ -1012,192 +786,6 @@ fn expect_single_rebuild_input_change(
     return;
 }
 
-fn render_input_description(
-    allocator: Allocator,
-    input: &CacheKeyInput
-) -> !std::string::String {
-    var out = std::string::String(allocator);
-    try append_input_pair(out, "compiler-version", input.compiler_version);
-    try append_input_pair(out, "manifest-path", input.manifest_path);
-    try append_input_pair(out, "manifest-hash", input.manifest_hash);
-    try append_input_pair(out, "module-graph-hash", input.module_graph_hash);
-    try append_input_pair(out, "source-hashes", input.source_hashes);
-    try append_input_pair(out, "public-interface-hash", input.public_interface_hash);
-    try append_input_pair(out, "target", input.target);
-    try append_input_pair(out, "backend", backend_name(input.backend));
-    try append_input_pair(out, "optimization-mode", optimization_mode_name(input.optimization_mode));
-    try append_input_pair(out, "stdlib-hash", input.stdlib_hash);
-    try append_input_pair(out, "stdlib-version", input.stdlib_version);
-    return out;
-}
-
-fn append_input_pair(
-    out: &var std::string::String,
-    name: []u8,
-    value: []u8
-) -> !void {
-    if out.len() > 0 {
-        try out.append_byte(cast<u8>(59));
-    }
-    try out.append_bytes(name);
-    try out.append_byte(cast<u8>(61));
-    try out.append_bytes(value);
-    return;
-}
-
-fn input_field_changed(
-    description: []u8,
-    name: []u8,
-    current: []u8
-) -> !bool {
-    let previous = try input_description_value(description, name);
-    return !std::mem::equal_bytes(previous, current);
-}
-
-fn input_description_value(description: []u8, name: []u8) -> ![]u8 borrows description {
-    var index = 0;
-    let length = std::mem::len(description);
-    while index < length {
-        let field_start = index;
-        while index < length and description[index] != cast<u8>(59) {
-            index = index + 1;
-        }
-        let field = description[field_start..index];
-        if input_description_field_name_matches(field, name) {
-            return field[std::mem::len(name) + 1..std::mem::len(field)];
-        }
-        if index < length {
-            index = index + 1;
-        }
-    }
-    return error("cache input description missing field");
-}
-
-fn input_description_field_name_matches(field: []u8, name: []u8) -> bool {
-    let name_len = std::mem::len(name);
-    if std::mem::len(field) <= name_len {
-        return false;
-    }
-    if field[name_len] != cast<u8>(61) {
-        return false;
-    }
-    return std::mem::equal_bytes(field[0..name_len], name);
-}
-
-fn parse_entry_metadata(
-    allocator: Allocator,
-    bytes: []u8
-) -> !CacheEntryMetadata {
-    if !std::mem::equal_bytes(first_line(bytes), "kizu-cache-entry-v0") {
-        return error("invalid cache metadata");
-    }
-    let fingerprint_text = try metadata_value(bytes, "fingerprint ");
-    let input_description_text = try metadata_value(bytes, "input-description ");
-    let artifact_text = try metadata_value(bytes, "artifact ");
-    let fingerprint = try parse_i64(fingerprint_text);
-    return CacheEntryMetadata {
-        key: CacheKey { fingerprint: fingerprint },
-        input_description: input_description_text,
-        artifact_path: artifact_text
-    };
-}
-
-fn first_line(bytes: []u8) -> []u8 {
-    var index = 0;
-    let length = std::mem::len(bytes);
-    while index < length and bytes[index] != cast<u8>(10) {
-        index = index + 1;
-    }
-    return bytes[0..index];
-}
-
-fn metadata_value(bytes: []u8, prefix: []u8) -> ![]u8 {
-    var index = 0;
-    let length = std::mem::len(bytes);
-    while index < length {
-        let line_start = index;
-        while index < length and bytes[index] != cast<u8>(10) {
-            index = index + 1;
-        }
-        let line = bytes[line_start..index];
-        if std::mem::starts_with(line, prefix) {
-            return line[std::mem::len(prefix)..std::mem::len(line)];
-        }
-        if index < length {
-            index = index + 1;
-        }
-    }
-    return error("cache metadata missing field");
-}
-
-fn parse_i64(bytes: []u8) -> !i64 {
-    let length = std::mem::len(bytes);
-    if length == 0 {
-        return error("empty i64");
-    }
-    var index = 0;
-    var negative = false;
-    if bytes[0] == cast<u8>(45) {
-        negative = true;
-        index = 1;
-        if index == length {
-            return error("invalid i64");
-        }
-    }
-
-    var value = 0;
-    while index < length {
-        let byte = bytes[index];
-        if byte < cast<u8>(48) or byte > cast<u8>(57) {
-            return error("invalid i64");
-        }
-        value = (value * 10) + cast<i64>(byte - cast<u8>(48));
-        index = index + 1;
-    }
-    if negative {
-        return 0 - value;
-    }
-    return value;
-}
-
-fn mix_field(state: i64, name: []u8, value: []u8) -> i64 {
-    var next = mix_bytes(state, name);
-    next = mix_byte(next, cast<u8>(0));
-    next = mix_len(next, std::mem::len(value));
-    next = mix_byte(next, cast<u8>(0));
-    next = mix_bytes(next, value);
-    next = mix_byte(next, cast<u8>(10));
-    return next;
-}
-
-fn mix_len(state: i64, length: i64) -> i64 {
-    var next = state;
-    var current = length;
-    if current == 0 {
-        return mix_byte(next, cast<u8>(48));
-    }
-    while current > 0 {
-        let digit = current % 10;
-        next = mix_byte(next, cast<u8>(48 + digit));
-        current = current / 10;
-    }
-    return next;
-}
-
-fn mix_bytes(state: i64, bytes: []u8) -> i64 {
-    var next = state;
-    var index = 0;
-    while index < std::mem::len(bytes) {
-        next = mix_byte(next, bytes[index]);
-        index = index + 1;
-    }
-    return next;
-}
-
-fn mix_byte(state: i64, byte: u8) -> i64 {
-    return ((state * 257) + cast<i64>(byte) + 1) % 1000000007;
-}
-
 fn backend_name(backend: CacheBackend) -> []u8 {
     if backend == CacheBackend::Interpreter {
         return "interpreter";
@@ -1222,10 +810,4 @@ fn optimization_mode_name(mode: OptimizationMode) -> []u8 {
         return "release-fast";
     }
     return "release-small";
-}
-
-fn append_line(out: &var std::string::String, text: []u8) -> !void {
-    try out.append_bytes(text);
-    try out.append_byte(cast<u8>(10));
-    return;
 }

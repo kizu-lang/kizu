@@ -1,0 +1,169 @@
+pub struct EntryMetadata {
+    pub fingerprint: i64,
+    pub input_description: []u8,
+    pub artifact_path: []u8,
+}
+
+pub fn render_input_description(
+    allocator: Allocator,
+    compiler_version: []u8,
+    manifest_path: []u8,
+    manifest_hash: []u8,
+    module_graph_hash: []u8,
+    source_hashes: []u8,
+    public_interface_hash: []u8,
+    target: []u8,
+    backend_name: []u8,
+    optimization_mode_name: []u8,
+    stdlib_hash: []u8,
+    stdlib_version: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_input_pair(out, "compiler-version", compiler_version);
+    try append_input_pair(out, "manifest-path", manifest_path);
+    try append_input_pair(out, "manifest-hash", manifest_hash);
+    try append_input_pair(out, "module-graph-hash", module_graph_hash);
+    try append_input_pair(out, "source-hashes", source_hashes);
+    try append_input_pair(out, "public-interface-hash", public_interface_hash);
+    try append_input_pair(out, "target", target);
+    try append_input_pair(out, "backend", backend_name);
+    try append_input_pair(out, "optimization-mode", optimization_mode_name);
+    try append_input_pair(out, "stdlib-hash", stdlib_hash);
+    try append_input_pair(out, "stdlib-version", stdlib_version);
+    return out;
+}
+
+pub fn append_input_pair(
+    out: &var std::string::String,
+    name: []u8,
+    value: []u8
+) -> !void {
+    if out.len() > 0 {
+        try out.append_byte(cast<u8>(59));
+    }
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(61));
+    try out.append_bytes(value);
+    return;
+}
+
+pub fn input_field_changed(
+    description: []u8,
+    name: []u8,
+    current: []u8
+) -> !bool {
+    let previous = try input_description_value(description, name);
+    return !std::mem::equal_bytes(previous, current);
+}
+
+pub fn parse_entry_metadata(
+    allocator: Allocator,
+    bytes: []u8
+) -> !EntryMetadata {
+    if !std::mem::equal_bytes(first_line(bytes), "kizu-cache-entry-v0") {
+        return error("invalid cache metadata");
+    }
+    let fingerprint_text = try metadata_value(bytes, "fingerprint ");
+    let input_description_text = try metadata_value(bytes, "input-description ");
+    let artifact_text = try metadata_value(bytes, "artifact ");
+    let fingerprint = try parse_i64(fingerprint_text);
+    return EntryMetadata {
+        fingerprint: fingerprint,
+        input_description: input_description_text,
+        artifact_path: artifact_text
+    };
+}
+
+pub fn append_line(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn input_description_value(description: []u8, name: []u8) -> ![]u8 borrows description {
+    var index = 0;
+    let length = std::mem::len(description);
+    while index < length {
+        let field_start = index;
+        while index < length and description[index] != cast<u8>(59) {
+            index = index + 1;
+        }
+        let field = description[field_start..index];
+        if input_description_field_name_matches(field, name) {
+            return field[std::mem::len(name) + 1..std::mem::len(field)];
+        }
+        if index < length {
+            index = index + 1;
+        }
+    }
+    return error("cache input description missing field");
+}
+
+fn input_description_field_name_matches(field: []u8, name: []u8) -> bool {
+    let name_len = std::mem::len(name);
+    if std::mem::len(field) <= name_len {
+        return false;
+    }
+    if field[name_len] != cast<u8>(61) {
+        return false;
+    }
+    return std::mem::equal_bytes(field[0..name_len], name);
+}
+
+fn first_line(bytes: []u8) -> []u8 {
+    var index = 0;
+    let length = std::mem::len(bytes);
+    while index < length and bytes[index] != cast<u8>(10) {
+        index = index + 1;
+    }
+    return bytes[0..index];
+}
+
+fn metadata_value(bytes: []u8, prefix: []u8) -> ![]u8 {
+    var index = 0;
+    let length = std::mem::len(bytes);
+    while index < length {
+        let line_start = index;
+        while index < length and bytes[index] != cast<u8>(10) {
+            index = index + 1;
+        }
+        let line = bytes[line_start..index];
+        if std::mem::starts_with(line, prefix) {
+            return line[std::mem::len(prefix)..std::mem::len(line)];
+        }
+        if index < length {
+            index = index + 1;
+        }
+    }
+    return error("cache metadata missing field");
+}
+
+fn parse_i64(bytes: []u8) -> !i64 {
+    let length = std::mem::len(bytes);
+    if length == 0 {
+        return error("empty i64");
+    }
+    var index = 0;
+    var negative = false;
+    if bytes[0] == cast<u8>(45) {
+        negative = true;
+        index = 1;
+        if index == length {
+            return error("invalid i64");
+        }
+    }
+
+    var value = 0;
+    while index < length {
+        let byte = bytes[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("invalid i64");
+        }
+        value = (value * 10) + cast<i64>(byte - cast<u8>(48));
+        index = index + 1;
+    }
+    if negative {
+        return 0 - value;
+    }
+    return value;
+}
