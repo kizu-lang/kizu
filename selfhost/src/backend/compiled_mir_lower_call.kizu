@@ -374,6 +374,45 @@ pub fn lower_call_args(
     return args;
 }
 
+pub fn lower_call_args_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    first_string_index: i64,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !std::array::Array<compiled_mir::MirCallArg> {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
+    );
+    var arg_nodes = try call_arg_nodes(ir_bytes, function_name, call_node, bs);
+    defer arg_nodes.deinit();
+    try require_contiguous_call_args(&arg_nodes);
+    var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
+        ir_bytes, module_prefix, callee_name, arg_nodes.len(), call_arg_type_cache
+    );
+    defer arg_types.deinit();
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    var arg_index = 0;
+    var string_index = first_string_index;
+    while arg_index < arg_nodes.len() {
+        let arg_node = try arg_nodes.get(arg_index);
+        let arg_type = try arg_types.get(arg_index);
+        let arg = try lower_single_call_arg(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, string_index, bs
+        );
+        let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
+        try args.append(arg);
+        if is_string_arg {
+            string_index = string_index + 1;
+        }
+        arg_index = arg_index + 1;
+    }
+    return args;
+}
+
 pub fn lower_call_args_with_aliases(
     ir_bytes: []u8,
     function_name: []u8,
@@ -414,6 +453,49 @@ pub fn lower_call_args_with_aliases(
     }
     return args;
 }
+
+pub fn lower_call_args_with_aliases_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    first_string_index: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !std::array::Array<compiled_mir::MirCallArg> {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
+    );
+    var arg_nodes = try call_arg_nodes(ir_bytes, function_name, call_node, bs);
+    defer arg_nodes.deinit();
+    try require_contiguous_call_args(&arg_nodes);
+    var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
+        ir_bytes, module_prefix, callee_name, arg_nodes.len(), call_arg_type_cache
+    );
+    defer arg_types.deinit();
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    var arg_index = 0;
+    var string_index = first_string_index;
+    while arg_index < arg_nodes.len() {
+        let arg_node = try arg_nodes.get(arg_index);
+        let arg_type = try arg_types.get(arg_index);
+        let arg = try lower_single_call_arg_with_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node,
+            string_index, alias_sources, alias_currents, bs
+        );
+        let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
+        try args.append(arg);
+        if is_string_arg {
+            string_index = string_index + 1;
+        }
+        arg_index = arg_index + 1;
+    }
+    return args;
+}
+
 pub fn is_error_call(ir_bytes: []u8, function_name: []u8, call_node: i64, bs: i64) -> !bool {
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs

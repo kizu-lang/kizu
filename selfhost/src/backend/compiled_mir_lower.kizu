@@ -3514,6 +3514,8 @@ pub fn lower_multi_statement_function(
     var alias_counter = 0;
     var aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer aliases.deinit();
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
     var stmt_index = 0;
     while stmt_index < statement_count {
         let statement = try ir_contract::body_child_sequence_from(
@@ -3563,7 +3565,8 @@ pub fn lower_multi_statement_function(
                 try_counter,
                 &aliases,
                 &var stmts,
-                bs
+                bs,
+                &var call_arg_type_cache
             );
             locals_spec = let_result.locals_spec;
             string_counter = let_result.string_counter;
@@ -3584,7 +3587,8 @@ pub fn lower_multi_statement_function(
                     stmt_index,
                     &var aliases,
                     &var stmts,
-                    bs
+                    bs,
+                    &var call_arg_type_cache
                 );
                 temp_counter = while_result.temp_counter;
                 string_counter = while_result.string_counter;
@@ -3601,7 +3605,8 @@ pub fn lower_multi_statement_function(
                     string_counter,
                     temp_counter,
                     &aliases,
-                    bs
+                    bs,
+                    &var call_arg_type_cache
                 ));
             } else {
                 if std::mem::equal_bytes(stmt_kind, "If") {
@@ -3619,7 +3624,8 @@ pub fn lower_multi_statement_function(
                         stmt_index,
                         &var aliases,
                         &var stmts,
-                        bs
+                        bs,
+                        &var call_arg_type_cache
                     );
                     temp_counter = if_result.temp_counter;
                     string_counter = if_result.string_counter;
@@ -3638,7 +3644,8 @@ pub fn lower_multi_statement_function(
                             try_counter,
                             &aliases,
                             &var stmts,
-                            bs
+                            bs,
+                            &var call_arg_type_cache
                         );
                         string_counter = expr_result.string_counter;
                         try_counter = expr_result.try_counter;
@@ -3824,6 +3831,44 @@ fn lower_call_args_with_local_aliases(
         &alias_sources,
         &alias_currents,
         bs
+    );
+}
+
+fn lower_call_args_with_local_aliases_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    call_node: i64,
+    first_string_index: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !std::array::Array<compiled_mir::MirCallArg> {
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    var index = 0;
+    while index < aliases.len() {
+        let state = try aliases.at(index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try alias_sources.append(state.source_name);
+            try alias_currents.append(state.current_name);
+        }
+        index = index + 1;
+    }
+    return try compiled_mir_lower_call::lower_call_args_with_aliases_cached(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        call_node,
+        first_string_index,
+        &alias_sources,
+        &alias_currents,
+        bs,
+        call_arg_type_cache
     );
 }
 
@@ -4063,7 +4108,8 @@ fn lower_multi_expr_statement(
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiExprLowerResult {
     let expr = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "expr", 0, bs
@@ -4088,7 +4134,7 @@ fn lower_multi_expr_statement(
     if !try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
         return try lower_void_free_try_call_statement(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-            inner, string_counter, try_counter, aliases, stmts, bs
+            inner, string_counter, try_counter, aliases, stmts, bs, call_arg_type_cache
         );
     }
     let callee_node = try ir_contract::body_child_sequence_from(
@@ -4312,7 +4358,8 @@ fn lower_void_free_try_call_statement(
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiExprLowerResult {
     let success_type = try try_call_success_type(
         ir_bytes, function_name, module_prefix, call_node, bs
@@ -4326,8 +4373,9 @@ fn lower_void_free_try_call_statement(
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let args = try lower_call_args_with_local_aliases(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs
+    let args = try lower_call_args_with_local_aliases_cached(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs,
+        call_arg_type_cache
     );
     let new_counter = string_counter + try compiled_mir_lower_call::count_string_args(&args);
     try stmts.append(compiled_mir::void_try_call_stmt(
@@ -4439,7 +4487,8 @@ fn lower_multi_let_statement(
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
     let let_name_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "name", 0, bs
@@ -4475,7 +4524,8 @@ fn lower_multi_let_statement(
         }
         return try lower_multi_let_try_call(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-            let_name, inner, string_counter, temp_counter, try_counter, aliases, stmts, bs
+            let_name, inner, string_counter, temp_counter, try_counter, aliases, stmts, bs,
+            call_arg_type_cache
         );
     }
     if std::mem::equal_bytes(let_value_kind, "Call") {
@@ -4625,8 +4675,9 @@ fn lower_multi_let_statement(
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
             ir_bytes, function_name, module_prefix, let_value, bs
         );
-        let args = try lower_call_args_with_local_aliases(
-            ir_bytes, function_name, module_prefix, locals_spec, let_value, string_counter, aliases, bs
+        let args = try lower_call_args_with_local_aliases_cached(
+            ir_bytes, function_name, module_prefix, locals_spec, let_value, string_counter, aliases, bs,
+            call_arg_type_cache
         );
         let new_locals = try compiled_signature::extend_locals_spec(
             ir_bytes, locals_spec, let_name, call_type
@@ -4707,7 +4758,8 @@ fn lower_multi_let_try_call(
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
     let called_error_union = try compiled_mir_types::lower_call_return_type(
         ir_bytes, function_name, module_prefix, call_node, bs
@@ -4721,8 +4773,9 @@ fn lower_multi_let_try_call(
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let args = try lower_call_args_with_local_aliases(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs
+    let args = try lower_call_args_with_local_aliases_cached(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs,
+        call_arg_type_cache
     );
     let new_locals = try compiled_signature::extend_locals_spec(
         ir_bytes, locals_spec, let_name, success_type
@@ -5149,7 +5202,8 @@ fn lower_try_call_void_if(
     then_on_success: bool,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let then_stmt = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, then_node, "statement", 0, bs
@@ -5171,8 +5225,9 @@ fn lower_try_call_void_if(
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let call_args = try lower_call_args_with_local_aliases(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs
+    let call_args = try lower_call_args_with_local_aliases_cached(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs,
+        call_arg_type_cache
     );
     let call_arg_strings = try compiled_mir_lower_call::count_string_args(&call_args);
 
@@ -5194,7 +5249,8 @@ fn lower_try_call_void_if(
         if_index,
         &var branch_aliases,
         &var then_body_stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     var branch_alias_index = 0;
     var merge_alias_counter = then_body.alias_counter;
@@ -5284,7 +5340,8 @@ fn lower_multi_return_statement(
     string_counter: i64,
     temp_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStmt {
     let value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "value", 0, bs
@@ -5306,9 +5363,9 @@ fn lower_multi_return_statement(
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
             ir_bytes, function_name, module_prefix, return_not_try, bs
         );
-        let args = try lower_call_args_with_local_aliases(
+        let args = try lower_call_args_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, locals_spec, return_not_try,
-            string_counter, aliases, bs
+            string_counter, aliases, bs, call_arg_type_cache
         );
         return compiled_mir::return_not_try_call_stmt(
             called_error_union, llvm_return_type, callee_module_prefix, callee_name,
@@ -5397,8 +5454,9 @@ fn lower_multi_return_statement(
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
             ir_bytes, function_name, module_prefix, value, bs
         );
-        let args = try lower_call_args_with_local_aliases(
-            ir_bytes, function_name, module_prefix, locals_spec, value, string_counter, aliases, bs
+        let args = try lower_call_args_with_local_aliases_cached(
+            ir_bytes, function_name, module_prefix, locals_spec, value, string_counter, aliases, bs,
+            call_arg_type_cache
         );
         return compiled_mir::return_call_stmt(
             call_type, string_counter, callee_module_prefix, callee_name, args
@@ -5434,9 +5492,9 @@ fn lower_multi_return_statement(
         let try_callee_module = try compiled_mir_types::lower_call_module_prefix(
             ir_bytes, function_name, module_prefix, try_inner, bs
         );
-        let try_args = try lower_call_args_with_local_aliases(
+        let try_args = try lower_call_args_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, locals_spec, try_inner,
-            string_counter, aliases, bs
+            string_counter, aliases, bs, call_arg_type_cache
         );
         return compiled_mir::return_call_stmt(
             try_call_type, string_counter, try_callee_module, try_callee_name, try_args
@@ -5976,7 +6034,8 @@ fn lower_void_then_body(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     then_body_stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !VoidBodyLowerResult {
     var body_locals = locals_spec;
     var body_strings = string_counter;
@@ -6005,7 +6064,8 @@ fn lower_void_then_body(
                 body_tries,
                 aliases,
                 then_body_stmts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
             body_strings = let_result.string_counter;
@@ -6027,7 +6087,8 @@ fn lower_void_then_body(
                     if_index * 1000 + body_index + 1,
                     aliases,
                     then_body_stmts,
-                    bs
+                    bs,
+                    call_arg_type_cache
                 );
                 body_strings = if_result.string_counter;
                 body_temps = if_result.temp_counter;
@@ -6046,7 +6107,8 @@ fn lower_void_then_body(
                         body_tries,
                         aliases,
                         then_body_stmts,
-                        bs
+                        bs,
+                        call_arg_type_cache
                     );
                     body_strings = expr_result.string_counter;
                     body_tries = expr_result.try_counter;
@@ -6207,7 +6269,8 @@ fn lower_void_if_else_statement(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     var then_body_stmts =
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
@@ -6229,7 +6292,8 @@ fn lower_void_if_else_statement(
         if_index,
         &var then_aliases,
         &var then_body_stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     var else_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var else_aliases = try copy_local_aliases(aliases);
@@ -6248,7 +6312,8 @@ fn lower_void_if_else_statement(
         if_index * 1000 + 500,
         &var else_aliases,
         &var else_body_stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let merge_alias_counter = try append_void_if_else_merge_vars(
         ir_bytes,
@@ -6301,7 +6366,8 @@ fn lower_void_if_no_else_statement(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     try require_void_then_block_no_else(ir_bytes, function_name, statement, bs);
     var then_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
@@ -6322,7 +6388,8 @@ fn lower_void_if_no_else_statement(
         if_index,
         &var branch_aliases,
         &var then_body_stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     var branch_alias_index = 0;
     var merge_alias_counter = then_body.alias_counter;
@@ -6403,7 +6470,8 @@ fn lower_void_if_body_statement(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
         ir_bytes, function_name, statement, "else", 0, bs
@@ -6437,7 +6505,8 @@ fn lower_void_if_body_statement(
                 if_index,
                 aliases,
                 stmts,
-                bs
+                bs,
+                call_arg_type_cache
             );
         }
     }
@@ -6463,7 +6532,8 @@ fn lower_void_if_body_statement(
         if_index,
         aliases,
         stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
 }
 
@@ -6481,7 +6551,8 @@ fn lower_multi_if_statement(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
@@ -6532,9 +6603,9 @@ fn lower_multi_if_statement(
                     let guard_module_prefix = try compiled_mir_types::lower_call_module_prefix(
                         ir_bytes, function_name, module_prefix, guard_not_try, bs
                     );
-                    let guard_args = try lower_call_args_with_local_aliases(
+                    let guard_args = try lower_call_args_with_local_aliases_cached(
                         ir_bytes, function_name, module_prefix, locals_spec, guard_not_try,
-                        string_counter, aliases, bs
+                        string_counter, aliases, bs, call_arg_type_cache
                     );
                     let guard_arg_strings = try compiled_mir_lower_call::count_string_args(&guard_args);
                     try stmts.append(compiled_mir::if_not_try_call_return_bool_stmt(
@@ -6567,7 +6638,8 @@ fn lower_multi_if_statement(
             false,
             aliases,
             stmts,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     let positive_try = try positive_try_call_condition_inner_or_minus_one(
@@ -6591,7 +6663,8 @@ fn lower_multi_if_statement(
             true,
             aliases,
             stmts,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     let cond_short_circuit = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
@@ -6847,7 +6920,8 @@ fn lower_multi_if_statement(
             if_index,
             aliases,
             stmts,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     var then_kind = compiled_mir::MirIfThenKind::ContinueLatch;
@@ -6917,9 +6991,9 @@ fn lower_multi_if_statement(
                 callee_name = try compiled_mir_types::lower_call_callee_name(
                     ir_bytes, function_name, module_prefix, then_return_value, bs
                 );
-                call_args = try lower_call_args_with_local_aliases(
+                call_args = try lower_call_args_with_local_aliases_cached(
                     ir_bytes, function_name, module_prefix, locals_spec, then_return_value, then_string_base,
-                    aliases, bs
+                    aliases, bs, call_arg_type_cache
                 );
                 then_kind = compiled_mir::MirIfThenKind::ReturnCall;
                 then_module_prefix = try compiled_mir_types::lower_call_module_prefix(
@@ -8185,7 +8259,8 @@ fn lower_branch_merge_block_prefix(
     label_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !VoidBodyLowerResult {
     var body_locals = locals_spec;
     var body_strings = string_counter;
@@ -8211,7 +8286,8 @@ fn lower_branch_merge_block_prefix(
                 body_tries,
                 aliases,
                 stmts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
             body_strings = let_result.string_counter;
@@ -8233,7 +8309,8 @@ fn lower_branch_merge_block_prefix(
                     label_index * 1000 + body_index + 1,
                     aliases,
                     stmts,
-                    bs
+                    bs,
+                    call_arg_type_cache
                 );
                 body_strings = if_result.string_counter;
                 body_temps = if_result.temp_counter;
@@ -8252,7 +8329,8 @@ fn lower_branch_merge_block_prefix(
                         body_tries,
                         aliases,
                         stmts,
-                        bs
+                        bs,
+                        call_arg_type_cache
                     );
                     body_strings = expr_result.string_counter;
                     body_tries = expr_result.try_counter;
@@ -8621,7 +8699,8 @@ fn lower_multi_while_branch_merge_latch(
     loop_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
@@ -8777,7 +8856,8 @@ fn lower_multi_while_branch_merge_latch(
         loop_index,
         &var body_aliases,
         &var body_stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     var branch_cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let branch_cond_node = try ir_contract::body_child_sequence_from(
@@ -8821,7 +8901,8 @@ fn lower_multi_while_branch_merge_latch(
         loop_index * 1000 + body_count,
         &var advance_aliases,
         &var branch_advance_stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     try validate_branch_merge_no_unmodelled_aliases(
         &loop_aliases, &body_aliases, induction_var, &carried_aliases
@@ -8883,7 +8964,8 @@ fn lower_multi_while_statement(
     loop_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
@@ -8926,7 +9008,8 @@ fn lower_multi_while_statement(
             "",
             "",
             stmts,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     let body_node = try ir_contract::body_child_sequence_from(
@@ -8950,7 +9033,8 @@ fn lower_multi_while_statement(
             alias_counter,
             loop_index,
             stmts,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     // A branch-merge latch advances or exits through a terminal if/else, so it has no trailing
@@ -8971,7 +9055,8 @@ fn lower_multi_while_statement(
             loop_index,
             aliases,
             stmts,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
@@ -9119,7 +9204,8 @@ fn lower_multi_while_statement(
                 body_try_counter,
                 &body_aliases,
                 &var body_stmts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             body_string_counter = let_result.string_counter;
             body_temp_counter = let_result.temp_counter;
@@ -9141,7 +9227,8 @@ fn lower_multi_while_statement(
                     body_if_index,
                     &var body_aliases,
                     &var body_stmts,
-                    bs
+                    bs,
+                    call_arg_type_cache
                 );
                 body_temp_counter = if_result.temp_counter;
                 body_string_counter = if_result.string_counter;
@@ -9163,7 +9250,8 @@ fn lower_multi_while_statement(
                         body_try_counter,
                         &body_aliases,
                         &var body_stmts,
-                        bs
+                        bs,
+                        call_arg_type_cache
                     );
                     body_string_counter = expr_result.string_counter;
                     body_try_counter = expr_result.try_counter;
@@ -9221,7 +9309,8 @@ fn lower_multi_while_statement(
             increment_value,
             body_string_counter,
             body_try_counter,
-            bs
+            bs,
+            call_arg_type_cache
         );
         try latch_stmts.append(latch_stmt);
     } else {
@@ -9939,7 +10028,8 @@ fn lower_multi_while_leading_decrement(
     alias_counter: i64,
     loop_index: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let head_var = "leading.decrement.head";
     // The reserved phi name is shared by every leading-decrement loop, so a second one in the same
@@ -10063,7 +10153,8 @@ fn lower_multi_while_leading_decrement(
                 body_try_counter,
                 &body_aliases,
                 &var body_stmts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             body_string_counter = let_result.string_counter;
             body_temp_counter = let_result.temp_counter;
@@ -10160,7 +10251,8 @@ fn lower_multi_while_leading_decrement(
                         body_if_index,
                         &var body_aliases,
                         &var body_stmts,
-                        bs
+                        bs,
+                        call_arg_type_cache
                     );
                     body_temp_counter = if_result.temp_counter;
                     body_string_counter = if_result.string_counter;
@@ -10545,7 +10637,8 @@ fn lower_multi_while_continue_latch(
     explicit_seed_var: []u8,
     rename_to: []u8,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
@@ -10690,7 +10783,8 @@ fn lower_multi_while_continue_latch(
                     body_try_counter,
                     &body_aliases,
                     &var body_stmts,
-                    bs
+                    bs,
+                    call_arg_type_cache
                 );
                 body_string_counter = let_result.string_counter;
                 body_temp_counter = let_result.temp_counter;
@@ -10713,7 +10807,8 @@ fn lower_multi_while_continue_latch(
                     body_if_index,
                     &var body_aliases,
                     &var body_stmts,
-                    bs
+                    bs,
+                    call_arg_type_cache
                 );
                 body_temp_counter = if_result.temp_counter;
                 body_string_counter = if_result.string_counter;
@@ -10739,7 +10834,8 @@ fn lower_multi_while_continue_latch(
                         body_string_counter,
                         body_temp_counter,
                         &body_aliases,
-                        bs
+                        bs,
+                        call_arg_type_cache
                     ));
                     // A renamed nested body lowers its return through the shared path without a
                     // rename, so an induction reference in the return value would be an unrenamed phi
@@ -10800,7 +10896,8 @@ fn lower_multi_while_continue_latch(
                                 seed_var,
                                 "nested.loop.induction",
                                 &var body_stmts,
-                                bs
+                                bs,
+                                call_arg_type_cache
                             );
                             body_string_counter = inner_result.string_counter;
                             body_temp_counter = inner_result.temp_counter;
@@ -11014,7 +11111,8 @@ fn lower_while_latch_try_call(
     try_node: i64,
     string_counter: i64,
     try_index: i64,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStmt {
     let inner = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, try_node, "value", 0, bs
@@ -11041,8 +11139,9 @@ fn lower_while_latch_try_call(
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
         ir_bytes, function_name, module_prefix, inner, bs
     );
-    let args = try compiled_mir_lower_call::lower_call_args(
-        ir_bytes, function_name, module_prefix, locals_spec, inner, string_counter, bs
+    let args = try compiled_mir_lower_call::lower_call_args_cached(
+        ir_bytes, function_name, module_prefix, locals_spec, inner, string_counter, bs,
+        call_arg_type_cache
     );
     // The bound name is the induction variable itself; the latch renderer suffixes every SSA
     // name with "_next", so the success value binds to %<induction_var>_next which the

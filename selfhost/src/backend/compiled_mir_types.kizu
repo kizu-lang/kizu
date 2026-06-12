@@ -12,6 +12,38 @@ pub struct FieldAccessInfo {
     pub field_llvm_type: []u8,
 }
 
+pub struct CallArgTypeCache {
+    pub module_prefixes: std::array::Array<[]u8>,
+    pub callee_names: std::array::Array<[]u8>,
+    pub arg_counts: std::array::Array<i64>,
+    pub type_starts: std::array::Array<i64>,
+    pub types: std::array::Array<[]u8>,
+    pub lookups: i64,
+    pub hits: i64,
+}
+
+pub fn call_arg_type_cache() -> CallArgTypeCache {
+    return CallArgTypeCache {
+        module_prefixes: std::array::Array<[]u8>(std::mem::page_allocator()),
+        callee_names: std::array::Array<[]u8>(std::mem::page_allocator()),
+        arg_counts: std::array::Array<i64>(std::mem::page_allocator()),
+        type_starts: std::array::Array<i64>(std::mem::page_allocator()),
+        types: std::array::Array<[]u8>(std::mem::page_allocator()),
+        lookups: 0,
+        hits: 0
+    };
+}
+
+impl CallArgTypeCache {
+    fn deinit(self: CallArgTypeCache) -> void {
+        self.types.deinit();
+        self.type_starts.deinit();
+        self.arg_counts.deinit();
+        self.callee_names.deinit();
+        self.module_prefixes.deinit();
+    }
+}
+
 pub fn resolve_value_llvm_type(
     ir_bytes: []u8,
     function_name: []u8,
@@ -258,6 +290,63 @@ pub fn lower_call_arg_types(
     return try lower_signature_call_arg_types(
         ir_bytes, module_prefix, callee_name, module_prefix, arg_count
     );
+}
+
+pub fn lower_call_arg_types_cached(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    arg_count: i64,
+    cache: &var CallArgTypeCache
+) -> !std::array::Array<[]u8> {
+    cache.lookups = cache.lookups + 1;
+    var index = 0;
+    while index < cache.arg_counts.len() {
+        if (try cache.arg_counts.get(index)) == arg_count and
+            std::mem::equal_bytes(try cache.module_prefixes.get(index), module_prefix) and
+            std::mem::equal_bytes(try cache.callee_names.get(index), callee_name) {
+            cache.hits = cache.hits + 1;
+            return try copy_cached_call_arg_types(
+                cache, try cache.type_starts.get(index), arg_count
+            );
+        }
+        index = index + 1;
+    }
+
+    var types = try lower_call_arg_types(ir_bytes, module_prefix, callee_name, arg_count);
+    let type_start = cache.types.len();
+    try append_cached_call_arg_types(cache, &types);
+    try cache.module_prefixes.append(module_prefix);
+    try cache.callee_names.append(callee_name);
+    try cache.arg_counts.append(arg_count);
+    try cache.type_starts.append(type_start);
+    return types;
+}
+
+fn append_cached_call_arg_types(
+    cache: &var CallArgTypeCache,
+    types: &std::array::Array<[]u8>
+) -> !void {
+    var index = 0;
+    while index < types.len() {
+        try cache.types.append(try types.get(index));
+        index = index + 1;
+    }
+    return;
+}
+
+fn copy_cached_call_arg_types(
+    cache: &CallArgTypeCache,
+    type_start: i64,
+    arg_count: i64
+) -> !std::array::Array<[]u8> {
+    var copied = std::array::Array<[]u8>(std::mem::page_allocator());
+    var index = 0;
+    while index < arg_count {
+        try copied.append(try cache.types.get(type_start + index));
+        index = index + 1;
+    }
+    return copied;
 }
 
 fn lower_signature_call_arg_types(
