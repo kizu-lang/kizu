@@ -1,0 +1,193 @@
+import selfhost::cache::layout;
+import selfhost::cache::metadata;
+
+pub struct Report {
+    pub removed_entries: i64,
+    pub freed_bytes: i64,
+    pub remaining_entries: i64,
+}
+
+pub fn prune_cache(
+    io: Io,
+    delete_all: bool,
+    max_entries: i64,
+    max_bytes: i64
+) -> !Report {
+    let bounded = max_entries >= 0 or max_bytes >= 0;
+    if !delete_all and !bounded {
+        return error("cache prune requires explicit policy");
+    }
+
+    try layout::ensure_cache_layout(io);
+    if !delete_all {
+        return try prune_cache_bounded(io, max_entries, max_bytes);
+    }
+
+    var entry_files = try std::fs::read_dir(io, layout::cache_entry_dir());
+    var artifact_files = try std::fs::read_dir(io, layout::cache_artifact_dir());
+    var entries = 0;
+    var bytes = 0;
+
+    var entry_index = 0;
+    while entry_index < entry_files.len() {
+        let entry = try entry_files.get(entry_index);
+        if !entry.is_dir {
+            try std::fs::remove_file(io, entry.path);
+            entries = entries + 1;
+        }
+        entry_index = entry_index + 1;
+    }
+
+    var artifact_index = 0;
+    while artifact_index < artifact_files.len() {
+        let artifact = try artifact_files.get(artifact_index);
+        if !artifact.is_dir {
+            let artifact_metadata = try std::fs::metadata(io, artifact.path);
+            bytes = bytes + artifact_metadata.size;
+            try std::fs::remove_file(io, artifact.path);
+        }
+        artifact_index = artifact_index + 1;
+    }
+
+    entry_files.deinit();
+    artifact_files.deinit();
+    return Report {
+        removed_entries: entries,
+        freed_bytes: bytes,
+        remaining_entries: 0
+    };
+}
+
+/// Bounded prune deletes entries in ascending cache fingerprint order until all
+/// configured limits are satisfied. It does not use directory order or wall-clock
+/// timestamps, so the same cache contents produce the same removal order.
+fn prune_cache_bounded(io: Io, max_entries: i64, max_bytes: i64) -> !Report {
+    let allocator = std::mem::page_allocator();
+    var entry_files = try std::fs::read_dir(io, layout::cache_entry_dir());
+    var fingerprints = std::array::Array<i64>(allocator);
+    var remaining_entries = 0;
+    var remaining_bytes = 0;
+
+    var entry_index = 0;
+    while entry_index < entry_files.len() {
+        let entry = try entry_files.get(entry_index);
+        if !entry.is_dir {
+            let metadata_bytes = try std::fs::read_file(io, entry.path);
+            let entry_metadata = try metadata::parse_entry_metadata(allocator, metadata_bytes);
+            remaining_entries = remaining_entries + 1;
+            remaining_bytes = remaining_bytes + try artifact_size_for_fingerprint(
+                allocator,
+                io,
+                entry_metadata.fingerprint
+            );
+            try fingerprints.append(entry_metadata.fingerprint);
+        }
+        entry_index = entry_index + 1;
+    }
+    entry_files.deinit();
+
+    try sort_prune_fingerprints(&var fingerprints);
+
+    var removed_entries = 0;
+    var freed_bytes = 0;
+    var remove_index = 0;
+    while remove_index < fingerprints.len() and prune_policy_exceeded(max_entries, max_bytes, remaining_entries, remaining_bytes) {
+        let fingerprint = try fingerprints.get(remove_index);
+        let removed_bytes = try remove_cache_entry_for_fingerprint(allocator, io, fingerprint);
+        removed_entries = removed_entries + 1;
+        freed_bytes = freed_bytes + removed_bytes;
+        remaining_entries = remaining_entries - 1;
+        remaining_bytes = remaining_bytes - removed_bytes;
+        remove_index = remove_index + 1;
+    }
+
+    fingerprints.deinit();
+    return Report {
+        removed_entries: removed_entries,
+        freed_bytes: freed_bytes,
+        remaining_entries: remaining_entries
+    };
+}
+
+fn remove_cache_entry_for_fingerprint(
+    allocator: Allocator,
+    io: Io,
+    fingerprint: i64
+) -> !i64 {
+    var entry_path = try layout::cache_entry_metadata_path(allocator, fingerprint);
+    let entry_path_bytes = entry_path.as_bytes();
+    if try std::fs::exists(io, entry_path_bytes) {
+        try std::fs::remove_file(io, entry_path_bytes);
+    }
+    entry_path.deinit();
+
+    var artifact_path = try layout::cache_entry_artifact_path(allocator, fingerprint);
+    let artifact_path_bytes = artifact_path.as_bytes();
+    let artifact_bytes = try artifact_size_at_path(io, artifact_path_bytes);
+    if artifact_bytes >= 0 {
+        try std::fs::remove_file(io, artifact_path_bytes);
+    }
+    artifact_path.deinit();
+    if artifact_bytes < 0 {
+        return 0;
+    }
+    return artifact_bytes;
+}
+
+fn artifact_size_for_fingerprint(allocator: Allocator, io: Io, fingerprint: i64) -> !i64 {
+    var artifact_path = try layout::cache_entry_artifact_path(allocator, fingerprint);
+    let artifact_path_bytes = artifact_path.as_bytes();
+    let size = try artifact_size_at_path(io, artifact_path_bytes);
+    artifact_path.deinit();
+    if size < 0 {
+        return 0;
+    }
+    return size;
+}
+
+fn artifact_size_at_path(io: Io, path: &[]u8) -> !i64 {
+    let artifact_exists = try std::fs::exists(io, path);
+    if artifact_exists {
+        let artifact_metadata = try std::fs::metadata(io, path);
+        if !artifact_metadata.is_dir {
+            return artifact_metadata.size;
+        }
+    }
+    return -1;
+}
+
+fn prune_policy_exceeded(
+    max_entries: i64,
+    max_bytes: i64,
+    entries: i64,
+    bytes: i64
+) -> bool {
+    if max_entries >= 0 and entries > max_entries {
+        return true;
+    }
+    if max_bytes >= 0 and bytes > max_bytes {
+        return true;
+    }
+    return false;
+}
+
+fn sort_prune_fingerprints(fingerprints: &var std::array::Array<i64>) -> !void {
+    var index = 1;
+    while index < fingerprints.len() {
+        var cursor = index;
+        var scanning = true;
+        while scanning and cursor > 0 {
+            let left = try fingerprints.get(cursor - 1);
+            let right = try fingerprints.get(cursor);
+            if right < left {
+                try fingerprints.set(cursor - 1, right);
+                try fingerprints.set(cursor, left);
+                cursor = cursor - 1;
+            } else {
+                scanning = false;
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
