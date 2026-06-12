@@ -540,6 +540,20 @@ func runRenderUnionPayloadCases() []runRenderCase {
 func runRenderUnionAbiCases() []runRenderCase {
 	return []runRenderCase{
 		{
+			name: "union_return_pick",
+			source: "union Shape {\n    Point,\n    Circle(i64),\n    Label([]u8),\n}\n\n" +
+				"fn pick(kind: i64) -> Shape {\n    if kind == 1 {\n" +
+				"        return Shape::Circle(7);\n    }\n    if kind == 2 {\n" +
+				"        return Shape::Label(\"ring\");\n    }\n    return Shape::Point;\n}\n\n" +
+				"fn describe(shape: &Shape) -> void {\n    match shape {\n" +
+				"        Point => print(\"point\"),\n        Circle(radius) => print(radius),\n" +
+				"        Label(text) => print(text),\n    }\n}\n\n" +
+				"fn main() {\n    let circle = pick(1);\n    let label = pick(2);\n" +
+				"    describe(circle);\n    describe(label);\n    match pick(0) {\n" +
+				"        Point => print(\"point\"),\n        _ => print(\"other\"),\n    }\n}\n",
+			wantStdout: "7\nring\npoint\n",
+		},
+		{
 			name: "union_param_describe",
 			source: "union Shape {\n    Point,\n    Circle(i64),\n    Label([]u8),\n}\n\n" +
 				"fn describe(shape: &Shape) -> void {\n    match shape {\n" +
