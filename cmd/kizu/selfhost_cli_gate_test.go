@@ -120,7 +120,7 @@ func runSelfhostCLIFileFrontendGate(
 	defer restore()
 
 	fixtures := writeSelfhostCLIFrontendFixtures(t)
-	ensureSelfhostStage2HostArtifact(t)
+	ensureSelfhostStage2RuntimeArtifacts(t)
 
 	_, program, err := loadPackageProgram("selfhost")
 	if err != nil {
@@ -1022,26 +1022,42 @@ func selfhostCLIFrontendCheckAggregateParseFailureCases(
 	}
 }
 
-// ensureSelfhostStage2HostArtifact provides the hosted host runtime artifacts
+// ensureSelfhostStage2RuntimeArtifacts provides the hosted runtime artifacts
 // that the interpreted run/test commands link generated executables against.
-// The checked-in host capability template is the source of truth, so tests stage
-// that template into the ignored target paths they exercise.
-func ensureSelfhostStage2HostArtifact(t *testing.T) {
+// The checked-in runtime templates are the source of truth, so tests stage those
+// templates into the ignored target paths they exercise.
+func ensureSelfhostStage2RuntimeArtifacts(t *testing.T) {
 	t.Helper()
-	source := "selfhost/runtime/selfhost.host.ll"
-	bytes, err := os.ReadFile(source)
-	if err != nil {
-		t.Fatalf("read host capability template: %v", err)
-	}
-	for _, target := range []string{
-		"target/selfhost/selfhost.host.ll",
-		"target/selfhost/stage2/selfhost.host.ll",
+	for _, artifact := range []struct {
+		source  string
+		targets []string
+	}{
+		{
+			source: "selfhost/runtime/selfhost.host.ll",
+			targets: []string{
+				"target/selfhost/selfhost.host.ll",
+				"target/selfhost/stage2/selfhost.host.ll",
+			},
+		},
+		{
+			source: "selfhost/runtime/selfhost.storage.ll",
+			targets: []string{
+				"target/selfhost/selfhost.storage.ll",
+				"target/selfhost/stage2/selfhost.storage.ll",
+			},
+		},
 	} {
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			t.Fatalf("create host artifact dir: %v", err)
+		bytes, err := os.ReadFile(artifact.source)
+		if err != nil {
+			t.Fatalf("read runtime template %s: %v", artifact.source, err)
 		}
-		if err := os.WriteFile(target, bytes, 0o644); err != nil {
-			t.Fatalf("stage host capability artifact: %v", err)
+		for _, target := range artifact.targets {
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatalf("create runtime artifact dir: %v", err)
+			}
+			if err := os.WriteFile(target, bytes, 0o644); err != nil {
+				t.Fatalf("stage runtime artifact %s: %v", target, err)
+			}
 		}
 	}
 }
