@@ -484,7 +484,7 @@ fn render_user_function(
     body_start: i64,
     func_end: i64
 ) -> !i64 {
-    try render_user_define_head(out, name, ret_kind);
+    try render_user_define_head(out, code, name, ret_kind);
     try w(out, "(");
     try render_param_list(out, code, kinds, param_base, param_count, 0);
     try wl(out, ") {");
@@ -501,7 +501,7 @@ fn render_user_function(
     // Every return record terminates its block and opens a fresh dead label, so
     // the body always leaves one open block; the ABI default terminator closes it
     // (an i64 function returns 0, an error-union-void function the ok union).
-    try render_user_tail(out, abi);
+    try render_user_tail(out, code, abi, ret_kind);
     try wl(out, "}");
     try nl(out);
     return func_end + 1;
@@ -512,21 +512,25 @@ fn render_user_function(
 // '%kizu.error.i64' for '!i64', and 'i64' for every other user function.
 fn render_user_define_head(
     out: &var std::string::String,
+    code: &std::array::Array<i64>,
     name: []u8,
     ret_kind: i64
 ) -> !void {
     let is_err_void = ret_kind == 2;
     let is_err_i64 = ret_kind == 3;
+    let is_union_ret = try value_kind_is_union(code, ret_kind);
     if is_err_void {
         try w(out, "define %kizu.error.void @kizu_run_user_");
     }
     if is_err_i64 {
         try w(out, "define %kizu.error.i64 @kizu_run_user_");
     }
-    if !is_err_void {
-        if !is_err_i64 {
-            try w(out, "define i64 @kizu_run_user_");
-        }
+    if is_union_ret {
+        try w(out, "define %kizu.run.union @kizu_run_user_");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret;
+    if is_word_ret {
+        try w(out, "define i64 @kizu_run_user_");
     }
     try w(out, name);
     return;
@@ -534,19 +538,31 @@ fn render_user_define_head(
 
 // render_user_tail closes a user function body's final open block with the
 // default terminator for its ABI.
-fn render_user_tail(out: &var std::string::String, abi: i64) -> !void {
+fn render_user_tail(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    abi: i64,
+    ret_kind: i64
+) -> !void {
     let err_void = ret_abi_user_err_void();
     let err_i64 = ret_abi_user_err_i64();
-    if abi == err_void {
+    let is_err_void = abi == err_void;
+    let is_err_i64 = abi == err_i64;
+    let is_union_ret = try value_kind_is_union(code, ret_kind);
+    if is_err_void {
         try render_ret_err_ok(out);
     }
-    if abi == err_i64 {
+    if is_err_i64 {
         try wl(out, "  ret %kizu.error.i64 { i1 true, i64 0, %kizu.slice.u8 zeroinitializer }");
     }
-    if abi != err_void {
-        if abi != err_i64 {
-            try wl(out, "  ret i64 0");
-        }
+    // The checker guarantees a union-returning body ends with a return, so this
+    // tail only types the dead fall-through block.
+    if is_union_ret {
+        try wl(out, "  ret %kizu.run.union zeroinitializer");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret;
+    if is_word_ret {
+        try wl(out, "  ret i64 0");
     }
     return;
 }
@@ -841,7 +857,7 @@ fn render_one_instruction(
     }
     let ret_value = codegen::code_op_ret_value();
     if op == ret_value {
-        try render_ret_value(out, code, index, abi);
+        try render_ret_value(out, code, kinds, index, abi);
     }
     let ret_void = codegen::code_op_ret_void();
     if op == ret_void {
@@ -1490,6 +1506,7 @@ fn render_sc_end(
 fn render_ret_value(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
     index: i64,
     abi: i64
 ) -> !void {
@@ -1504,16 +1521,25 @@ fn render_ret_value(
     }
     if abi != main_abi {
         if abi != err_i64 {
-            try render_ret_value_plain(out, value_id);
+            try render_ret_value_plain(out, code, kinds, value_id);
         }
     }
     try render_dead_label(out, index);
     return;
 }
 
-// render_ret_value_plain emits the ordinary i64 return terminator.
-fn render_ret_value_plain(out: &var std::string::String, value_id: i64) -> !void {
-    try w(out, "  ret i64 %v");
+// render_ret_value_plain emits the plain return terminator typed from the
+// returned value's kind (i64 scalars, the union aggregate for union returns).
+fn render_ret_value_plain(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    value_id: i64
+) -> !void {
+    let value_kind = try kinds.get(value_id);
+    try w(out, "  ret ");
+    try render_value_type(out, code, value_kind);
+    try w(out, " %v");
     try wi(out, value_id);
     try nl(out);
     return;
@@ -1740,9 +1766,12 @@ fn render_call(
     let callee_end = try code.get(index + 3);
     let arg_count = try code.get(index + 4);
     let callee = text[callee_start..callee_end];
+    let dst_kind = try kinds.get(dst);
     try w(out, "  %v");
     try wi(out, dst);
-    try w(out, " = call i64 @kizu_run_user_");
+    try w(out, " = call ");
+    try render_value_type(out, code, dst_kind);
+    try w(out, " @kizu_run_user_");
     try w(out, callee);
     try w(out, "(");
     try render_call_args(out, code, kinds, index, arg_count, 0);

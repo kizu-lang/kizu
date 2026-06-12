@@ -3758,12 +3758,15 @@ fn code_binary_kind_is_comparison(kind: i64) -> bool {
 
 // code_return_kind classifies a function's declared return type for the tape:
 // 0 = void (empty or 'void'), 1 = i64, 2 = error-union void ('!void'),
-// 3 = error-union i64 ('!i64'), -1 = a type the tape does not own yet.
+// 3 = error-union i64 ('!i64'), record_base + <UNION_DECL position> for a
+// declared union (the runtime aggregate return), -1 = a type the tape does not
+// own yet.
 fn code_return_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
-    type_node: std::kizu::ast::NodeId
-) -> i64 {
+    type_node: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !i64 {
     if is_empty_node(ast, type_node) {
         return 0;
     }
@@ -3780,7 +3783,8 @@ fn code_return_kind(
     if std::mem::equal_bytes(type_text, "!i64") {
         return 3;
     }
-    return 0 - 1;
+    let union_kind = try code_param_union_kind(text, ast, type_node, code);
+    return union_kind;
 }
 
 // code_node_span returns the trimmed (start, end) byte span of a node's source
@@ -4098,7 +4102,7 @@ fn lower_code_fn_decl(
     args_scratch: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
-    let ret_kind = code_return_kind(text, ast, return_type);
+    let ret_kind = try code_return_kind(text, ast, return_type, code);
     if ret_kind < 0 {
         return code_eval_unsupported(next_value);
     }
@@ -6507,12 +6511,14 @@ fn lower_code_user_call_statement(
     next_value: i64
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
-    let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
+    let callee_kind = try code_callee_return_kind(text, ast, decls, code, callee_span.start, callee_span.end, 0);
+    // A void callee defines (and calls) through the i64 ABI, so its discarded
+    // result records the i64 kind.
     if callee_kind == 0 {
-        return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+        return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 1, next_value);
     }
     if callee_kind == 1 {
-        return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+        return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 1, next_value);
     }
     return code_eval_unsupported(next_value);
 }
@@ -6568,7 +6574,7 @@ fn lower_code_try_call(
         return try lower_code_try_io_write_stderr(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     let callee_span = code_node_span(text, ast, callee);
-    let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
+    let callee_kind = try code_callee_return_kind(text, ast, decls, code, callee_span.start, callee_span.end, 0);
     if callee_kind == 2 {
         return try emit_code_try_call_void(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
@@ -6914,10 +6920,16 @@ fn lower_code_return_value(
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
+    // A return is a function boundary like a call argument: a UNION_CONST value
+    // packs into the runtime union aggregate before the terminator records it.
+    let stored_eval = try lower_code_arg_slice(text, code, kinds, eval.value_id, eval.next);
+    if !stored_eval.ok {
+        return code_eval_unsupported(stored_eval.next);
+    }
     let op_ret_value = code_op_ret_value();
     try code.append(op_ret_value);
-    try code.append(eval.value_id);
-    return code_eval_value(eval.value_id, eval.next);
+    try code.append(stored_eval.value_id);
+    return code_eval_value(stored_eval.value_id, stored_eval.next);
 }
 
 // code_local_lookup resolves a name against this function's locals (down to
@@ -8125,11 +8137,15 @@ fn lower_code_call(
         return try lower_code_union_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     let callee_span = code_node_span(text, ast, callee);
-    let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
-    if callee_kind != 1 {
+    let callee_kind = try code_callee_return_kind(text, ast, decls, code, callee_span.start, callee_span.end, 0);
+    let record_base = code_kind_struct_base();
+    let is_i64_ret = callee_kind == 1;
+    let is_union_ret = callee_kind >= record_base;
+    let value_ret = is_i64_ret or is_union_ret;
+    if !value_ret {
         return code_eval_unsupported(next_value);
     }
-    return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, callee_kind, next_value);
 }
 
 // code_callee_union_tag resolves a call's callee against the union declarations
@@ -8249,6 +8265,7 @@ fn emit_code_user_call(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
+    result_kind: i64,
     next_value: i64
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
@@ -8267,8 +8284,7 @@ fn emit_code_user_call(
     let scratch_bound = scratch_base + arg_count;
     try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
     try args_scratch.set(0, scratch_base);
-    let kind_i64 = code_kind_i64();
-    try kinds.append(kind_i64);
+    try kinds.append(result_kind);
     let result_value = args_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
@@ -8340,7 +8356,7 @@ fn lower_code_try_call_expr(
     // A 'try <callee>(...)' of a declared error-union-i64 function yields the
     // extracted i64 success value.
     let callee_span = code_node_span(text, ast, callee);
-    let callee_kind = try code_callee_return_kind(text, ast, decls, callee_span.start, callee_span.end, 0);
+    let callee_kind = try code_callee_return_kind(text, ast, decls, code, callee_span.start, callee_span.end, 0);
     if callee_kind == 3 {
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
@@ -8600,6 +8616,7 @@ fn code_callee_return_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
     name_start: i64,
     name_end: i64,
     index: i64
@@ -8608,12 +8625,12 @@ fn code_callee_return_kind(
         return 0 - 1;
     }
     let child = try ast.child_at(decls, index);
-    let kind = try code_decl_return_kind(text, ast, child, name_start, name_end);
+    let kind = try code_decl_return_kind(text, ast, child, code, name_start, name_end);
     let after = index + 1;
     if kind > 0 - 2 {
         return kind;
     }
-    return try code_callee_return_kind(text, ast, decls, name_start, name_end, after);
+    return try code_callee_return_kind(text, ast, decls, code, name_start, name_end, after);
 }
 
 // code_decl_return_kind classifies one declaration against the callee name span:
@@ -8622,12 +8639,13 @@ fn code_decl_return_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
     child: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
     name_start: i64,
     name_end: i64
 ) -> !i64 {
     let node = ast.get(child);
     return match node.data {
-        FnDecl(fn_decl) => try code_fn_decl_return_kind(text, ast, fn_decl.name, fn_decl.return_type, name_start, name_end),
+        FnDecl(fn_decl) => try code_fn_decl_return_kind(text, ast, fn_decl.name, fn_decl.return_type, code, name_start, name_end),
         _ => code_decl_kind_skip(),
     };
 }
@@ -8644,6 +8662,7 @@ fn code_fn_decl_return_kind(
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
     return_type: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
     name_start: i64,
     name_end: i64
 ) -> !i64 {
@@ -8652,5 +8671,6 @@ fn code_fn_decl_return_kind(
     if !std::mem::equal_bytes(decl_name, callee_name) {
         return 0 - 2;
     }
-    return code_return_kind(text, ast, return_type);
+    let ret_kind = try code_return_kind(text, ast, return_type, code);
+    return ret_kind;
 }
