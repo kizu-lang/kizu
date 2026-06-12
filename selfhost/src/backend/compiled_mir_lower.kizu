@@ -2727,6 +2727,8 @@ pub fn lower_expr_return_function(
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
     let result_id = try lower_expr_into(
         ir_bytes,
         function_name,
@@ -2736,7 +2738,8 @@ pub fn lower_expr_return_function(
         0,
         0,
         &var insts,
-        bs
+        bs,
+        &var call_arg_type_cache
     );
     return compiled_mir_function::single_expr_return_function(
         llvm_symbol,
@@ -2767,6 +2770,8 @@ pub fn lower_short_circuit_or_return_function(
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
     let prefix_result = try lower_short_circuit_or_prefix(
         ir_bytes,
         function_name,
@@ -2778,7 +2783,8 @@ pub fn lower_short_circuit_or_return_function(
         0,
         0,
         &var stmts,
-        bs
+        bs,
+        &var call_arg_type_cache
     );
     var final_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let final_result = try lower_expr_into(
@@ -2790,7 +2796,8 @@ pub fn lower_short_circuit_or_return_function(
         prefix_result.string_counter,
         prefix_result.temp_counter,
         &var final_insts,
-        bs
+        bs,
+        &var call_arg_type_cache
     );
     try stmts.append(compiled_mir::return_expr_stmt(
         prefix_result.string_counter,
@@ -2823,7 +2830,8 @@ fn lower_short_circuit_or_prefix(
     temp_counter: i64,
     if_index: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !ShortCircuitOrLowerResult {
     if (try short_circuit_kind(ir_bytes, function_name, node, bs)) != 2 {
         return ShortCircuitOrLowerResult {
@@ -2850,7 +2858,8 @@ fn lower_short_circuit_or_prefix(
         temp_counter,
         if_index,
         stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     return try lower_short_circuit_or_prefix(
         ir_bytes,
@@ -2863,7 +2872,8 @@ fn lower_short_circuit_or_prefix(
         left_result.temp_counter,
         left_result.if_index,
         stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
 }
 
@@ -2878,7 +2888,8 @@ fn append_short_circuit_or_operand_ifs(
     temp_counter: i64,
     if_index: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !ShortCircuitOrLowerResult {
     if (try short_circuit_kind(ir_bytes, function_name, node, bs)) == 2 {
         let left_node = try ir_contract::body_child_sequence_from(
@@ -2898,7 +2909,8 @@ fn append_short_circuit_or_operand_ifs(
             temp_counter,
             if_index,
             stmts,
-            bs
+            bs,
+            call_arg_type_cache
         );
         return try append_short_circuit_or_operand_ifs(
             ir_bytes,
@@ -2911,7 +2923,8 @@ fn append_short_circuit_or_operand_ifs(
             left_result.temp_counter,
             left_result.if_index,
             stmts,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
@@ -2924,7 +2937,8 @@ fn append_short_circuit_or_operand_ifs(
         string_counter,
         temp_counter,
         &var cond_insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let cond_strings = try count_strings_in_insts(&cond_insts);
     let cond_len = cond_insts.len();
@@ -3544,7 +3558,8 @@ pub fn lower_multi_statement_function(
                         alias_counter,
                         &var aliases,
                         &var stmts,
-                        bs
+                        bs,
+                        &var call_arg_type_cache
                     );
                     string_counter = init_alias.string_counter;
                     temp_counter = init_alias.temp_counter;
@@ -3946,7 +3961,8 @@ fn lower_expr_with_carried_renames(
     temp_counter: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
     states: &std::array::Array<CarriedScalarState>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let result = try lower_expr_into(
         ir_bytes,
@@ -3957,7 +3973,8 @@ fn lower_expr_with_carried_renames(
         string_counter,
         temp_counter,
         insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     try rename_carried_scalars_in_insts(insts, states);
     return result;
@@ -4519,7 +4536,8 @@ fn lower_multi_let_statement(
         if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
             return try lower_multi_let_array_get(
                 ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-                let_name, inner, string_counter, temp_counter, try_counter, aliases, stmts, bs
+                let_name, inner, string_counter, temp_counter, try_counter, aliases, stmts,
+                bs, call_arg_type_cache
             );
         }
         return try lower_multi_let_try_call(
@@ -4564,7 +4582,8 @@ fn lower_multi_let_statement(
                     temp_counter,
                     &var len_insts,
                     aliases,
-                    bs
+                    bs,
+                    call_arg_type_cache
                 );
                 let len_inst_count = len_insts.len();
                 let len_locals = try compiled_signature::extend_locals_spec(
@@ -4646,7 +4665,8 @@ fn lower_multi_let_statement(
                 temp_counter,
                 &var nested_insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             let nested_strings = try count_strings_in_insts(&nested_insts);
             let nested_inst_count = nested_insts.len();
@@ -4725,7 +4745,8 @@ fn lower_multi_let_statement(
         temp_counter,
         &var insts,
         aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let expr_strings = try count_strings_in_insts(&insts);
     let next_temp = temp_counter + insts.len();
@@ -4913,7 +4934,8 @@ fn lower_multi_let_array_get(
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
     let callee_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, call_node, "callee", 0, bs
@@ -4980,7 +5002,8 @@ fn lower_multi_let_array_get(
         temp_counter,
         &var insts,
         aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let expr_strings = try count_strings_in_insts(&insts);
     let next_temp = temp_counter + insts.len();
@@ -5388,7 +5411,8 @@ fn lower_multi_return_statement(
                 temp_counter,
                 &var message_insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             return compiled_mir::return_error_stmt(
                 string_counter, message_result, message_insts
@@ -5410,7 +5434,8 @@ fn lower_multi_return_statement(
                 temp_counter,
                 &var len_insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             return compiled_mir::return_expr_stmt(string_counter, len_result_id, len_insts);
         }
@@ -5420,7 +5445,8 @@ fn lower_multi_return_statement(
         if try callee_is_field_expr(ir_bytes, function_name, value, bs) {
                 return try lower_multi_return_array_get(
                     ir_bytes, function_name, module_prefix, llvm_return_type,
-                    locals_spec, value, string_counter, temp_counter, aliases, bs
+                    locals_spec, value, string_counter, temp_counter, aliases, bs,
+                    call_arg_type_cache
                 );
         }
         // 'return equal_bytes(token_text(...), expected);' carries a nested call argument and
@@ -5441,7 +5467,8 @@ fn lower_multi_return_statement(
                 temp_counter,
                 &var nested_insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             return compiled_mir::return_expr_stmt(string_counter, nested_result_id, nested_insts);
         }
@@ -5517,7 +5544,8 @@ fn lower_multi_return_statement(
         temp_counter,
         &var insts,
         aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     return compiled_mir::return_expr_stmt(string_counter, result_id, insts);
 }
@@ -5537,7 +5565,8 @@ fn lower_multi_return_array_get(
     string_counter: i64,
     temp_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStmt {
     let callee_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, call_node, "callee", 0, bs
@@ -5613,7 +5642,8 @@ fn lower_multi_return_array_get(
         temp_counter,
         &var insts,
         aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     return compiled_mir::return_array_get_stmt(
         receiver_llvm_type,
@@ -5873,7 +5903,8 @@ fn lower_void_then_body_assign(
     alias_counter: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !VoidAssignLowerResult {
     let target = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "target", 0, bs
@@ -5917,7 +5948,8 @@ fn lower_void_then_body_assign(
         temp_counter,
         &var insts,
         aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let value_type = try expr_inst_llvm_type_by_id(&insts, result_id);
     if !std::mem::equal_bytes(value_type, target_type) {
@@ -5949,7 +5981,8 @@ fn lower_induction_init_alias(
     alias_counter: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !VoidAssignLowerResult {
     let name_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "name", 0, bs
@@ -5984,7 +6017,8 @@ fn lower_induction_init_alias(
         temp_counter,
         &var insts,
         aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let value_type = try expr_inst_llvm_type_by_id(&insts, result_id);
     if !std::mem::equal_bytes(value_type, target_type) {
@@ -6133,7 +6167,8 @@ fn lower_void_then_body(
                             body_alias_counter,
                             aliases,
                             then_body_stmts,
-                            bs
+                            bs,
+                            call_arg_type_cache
                         );
                         body_strings = assign_result.string_counter;
                         body_temps = assign_result.temp_counter;
@@ -6686,7 +6721,8 @@ fn lower_multi_if_statement(
             temp_counter,
             &var cond_insts,
             aliases,
-            bs
+            bs,
+            call_arg_type_cache
         );
         cond_strings = try count_strings_in_insts(&cond_insts);
         last_cond_result = cond_result;
@@ -6719,7 +6755,8 @@ fn lower_multi_if_statement(
                 temp_counter,
                 &var cond_insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             var acc_strings = try count_strings_in_insts(&cond_insts);
             var acc_temp = temp_counter + cond_insts.len();
@@ -6734,7 +6771,8 @@ fn lower_multi_if_statement(
                 acc_temp,
                 &var cond_rhs_insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             acc_strings = acc_strings + try count_strings_in_insts(&cond_rhs_insts);
             acc_temp = acc_temp + cond_rhs_insts.len();
@@ -6753,7 +6791,8 @@ fn lower_multi_if_statement(
                     acc_temp,
                     &var operand_insts,
                     aliases,
-                    bs
+                    bs,
+                    call_arg_type_cache
                 );
                 acc_strings = acc_strings + try count_strings_in_insts(&operand_insts);
                 acc_temp = acc_temp + operand_insts.len();
@@ -6795,7 +6834,8 @@ fn lower_multi_if_statement(
                 temp_counter,
                 &var cond_insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             var acc_strings = try count_strings_in_insts(&cond_insts);
             var acc_temp = temp_counter + cond_insts.len();
@@ -6810,7 +6850,8 @@ fn lower_multi_if_statement(
                 acc_temp,
                 &var cond_rhs_insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             acc_strings = acc_strings + try count_strings_in_insts(&cond_rhs_insts);
             acc_temp = acc_temp + cond_rhs_insts.len();
@@ -6829,7 +6870,8 @@ fn lower_multi_if_statement(
                     acc_temp,
                     &var operand_insts,
                     aliases,
-                    bs
+                    bs,
+                    call_arg_type_cache
                 );
                 acc_strings = acc_strings + try count_strings_in_insts(&operand_insts);
                 acc_temp = acc_temp + operand_insts.len();
@@ -6982,7 +7024,8 @@ fn lower_multi_if_statement(
                         then_base,
                         &var then_insts,
                         aliases,
-                        bs
+                        bs,
+                        call_arg_type_cache
                     );
                 } else {
                 call_type = try compiled_mir_types::lower_call_return_type(
@@ -7023,7 +7066,8 @@ fn lower_multi_if_statement(
                         then_base,
                         &var then_insts,
                         aliases,
-                        bs
+                        bs,
+                        call_arg_type_cache
                     );
                 }
             }
@@ -7750,7 +7794,8 @@ fn validate_branch_merge_exit_assign(
     induction_var: []u8,
     string_counter: i64,
     temp_counter: i64,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !void {
     let target_type = try compiled_mir_types::resolve_value_llvm_type(
         ir_bytes, function_name, module_prefix, locals_spec, induction_var, bs
@@ -7813,7 +7858,8 @@ fn validate_branch_merge_exit_assign(
         string_counter,
         temp_counter,
         &var exit_insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let exit_type = try expr_inst_llvm_type_by_id(&exit_insts, exit_result);
     if !std::mem::equal_bytes(exit_type, target_type) {
@@ -8348,7 +8394,8 @@ fn lower_branch_merge_block_prefix(
                             body_alias_counter,
                             aliases,
                             stmts,
-                            bs
+                            bs,
+                            call_arg_type_cache
                         );
                         body_strings = assign_result.string_counter;
                         body_temps = assign_result.temp_counter;
@@ -8791,7 +8838,8 @@ fn lower_multi_while_branch_merge_latch(
         temp_counter,
         &var cond_insts,
         &loop_aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let body_string_start = string_counter + try count_strings_in_insts(&cond_insts);
     let body_temp_start = temp_counter + cond_insts.len();
@@ -8835,7 +8883,8 @@ fn lower_multi_while_branch_merge_latch(
         induction_var,
         body_string_start,
         body_temp_start,
-        bs
+        bs,
+        call_arg_type_cache
     );
 
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
@@ -8876,7 +8925,8 @@ fn lower_multi_while_branch_merge_latch(
         body_result.temp_counter,
         &var branch_cond_insts,
         &body_aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let branch_cond_type = try expr_inst_llvm_type_by_id(&branch_cond_insts, branch_cond_result);
     if !std::mem::equal_bytes(branch_cond_type, "i1") {
@@ -9111,7 +9161,8 @@ fn lower_multi_while_statement(
             string_counter,
             temp_counter,
             &var cond_insts,
-            bs
+            bs,
+            call_arg_type_cache
         );
         var acc_strings = try count_strings_in_insts(&cond_insts);
         var acc_temp = temp_counter + cond_insts.len();
@@ -9125,7 +9176,8 @@ fn lower_multi_while_statement(
             string_counter + acc_strings,
             acc_temp,
             &var cond_rhs_insts,
-            bs
+            bs,
+            call_arg_type_cache
         );
         acc_strings = acc_strings + try count_strings_in_insts(&cond_rhs_insts);
         acc_temp = acc_temp + cond_rhs_insts.len();
@@ -9142,7 +9194,8 @@ fn lower_multi_while_statement(
                 string_counter + acc_strings,
                 acc_temp,
                 &var operand_insts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             acc_strings = acc_strings + try count_strings_in_insts(&operand_insts);
             acc_temp = acc_temp + operand_insts.len();
@@ -9164,7 +9217,8 @@ fn lower_multi_while_statement(
             string_counter,
             temp_counter,
             &var cond_insts,
-            bs
+            bs,
+            call_arg_type_cache
         );
         body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
         body_temp_counter = temp_counter + cond_insts.len();
@@ -9589,7 +9643,8 @@ fn lower_scalar_select_assign_from_if(
     body_index: i64,
     states: &var std::array::Array<CarriedScalarState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let target_name = try scalar_assign_target_or_empty(ir_bytes, function_name, assign_node, bs);
     if std::mem::len(target_name) == 0 {
@@ -9625,7 +9680,8 @@ fn lower_scalar_select_assign_from_if(
         temp_counter,
         &var cond_insts,
         states,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let cond_strings = try count_strings_in_insts(&cond_insts);
     let value_node = try ir_contract::body_child_sequence_from(
@@ -9642,7 +9698,8 @@ fn lower_scalar_select_assign_from_if(
         temp_counter + cond_insts.len(),
         &var value_insts,
         states,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let value_strings = try count_strings_in_insts(&value_insts);
     let cond_len = cond_insts.len();
@@ -9687,7 +9744,8 @@ fn lower_carried_return_if_from_cond(
     cond_result: i64,
     cond_insts: std::array::Array<compiled_mir::MirExprInst>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let then_string_base = string_counter + try count_strings_in_insts(&cond_insts);
     let then_base = cond_result + 1;
@@ -9747,8 +9805,9 @@ fn lower_carried_return_if_from_cond(
         let callee_name = try compiled_mir_types::lower_call_callee_name(
             ir_bytes, function_name, module_prefix, ret_node, bs
         );
-        let call_args = try compiled_mir_lower_call::lower_call_args(
-            ir_bytes, function_name, module_prefix, locals_spec, ret_node, then_string_base, bs
+        let call_args = try compiled_mir_lower_call::lower_call_args_cached(
+            ir_bytes, function_name, module_prefix, locals_spec, ret_node, then_string_base, bs,
+            call_arg_type_cache
         );
         let call_arg_strings = try compiled_mir_lower_call::count_string_args(&call_args);
         let then_module_prefix = try compiled_mir_types::lower_call_module_prefix(
@@ -9794,7 +9853,8 @@ fn lower_carried_return_if_from_cond(
         then_string_base,
         then_base,
         &var then_insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let then_strings = try count_strings_in_insts(&then_insts);
     try stmts.append(compiled_mir::if_stmt(
@@ -9839,7 +9899,8 @@ fn lower_carried_return_if_statement(
     if_index: i64,
     states: &std::array::Array<CarriedScalarState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, if_node, "condition", 0, bs
@@ -9862,7 +9923,8 @@ fn lower_carried_return_if_statement(
         temp_counter,
         &var cond_insts,
         states,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let then_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, if_node, "then", 0, bs
@@ -9892,7 +9954,8 @@ fn lower_carried_return_if_statement(
         cond_result,
         cond_insts,
         stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
 }
 
@@ -9911,7 +9974,8 @@ fn lower_guarded_return_then_scalar_assign(
     body_index: i64,
     states: &var std::array::Array<CarriedScalarState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let then_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, if_node, "then", 0, bs
@@ -9945,7 +10009,8 @@ fn lower_guarded_return_then_scalar_assign(
         temp_counter,
         &var cond_insts,
         states,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let outer_strings = try count_strings_in_insts(&cond_insts);
     let outer_len = cond_insts.len();
@@ -9959,7 +10024,8 @@ fn lower_guarded_return_then_scalar_assign(
         temp_counter + outer_len,
         &var cond_insts,
         states,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let and_id = nested_result + 1;
     try cond_insts.append(compiled_mir::binary_expr_inst(and_id, "and", outer_result, nested_result));
@@ -9985,7 +10051,8 @@ fn lower_guarded_return_then_scalar_assign(
         and_id,
         cond_insts,
         stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let assign_result = try lower_scalar_select_assign_from_if(
         ir_bytes,
@@ -10000,7 +10067,8 @@ fn lower_guarded_return_then_scalar_assign(
         body_index,
         states,
         stmts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     return assign_result;
 }
@@ -10085,7 +10153,8 @@ fn lower_multi_while_leading_decrement(
         string_counter,
         temp_counter,
         &var cond_insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     try rename_induction_in_insts(&var cond_insts, induction_var, head_var);
     // The header must test the decremented counter: after the rename, the condition has to read the
@@ -10117,7 +10186,8 @@ fn lower_multi_while_leading_decrement(
         body_string_counter,
         body_temp_counter,
         &var dec_insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     try rename_induction_in_insts(&var dec_insts, induction_var, head_var);
     let dec_strings = try count_strings_in_insts(&dec_insts);
@@ -10193,7 +10263,8 @@ fn lower_multi_while_leading_decrement(
                                 body_index,
                                 &var carried_states,
                                 &var body_stmts,
-                                bs
+                                bs,
+                                call_arg_type_cache
                             );
                         } else {
                             if then_count == 2 {
@@ -10212,7 +10283,8 @@ fn lower_multi_while_leading_decrement(
                                     body_index,
                                     &var carried_states,
                                     &var body_stmts,
-                                    bs
+                                    bs,
+                                    call_arg_type_cache
                                 );
                             } else {
                                 return error("compiled mir: unsupported carried scalar if shape");
@@ -10231,7 +10303,8 @@ fn lower_multi_while_leading_decrement(
                             body_if_index,
                             &carried_states,
                             &var body_stmts,
-                            bs
+                            bs,
+                            call_arg_type_cache
                         );
                     }
                     body_temp_counter = carried_result.temp_counter;
@@ -10513,7 +10586,8 @@ fn lower_expr_with_local_aliases(
     temp_counter: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
     aliases: &std::array::Array<LocalAliasState>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     return try lower_expr_into_local_aliases(
         ir_bytes,
@@ -10525,7 +10599,8 @@ fn lower_expr_with_local_aliases(
         temp_counter,
         insts,
         aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
 }
 // insts_reference_var reports whether an expression instruction array reads a Var named 'name'.
@@ -10716,7 +10791,8 @@ fn lower_multi_while_continue_latch(
                 string_counter,
                 temp_counter,
                 &var init_insts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             body_string_counter = string_counter + try count_strings_in_insts(&init_insts);
             body_temp_counter = temp_counter + init_insts.len();
@@ -10739,7 +10815,8 @@ fn lower_multi_while_continue_latch(
         body_string_counter,
         body_temp_counter,
         &var cond_insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     body_string_counter = body_string_counter + try count_strings_in_insts(&cond_insts);
     body_temp_counter = body_temp_counter + cond_insts.len();
@@ -10766,7 +10843,7 @@ fn lower_multi_while_continue_latch(
                 let let_advance = try lower_renamed_continue_latch_let(
                     ir_bytes, function_name, module_prefix, locals_spec, body_stmt,
                     induction_var, rename_to, body_string_counter, body_temp_counter,
-                    &var body_stmts, bs
+                    &var body_stmts, bs, call_arg_type_cache
                 );
                 body_string_counter = let_advance.string_counter;
                 body_temp_counter = let_advance.temp_counter;
@@ -10964,7 +11041,8 @@ fn lower_renamed_continue_latch_let(
     string_counter: i64,
     temp_counter: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
     let let_name_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "name", 0, bs
@@ -10991,7 +11069,8 @@ fn lower_renamed_continue_latch_let(
         string_counter,
         temp_counter,
         &var insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     try rename_induction_in_insts(&var insts, induction_var, rename_to);
     let expr_strings = try count_strings_in_insts(&insts);
@@ -11352,7 +11431,8 @@ fn lower_expr_call_with_nested_args(
     string_index: i64,
     id_base: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
@@ -11369,6 +11449,10 @@ fn lower_expr_call_with_nested_args(
     let arg_count = try compiled_mir_types::count_call_args(
         ir_bytes, function_name, call_node, bs
     );
+    var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
+        ir_bytes, module_prefix, callee_name, arg_count, call_arg_type_cache
+    );
+    defer arg_types.deinit();
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var arg_index = 0;
     var string_idx = string_index;
@@ -11377,16 +11461,14 @@ fn lower_expr_call_with_nested_args(
             ir_bytes, function_name, call_node, "arg", arg_index, bs
         );
         let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
-        let arg_type = try compiled_mir_types::lower_call_arg_type(
-            ir_bytes, module_prefix, callee_name, arg_index
-        );
+        let arg_type = try arg_types.get(arg_index);
         let hoist_arg = std::mem::equal_bytes(arg_kind, "Call") or
             (try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs));
         if hoist_arg {
             let before = insts.len();
             let temp_id = try lower_expr_into(
                 ir_bytes, function_name, module_prefix, params_spec, arg_node,
-                string_idx, id_base, insts, bs
+                string_idx, id_base, insts, bs, call_arg_type_cache
             );
             string_idx = string_idx + try count_strings_in_insts_from(insts, before);
             try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
@@ -11420,7 +11502,8 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
     id_base: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
     aliases: &std::array::Array<LocalAliasState>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
@@ -11450,6 +11533,10 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
     let arg_count = try compiled_mir_types::count_call_args(
         ir_bytes, function_name, call_node, bs
     );
+    var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
+        ir_bytes, module_prefix, callee_name, arg_count, call_arg_type_cache
+    );
+    defer arg_types.deinit();
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var arg_index = 0;
     var string_idx = string_index;
@@ -11458,16 +11545,14 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
             ir_bytes, function_name, call_node, "arg", arg_index, bs
         );
         let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
-        let arg_type = try compiled_mir_types::lower_call_arg_type(
-            ir_bytes, module_prefix, callee_name, arg_index
-        );
+        let arg_type = try arg_types.get(arg_index);
         let hoist_arg = std::mem::equal_bytes(arg_kind, "Call") or
             (try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs));
         if hoist_arg {
             let before = insts.len();
             let temp_id = try lower_expr_with_local_aliases(
                 ir_bytes, function_name, module_prefix, params_spec, arg_node,
-                string_idx, id_base, insts, aliases, bs
+                string_idx, id_base, insts, aliases, bs, call_arg_type_cache
             );
             string_idx = string_idx + try count_strings_in_insts_from(insts, before);
             try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
@@ -11509,7 +11594,8 @@ fn lower_expr_call_with_local_aliases(
     id_base: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
     aliases: &std::array::Array<LocalAliasState>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let id = id_base + insts.len();
     if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
@@ -11522,7 +11608,7 @@ fn lower_expr_call_with_local_aliases(
     if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, bs) {
         return try lower_expr_call_with_nested_args_with_local_aliases(
             ir_bytes, function_name, module_prefix, params_spec, expr_node,
-            string_index, id_base, insts, aliases, bs
+            string_index, id_base, insts, aliases, bs, call_arg_type_cache
         );
     }
     let call_type = try compiled_mir_types::lower_call_return_type(
@@ -11534,8 +11620,9 @@ fn lower_expr_call_with_local_aliases(
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
         ir_bytes, function_name, module_prefix, expr_node, bs
     );
-    let args = try lower_call_args_with_local_aliases(
-        ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, aliases, bs
+    let args = try lower_call_args_with_local_aliases_cached(
+        ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, aliases, bs,
+        call_arg_type_cache
     );
     try insts.append(compiled_mir::call_expr_inst(
         id,
@@ -11557,7 +11644,8 @@ fn lower_expr_into_local_aliases(
     id_base: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
     aliases: &std::array::Array<LocalAliasState>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr_node, bs);
     let id = id_base + insts.len();
@@ -11650,7 +11738,8 @@ fn lower_expr_into_local_aliases(
             id_base,
             insts,
             aliases,
-            bs
+            bs,
+            call_arg_type_cache
         );
         let result_id = id_base + insts.len();
         try insts.append(compiled_mir::prefix_not_expr_inst(result_id, operand));
@@ -11669,12 +11758,12 @@ fn lower_expr_into_local_aliases(
         let before_left = insts.len();
         let left = try lower_expr_into_local_aliases(
             ir_bytes, function_name, module_prefix, params_spec, left_node,
-            string_index, id_base, insts, aliases, bs
+            string_index, id_base, insts, aliases, bs, call_arg_type_cache
         );
         let right_string_index = string_index + try count_strings_in_insts_from(insts, before_left);
         let right = try lower_expr_into_local_aliases(
             ir_bytes, function_name, module_prefix, params_spec, right_node,
-            right_string_index, id_base, insts, aliases, bs
+            right_string_index, id_base, insts, aliases, bs, call_arg_type_cache
         );
         let result_id = id_base + insts.len();
         try insts.append(compiled_mir::binary_expr_inst(result_id, op, left, right));
@@ -11708,7 +11797,7 @@ fn lower_expr_into_local_aliases(
         // (trunc/sext/copy in the renderer).
         let operand_id = try lower_expr_into_local_aliases(
             ir_bytes, function_name, module_prefix, params_spec, value_node,
-            string_index, id_base, insts, aliases, bs
+            string_index, id_base, insts, aliases, bs, call_arg_type_cache
         );
         let source_llvm = try expr_inst_llvm_type_by_id(insts, operand_id);
         let cast_id = id_base + insts.len();
@@ -11728,7 +11817,8 @@ fn lower_expr_into_local_aliases(
             id_base,
             insts,
             aliases,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     if std::mem::equal_bytes(kind, "IndexExpr") {
@@ -11755,7 +11845,8 @@ fn lower_expr_into_local_aliases(
                 id_base,
                 insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             let start_id = try lower_expr_into_local_aliases(
                 ir_bytes,
@@ -11767,7 +11858,8 @@ fn lower_expr_into_local_aliases(
                 id_base,
                 insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             let end_id = try lower_expr_into_local_aliases(
                 ir_bytes,
@@ -11779,7 +11871,8 @@ fn lower_expr_into_local_aliases(
                 id_base,
                 insts,
                 aliases,
-                bs
+                bs,
+                call_arg_type_cache
             );
             let result_id = id_base + insts.len();
             try insts.append(compiled_mir::slice_expr_inst(
@@ -11806,7 +11899,8 @@ fn lower_expr_into_local_aliases(
             id_base,
             insts,
             aliases,
-            bs
+            bs,
+            call_arg_type_cache
         );
         let result_id = id_base + insts.len();
         try insts.append(compiled_mir::index_load_expr_inst(
@@ -11827,7 +11921,8 @@ fn lower_expr_into_local_aliases(
             id_base,
             insts,
             aliases,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     return error("compiled mir: unsupported expression kind");
@@ -11842,7 +11937,8 @@ fn lower_expr_into(
     string_index: i64,
     id_base: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr_node, bs);
     let id = id_base + insts.len();
@@ -11932,7 +12028,8 @@ fn lower_expr_into(
             string_index,
             id_base,
             insts,
-            bs
+            bs,
+            call_arg_type_cache
         );
         let result_id = id_base + insts.len();
         try insts.append(compiled_mir::prefix_not_expr_inst(result_id, operand));
@@ -11951,12 +12048,12 @@ fn lower_expr_into(
         let before_left = insts.len();
         let left = try lower_expr_into(
             ir_bytes, function_name, module_prefix, params_spec, left_node,
-            string_index, id_base, insts, bs
+            string_index, id_base, insts, bs, call_arg_type_cache
         );
         let right_string_index = string_index + try count_strings_in_insts_from(insts, before_left);
         let right = try lower_expr_into(
             ir_bytes, function_name, module_prefix, params_spec, right_node,
-            right_string_index, id_base, insts, bs
+            right_string_index, id_base, insts, bs, call_arg_type_cache
         );
         let result_id = id_base + insts.len();
         try insts.append(compiled_mir::binary_expr_inst(result_id, op, left, right));
@@ -11996,7 +12093,8 @@ fn lower_expr_into(
             expr_node,
             id_base,
             insts,
-            bs
+            bs,
+            call_arg_type_cache
         );
     }
     if std::mem::equal_bytes(kind, "IndexExpr") {
@@ -12022,7 +12120,8 @@ fn lower_expr_into(
                 string_index,
                 id_base,
                 insts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             let start_id = try lower_expr_into(
                 ir_bytes,
@@ -12033,7 +12132,8 @@ fn lower_expr_into(
                 string_index,
                 id_base,
                 insts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             let end_id = try lower_expr_into(
                 ir_bytes,
@@ -12044,7 +12144,8 @@ fn lower_expr_into(
                 string_index,
                 id_base,
                 insts,
-                bs
+                bs,
+                call_arg_type_cache
             );
             let result_id = id_base + insts.len();
             try insts.append(compiled_mir::slice_expr_inst(
@@ -12070,7 +12171,8 @@ fn lower_expr_into(
             string_index,
             id_base,
             insts,
-            bs
+            bs,
+            call_arg_type_cache
         );
         let result_id = id_base + insts.len();
         try insts.append(compiled_mir::index_load_expr_inst(
@@ -12095,7 +12197,7 @@ fn lower_expr_into(
         if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, bs) {
             return try lower_expr_call_with_nested_args(
                 ir_bytes, function_name, module_prefix, params_spec, expr_node,
-                string_index, id_base, insts, bs
+                string_index, id_base, insts, bs, call_arg_type_cache
             );
         }
         let call_type = try compiled_mir_types::lower_call_return_type(
@@ -12107,8 +12209,9 @@ fn lower_expr_into(
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
             ir_bytes, function_name, module_prefix, expr_node, bs
         );
-        let args = try compiled_mir_lower_call::lower_call_args(
-            ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, bs
+        let args = try compiled_mir_lower_call::lower_call_args_cached(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, bs,
+            call_arg_type_cache
         );
         try insts.append(compiled_mir::call_expr_inst(
             id,
@@ -12130,7 +12233,8 @@ fn lower_expr_field(
     expr_node: i64,
     id_base: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let mode = try ir_contract::sequence_fact_second_value_from(
         ir_bytes, "body-field-expr ", function_name, expr_node, bs
@@ -12209,7 +12313,8 @@ fn lower_expr_field(
         0,
         id_base,
         insts,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let field = try compiled_mir_types::resolve_field_expr(
         ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
@@ -12235,14 +12340,16 @@ fn lower_expr_field_with_local_aliases(
     id_base: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
     aliases: &std::array::Array<LocalAliasState>,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let mode = try ir_contract::sequence_fact_second_value_from(
         ir_bytes, "body-field-expr ", function_name, expr_node, bs
     );
     if std::mem::equal_bytes(mode, "namespace") {
         return try lower_expr_field(
-            ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs,
+            call_arg_type_cache
         );
     }
     let receiver = try ir_contract::body_child_sequence_from(
@@ -12285,7 +12392,8 @@ fn lower_expr_field_with_local_aliases(
         id_base,
         insts,
         aliases,
-        bs
+        bs,
+        call_arg_type_cache
     );
     let field = try compiled_mir_types::resolve_field_expr(
         ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
