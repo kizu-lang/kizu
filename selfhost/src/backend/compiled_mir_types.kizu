@@ -235,20 +235,95 @@ pub fn lower_call_arg_type(
     callee_name: []u8,
     arg_index: i64
 ) -> ![]u8 {
+    var arg_types = try lower_call_arg_types(ir_bytes, module_prefix, callee_name, arg_index + 1);
+    defer arg_types.deinit();
+    return try arg_types.get(arg_index);
+}
+
+pub fn lower_call_arg_types(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    arg_count: i64
+) -> !std::array::Array<[]u8> {
     let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
     if std::mem::len(qualified) > 0 {
-        return try compiled_signature::resolve_call_arg_type(
-            ir_bytes, ir_bytes[0..0], qualified, arg_index
+        return try lower_signature_call_arg_types(
+            ir_bytes, ir_bytes[0..0], qualified, ir_bytes[0..0], arg_count
         );
     }
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
-        // Stdlib callees resolve argument types from trailing stdlib-symbol arg-type tokens:
-        // one token is uniform for all args, multiple tokens are matched by index.
-        return try compiled_fact_lookup::lookup_stdlib_arg_type(ir_bytes, callee_name, arg_index);
+        return try lower_stdlib_call_arg_types(ir_bytes, callee_name, arg_count);
     }
-    return try compiled_signature::resolve_call_arg_type(
-        ir_bytes, module_prefix, callee_name, arg_index
+    return try lower_signature_call_arg_types(
+        ir_bytes, module_prefix, callee_name, module_prefix, arg_count
     );
+}
+
+fn lower_signature_call_arg_types(
+    ir_bytes: []u8,
+    lookup_prefix: []u8,
+    callee_name: []u8,
+    type_module_prefix: []u8,
+    arg_count: i64
+) -> !std::array::Array<[]u8> {
+    var types = std::array::Array<[]u8>(std::mem::page_allocator());
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "function-signature-param ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(lookup_prefix);
+    let name_len = std::mem::len(callee_name);
+    var index = 0;
+    while arg_count > 0 and
+        index + prefix_len + mp_len + name_len < byte_len and
+        types.len() < arg_count {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let name_end = mp_end + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], lookup_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..name_end], callee_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                let line_end_pos = compiled_util::find_line_end(ir_bytes, name_end);
+                let entry = ir_bytes[name_end..line_end_pos];
+                let entry_len = std::mem::len(entry);
+                let colon1 = compiled_util::find_byte(entry, cast<u8>(58), 0);
+                let colon2 = compiled_util::find_byte(entry, cast<u8>(58), colon1 + 1);
+                if colon2 >= entry_len {
+                    return error("compiled function: call arg type not found");
+                }
+                let kizu_type = entry[colon2 + 1..entry_len];
+                try types.append(
+                    try compiled_type_lower::kizu_type_to_llvm(
+                        ir_bytes, type_module_prefix, kizu_type
+                    )
+                );
+            }
+        }
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    if types.len() != arg_count {
+        return error("compiled function: call arg type not found");
+    }
+    return types;
+}
+
+fn lower_stdlib_call_arg_types(
+    ir_bytes: []u8,
+    callee_name: []u8,
+    arg_count: i64
+) -> !std::array::Array<[]u8> {
+    var types = std::array::Array<[]u8>(std::mem::page_allocator());
+    var index = 0;
+    while index < arg_count {
+        try types.append(
+            try compiled_fact_lookup::lookup_stdlib_arg_type(ir_bytes, callee_name, index)
+        );
+        index = index + 1;
+    }
+    return types;
 }
 
 pub fn resolve_field_receiver_kizu_type(

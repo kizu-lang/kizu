@@ -38,6 +38,148 @@ fn aliased_name_or_original(
     return name;
 }
 
+fn call_arg_nodes(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64
+) -> !std::array::Array<i64> {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "body-edge ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(function_name);
+    var nodes = std::array::Array<i64>(std::mem::page_allocator());
+    var index = bs;
+    var seen = false;
+    var done = false;
+    while !done and index + prefix_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(ir_bytes[name_start..name_end], function_name) and
+                call_arg_is_space(ir_bytes[name_end]) {
+                seen = true;
+                try append_call_arg_node_from_line(ir_bytes, name_end, call_node, &var nodes);
+            } else {
+                if seen {
+                    done = true;
+                }
+            }
+        }
+        if !done {
+            index = compiled_util::find_line_end(ir_bytes, index) + 1;
+        }
+    }
+    return nodes;
+}
+
+fn append_call_arg_node_from_line(
+    ir_bytes: []u8,
+    name_end: i64,
+    call_node: i64,
+    nodes: &var std::array::Array<i64>
+) -> !void {
+    let parent_start = call_arg_skip_spaces(ir_bytes, name_end);
+    let parent = try call_arg_parse_i64_token(ir_bytes, parent_start);
+    if parent != call_node {
+        return;
+    }
+
+    let parent_end = call_arg_token_end(ir_bytes, parent_start);
+    let edge_start = call_arg_skip_spaces(ir_bytes, parent_end);
+    let edge_end = call_arg_token_end(ir_bytes, edge_start);
+    if !std::mem::equal_bytes(ir_bytes[edge_start..edge_end], "arg") {
+        return;
+    }
+
+    let ordinal_start = call_arg_skip_spaces(ir_bytes, edge_end);
+    let ordinal = try call_arg_parse_i64_token(ir_bytes, ordinal_start);
+    let ordinal_end = call_arg_token_end(ir_bytes, ordinal_start);
+    let child_start = call_arg_skip_spaces(ir_bytes, ordinal_end);
+    let child = try call_arg_parse_i64_token(ir_bytes, child_start);
+    while nodes.len() <= ordinal {
+        try nodes.append(-1);
+    }
+    if (try nodes.get(ordinal)) < 0 {
+        try nodes.set(ordinal, child);
+    }
+    return;
+}
+
+fn require_contiguous_call_args(nodes: &std::array::Array<i64>) -> !void {
+    var index = 0;
+    while index < nodes.len() {
+        if (try nodes.get(index)) < 0 {
+            return error("compiled mir: missing call arg");
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn call_arg_token_end(bytes: []u8, start: i64) -> i64 {
+    let byte_len = std::mem::len(bytes);
+    var index = start;
+    while index < byte_len {
+        let byte = bytes[index];
+        if call_arg_is_space(byte) or byte == cast<u8>(10) or byte == cast<u8>(13) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+fn call_arg_skip_spaces(bytes: []u8, start: i64) -> i64 {
+    let byte_len = std::mem::len(bytes);
+    var index = start;
+    while index < byte_len and call_arg_is_space(bytes[index]) {
+        index = index + 1;
+    }
+    return index;
+}
+
+fn call_arg_parse_i64_token(bytes: []u8, start: i64) -> !i64 {
+    let byte_len = std::mem::len(bytes);
+    if start >= byte_len {
+        return error("invalid IR artifact fact");
+    }
+    var value = 0;
+    var index = start;
+    var found = false;
+    while index < byte_len and call_arg_is_digit(bytes[index]) {
+        value = (value * 10) + try call_arg_digit_value(bytes[index]);
+        found = true;
+        index = index + 1;
+    }
+    if !found {
+        return error("invalid IR artifact fact");
+    }
+    if index < byte_len and
+        !call_arg_is_space(bytes[index]) and
+        bytes[index] != cast<u8>(10) and
+        bytes[index] != cast<u8>(13) {
+        return error("invalid IR artifact fact");
+    }
+    return value;
+}
+
+fn call_arg_is_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(9);
+}
+
+fn call_arg_is_digit(byte: u8) -> bool {
+    return byte >= cast<u8>(48) and byte <= cast<u8>(57);
+}
+
+fn call_arg_digit_value(byte: u8) -> !i64 {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return cast<i64>(byte - cast<u8>(48));
+    }
+    return error("invalid IR artifact fact");
+}
+
 pub fn lower_single_call_arg(
     ir_bytes: []u8,
     function_name: []u8,
@@ -206,19 +348,19 @@ pub fn lower_call_args(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+    var arg_nodes = try call_arg_nodes(ir_bytes, function_name, call_node, bs);
+    defer arg_nodes.deinit();
+    try require_contiguous_call_args(&arg_nodes);
+    var arg_types = try compiled_mir_types::lower_call_arg_types(
+        ir_bytes, module_prefix, callee_name, arg_nodes.len()
     );
+    defer arg_types.deinit();
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var arg_index = 0;
     var string_index = first_string_index;
-    while arg_index < arg_count {
-        let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
-        );
-        let arg_type = try compiled_mir_types::lower_call_arg_type(
-            ir_bytes, module_prefix, callee_name, arg_index
-        );
+    while arg_index < arg_nodes.len() {
+        let arg_node = try arg_nodes.get(arg_index);
+        let arg_type = try arg_types.get(arg_index);
         let arg = try lower_single_call_arg(
             ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, string_index, bs
         );
@@ -246,19 +388,19 @@ pub fn lower_call_args_with_aliases(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+    var arg_nodes = try call_arg_nodes(ir_bytes, function_name, call_node, bs);
+    defer arg_nodes.deinit();
+    try require_contiguous_call_args(&arg_nodes);
+    var arg_types = try compiled_mir_types::lower_call_arg_types(
+        ir_bytes, module_prefix, callee_name, arg_nodes.len()
     );
+    defer arg_types.deinit();
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var arg_index = 0;
     var string_index = first_string_index;
-    while arg_index < arg_count {
-        let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
-        );
-        let arg_type = try compiled_mir_types::lower_call_arg_type(
-            ir_bytes, module_prefix, callee_name, arg_index
-        );
+    while arg_index < arg_nodes.len() {
+        let arg_node = try arg_nodes.get(arg_index);
+        let arg_type = try arg_types.get(arg_index);
         let arg = try lower_single_call_arg_with_aliases(
             ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node,
             string_index, alias_sources, alias_currents, bs
