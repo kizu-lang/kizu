@@ -3398,6 +3398,13 @@ pub fn code_op_enum_const() -> i64 {
     return 9;
 }
 
+// ENUM_DECL records one enum declaration's identity at the head of the tape.
+// Enum values still use the i64 tag ABI, but call results need a record-backed
+// kind so bare match-arm patterns can resolve against the enum declaration.
+pub fn code_op_enum_decl() -> i64 {
+    return 113;
+}
+
 // UNION_CONST materializes a 'Union::Variant(<payload>)' construction (or a
 // payload-less variant read) as its declaration-order tag: the record extends
 // ENUM_CONST's layout with a trailing payload value id ('op dst qual_start
@@ -3907,8 +3914,9 @@ fn code_binary_kind_is_comparison(kind: i64) -> bool {
 // code_return_kind classifies a function's declared return type for the tape:
 // 0 = void (empty or 'void'), 1 = i64, 2 = error-union void ('!void'),
 // 3 = error-union i64 ('!i64'), record_base + <UNION_DECL position> for a
-// declared union (the runtime aggregate return), -1 = a type the tape does not
-// own yet.
+// declared union (the runtime aggregate return), record_base + <ENUM_DECL
+// position> for a declared enum (the i64 tag ABI with enum identity), -1 = a
+// type the tape does not own yet.
 fn code_return_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -3932,7 +3940,14 @@ fn code_return_kind(
         return 3;
     }
     let union_kind = try code_param_union_kind(text, ast, type_node, code);
-    return union_kind;
+    if union_kind >= 0 {
+        return union_kind;
+    }
+    let enum_kind = try code_return_enum_kind(text, ast, type_node, code);
+    if enum_kind >= 0 {
+        return enum_kind;
+    }
+    return 0 - 1;
 }
 
 // code_node_span returns the trimmed (start, end) byte span of a node's source
@@ -4031,9 +4046,10 @@ fn lower_code_program(
     };
 }
 
-// lower_code_program_decls emits every union declaration's UNION_DECL record
-// at the head of the tape (so parameter classification and runtime match arms
-// can resolve them regardless of declaration order), then walks the functions.
+// lower_code_program_decls emits declaration identity records at the head of the
+// tape, then walks the functions. UNION_DECL records come first so the existing
+// union lookup can stop at the first non-union record; ENUM_DECL records follow
+// to preserve enum identity for function return values.
 fn lower_code_program_decls(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -4050,7 +4066,11 @@ fn lower_code_program_decls(
     if !decls_eval.ok {
         return code_eval_unsupported(decls_eval.next);
     }
-    return try lower_code_declarations(text, ast, decls, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, 0, decls_eval.next);
+    let enum_eval = try emit_enum_decl_records(text, ast, decls, code, 0);
+    if !enum_eval.ok {
+        return code_eval_unsupported(enum_eval.next);
+    }
+    return try lower_code_declarations(text, ast, decls, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, 0, enum_eval.next);
 }
 
 // emit_union_decl_records walks the top-level declarations and records every
@@ -4152,6 +4172,52 @@ fn append_union_variant_entry(
     try code.append(name_span.end);
     let payload_kind = try union_payload_kind(text, ast, payload);
     try code.append(payload_kind);
+    return code_eval_value(0, 0);
+}
+
+fn emit_enum_decl_records(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    index: i64
+) -> !CodeEval {
+    if index >= decls.len {
+        return code_eval_value(0, 0);
+    }
+    let child = try ast.child_at(decls, index);
+    let eval = try emit_enum_decl_record(text, ast, child, code);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try emit_enum_decl_records(text, ast, decls, code, after);
+}
+
+fn emit_enum_decl_record(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !CodeEval {
+    let node = ast.get(child);
+    return match node.data {
+        EnumDecl(enum_decl) => try emit_one_enum_decl(text, ast, enum_decl.name, code),
+        _ => code_eval_value(0, 0),
+    };
+}
+
+fn emit_one_enum_decl(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !CodeEval {
+    let name_span = code_node_span(text, ast, name);
+    let op_enum_decl = code_op_enum_decl();
+    try code.append(op_enum_decl);
+    try code.append(name_span.start);
+    try code.append(name_span.end);
     return code_eval_value(0, 0);
 }
 
@@ -4982,6 +5048,55 @@ fn union_decl_pos_by_span(
     return pos;
 }
 
+fn code_union_decl_record_end(code: &var std::array::Array<i64>, pos: i64) -> !i64 {
+    let count_pos = pos + 3;
+    let variant_count = try code.get(count_pos);
+    let entry_slots = variant_count * 3;
+    return pos + 4 + entry_slots;
+}
+
+fn enum_decl_pos_by_span(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    name_start: i64,
+    name_end: i64,
+    pos: i64
+) -> !i64 {
+    let total = code.len();
+    if pos >= total {
+        return 0 - 1;
+    }
+    let op = try code.get(pos);
+    let op_union_decl = code_op_union_decl();
+    if op == op_union_decl {
+        return try enum_decl_pos_after_union(text, code, name_start, name_end, pos);
+    }
+    let op_enum_decl = code_op_enum_decl();
+    if op != op_enum_decl {
+        return 0 - 1;
+    }
+    let rec_name_start = try code.get(pos + 1);
+    let rec_name_end = try code.get(pos + 2);
+    let rec_name = text[rec_name_start..rec_name_end];
+    let wanted = text[name_start..name_end];
+    let next_pos = pos + 3;
+    if !std::mem::equal_bytes(rec_name, wanted) {
+        return try enum_decl_pos_by_span(text, code, name_start, name_end, next_pos);
+    }
+    return pos;
+}
+
+fn enum_decl_pos_after_union(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    name_start: i64,
+    name_end: i64,
+    pos: i64
+) -> !i64 {
+    let next_union = try code_union_decl_record_end(code, pos);
+    return try enum_decl_pos_by_span(text, code, name_start, name_end, next_union);
+}
+
 // union_decl_variant_index returns the declaration-order index (the runtime
 // tag) of the named variant in the UNION_DECL record (-1 when the record does
 // not carry it).
@@ -5150,6 +5265,21 @@ fn code_struct_param_field_kind(
         return union_kind;
     }
     return 0 - 1;
+}
+
+fn code_return_enum_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !i64 {
+    let span = code_node_span(text, ast, type_node);
+    let pos = try enum_decl_pos_by_span(text, code, span.start, span.end, 0);
+    if pos < 0 {
+        return 0 - 1;
+    }
+    let record_base = code_kind_struct_base();
+    return record_base + pos;
 }
 
 // code_param_union_kind resolves a union-typed parameter ('Shape' or the
@@ -5333,10 +5463,11 @@ fn lower_code_else_block(
     };
 }
 
-// lower_code_match lowers a statement-position 'match <enum> { ... }' as a
-// nested if/else chain of tag comparisons over the structured IF records; a
-// '_' arm lowers as the unconditional tail. The matched value must trace to an
-// ENUM_CONST record so the arm patterns resolve against its enum declaration.
+// lower_code_match lowers a statement-position 'match <enum/union> { ... }' as
+// a nested if/else chain of tag comparisons over the structured IF records; a
+// '_' arm lowers as the unconditional tail. Enum call results carry an ENUM_DECL
+// kind so bare arm patterns can resolve against the enum declaration while the
+// value itself remains an i64 tag.
 fn lower_code_match(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -5367,12 +5498,14 @@ fn lower_code_match(
     let record_pos = value_kind - record_base;
     let record_op = try code.get(record_pos);
     let op_enum_const = code_op_enum_const();
+    let op_enum_decl = code_op_enum_decl();
     let op_union_const = code_op_union_const();
     let op_union_decl = code_op_union_decl();
     let is_enum = record_op == op_enum_const;
+    let is_enum_runtime = record_op == op_enum_decl;
     let is_union = record_op == op_union_const;
     let is_runtime = record_op == op_union_decl;
-    let supported = is_enum or is_union or is_runtime;
+    let supported = is_enum or is_enum_runtime or is_union or is_runtime;
     if !supported {
         return code_eval_unsupported(value_eval.next);
     }
@@ -5559,8 +5692,9 @@ fn lower_code_match_arm(
 }
 
 // match_pattern_tag resolves an arm pattern against the matched record's
-// declaration: an ENUM_CONST record resolves through the enum declarations, a
-// UNION_CONST record through the unions (both keep the name span at +4/+5).
+// declaration: ENUM_DECL records keep their enum name at +1/+2, UNION_DECL
+// keeps its variant entries inline, and compile-time ENUM_CONST/UNION_CONST
+// records keep the declaration name span at +4/+5.
 fn match_pattern_tag(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -5578,6 +5712,10 @@ fn match_pattern_tag(
     if record_op == op_union_decl {
         return try union_decl_pattern_tag(text, code, record_pos, p_start, p_end);
     }
+    let op_enum_decl = code_op_enum_decl();
+    if record_op == op_enum_decl {
+        return try enum_decl_pattern_tag(text, ast, decls, code, record_pos, p_start, p_end);
+    }
     let name_start_pos = record_pos + 4;
     let name_start = try code.get(name_start_pos);
     let name_end_pos = record_pos + 5;
@@ -5586,6 +5724,20 @@ fn match_pattern_tag(
     if record_op == op_union_const {
         return try union_variant_tag_lookup(text, ast, decls, name_start, name_end, p_start, p_end, 0);
     }
+    return try enum_variant_tag_lookup(text, ast, decls, name_start, name_end, p_start, p_end, 0);
+}
+
+fn enum_decl_pattern_tag(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    record_pos: i64,
+    p_start: i64,
+    p_end: i64
+) -> !i64 {
+    let name_start = try code.get(record_pos + 1);
+    let name_end = try code.get(record_pos + 2);
     return try enum_variant_tag_lookup(text, ast, decls, name_start, name_end, p_start, p_end, 0);
 }
 
@@ -6189,11 +6341,13 @@ fn lower_code_match_expr(
     let record_pos = value_kind - record_base;
     let record_op = try code.get(record_pos);
     let op_enum_const = code_op_enum_const();
+    let op_enum_decl = code_op_enum_decl();
     let op_union_const = code_op_union_const();
-    if record_op != op_enum_const {
-        if record_op != op_union_const {
-            return code_eval_unsupported(value_eval.next);
-        }
+    let is_supported = record_op == op_enum_const or
+        record_op == op_enum_decl or
+        record_op == op_union_const;
+    if !is_supported {
+        return code_eval_unsupported(value_eval.next);
     }
     if arms.len == 0 {
         return code_eval_unsupported(value_eval.next);
