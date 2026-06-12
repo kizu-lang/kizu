@@ -44,6 +44,17 @@ pub fn render_run_artifact(
     text: []u8,
     parsed: std::kizu::ast::ParseResult
 ) -> !std::string::String {
+    let rendered = try render_run_ast_artifact(allocator, source_path, text, parsed.ast, parsed.root);
+    return rendered;
+}
+
+pub fn render_run_ast_artifact(
+    allocator: Allocator,
+    source_path: []u8,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !std::string::String {
     var code = std::array::Array<i64>(allocator);
     var kinds = std::array::Array<i64>(allocator);
     var local_starts = std::array::Array<i64>(allocator);
@@ -52,8 +63,8 @@ pub fn render_run_artifact(
     var args_scratch = std::array::Array<i64>(allocator);
     let eval = try codegen::lower_code_module(
         text,
-        parsed.ast,
-        parsed.root,
+        ast,
+        root,
         &var code,
         &var kinds,
         &var local_starts,
@@ -64,7 +75,8 @@ pub fn render_run_artifact(
     if !eval.ok {
         return error("render run artifact: run source lowering not supported");
     }
-    return try render_tape_module(allocator, source_path, text, &code, &kinds);
+    let rendered = try render_tape_module(allocator, source_path, text, &code, &kinds);
+    return rendered;
 }
 
 // render_bool_print_global emits one of the bool print payload globals
@@ -166,16 +178,23 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.owned @kizu_rt_string_new(%kizu.owned)");
+    try wl(out, "declare %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned, i8)");
+    try wl(out, "declare %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned)");
     try wl(out, "declare i64 @kizu_rt_process_exit_code(i64)");
     try wl(out, "declare void @kizu_rt_trap(%kizu.slice.u8)");
     try wl(out, "declare void @kizu_host_init(i32, ptr)");
     try nl(out);
     try wl(out, "@.kizu.run.newline = private unnamed_addr constant [1 x i8] [i8 10]");
+    try wl(out, "@.kizu.run.true_word = private unnamed_addr constant [4 x i8] [i8 116, i8 114, i8 117, i8 101]");
+    try wl(out, "@.kizu.run.false_word = private unnamed_addr constant [5 x i8] [i8 102, i8 97, i8 108, i8 115, i8 101]");
     try render_bool_print_global(out, "@.kizu.run.bool_true = private unnamed_addr constant [5 x i8] c", "true");
     try render_bool_print_global(out, "@.kizu.run.bool_false = private unnamed_addr constant [6 x i8] c", "false");
     try render_expect_fail_global(out);
     try nl(out);
     try render_i64_decimal_helper(out);
+    try render_string_format_helpers(out);
     return;
 }
 
@@ -192,15 +211,24 @@ fn render_i64_decimal_helper(out: &var std::string::String) -> !void {
     try wl(out, "  br i1 %allocated, label %check_zero, label %alloc_failed");
     try wl(out, "check_zero:");
     try wl(out, "  %is_zero = icmp eq i64 %value, 0");
-    try wl(out, "  br i1 %is_zero, label %zero, label %loop");
+    try wl(out, "  br i1 %is_zero, label %zero, label %nonzero");
     try wl(out, "zero:");
     try wl(out, "  %zero_ptr = getelementptr i8, ptr %buffer, i64 19");
     try wl(out, "  store i8 48, ptr %zero_ptr");
     try wl(out, "  br label %finish_zero");
+    try wl(out, "nonzero:");
+    try wl(out, "  %is_negative = icmp slt i64 %value, 0");
+    try wl(out, "  br i1 %is_negative, label %negative, label %positive");
+    try wl(out, "negative:");
+    try wl(out, "  br label %loop");
+    try wl(out, "positive:");
+    try wl(out, "  %positive_current = sub i64 0, %value");
+    try wl(out, "  br label %loop");
     try wl(out, "loop:");
-    try wl(out, "  %current = phi i64 [ %value, %check_zero ], [ %quotient, %loop ]");
-    try wl(out, "  %write_index = phi i64 [ 19, %check_zero ], [ %next_index, %loop ]");
-    try wl(out, "  %digit = srem i64 %current, 10");
+    try wl(out, "  %current = phi i64 [ %value, %negative ], [ %positive_current, %positive ], [ %quotient, %loop ]");
+    try wl(out, "  %write_index = phi i64 [ 19, %negative ], [ 19, %positive ], [ %next_index, %loop ]");
+    try wl(out, "  %raw_digit = srem i64 %current, 10");
+    try wl(out, "  %digit = sub i64 0, %raw_digit");
     try wl(out, "  %digit_byte_i64 = add i64 %digit, 48");
     try wl(out, "  %digit_byte = trunc i64 %digit_byte_i64 to i8");
     try wl(out, "  %digit_ptr = getelementptr i8, ptr %buffer, i64 %write_index");
@@ -208,13 +236,21 @@ fn render_i64_decimal_helper(out: &var std::string::String) -> !void {
     try wl(out, "  %quotient = sdiv i64 %current, 10");
     try wl(out, "  %next_index = sub i64 %write_index, 1");
     try wl(out, "  %done = icmp eq i64 %quotient, 0");
-    try wl(out, "  br i1 %done, label %finish_loop, label %loop");
+    try wl(out, "  br i1 %done, label %maybe_sign, label %loop");
+    try wl(out, "maybe_sign:");
+    try wl(out, "  br i1 %is_negative, label %write_sign, label %finish_loop");
+    try wl(out, "write_sign:");
+    try wl(out, "  %sign_ptr = getelementptr i8, ptr %buffer, i64 %next_index");
+    try wl(out, "  store i8 45, ptr %sign_ptr");
+    try wl(out, "  br label %finish_sign");
     try wl(out, "finish_zero:");
     try wl(out, "  br label %success");
     try wl(out, "finish_loop:");
     try wl(out, "  br label %success");
+    try wl(out, "finish_sign:");
+    try wl(out, "  br label %success");
     try wl(out, "success:");
-    try wl(out, "  %start = phi i64 [ 19, %finish_zero ], [ %write_index, %finish_loop ]");
+    try wl(out, "  %start = phi i64 [ 19, %finish_zero ], [ %write_index, %finish_loop ], [ %next_index, %finish_sign ]");
     try wl(out, "  %len = sub i64 20, %start");
     try wl(out, "  %start_ptr = getelementptr i8, ptr %buffer, i64 %start");
     try wl(out, "  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %start_ptr, 0");
@@ -224,6 +260,157 @@ fn render_i64_decimal_helper(out: &var std::string::String) -> !void {
     try wl(out, "  ret %kizu.error.slice.u8 %result");
     try wl(out, "alloc_failed:");
     try wl(out, "  ret %kizu.error.slice.u8 zeroinitializer");
+    try wl(out, "}");
+    try nl(out);
+    return;
+}
+
+fn render_string_format_helpers(out: &var std::string::String) -> !void {
+    try wl(out, "define %kizu.error.void @kizu_run_string_append_i64(%kizu.owned %text, i64 %value) {");
+    try wl(out, "entry:");
+    try wl(out, "  %decimal = call %kizu.error.slice.u8 @kizu_run_i64_decimal(i64 %value)");
+    try wl(out, "  %ok = extractvalue %kizu.error.slice.u8 %decimal, 0");
+    try wl(out, "  br i1 %ok, label %append, label %fail");
+    try wl(out, "append:");
+    try wl(out, "  %slice = extractvalue %kizu.error.slice.u8 %decimal, 1");
+    try wl(out, "  %result = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %text, %kizu.slice.u8 %slice)");
+    try wl(out, "  ret %kizu.error.void %result");
+    try wl(out, "fail:");
+    try wl(out, "  ret %kizu.error.void zeroinitializer");
+    try wl(out, "}");
+    try nl(out);
+    try wl(out, "define %kizu.error.void @kizu_run_string_append_bool(%kizu.owned %text, i1 %value) {");
+    try wl(out, "entry:");
+    try wl(out, "  %ptr = select i1 %value, ptr @.kizu.run.true_word, ptr @.kizu.run.false_word");
+    try wl(out, "  %len = select i1 %value, i64 4, i64 5");
+    try wl(out, "  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0");
+    try wl(out, "  %slice = insertvalue %kizu.slice.u8 %base, i64 %len, 1");
+    try wl(out, "  %result = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %text, %kizu.slice.u8 %slice)");
+    try wl(out, "  ret %kizu.error.void %result");
+    try wl(out, "}");
+    try nl(out);
+    try wl(out, "define i8 @kizu_run_hex_digit(i8 %value) {");
+    try wl(out, "entry:");
+    try wl(out, "  %low = icmp ult i8 %value, 10");
+    try wl(out, "  %num = add i8 %value, 48");
+    try wl(out, "  %hex = add i8 %value, 87");
+    try wl(out, "  %result = select i1 %low, i8 %num, i8 %hex");
+    try wl(out, "  ret i8 %result");
+    try wl(out, "}");
+    try nl(out);
+    try wl(out, "define %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 %second) {");
+    try wl(out, "entry:");
+    try wl(out, "  %first = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 92)");
+    try wl(out, "  %first_ok = extractvalue %kizu.error.void %first, 0");
+    try wl(out, "  br i1 %first_ok, label %append_second, label %fail");
+    try wl(out, "append_second:");
+    try wl(out, "  %result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 %second)");
+    try wl(out, "  ret %kizu.error.void %result");
+    try wl(out, "fail:");
+    try wl(out, "  ret %kizu.error.void %first");
+    try wl(out, "}");
+    try nl(out);
+    try wl(out, "define %kizu.error.void @kizu_run_string_append_hex_escape(%kizu.owned %text, i8 %byte) {");
+    try wl(out, "entry:");
+    try wl(out, "  %high_nibble = lshr i8 %byte, 4");
+    try wl(out, "  %low_nibble = and i8 %byte, 15");
+    try wl(out, "  %high = call i8 @kizu_run_hex_digit(i8 %high_nibble)");
+    try wl(out, "  %low = call i8 @kizu_run_hex_digit(i8 %low_nibble)");
+    try wl(out, "  %slash = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 92)");
+    try wl(out, "  %slash_ok = extractvalue %kizu.error.void %slash, 0");
+    try wl(out, "  br i1 %slash_ok, label %write_x, label %slash_fail");
+    try wl(out, "write_x:");
+    try wl(out, "  %x = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 120)");
+    try wl(out, "  %x_ok = extractvalue %kizu.error.void %x, 0");
+    try wl(out, "  br i1 %x_ok, label %write_high, label %x_fail");
+    try wl(out, "write_high:");
+    try wl(out, "  %high_result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 %high)");
+    try wl(out, "  %high_ok = extractvalue %kizu.error.void %high_result, 0");
+    try wl(out, "  br i1 %high_ok, label %write_low, label %high_fail");
+    try wl(out, "write_low:");
+    try wl(out, "  %low_result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 %low)");
+    try wl(out, "  ret %kizu.error.void %low_result");
+    try wl(out, "slash_fail:");
+    try wl(out, "  ret %kizu.error.void %slash");
+    try wl(out, "x_fail:");
+    try wl(out, "  ret %kizu.error.void %x");
+    try wl(out, "high_fail:");
+    try wl(out, "  ret %kizu.error.void %high_result");
+    try wl(out, "}");
+    try nl(out);
+    try wl(out, "define %kizu.error.void @kizu_run_string_append_escaped_byte(%kizu.owned %text, i8 %byte) {");
+    try wl(out, "entry:");
+    try wl(out, "  %is_quote = icmp eq i8 %byte, 34");
+    try wl(out, "  br i1 %is_quote, label %quote, label %check_backslash");
+    try wl(out, "quote:");
+    try wl(out, "  %quote_result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 34)");
+    try wl(out, "  ret %kizu.error.void %quote_result");
+    try wl(out, "check_backslash:");
+    try wl(out, "  %is_backslash = icmp eq i8 %byte, 92");
+    try wl(out, "  br i1 %is_backslash, label %backslash, label %check_newline");
+    try wl(out, "backslash:");
+    try wl(out, "  %backslash_result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 92)");
+    try wl(out, "  ret %kizu.error.void %backslash_result");
+    try wl(out, "check_newline:");
+    try wl(out, "  %is_newline = icmp eq i8 %byte, 10");
+    try wl(out, "  br i1 %is_newline, label %newline, label %check_return");
+    try wl(out, "newline:");
+    try wl(out, "  %newline_result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 110)");
+    try wl(out, "  ret %kizu.error.void %newline_result");
+    try wl(out, "check_return:");
+    try wl(out, "  %is_return = icmp eq i8 %byte, 13");
+    try wl(out, "  br i1 %is_return, label %return_byte, label %check_tab");
+    try wl(out, "return_byte:");
+    try wl(out, "  %return_result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 114)");
+    try wl(out, "  ret %kizu.error.void %return_result");
+    try wl(out, "check_tab:");
+    try wl(out, "  %is_tab = icmp eq i8 %byte, 9");
+    try wl(out, "  br i1 %is_tab, label %tab, label %check_printable");
+    try wl(out, "tab:");
+    try wl(out, "  %tab_result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 116)");
+    try wl(out, "  ret %kizu.error.void %tab_result");
+    try wl(out, "check_printable:");
+    try wl(out, "  %ge_space = icmp uge i8 %byte, 32");
+    try wl(out, "  %le_tilde = icmp ule i8 %byte, 126");
+    try wl(out, "  %printable = and i1 %ge_space, %le_tilde");
+    try wl(out, "  br i1 %printable, label %plain, label %hex");
+    try wl(out, "plain:");
+    try wl(out, "  %plain_result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 %byte)");
+    try wl(out, "  ret %kizu.error.void %plain_result");
+    try wl(out, "hex:");
+    try wl(out, "  %hex_result = call %kizu.error.void @kizu_run_string_append_hex_escape(%kizu.owned %text, i8 %byte)");
+    try wl(out, "  ret %kizu.error.void %hex_result");
+    try wl(out, "}");
+    try nl(out);
+    try wl(out, "define %kizu.error.void @kizu_run_string_append_bytes_literal(%kizu.owned %text, %kizu.slice.u8 %bytes) {");
+    try wl(out, "entry:");
+    try wl(out, "  %open = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 34)");
+    try wl(out, "  %open_ok = extractvalue %kizu.error.void %open, 0");
+    try wl(out, "  br i1 %open_ok, label %loop, label %open_fail");
+    try wl(out, "loop:");
+    try wl(out, "  %ptr = extractvalue %kizu.slice.u8 %bytes, 0");
+    try wl(out, "  %len = extractvalue %kizu.slice.u8 %bytes, 1");
+    try wl(out, "  br label %loop_head");
+    try wl(out, "loop_head:");
+    try wl(out, "  %i = phi i64 [ 0, %loop ], [ %next, %step_ok ]");
+    try wl(out, "  %done = icmp sge i64 %i, %len");
+    try wl(out, "  br i1 %done, label %close, label %step");
+    try wl(out, "step:");
+    try wl(out, "  %byte_ptr = getelementptr i8, ptr %ptr, i64 %i");
+    try wl(out, "  %byte = load i8, ptr %byte_ptr");
+    try wl(out, "  %step_result = call %kizu.error.void @kizu_run_string_append_escaped_byte(%kizu.owned %text, i8 %byte)");
+    try wl(out, "  %step_ok_flag = extractvalue %kizu.error.void %step_result, 0");
+    try wl(out, "  br i1 %step_ok_flag, label %step_ok, label %step_fail");
+    try wl(out, "step_ok:");
+    try wl(out, "  %next = add i64 %i, 1");
+    try wl(out, "  br label %loop_head");
+    try wl(out, "close:");
+    try wl(out, "  %close_result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 34)");
+    try wl(out, "  ret %kizu.error.void %close_result");
+    try wl(out, "open_fail:");
+    try wl(out, "  ret %kizu.error.void %open");
+    try wl(out, "step_fail:");
+    try wl(out, "  ret %kizu.error.void %step_result");
     try wl(out, "}");
     try nl(out);
     return;
@@ -871,6 +1058,18 @@ fn render_one_instruction(
     if op == io_blocking {
         try render_io_blocking(out, code, index);
     }
+    let page_allocator = codegen::code_op_page_allocator();
+    if op == page_allocator {
+        try render_page_allocator(out, code, index);
+    }
+    let string_new = codegen::code_op_string_new();
+    if op == string_new {
+        try render_string_new(out, code, index);
+    }
+    let string_as_bytes = codegen::code_op_string_as_bytes();
+    if op == string_as_bytes {
+        try render_string_as_bytes(out, code, index);
+    }
     let try_fs_read = codegen::code_op_try_fs_read();
     if op == try_fs_read {
         try render_try_fs_read(out, code, index, abi);
@@ -878,6 +1077,22 @@ fn render_one_instruction(
     let try_io_write = codegen::code_op_try_io_write();
     if op == try_io_write {
         try render_try_io_write(out, code, index, abi);
+    }
+    let try_string_append_i64 = codegen::code_op_try_string_append_i64();
+    if op == try_string_append_i64 {
+        try render_try_string_append_i64(out, code, index, abi);
+    }
+    let try_string_append_bool = codegen::code_op_try_string_append_bool();
+    if op == try_string_append_bool {
+        try render_try_string_append_bool(out, code, index, abi);
+    }
+    let try_string_append_bytes_literal = codegen::code_op_try_string_append_bytes_literal();
+    if op == try_string_append_bytes_literal {
+        try render_try_string_append_bytes_literal(out, code, index, abi);
+    }
+    let try_string_append_byte = codegen::code_op_try_string_append_byte();
+    if op == try_string_append_byte {
+        try render_try_string_append_byte(out, code, index, abi);
     }
     let if_begin = codegen::code_op_if_begin();
     if op == if_begin {
@@ -2106,6 +2321,152 @@ fn render_io_blocking(
     return;
 }
 
+fn render_page_allocator(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try wl(out, " = call %kizu.owned @kizu_rt_mem_page_allocator()");
+    return;
+}
+
+fn render_string_new(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let allocator = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call %kizu.owned @kizu_rt_string_new(%kizu.owned %v");
+    try wi(out, allocator);
+    try wl(out, ")");
+    return;
+}
+
+fn render_string_as_bytes(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let text_value = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %v");
+    try wi(out, text_value);
+    try wl(out, ")");
+    return;
+}
+
+fn render_try_string_append_i64(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let text_value = try code.get(index + 1);
+    let value = try code.get(index + 2);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_run_string_append_i64(%kizu.owned %v");
+    try wi(out, text_value);
+    try w(out, ", i64 %v");
+    try wi(out, value);
+    try wl(out, ")");
+    try render_try_error_void_tail(out, index, abi);
+    return;
+}
+
+fn render_try_string_append_bool(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let text_value = try code.get(index + 1);
+    let value = try code.get(index + 2);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_run_string_append_bool(%kizu.owned %v");
+    try wi(out, text_value);
+    try w(out, ", i1 %v");
+    try wi(out, value);
+    try wl(out, ")");
+    try render_try_error_void_tail(out, index, abi);
+    return;
+}
+
+fn render_try_string_append_bytes_literal(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let text_value = try code.get(index + 1);
+    let value = try code.get(index + 2);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_run_string_append_bytes_literal(%kizu.owned %v");
+    try wi(out, text_value);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, value);
+    try wl(out, ")");
+    try render_try_error_void_tail(out, index, abi);
+    return;
+}
+
+fn render_try_string_append_byte(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let text_value = try code.get(index + 1);
+    let value = try code.get(index + 2);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_byte = trunc i64 %v");
+    try wi(out, value);
+    try wl(out, " to i8");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %v");
+    try wi(out, text_value);
+    try w(out, ", i8 %tc");
+    try wi(out, index);
+    try wl(out, "_byte)");
+    try render_try_error_void_tail(out, index, abi);
+    return;
+}
+
+fn render_try_error_void_tail(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    return;
+}
+
 // render_try_fs_read emits 'try std::fs::read_file(io, path)': build the path slice
 // from its CONST_STR global, call the runtime read, extract the ok flag, and branch
 // into a fail block that propagates the error or a cont block that extracts the read
@@ -2778,6 +3139,34 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let try_io_write = codegen::code_op_try_io_write();
     if op == try_io_write {
         return index + 4;
+    }
+    let page_allocator = codegen::code_op_page_allocator();
+    if op == page_allocator {
+        return index + 2;
+    }
+    let string_new = codegen::code_op_string_new();
+    if op == string_new {
+        return index + 3;
+    }
+    let string_as_bytes = codegen::code_op_string_as_bytes();
+    if op == string_as_bytes {
+        return index + 3;
+    }
+    let try_string_append_i64 = codegen::code_op_try_string_append_i64();
+    if op == try_string_append_i64 {
+        return index + 3;
+    }
+    let try_string_append_bool = codegen::code_op_try_string_append_bool();
+    if op == try_string_append_bool {
+        return index + 3;
+    }
+    let try_string_append_bytes_literal = codegen::code_op_try_string_append_bytes_literal();
+    if op == try_string_append_bytes_literal {
+        return index + 3;
+    }
+    let try_string_append_byte = codegen::code_op_try_string_append_byte();
+    if op == try_string_append_byte {
+        return index + 3;
     }
     let struct_lit = codegen::code_op_struct_lit();
     if op == struct_lit {

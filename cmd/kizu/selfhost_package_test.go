@@ -879,6 +879,8 @@ func assertBackendWrapperClosureExternalCalleePolicy(
 	for _, fragment := range []string{
 		"std::mem::equal_bytes(callee_text, \"codegen::lower_run_program\")",
 		"std::mem::equal_bytes(callee_text, \"hosted::emit_run_codegen_artifact\")",
+		"std::mem::equal_bytes(callee_text, \"code_render::render_run_ast_artifact\")",
+		"std::mem::equal_bytes(callee_text, \"hosted::emit_rendered_run_artifact\")",
 	} {
 		if !strings.Contains(backendPolicyBody, fragment) {
 			t.Fatalf("backend wrapper closure allowlist missing %q", fragment)
@@ -1902,8 +1904,8 @@ func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
 func assertExecuteRoutesRunThroughCodegenIR(t *testing.T, execute string) {
 	t.Helper()
 	requiredExecute := []string{
-		"backend::lower_run_codegen_program(",
-		"backend::emit_run_codegen_artifact(",
+		"backend::render_run_codegen_artifact(",
+		"backend::emit_rendered_run_artifact(",
 		"artifact.bytes > 0 and artifact.metadata_bytes > 0",
 		"backend::run_artifact_ll_path(allocator, path)",
 		"backend::run_artifact_executable_path(allocator, path)",
@@ -2851,8 +2853,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/cli/execute.kizu": {
 		"pub fn run_file_cli(",
 		"pub fn test_file_cli(",
-		"backend::lower_run_codegen_program(",
-		"backend::emit_run_codegen_artifact(",
+		"backend::render_run_codegen_artifact(",
+		"backend::emit_rendered_run_artifact(",
 		"backend::lower_test_executable(",
 	},
 	"../../selfhost/src/backend/executable.kizu": {
@@ -3229,7 +3231,9 @@ func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm str
 			return
 		}
 		if name == "selfhost::backend::lower_run_codegen_program" ||
-			name == "selfhost::backend::emit_run_codegen_artifact" {
+			name == "selfhost::backend::emit_run_codegen_artifact" ||
+			name == "selfhost::backend::render_run_codegen_artifact" ||
+			name == "selfhost::backend::emit_rendered_run_artifact" {
 			assertBackendWrapperCatalogSignatureOrigin(t, selected, fact)
 			return
 		}
@@ -3948,12 +3952,30 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 // hostedExecutableBodyContractFragments returns representative generic body IR
 // contract fragments required before accepting hosted executable IR.
 func hostedExecutableBodyContractFragments() []string {
+	fragments := hostedExecutableCommonBodyContractFragments()
+	fragments = append(fragments, hostedExecutableRunBodyContractFragments()...)
+	fragments = append(fragments, hostedExecutableTestBodyContractFragments()...)
+	return fragments
+}
+
+// hostedExecutableCommonBodyContractFragments returns shared body checks.
+func hostedExecutableCommonBodyContractFragments() []string {
 	return []string{
 		"ir_contract::require_body_call(",
 		`"selfhost::cli::execute::run_file_cli"`,
 		`"check::checked_ast_node"`,
-		`"backend::lower_run_codegen_program"`,
+		`"backend::render_run_codegen_artifact"`,
+		`"backend::emit_rendered_run_artifact"`,
+		`"code_render::render_run_ast_artifact"`,
+		`"hosted::emit_rendered_run_artifact"`,
+		`"selfhost::backend::lower_run_codegen_program"`,
 		`"codegen::stdout_payload"`,
+	}
+}
+
+// hostedExecutableRunBodyContractFragments returns run-codegen body checks.
+func hostedExecutableRunBodyContractFragments() []string {
+	return []string{
 		`"selfhost::ir::codegen::lower_run_program"`,
 		`"codegen::lower_run_program"`,
 		`"lower_run_ast"`,
@@ -4009,6 +4031,12 @@ func hostedExecutableBodyContractFragments() []string {
 		`"selfhost::backend::hosted::render_return_void_llvm"`,
 		`"append_hosted_return_body"`,
 		`"codegen::metadata_for_program"`,
+	}
+}
+
+// hostedExecutableTestBodyContractFragments returns test executable body checks.
+func hostedExecutableTestBodyContractFragments() []string {
+	return []string{
 		`"selfhost::cli::execute::test_file_cli"`,
 		`"backend::lower_test_executable"`,
 		`"selfhost::backend::executable::lower_test_executable"`,
