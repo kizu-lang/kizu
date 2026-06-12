@@ -35,11 +35,13 @@ func linkRunParityExecutableWithHost(
 	hostLLPath string,
 	exePath string,
 ) error {
+	storageLLPath := filepath.Join(filepath.Dir(hostLLPath), "selfhost.storage.ll")
 	compile := exec.Command(
 		clang,
 		"-Wno-override-module",
 		"-fno-integrated-as",
 		llPath,
+		storageLLPath,
 		hostLLPath,
 		"selfhost/runtime/selfhost.hosted.c",
 		"-o",

@@ -60,6 +60,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderMultilineStringCases()...)
 	cases = append(cases, runRenderSliceParamCases()...)
 	cases = append(cases, runRenderIoWriteCases()...)
+	cases = append(cases, runRenderStringBuilderCases()...)
 	cases = append(cases, runRenderStructCases()...)
 	cases = append(cases, runRenderEnumMatchCases()...)
 	cases = append(cases, runRenderVarStructCases()...)
@@ -445,6 +446,33 @@ func runRenderIoWriteCases() []runRenderCase {
 	}
 }
 
+// runRenderStringBuilderCases covers the bounded std::string::String and std::fmt
+// helper shape used by examples/std_fmt.kizu.
+func runRenderStringBuilderCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "std_fmt_string_builder",
+			source: "fn main() -> !void {\n    let allocator = std::mem::page_allocator();\n" +
+				"    var text = std::string::String(allocator);\n\n" +
+				"    try std::fmt::append_i64(text, 0);\n" +
+				"    try text.append_byte(cast<u8>(32));\n" +
+				"    try std::fmt::append_i64(text, (0 - 9223372036854775807) - 1);\n" +
+				"    try text.append_byte(cast<u8>(32));\n" +
+				"    try std::fmt::append_i64(text, 42);\n" +
+				"    try text.append_byte(cast<u8>(32));\n" +
+				"    try std::fmt::append_bool(text, true);\n" +
+				"    try text.append_byte(cast<u8>(32));\n" +
+				"    try std::fmt::append_bool(text, false);\n" +
+				"    try text.append_byte(cast<u8>(32));\n" +
+				"    try std::fmt::append_bytes_literal(text, \"token\");\n" +
+				"    try text.append_byte(cast<u8>(32));\n" +
+				"    try std::fmt::append_bytes_literal(text, \"a\\b\");\n\n" +
+				"    let bytes = text.as_bytes();\n    print(bytes);\n    return;\n}\n",
+			wantStdout: "0 -9223372036854775808 42 true false \"token\" \"a\\\\b\"\n",
+		},
+	}
+}
+
 // runRenderStructCases is the struct-scalarization corpus (let-bound struct
 // literals, scalar and slice field reads, nested struct fields, and a field
 // read as a user-call argument).
@@ -628,6 +656,7 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 		"-Wno-override-module",
 		"-fno-integrated-as",
 		llPath,
+		"selfhost/runtime/selfhost.storage.ll",
 		"selfhost/runtime/selfhost.host.ll",
 		"selfhost/runtime/selfhost.hosted.c",
 		"-o",

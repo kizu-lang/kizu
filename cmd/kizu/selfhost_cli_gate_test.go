@@ -360,7 +360,8 @@ func selfhostRunArtifactExpectations(
 			path: llPath,
 			contains: []string{
 				`source_filename = "` + sourcePath + `"`,
-				"@.kizu.run.stdout",
+				"@.kizu.run.s0",
+				"@kizu_rt_io_write_stdout",
 			},
 			rejects: []string{
 				"selfhost/tests/cli/run_hello.kizu",

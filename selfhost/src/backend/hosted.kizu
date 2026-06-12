@@ -33,6 +33,10 @@ pub fn run_host_runtime_artifact() -> []u8 {
     return "target/selfhost/selfhost.host.ll";
 }
 
+pub fn run_storage_runtime_artifact() -> []u8 {
+    return "target/selfhost/selfhost.storage.ll";
+}
+
 pub fn run_linker_output_flag() -> []u8 {
     return "-o";
 }
@@ -234,6 +238,52 @@ pub fn emit_run_codegen_artifact(
     };
 }
 
+pub fn emit_rendered_run_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8,
+    artifact: &[]u8,
+    artifact_len: i64
+) -> !data::RunArtifact {
+    try ensure_hosted_artifact_dir(io, run_artifact_dir());
+
+    var ll_path = try artifact_path(
+        allocator,
+        run_artifact_path_prefix(),
+        source_path,
+        artifact_ll_suffix()
+    );
+    var metadata_path = try artifact_path(
+        allocator,
+        run_artifact_path_prefix(),
+        source_path,
+        artifact_metadata_suffix()
+    );
+    let ll_path_view = ll_path.as_bytes();
+    let metadata_path_view = metadata_path.as_bytes();
+    let metadata_hosted = rendered_run_metadata_executable();
+    let module_len = try write_backend_bytes(
+        io,
+        ll_path_view,
+        artifact,
+        artifact_len
+    );
+    let metadata_len = try write_run_metadata(
+        allocator,
+        io,
+        source_path,
+        ll_path_view,
+        metadata_path_view,
+        &metadata_hosted
+    );
+    ll_path.deinit();
+    metadata_path.deinit();
+    return data::RunArtifact {
+        bytes: module_len,
+        metadata_bytes: metadata_len
+    };
+}
+
 pub fn run_artifact_ll_path(
     allocator: Allocator,
     source_path: []u8
@@ -266,8 +316,8 @@ pub fn link_run_artifact(
         8,
         run_linker_tool(),
         run_linker_llvm_module_flag(),
-        run_linker_external_assembler_flag(),
         ll_path,
+        run_storage_runtime_artifact(),
         run_host_runtime_artifact(),
         run_host_runtime_source(),
         run_linker_output_flag(),
@@ -360,6 +410,20 @@ fn hosted_executable_metadata_from_codegen(
         output_payload: "",
         append_newline: false,
         exit_code: template.exit_code
+    };
+}
+
+fn rendered_run_metadata_executable() -> data::HostedExecutable {
+    let codegen_ir = codegen::metadata_line();
+    return data::HostedExecutable {
+        comment: "kizu codegen run artifact ll v0",
+        entry: "kizu_run_main",
+        global: "",
+        codegen_ir: codegen_ir,
+        output_stream: data::HostedOutputStream::None,
+        output_payload: "",
+        append_newline: false,
+        exit_code: 0
     };
 }
 

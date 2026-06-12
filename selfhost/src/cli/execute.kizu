@@ -27,35 +27,36 @@ pub fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     if !(try check::checked_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
         return std::process::exit_code(1);
     }
-    var run_codegen_scratch = std::string::String(allocator);
-    defer run_codegen_scratch.deinit();
-    let program = try backend::lower_run_codegen_program(
+    var module = try backend::render_run_codegen_artifact(
+        allocator,
+        path,
         file_text,
         parsed.ast,
-        parsed.root,
-        &var run_codegen_scratch
+        parsed.root
     );
-    if backend::run_codegen_supported(&program) {
-        let artifact = try backend::emit_run_codegen_artifact(
-            allocator,
-            io,
-            path,
-            program
-        );
-        if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
-            var ll_path = try backend::run_artifact_ll_path(allocator, path);
-            defer ll_path.deinit();
-            var executable_path = try backend::run_artifact_executable_path(allocator, path);
-            defer executable_path.deinit();
-            let ll_path_bytes = ll_path.as_bytes();
-            let executable_path_bytes = executable_path.as_bytes();
-            let link_code = try backend::link_run_artifact(ll_path_bytes, executable_path_bytes);
-            if link_code != 0 {
-                try output::usage(allocator, io);
-                return std::process::exit_code(64);
-            }
-            return try backend::execute_run_artifact(executable_path_bytes);
+    defer module.deinit();
+    let module_bytes = module.as_bytes();
+    let module_len = module.len();
+    let artifact = try backend::emit_rendered_run_artifact(
+        allocator,
+        io,
+        path,
+        module_bytes,
+        module_len
+    );
+    if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
+        var ll_path = try backend::run_artifact_ll_path(allocator, path);
+        defer ll_path.deinit();
+        var executable_path = try backend::run_artifact_executable_path(allocator, path);
+        defer executable_path.deinit();
+        let ll_path_bytes = ll_path.as_bytes();
+        let executable_path_bytes = executable_path.as_bytes();
+        let link_code = try backend::link_run_artifact(ll_path_bytes, executable_path_bytes);
+        if link_code != 0 {
+            try output::usage(allocator, io);
+            return std::process::exit_code(64);
         }
+        return try backend::execute_run_artifact(executable_path_bytes);
     }
     try output::unsupported_run_codegen(allocator, io);
     return std::process::exit_code(64);

@@ -3524,6 +3524,36 @@ pub fn code_op_try_fs_read() -> i64 {
     return 35;
 }
 
+// PAGE_ALLOCATOR / STRING_NEW / STRING_AS_BYTES / TRY_STRING_APPEND_* cover the
+// bounded std::string::String builder shape used by hosted run artifacts.
+pub fn code_op_page_allocator() -> i64 {
+    return 39;
+}
+
+pub fn code_op_string_new() -> i64 {
+    return 92;
+}
+
+pub fn code_op_string_as_bytes() -> i64 {
+    return 93;
+}
+
+pub fn code_op_try_string_append_i64() -> i64 {
+    return 94;
+}
+
+pub fn code_op_try_string_append_bool() -> i64 {
+    return 95;
+}
+
+pub fn code_op_try_string_append_bytes_literal() -> i64 {
+    return 96;
+}
+
+pub fn code_op_try_string_append_byte() -> i64 {
+    return 97;
+}
+
 // Structured control-flow opcodes. They carry fixed arity so the linear tape
 // walk (tape_record_end) skips them like any other record; the renderer emits
 // matching LLVM labels from the IF_BEGIN tape index (IF_ELSE/IF_END carry that
@@ -5727,8 +5757,9 @@ fn lower_code_let(
 }
 
 // lower_code_var_binding routes a 'var' init by its kind: an i64 init takes an
-// i64 slot, a struct-literal init scalarizes into per-field slots, and any
-// other kind (bool/str/slice) is not owned by the tape yet.
+// i64 slot, an owned runtime handle is bound directly for method mutation, a
+// struct-literal init scalarizes into per-field slots, and any other kind
+// (bool/str/slice) is not owned by the tape yet.
 fn lower_code_var_binding(
     text: []u8,
     name_start: i64,
@@ -5746,6 +5777,10 @@ fn lower_code_var_binding(
     if init_kind == kind_i64 {
         return try bind_code_var(text, name_start, name_end, init_value_id, code, local_starts, local_ends, local_values, next_value);
     }
+    let kind_owned = code_kind_owned();
+    if init_kind == kind_owned {
+        return try bind_code_owned_local(name_start, name_end, init_value_id, local_starts, local_ends, local_values, next_value);
+    }
     let record_base = code_kind_struct_base();
     if init_kind < record_base {
         return code_eval_unsupported(next_value);
@@ -5757,6 +5792,21 @@ fn lower_code_var_binding(
         return code_eval_unsupported(next_value);
     }
     return try bind_code_var_struct(text, name_start, name_end, record_pos, code, kinds, local_starts, local_ends, local_values, next_value);
+}
+
+fn bind_code_owned_local(
+    name_start: i64,
+    name_end: i64,
+    value_id: i64,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    try local_starts.append(name_start);
+    try local_ends.append(name_end);
+    try local_values.append(value_id);
+    return code_eval_value(value_id, next_value);
 }
 
 // bind_code_var_struct scalarizes a 'var <name> = <struct literal>' binding:
@@ -6567,6 +6617,19 @@ fn lower_code_try_call(
     next_value: i64
 ) -> !CodeEval {
     let callee_text = ast_node_text(text, ast, callee);
+    if std::mem::equal_bytes(callee_text, "std::fmt::append_i64") {
+        return try lower_code_try_string_append_i64(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if std::mem::equal_bytes(callee_text, "std::fmt::append_bool") {
+        return try lower_code_try_string_append_bool(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if std::mem::equal_bytes(callee_text, "std::fmt::append_bytes_literal") {
+        return try lower_code_try_string_append_bytes_literal(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    let append_byte_eval = try lower_code_try_string_append_byte_method(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if append_byte_eval.ok {
+        return append_byte_eval;
+    }
     if std::mem::equal_bytes(callee_text, "std::io::write_stdout") {
         return try lower_code_try_io_write_stdout(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
@@ -6584,6 +6647,183 @@ fn lower_code_try_call(
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
+}
+
+fn lower_code_try_string_append_i64(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let kind_i64 = code_kind_i64();
+    let op = code_op_try_string_append_i64();
+    return try lower_code_try_string_append_two_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, kind_i64, op, next_value);
+}
+
+fn lower_code_try_string_append_bool(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let kind_bool = code_kind_bool();
+    let op = code_op_try_string_append_bool();
+    return try lower_code_try_string_append_two_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, kind_bool, op, next_value);
+}
+
+fn lower_code_try_string_append_bytes_literal(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let kind_slice = code_kind_slice();
+    let op = code_op_try_string_append_bytes_literal();
+    return try lower_code_try_string_append_two_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, kind_slice, op, next_value);
+}
+
+fn lower_code_try_string_append_two_args(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    arg_kind: i64,
+    op: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 2 {
+        return code_eval_unsupported(next_value);
+    }
+    let receiver_arg = try ast.child_at(args, 0);
+    let receiver_eval = try lower_code_expr(text, ast, decls, receiver_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !receiver_eval.ok {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let kind_owned = code_kind_owned();
+    let receiver_kind = try kinds.get(receiver_eval.value_id);
+    if receiver_kind != kind_owned {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let value_arg = try ast.child_at(args, 1);
+    let value_eval = try lower_code_expr(text, ast, decls, value_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+    if !value_eval.ok {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let stored_eval = try lower_code_arg_slice(text, code, kinds, value_eval.value_id, value_eval.next);
+    let stored_kind = try kinds.get(stored_eval.value_id);
+    if stored_kind != arg_kind {
+        return code_eval_unsupported(stored_eval.next);
+    }
+    try code.append(op);
+    try code.append(receiver_eval.value_id);
+    try code.append(stored_eval.value_id);
+    return code_eval_value(0, stored_eval.next);
+}
+
+fn lower_code_try_string_append_byte_method(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(callee);
+    return match node.data {
+        FieldExpr(field_expr) => try lower_code_try_string_append_byte_field(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_try_string_append_byte_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if namespace {
+        return code_eval_unsupported(next_value);
+    }
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let method = ast_node_text(text, ast, name);
+    if !std::mem::equal_bytes(method, "append_byte") {
+        return code_eval_unsupported(next_value);
+    }
+    let receiver_eval = try lower_code_expr(text, ast, decls, receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !receiver_eval.ok {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let kind_owned = code_kind_owned();
+    let receiver_kind = try kinds.get(receiver_eval.value_id);
+    if receiver_kind != kind_owned {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let value_arg = try ast.child_at(args, 0);
+    let value_eval = try lower_code_expr(text, ast, decls, value_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+    if !value_eval.ok {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let value_kind = try kinds.get(value_eval.value_id);
+    let i64_like = try code_operand_is_i64_like(code, value_kind);
+    if !i64_like {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let op_append_byte = code_op_try_string_append_byte();
+    try code.append(op_append_byte);
+    try code.append(receiver_eval.value_id);
+    try code.append(value_eval.value_id);
+    return code_eval_value(0, value_eval.next);
 }
 
 // lower_code_try_io_write_stdout / lower_code_try_io_write_stderr bind their
@@ -7011,6 +7251,7 @@ fn lower_code_expr(
         String(string_node) => try lower_code_string(text, ast, node_id, code, kinds, next_value),
         Bool(bool_node) => try lower_code_bool(text, ast, node_id, code, kinds, next_value),
         Var(var_node) => try lower_code_var(text, ast, node_id, code, kinds, local_starts, local_ends, local_values, locals_base, next_value),
+        CastExpr(cast_expr) => try lower_code_cast(text, ast, decls, cast_expr.type_node, cast_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Prefix(prefix_node) => try lower_code_prefix(text, ast, decls, prefix_node.op, prefix_node.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Binary(binary) => try lower_code_binary(text, ast, decls, binary.op, binary.left, binary.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Call(call_node) => try lower_code_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
@@ -7361,6 +7602,31 @@ fn lower_code_var(
         return try emit_code_var_load(slot, code, kinds, next_value);
     }
     return code_eval_value(bound, next_value);
+}
+
+// lower_code_cast keeps checked casts as their operand value. The
+// frontend/checker owns target validity; typed consumers validate the operand
+// kind and truncate where needed, such as append_byte's i8 boundary.
+fn lower_code_cast(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    type_node: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    return code_eval_value(eval.value_id, eval.next);
 }
 
 // lower_code_struct_literal scalarizes a struct literal: every field initializer
@@ -8124,8 +8390,18 @@ fn lower_code_call(
     next_value: i64
 ) -> !CodeEval {
     let callee_text = ast_node_text(text, ast, callee);
+    if std::mem::equal_bytes(callee_text, "std::mem::page_allocator") {
+        return try lower_code_page_allocator(args, code, kinds, next_value);
+    }
     if std::mem::equal_bytes(callee_text, "std::io::blocking") {
         return try lower_code_io_blocking(args, code, kinds, next_value);
+    }
+    if std::mem::equal_bytes(callee_text, "std::string::String") {
+        return try lower_code_string_new(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    let as_bytes_eval = try lower_code_string_as_bytes_method(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if as_bytes_eval.ok {
+        return as_bytes_eval;
     }
     // The union-constructor probe resolves the callee against the union
     // declarations without touching the tape; only a resolved constructor
@@ -8146,6 +8422,130 @@ fn lower_code_call(
         return code_eval_unsupported(next_value);
     }
     return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, callee_kind, next_value);
+}
+
+fn lower_code_page_allocator(
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let op_page = code_op_page_allocator();
+    try code.append(op_page);
+    try code.append(next_value);
+    let kind_owned = code_kind_owned();
+    try kinds.append(kind_owned);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+fn lower_code_string_new(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let allocator_arg = try ast.child_at(args, 0);
+    let allocator_eval = try lower_code_expr(text, ast, decls, allocator_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !allocator_eval.ok {
+        return code_eval_unsupported(allocator_eval.next);
+    }
+    let kind_owned = code_kind_owned();
+    let allocator_kind = try kinds.get(allocator_eval.value_id);
+    if allocator_kind != kind_owned {
+        return code_eval_unsupported(allocator_eval.next);
+    }
+    let op_string_new = code_op_string_new();
+    try code.append(op_string_new);
+    try code.append(allocator_eval.next);
+    try code.append(allocator_eval.value_id);
+    try kinds.append(kind_owned);
+    let result_value = allocator_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+fn lower_code_string_as_bytes_method(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(callee);
+    return match node.data {
+        FieldExpr(field_expr) => try lower_code_string_as_bytes_field(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_string_as_bytes_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if namespace {
+        return code_eval_unsupported(next_value);
+    }
+    if args.len != 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let method = ast_node_text(text, ast, name);
+    if !std::mem::equal_bytes(method, "as_bytes") {
+        return code_eval_unsupported(next_value);
+    }
+    let receiver_eval = try lower_code_expr(text, ast, decls, receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !receiver_eval.ok {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let kind_owned = code_kind_owned();
+    let receiver_kind = try kinds.get(receiver_eval.value_id);
+    if receiver_kind != kind_owned {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let op_as_bytes = code_op_string_as_bytes();
+    try code.append(op_as_bytes);
+    try code.append(receiver_eval.next);
+    try code.append(receiver_eval.value_id);
+    let kind_slice = code_kind_slice();
+    try kinds.append(kind_slice);
+    let result_value = receiver_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
 }
 
 // code_callee_union_tag resolves a call's callee against the union declarations
