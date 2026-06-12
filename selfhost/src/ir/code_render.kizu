@@ -61,6 +61,7 @@ pub fn render_run_ast_artifact(
     var local_ends = std::array::Array<i64>(allocator);
     var local_values = std::array::Array<i64>(allocator);
     var args_scratch = std::array::Array<i64>(allocator);
+    var defer_records = std::array::Array<i64>(allocator);
     let eval = try codegen::lower_code_module(
         text,
         ast,
@@ -70,7 +71,8 @@ pub fn render_run_ast_artifact(
         &var local_starts,
         &var local_ends,
         &var local_values,
-        &var args_scratch
+        &var args_scratch,
+        &var defer_records
     );
     if !eval.ok {
         return error("render run artifact: run source lowering not supported");
@@ -167,6 +169,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try nl(out);
     try wl(out, "%kizu.slice.u8 = type { ptr, i64 }");
     try wl(out, "%kizu.owned = type { ptr }");
+    try wl(out, "%kizu.handle = type { ptr, i64 }");
     try wl(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
@@ -182,6 +185,22 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned, i8)");
     try wl(out, "declare %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned)");
+    try wl(out, "declare i64 @kizu_rt_string_len(%kizu.owned)");
+    try wl(out, "declare void @kizu_rt_string_deinit(%kizu.owned)");
+    try wl(out, "declare %kizu.owned @kizu_rt_array_new(%kizu.owned, i64)");
+    try wl(out, "declare %kizu.error.void @kizu_rt_array_append(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare i64 @kizu_rt_array_len(%kizu.owned)");
+    try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned, i64)");
+    try wl(out, "declare void @kizu_rt_array_deinit(%kizu.owned)");
+    try wl(out, "declare %kizu.owned @kizu_rt_map_new(%kizu.owned)");
+    try wl(out, "declare %kizu.error.void @kizu_rt_map_insert(%kizu.owned, %kizu.slice.u8, i64)");
+    try wl(out, "declare i1 @kizu_rt_map_contains(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare void @kizu_rt_map_deinit(%kizu.owned)");
+    try wl(out, "declare %kizu.owned @kizu_rt_arena_new(%kizu.owned, i64)");
+    try wl(out, "declare %kizu.handle @kizu_rt_arena_add(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned, %kizu.handle)");
+    try wl(out, "declare void @kizu_rt_arena_deinit(%kizu.owned)");
     try wl(out, "declare i64 @kizu_rt_process_exit_code(i64)");
     try wl(out, "declare void @kizu_rt_trap(%kizu.slice.u8)");
     try wl(out, "declare void @kizu_host_init(i32, ptr)");
@@ -563,10 +582,14 @@ fn render_function_or_skip(
 ) -> !i64 {
     let op = try code.get(index);
     let func_begin = codegen::code_op_func_begin();
-    if op != func_begin {
-        return try tape_record_end(code, index);
+    if op == func_begin {
+        return try render_one_function(out, text, code, kinds, index);
     }
-    return try render_one_function(out, text, code, kinds, index);
+    let method_func_begin = codegen::code_op_method_func_begin();
+    if op == method_func_begin {
+        return try render_one_method_function(out, text, code, kinds, index);
+    }
+    return try tape_record_end(code, index);
 }
 
 // render_one_function renders the function whose FUNC_BEGIN is at func_index and
@@ -593,6 +616,27 @@ fn render_one_function(
         return try render_main_function(out, text, code, kinds, body_start, func_end);
     }
     return try render_user_function(out, text, code, kinds, name, param_base, param_count, ret_kind, body_start, func_end);
+}
+
+fn render_one_method_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    func_index: i64
+) -> !i64 {
+    let type_start = try code.get(func_index + 1);
+    let type_end = try code.get(func_index + 2);
+    let name_start = try code.get(func_index + 3);
+    let name_end = try code.get(func_index + 4);
+    let param_count = try code.get(func_index + 5);
+    let ret_kind = try code.get(func_index + 6);
+    let param_base = try code.get(func_index + 7);
+    let type_name = text[type_start..type_end];
+    let name = text[name_start..name_end];
+    let body_start = func_index + 8;
+    let func_end = try tape_function_end(code, body_start);
+    return try render_user_method_function(out, text, code, kinds, type_name, name, param_base, param_count, ret_kind, body_start, func_end);
 }
 
 // The return ABI selects how returns and try-propagations render: MAIN is the
@@ -694,6 +738,38 @@ fn render_user_function(
     return func_end + 1;
 }
 
+fn render_user_method_function(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    type_name: []u8,
+    name: []u8,
+    param_base: i64,
+    param_count: i64,
+    ret_kind: i64,
+    body_start: i64,
+    func_end: i64
+) -> !i64 {
+    try render_user_method_define_head(out, code, type_name, name, ret_kind);
+    try w(out, "(");
+    try render_param_list(out, code, kinds, param_base, param_count, 0);
+    try wl(out, ") {");
+    try wl(out, "entry:");
+    let prints = try body_has_print(code, body_start, func_end);
+    if prints {
+        try wl(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    }
+    try render_var_allocas(out, code, body_start, func_end);
+    let abi = user_ret_abi(ret_kind);
+    try render_body(out, text, code, kinds, body_start, func_end, abi);
+    try render_user_tail(out, code, abi, ret_kind);
+    try wl(out, "}");
+    try nl(out);
+    try render_user_method_bridge(out, code, kinds, type_name, name, param_base, param_count, ret_kind);
+    return func_end + 1;
+}
+
 // render_user_define_head writes the 'define <ret> @kizu_run_user_<name>' opener
 // whose return type follows the declared kind: '%kizu.error.void' for '!void',
 // '%kizu.error.i64' for '!i64', and 'i64' for every other user function.
@@ -719,6 +795,81 @@ fn render_user_define_head(
     if is_word_ret {
         try w(out, "define i64 @kizu_run_user_");
     }
+    try w(out, name);
+    return;
+}
+
+fn render_user_method_define_head(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    type_name: []u8,
+    name: []u8,
+    ret_kind: i64
+) -> !void {
+    try w(out, "define ");
+    try render_user_return_type(out, code, ret_kind);
+    try w(out, " @kizu_run_user_");
+    try render_method_symbol(out, type_name, name);
+    return;
+}
+
+fn render_user_return_type(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    ret_kind: i64
+) -> !void {
+    let is_err_void = ret_kind == 2;
+    let is_err_i64 = ret_kind == 3;
+    let is_union_ret = try value_kind_is_union(code, ret_kind);
+    if is_err_void {
+        try w(out, "%kizu.error.void");
+    }
+    if is_err_i64 {
+        try w(out, "%kizu.error.i64");
+    }
+    if is_union_ret {
+        try w(out, "%kizu.run.union");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret;
+    if is_word_ret {
+        try w(out, "i64");
+    }
+    return;
+}
+
+fn render_user_method_bridge(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    type_name: []u8,
+    name: []u8,
+    param_base: i64,
+    param_count: i64,
+    ret_kind: i64
+) -> !void {
+    try render_user_define_head(out, code, name, ret_kind);
+    try w(out, "(");
+    try render_param_list(out, code, kinds, param_base, param_count, 0);
+    try wl(out, ") {");
+    try wl(out, "entry:");
+    try w(out, "  %bridge = call ");
+    try render_user_return_type(out, code, ret_kind);
+    try w(out, " @kizu_run_user_");
+    try render_method_symbol(out, type_name, name);
+    try w(out, "(");
+    try render_param_list(out, code, kinds, param_base, param_count, 0);
+    try wl(out, ")");
+    try w(out, "  ret ");
+    try render_user_return_type(out, code, ret_kind);
+    try wl(out, " %bridge");
+    try wl(out, "}");
+    try nl(out);
+    return;
+}
+
+fn render_method_symbol(out: &var std::string::String, type_name: []u8, name: []u8) -> !void {
+    try w(out, type_name);
+    try w(out, "__");
     try w(out, name);
     return;
 }
@@ -792,23 +943,52 @@ fn render_value_type(
 ) -> !void {
     let kind_bool = codegen::code_kind_bool();
     let kind_slice = codegen::code_kind_slice();
+    let kind_handle = codegen::code_kind_handle();
     let is_bool = kind == kind_bool;
     let is_slice = kind == kind_slice;
+    let is_handle = kind == kind_handle;
+    let is_owned = value_kind_is_owned(kind);
     let is_union = try value_kind_is_union(code, kind);
+    let is_struct_param = try value_kind_is_struct_param(code, kind);
     if is_bool {
         try w(out, "i1");
     }
     if is_slice {
         try w(out, "%kizu.slice.u8");
     }
+    if is_handle {
+        try w(out, "%kizu.handle");
+    }
+    if is_owned {
+        try w(out, "%kizu.owned");
+    }
     if is_union {
         try w(out, "%kizu.run.union");
     }
-    let scalar = !is_bool and !is_slice and !is_union;
+    if is_struct_param {
+        try render_struct_param_value_type(out, code, kind);
+    }
+    let scalar = !is_bool and !is_slice and !is_handle and !is_owned and !is_union and !is_struct_param;
     if scalar {
         try w(out, "i64");
     }
     return;
+}
+
+fn value_kind_is_owned(kind: i64) -> bool {
+    if kind == codegen::code_kind_owned() {
+        return true;
+    }
+    if kind == codegen::code_kind_owned_string() {
+        return true;
+    }
+    if kind == codegen::code_kind_owned_array_i64() {
+        return true;
+    }
+    if kind == codegen::code_kind_owned_map_i64() {
+        return true;
+    }
+    return kind == codegen::code_kind_owned_arena_slice_struct();
 }
 
 // value_kind_is_union reports whether a record-backed value kind references a
@@ -822,6 +1002,35 @@ fn value_kind_is_union(code: &std::array::Array<i64>, kind: i64) -> !bool {
     let op = try code.get(record_pos);
     let op_union_decl = codegen::code_op_union_decl();
     return op == op_union_decl;
+}
+
+fn value_kind_is_struct_param(code: &std::array::Array<i64>, kind: i64) -> !bool {
+    let record_base = codegen::code_kind_struct_base();
+    if kind < record_base {
+        return false;
+    }
+    let record_pos = kind - record_base;
+    let op = try code.get(record_pos);
+    let op_struct_param = codegen::code_op_struct_param();
+    return op == op_struct_param;
+}
+
+fn render_struct_param_value_type(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kind: i64
+) -> !void {
+    let field_kind = try struct_param_first_field_kind(code, kind);
+    try render_value_type(out, code, field_kind);
+    return;
+}
+
+fn struct_param_first_field_kind(code: &std::array::Array<i64>, kind: i64) -> !i64 {
+    let record_base = codegen::code_kind_struct_base();
+    let record_pos = kind - record_base;
+    let kind_pos = record_pos + 4;
+    let field_kind = try code.get(kind_pos);
+    return field_kind;
 }
 
 // tape_function_end returns the index of the FUNC_END record closing the function
@@ -1093,6 +1302,58 @@ fn render_one_instruction(
     let try_string_append_byte = codegen::code_op_try_string_append_byte();
     if op == try_string_append_byte {
         try render_try_string_append_byte(out, code, index, abi);
+    }
+    let mem_page_allocator = codegen::code_op_mem_page_allocator();
+    if op == mem_page_allocator {
+        try render_mem_page_allocator(out, code, index);
+    }
+    let storage_new = codegen::code_op_storage_new();
+    if op == storage_new {
+        try render_storage_new(out, code, index);
+    }
+    let storage_deinit = codegen::code_op_storage_deinit();
+    if op == storage_deinit {
+        try render_storage_deinit(out, code, index);
+    }
+    let string_len = codegen::code_op_string_len();
+    if op == string_len {
+        try render_string_len(out, code, index);
+    }
+    let try_string_append = codegen::code_op_try_string_append_bytes();
+    if op == try_string_append {
+        try render_try_string_append_bytes(out, code, index, abi);
+    }
+    let array_len = codegen::code_op_array_len();
+    if op == array_len {
+        try render_array_len(out, code, index);
+    }
+    let try_array_append = codegen::code_op_try_array_append_i64();
+    if op == try_array_append {
+        try render_try_array_append_i64(out, code, index, abi);
+    }
+    let array_get = codegen::code_op_array_get_i64();
+    if op == array_get {
+        try render_array_get_i64(out, code, index);
+    }
+    let try_map_insert = codegen::code_op_try_map_insert_i64();
+    if op == try_map_insert {
+        try render_try_map_insert_i64(out, code, index, abi);
+    }
+    let map_contains = codegen::code_op_map_contains();
+    if op == map_contains {
+        try render_map_contains(out, code, index);
+    }
+    let try_map_get = codegen::code_op_try_map_get_i64();
+    if op == try_map_get {
+        try render_try_map_get_i64(out, code, index, abi);
+    }
+    let arena_add = codegen::code_op_arena_add_slice_struct();
+    if op == arena_add {
+        try render_arena_add_slice_struct(out, code, index);
+    }
+    let arena_get = codegen::code_op_arena_get_slice_struct_field();
+    if op == arena_get {
+        try render_arena_get_slice_struct_field(out, code, index);
     }
     let if_begin = codegen::code_op_if_begin();
     if op == if_begin {
@@ -2579,6 +2840,440 @@ fn render_try_io_write(
     return;
 }
 
+fn render_mem_page_allocator(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try wl(out, " = call %kizu.owned @kizu_rt_mem_page_allocator()");
+    return;
+}
+
+fn render_storage_new(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    let allocator = try code.get(index + 3);
+    let element_size = try code.get(index + 4);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call %kizu.owned @");
+    let symbol = storage_new_symbol(kind);
+    try w(out, symbol);
+    try w(out, "(%kizu.owned %v");
+    try wi(out, allocator);
+    let needs_size = storage_new_needs_size(kind);
+    if needs_size {
+        try w(out, ", i64 ");
+        try wi(out, element_size);
+    }
+    try wl(out, ")");
+    return;
+}
+
+fn storage_new_symbol(kind: i64) -> []u8 {
+    if kind == codegen::code_kind_owned_string() {
+        return "kizu_rt_string_new";
+    }
+    if kind == codegen::code_kind_owned_array_i64() {
+        return "kizu_rt_array_new";
+    }
+    if kind == codegen::code_kind_owned_map_i64() {
+        return "kizu_rt_map_new";
+    }
+    return "kizu_rt_arena_new";
+}
+
+fn storage_new_needs_size(kind: i64) -> bool {
+    if kind == codegen::code_kind_owned_array_i64() {
+        return true;
+    }
+    return kind == codegen::code_kind_owned_arena_slice_struct();
+}
+
+fn render_storage_deinit(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    try w(out, "  call void @");
+    let symbol = storage_deinit_symbol(kind);
+    try w(out, symbol);
+    try w(out, "(%kizu.owned %v");
+    try wi(out, receiver);
+    try wl(out, ")");
+    return;
+}
+
+fn storage_deinit_symbol(kind: i64) -> []u8 {
+    if kind == codegen::code_kind_owned_string() {
+        return "kizu_rt_string_deinit";
+    }
+    if kind == codegen::code_kind_owned_array_i64() {
+        return "kizu_rt_array_deinit";
+    }
+    if kind == codegen::code_kind_owned_map_i64() {
+        return "kizu_rt_map_deinit";
+    }
+    return "kizu_rt_arena_deinit";
+}
+
+fn render_string_len(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call i64 @kizu_rt_string_len(%kizu.owned %v");
+    try wi(out, receiver);
+    try wl(out, ")");
+    return;
+}
+
+fn render_try_string_append_bytes(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let bytes = try code.get(index + 2);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, bytes);
+    try wl(out, ")");
+    try render_try_void_result(out, index, abi);
+    return;
+}
+
+fn render_array_len(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call i64 @kizu_rt_array_len(%kizu.owned %v");
+    try wi(out, receiver);
+    try wl(out, ")");
+    return;
+}
+
+fn render_try_array_append_i64(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let value = try code.get(index + 2);
+    try w(out, "  %aa");
+    try wi(out, index);
+    try wl(out, "_slot = alloca i64");
+    try w(out, "  store i64 %v");
+    try wi(out, value);
+    try w(out, ", ptr %aa");
+    try wi(out, index);
+    try wl(out, "_slot");
+    try w(out, "  %aa");
+    try wi(out, index);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %aa");
+    try wi(out, index);
+    try wl(out, "_slot, 0");
+    try w(out, "  %aa");
+    try wi(out, index);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %aa");
+    try wi(out, index);
+    try wl(out, "_base, i64 8, 1");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_rt_array_append(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", %kizu.slice.u8 %aa");
+    try wi(out, index);
+    try wl(out, "_slice)");
+    try render_try_void_result(out, index, abi);
+    return;
+}
+
+fn render_try_void_result(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    return;
+}
+
+fn render_array_get_i64(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    let item_index = try code.get(index + 3);
+    try w(out, "  %ag");
+    try wi(out, dst);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", i64 %v");
+    try wi(out, item_index);
+    try wl(out, ")");
+    try w(out, "  %ag");
+    try wi(out, dst);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %ag");
+    try wi(out, dst);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %ag");
+    try wi(out, dst);
+    try w(out, "_ok, label %ag");
+    try wi(out, dst);
+    try w(out, "_cont, label %ag");
+    try wi(out, dst);
+    try wl(out, "_fail");
+    try w(out, "ag");
+    try wi(out, dst);
+    try wl(out, "_fail:");
+    try w(out, "  %ag");
+    try wi(out, dst);
+    try w(out, "_msg = extractvalue %kizu.error.slice.u8 %ag");
+    try wi(out, dst);
+    try wl(out, ", 2");
+    try w(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %ag");
+    try wi(out, dst);
+    try wl(out, "_msg)");
+    try wl(out, "  unreachable");
+    try w(out, "ag");
+    try wi(out, dst);
+    try wl(out, "_cont:");
+    try w(out, "  %ag");
+    try wi(out, dst);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %ag");
+    try wi(out, dst);
+    try wl(out, ", 1");
+    try w(out, "  %ag");
+    try wi(out, dst);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %ag");
+    try wi(out, dst);
+    try wl(out, "_slice, 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load i64, ptr %ag");
+    try wi(out, dst);
+    try wl(out, "_ptr");
+    return;
+}
+
+fn render_try_map_insert_i64(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let key = try code.get(index + 2);
+    let value = try code.get(index + 3);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_rt_map_insert(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, key);
+    try w(out, ", i64 %v");
+    try wi(out, value);
+    try wl(out, ")");
+    try render_try_void_result(out, index, abi);
+    return;
+}
+
+fn render_map_contains(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    let key = try code.get(index + 3);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call i1 @kizu_rt_map_contains(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, key);
+    try wl(out, ")");
+    return;
+}
+
+fn render_try_map_get_i64(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    let key = try code.get(index + 3);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, key);
+    try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_i64_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 1");
+    return;
+}
+
+fn render_arena_add_slice_struct(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let arena = try code.get(index + 2);
+    let field = try code.get(index + 3);
+    try w(out, "  %ar");
+    try wi(out, dst);
+    try wl(out, "_slot = alloca %kizu.slice.u8");
+    try w(out, "  store %kizu.slice.u8 %v");
+    try wi(out, field);
+    try w(out, ", ptr %ar");
+    try wi(out, dst);
+    try wl(out, "_slot");
+    try w(out, "  %ar");
+    try wi(out, dst);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %ar");
+    try wi(out, dst);
+    try wl(out, "_slot, 0");
+    try w(out, "  %ar");
+    try wi(out, dst);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %ar");
+    try wi(out, dst);
+    try wl(out, "_base, i64 16, 1");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %v");
+    try wi(out, arena);
+    try w(out, ", %kizu.slice.u8 %ar");
+    try wi(out, dst);
+    try wl(out, "_slice)");
+    return;
+}
+
+fn render_arena_get_slice_struct_field(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let arena = try code.get(index + 2);
+    let handle = try code.get(index + 3);
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %v");
+    try wi(out, arena);
+    try w(out, ", %kizu.handle %v");
+    try wi(out, handle);
+    try wl(out, ")");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %arg");
+    try wi(out, dst);
+    try w(out, "_ok, label %arg");
+    try wi(out, dst);
+    try w(out, "_cont, label %arg");
+    try wi(out, dst);
+    try wl(out, "_fail");
+    try w(out, "arg");
+    try wi(out, dst);
+    try wl(out, "_fail:");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_msg = extractvalue %kizu.error.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, ", 2");
+    try w(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, "_msg)");
+    try wl(out, "  unreachable");
+    try w(out, "arg");
+    try wi(out, dst);
+    try wl(out, "_cont:");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, ", 1");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, "_slice, 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load %kizu.slice.u8, ptr %arg");
+    try wi(out, dst);
+    try wl(out, "_ptr");
+    return;
+}
+
 // render_fs_read_propagate emits the fail-block terminator for a try fs read: the
 // kizu_run_main entry exits the process with code 1, every other (error-union-void)
 // function returns a failed error union.
@@ -2636,12 +3331,13 @@ fn render_print(
     // writes its SSA slice directly, a bool selects its word payload, and any
     // other value formats as i64.
     let record_base = codegen::code_kind_struct_base();
+    let is_struct_param = try value_kind_is_struct_param(code, value_kind);
     let is_string = value_kind == kind_str;
     let is_slice = value_kind == kind_slice;
     let is_bool = value_kind == kind_bool;
-    let is_record = value_kind >= record_base;
+    let is_record = value_kind >= record_base and !is_struct_param;
     let not_str_slice = !is_string and !is_slice;
-    let not_bool_record = !is_bool and !is_record;
+    let not_bool_record = !is_bool and !is_record and !is_struct_param;
     let is_i64 = not_str_slice and not_bool_record;
     if is_string {
         try render_print_string_line(out, code, value_id, index);
@@ -2655,8 +3351,36 @@ fn render_print(
     if is_record {
         try render_print_enum_line(out, code, value_kind, index);
     }
+    if is_struct_param {
+        try render_print_struct_param_line(out, code, value_id, value_kind, index);
+    }
     if is_i64 {
         try render_print_i64_line(out, value_id, index);
+    }
+    return;
+}
+
+fn render_print_struct_param_line(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64,
+    value_kind: i64,
+    suffix: i64
+) -> !void {
+    let field_kind = try struct_param_first_field_kind(code, value_kind);
+    let kind_slice = codegen::code_kind_slice();
+    let kind_bool = codegen::code_kind_bool();
+    let is_slice = field_kind == kind_slice;
+    let is_bool = field_kind == kind_bool;
+    let is_i64 = !is_slice and !is_bool;
+    if is_slice {
+        try render_print_slice_line(out, value_id, suffix);
+    }
+    if is_bool {
+        try render_print_bool_line(out, value_id, suffix);
+    }
+    if is_i64 {
+        try render_print_i64_line(out, value_id, suffix);
     }
     return;
 }
@@ -3114,6 +3838,12 @@ fn tape_union_decl_record_end(code: &std::array::Array<i64>, index: i64) -> !i64
     return index + 4 + entry_slots;
 }
 
+fn tape_struct_param_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let field_count = try code.get(index + 1);
+    let field_slots = field_count * 3;
+    return index + 2 + field_slots;
+}
+
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let op = try code.get(index);
     let const_int = codegen::code_op_const_int();
@@ -3167,6 +3897,58 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let try_string_append_byte = codegen::code_op_try_string_append_byte();
     if op == try_string_append_byte {
         return index + 3;
+    }
+    let mem_page_allocator = codegen::code_op_mem_page_allocator();
+    if op == mem_page_allocator {
+        return index + 2;
+    }
+    let storage_new = codegen::code_op_storage_new();
+    if op == storage_new {
+        return index + 5;
+    }
+    let storage_deinit = codegen::code_op_storage_deinit();
+    if op == storage_deinit {
+        return index + 3;
+    }
+    let string_len = codegen::code_op_string_len();
+    if op == string_len {
+        return index + 3;
+    }
+    let try_string_append = codegen::code_op_try_string_append_bytes();
+    if op == try_string_append {
+        return index + 3;
+    }
+    let array_len = codegen::code_op_array_len();
+    if op == array_len {
+        return index + 3;
+    }
+    let try_array_append = codegen::code_op_try_array_append_i64();
+    if op == try_array_append {
+        return index + 3;
+    }
+    let array_get = codegen::code_op_array_get_i64();
+    if op == array_get {
+        return index + 4;
+    }
+    let try_map_insert = codegen::code_op_try_map_insert_i64();
+    if op == try_map_insert {
+        return index + 4;
+    }
+    let map_contains = codegen::code_op_map_contains();
+    if op == map_contains {
+        return index + 4;
+    }
+    let try_map_get = codegen::code_op_try_map_get_i64();
+    if op == try_map_get {
+        return index + 4;
+    }
+    let arena_add = codegen::code_op_arena_add_slice_struct();
+    if op == arena_add {
+        return index + 4;
+    }
+    let arena_get = codegen::code_op_arena_get_slice_struct_field();
+    if op == arena_get {
+        return index + 4;
     }
     let struct_lit = codegen::code_op_struct_lit();
     if op == struct_lit {
@@ -3243,6 +4025,14 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let func_begin = codegen::code_op_func_begin();
     if op == func_begin {
         return index + 6;
+    }
+    let method_func_begin = codegen::code_op_method_func_begin();
+    if op == method_func_begin {
+        return index + 8;
+    }
+    let struct_param = codegen::code_op_struct_param();
+    if op == struct_param {
+        return try tape_struct_param_record_end(code, index);
     }
     let func_end = codegen::code_op_func_end();
     if op == func_end {

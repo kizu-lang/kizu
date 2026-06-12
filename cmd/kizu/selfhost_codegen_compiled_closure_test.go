@@ -5,19 +5,17 @@ import (
 	"testing"
 )
 
-// codegenCompiledClosureSeeds lists the in-degree-zero cluster roots the
-// selfhost::ir::codegen Program builder / metadata / Value helper closure seeds
-// its BFS with: lowered_main_print_program (the const-string main-print builder
-// alias), metadata_for_program (the program metadata selector), main_print_payload
-// (the program-shape Value reader), and unsupported_program (the empty-program
-// sentinel). None of the four is called by another cluster member, and together
-// they reach the remaining seven members through their body callees.
+// codegenCompiledClosureSeeds lists the codegen compiled closure roots: the
+// Program builder / metadata / Value helper roots plus the stage2 backend roots
+// needed by the run tape lowering and renderer.
 func codegenCompiledClosureSeeds() []string {
 	return []string{
 		"lowered_main_print_program",
 		"metadata_for_program",
 		"main_print_payload",
 		"unsupported_program",
+		"lower_code_module",
+		"code_op_mem_page_allocator",
 	}
 }
 

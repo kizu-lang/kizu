@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// codegenClosureSeeds lists the public codegen entrypoints plus the one documented
-// stage2 ABI foundation root that replace the old handwritten body list.
+// codegenClosureSeeds lists the public codegen entrypoints plus the documented
+// stage2 ABI/backend roots that replace the old handwritten body list.
 func codegenClosureSeeds() []string {
 	return []string{
 		"lower_run_program",
@@ -28,6 +28,7 @@ func codegenClosureSeeds() []string {
 		"metadata_line",
 		"empty_int_env",
 		"lower_code_module",
+		"code_op_mem_page_allocator",
 	}
 }
 
