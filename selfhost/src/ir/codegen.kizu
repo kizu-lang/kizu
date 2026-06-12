@@ -3765,6 +3765,14 @@ pub fn code_op_arena_deinit() -> i64 {
     return 112;
 }
 
+pub fn code_op_arena_add_struct() -> i64 {
+    return 114;
+}
+
+pub fn code_op_arena_get_struct_field() -> i64 {
+    return 115;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -3846,6 +3854,28 @@ pub fn code_kind_owned_arena_slice_struct() -> i64 {
     return code_kind_arena();
 }
 
+fn code_kind_arena_record_base() -> i64 {
+    return 0 - 1000000000;
+}
+
+fn code_kind_arena_record(record_pos: i64) -> i64 {
+    return code_kind_arena_record_base() - record_pos;
+}
+
+pub fn code_kind_is_arena(kind: i64) -> bool {
+    if kind == code_kind_arena() {
+        return true;
+    }
+    return kind <= code_kind_arena_record_base();
+}
+
+fn code_kind_arena_record_pos(kind: i64) -> i64 {
+    if kind <= code_kind_arena_record_base() {
+        return code_kind_arena_record_base() - kind;
+    }
+    return 0 - 1;
+}
+
 fn code_kind_is_owned_resource(kind: i64) -> bool {
     if kind == code_kind_owned_string() {
         return true;
@@ -3856,7 +3886,7 @@ fn code_kind_is_owned_resource(kind: i64) -> bool {
     if kind == code_kind_owned_map_i64() {
         return true;
     }
-    return kind == code_kind_arena();
+    return code_kind_is_arena(kind);
 }
 
 // code_kind_struct_base marks a record-backed value on the kinds array: the
@@ -4909,7 +4939,7 @@ fn emit_code_defer_runtime_deinit(
     let receiver_kind = try defer_records.get(receiver_kind_pos);
     let receiver_pos = record_index + 5;
     let receiver_value = try defer_records.get(receiver_pos);
-    if receiver_kind == code_kind_arena() {
+    if code_kind_is_arena(receiver_kind) {
         let op_arena_deinit = code_op_arena_deinit();
         try code.append(op_arena_deinit);
         try code.append(receiver_value);
@@ -7498,7 +7528,7 @@ fn lower_code_runtime_field_statement_call(
     if !code_kind_is_owned_resource(receiver_kind) {
         return code_eval_unsupported(receiver_eval.next);
     }
-    if receiver_kind == code_kind_arena() {
+    if code_kind_is_arena(receiver_kind) {
         let op_arena_deinit = code_op_arena_deinit();
         try code.append(op_arena_deinit);
         try code.append(receiver_eval.value_id);
@@ -9068,7 +9098,7 @@ fn lower_code_field_expr(
     }
     let arena_get_receiver = try code_field_receiver_is_runtime_arena_get(text, ast, decls, code, receiver);
     if arena_get_receiver {
-        return try lower_code_runtime_arena_get_field_receiver(text, ast, decls, receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+        return try lower_code_runtime_arena_get_field_receiver(text, ast, decls, receiver, name, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     let base_eval = try lower_code_expr(text, ast, decls, receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !base_eval.ok {
@@ -9205,6 +9235,7 @@ fn lower_code_runtime_arena_get_field_receiver(
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
     receiver: std::kizu::ast::NodeId,
+    field_name: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
@@ -9216,7 +9247,7 @@ fn lower_code_runtime_arena_get_field_receiver(
 ) -> !CodeEval {
     let node = ast.get(receiver);
     return match node.data {
-        Call(call_node) => try lower_code_runtime_arena_get_field_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        Call(call_node) => try lower_code_runtime_arena_get_field_call(text, ast, decls, call_node.callee, call_node.args, field_name, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -9227,6 +9258,7 @@ fn lower_code_runtime_arena_get_field_call(
     decls: std::kizu::ast::ChildRange,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
+    field_name: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
@@ -9238,7 +9270,7 @@ fn lower_code_runtime_arena_get_field_call(
 ) -> !CodeEval {
     let node = ast.get(callee);
     return match node.data {
-        FieldExpr(field_expr) => try lower_code_runtime_arena_get_field_method(text, ast, decls, field_expr.receiver, field_expr.namespace, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        FieldExpr(field_expr) => try lower_code_runtime_arena_get_field_method(text, ast, decls, field_expr.receiver, field_expr.namespace, args, field_name, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -9250,6 +9282,7 @@ fn lower_code_runtime_arena_get_field_method(
     method_receiver: std::kizu::ast::NodeId,
     namespace: bool,
     args: std::kizu::ast::ChildRange,
+    field_name: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
@@ -9267,10 +9300,35 @@ fn lower_code_runtime_arena_get_field_method(
         return code_eval_unsupported(receiver_eval.next);
     }
     let receiver_kind = try kinds.get(receiver_eval.value_id);
-    if receiver_kind != code_kind_owned_arena_slice_struct() {
+    if !code_kind_is_arena(receiver_kind) {
         return code_eval_unsupported(receiver_eval.next);
     }
-    return try lower_code_arena_get_slice_struct_field(text, ast, decls, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+    let element_start = try code_arena_kind_element_span_part(code, receiver_kind, 0);
+    if element_start < 0 {
+        return try lower_code_arena_get_slice_struct_field(text, ast, decls, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+    }
+    let element_end = try code_arena_kind_element_span_part(code, receiver_kind, 1);
+    if element_end < 0 {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let field_span = code_node_span(text, ast, field_name);
+    let kind_part = code_arena_layout_part_kind();
+    let layout_kind = try code_arena_struct_field_layout_part_by_span(text, ast, decls, element_start, element_end, field_span.start, field_span.end, kind_part, 0);
+    if layout_kind < 0 {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let count_part = code_arena_layout_part_count();
+    let layout_count = try code_arena_struct_field_layout_part_by_span(text, ast, decls, element_start, element_end, field_span.start, field_span.end, count_part, 0);
+    let slice_kind = code_kind_slice();
+    let single_slice = layout_count == 1 and layout_kind == slice_kind;
+    if single_slice {
+        return try lower_code_arena_get_slice_struct_field(text, ast, decls, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+    }
+    let offset_part = code_arena_layout_part_offset();
+    let layout_offset = try code_arena_struct_field_layout_part_by_span(text, ast, decls, element_start, element_end, field_span.start, field_span.end, offset_part, 0);
+    let size_part = code_arena_layout_part_size();
+    let layout_size = try code_arena_struct_field_layout_part_by_span(text, ast, decls, element_start, element_end, field_span.start, field_span.end, size_part, 0);
+    return try lower_code_arena_get_struct_field(text, ast, decls, receiver_eval.value_id, args, layout_offset, layout_size, layout_kind, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
 }
 
 // lower_code_var_struct_read loads a scalarized var-struct field from its slot
@@ -9959,6 +10017,14 @@ fn lower_code_arena_new(
     if element_size < 0 {
         return code_eval_unsupported(next_value);
     }
+    let element_start = try code_arena_callee_element_span_part(text, ast, callee, 0);
+    if element_start < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let element_end = try code_arena_callee_element_span_part(text, ast, callee, 1);
+    if element_end < 0 {
+        return code_eval_unsupported(next_value);
+    }
     if args.len != 1 {
         return code_eval_unsupported(next_value);
     }
@@ -9971,16 +10037,54 @@ fn lower_code_arena_new(
     if allocator_kind != code_kind_owned() {
         return code_eval_unsupported(allocator_eval.next);
     }
+    let record_pos = code.len();
     let op = code_op_arena_new();
     try code.append(op);
     try code.append(allocator_eval.next);
     try code.append(allocator_eval.value_id);
     try code.append(element_size);
-    let kind_arena = code_kind_arena();
+    try code.append(element_start);
+    try code.append(element_end);
+    let kind_arena = code_kind_arena_record(record_pos);
     try kinds.append(kind_arena);
     let result_value = allocator_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
+}
+
+fn code_arena_callee_element_span_part(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    part: i64
+) -> !i64 {
+    let node = ast.get(callee);
+    return match node.data {
+        TypeApplyExpr(type_apply) => try code_arena_type_apply_element_span_part(text, ast, type_apply.callee, type_apply.type_args, part),
+        _ => code_arena_missing_size(),
+    };
+}
+
+fn code_arena_type_apply_element_span_part(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_callee: std::kizu::ast::NodeId,
+    type_args: std::kizu::ast::ChildRange,
+    part: i64
+) -> !i64 {
+    if type_args.len != 1 {
+        return 0 - 1;
+    }
+    let callee_text = ast_node_text(text, ast, type_callee);
+    if !std::mem::equal_bytes(callee_text, "std::arena::Arena") {
+        return 0 - 1;
+    }
+    let element_type = try ast.child_at(type_args, 0);
+    let span = code_node_span(text, ast, element_type);
+    if part == 0 {
+        return span.start;
+    }
+    return span.end;
 }
 
 fn code_arena_callee_element_size(
@@ -10180,6 +10284,222 @@ fn code_arena_max_align(left: i64, right: i64) -> i64 {
     return left;
 }
 
+fn code_arena_layout_part_offset() -> i64 {
+    return 0;
+}
+
+fn code_arena_layout_part_size() -> i64 {
+    return 1;
+}
+
+fn code_arena_layout_part_kind() -> i64 {
+    return 2;
+}
+
+fn code_arena_layout_part_count() -> i64 {
+    return 3;
+}
+
+fn code_arena_layout_part(
+    part: i64,
+    offset: i64,
+    size: i64,
+    kind: i64,
+    field_count: i64
+) -> i64 {
+    if part == code_arena_layout_part_offset() {
+        return offset;
+    }
+    if part == code_arena_layout_part_size() {
+        return size;
+    }
+    if part == code_arena_layout_part_kind() {
+        return kind;
+    }
+    if part == code_arena_layout_part_count() {
+        return field_count;
+    }
+    return 0 - 1;
+}
+
+fn code_arena_struct_field_layout_part_by_span(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    type_start: i64,
+    type_end: i64,
+    field_start: i64,
+    field_end: i64,
+    part: i64,
+    index: i64
+) -> !i64 {
+    if index >= decls.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(decls, index);
+    let value = try code_decl_arena_struct_field_layout_part_by_span(text, ast, child, type_start, type_end, field_start, field_end, part);
+    if value >= 0 {
+        return value;
+    }
+    let after = index + 1;
+    return try code_arena_struct_field_layout_part_by_span(text, ast, decls, type_start, type_end, field_start, field_end, part, after);
+}
+
+fn code_decl_arena_struct_field_layout_part_by_span(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    type_start: i64,
+    type_end: i64,
+    field_start: i64,
+    field_end: i64,
+    part: i64
+) -> !i64 {
+    let node = ast.get(child);
+    return match node.data {
+        StructDecl(struct_decl) => try code_struct_decl_arena_field_layout_part_by_span(text, ast, struct_decl.name, struct_decl.fields, type_start, type_end, field_start, field_end, part),
+        _ => code_arena_missing_size(),
+    };
+}
+
+fn code_struct_decl_arena_field_layout_part_by_span(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    type_start: i64,
+    type_end: i64,
+    field_start: i64,
+    field_end: i64,
+    part: i64
+) -> !i64 {
+    let decl_name = ast_node_text(text, ast, name);
+    let type_text = text[type_start..type_end];
+    if !std::mem::equal_bytes(decl_name, type_text) {
+        return 0 - 1;
+    }
+    if fields.len == 0 {
+        return 0 - 1;
+    }
+    return try code_arena_struct_fields_field_layout_part(text, ast, fields, field_start, field_end, part, 0, 0, 1);
+}
+
+fn code_arena_struct_fields_field_layout_part(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    fields: std::kizu::ast::ChildRange,
+    field_start: i64,
+    field_end: i64,
+    part: i64,
+    index: i64,
+    size: i64,
+    align: i64
+) -> !i64 {
+    if index >= fields.len {
+        return 0 - 1;
+    }
+    let field_id = try ast.child_at(fields, index);
+    let field_size = try code_arena_struct_field_size(text, ast, field_id);
+    if field_size < 0 {
+        return 0 - 1;
+    }
+    let field_align = try code_arena_struct_field_align(text, ast, field_id);
+    if field_align < 0 {
+        return 0 - 1;
+    }
+    let field_kind = try code_arena_struct_field_kind(text, ast, field_id);
+    if field_kind < 0 {
+        return 0 - 1;
+    }
+    let field_offset = code_arena_round_up(size, field_align);
+    let name_matches = try code_arena_struct_field_name_matches(text, ast, field_id, field_start, field_end);
+    if name_matches == 1 {
+        return code_arena_layout_part(part, field_offset, field_size, field_kind, fields.len);
+    }
+    let next_size = field_offset + field_size;
+    let next_align = code_arena_max_align(align, field_align);
+    let after = index + 1;
+    return try code_arena_struct_fields_field_layout_part(text, ast, fields, field_start, field_end, part, after, next_size, next_align);
+}
+
+fn code_arena_struct_field_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    field_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(field_id);
+    return match node.data {
+        Field(field_node) => code_arena_field_type_kind(text, ast, field_node.type_node),
+        _ => code_arena_missing_size(),
+    };
+}
+
+fn code_arena_struct_field_name_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    field_id: std::kizu::ast::NodeId,
+    field_start: i64,
+    field_end: i64
+) -> !i64 {
+    let node = ast.get(field_id);
+    return match node.data {
+        Field(field_node) => code_arena_field_name_matches(text, ast, field_node.name, field_start, field_end),
+        _ => 0,
+    };
+}
+
+fn code_arena_field_name_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    field_start: i64,
+    field_end: i64
+) -> i64 {
+    let declared = ast_node_text(text, ast, name);
+    let wanted = text[field_start..field_end];
+    if std::mem::equal_bytes(declared, wanted) {
+        return 1;
+    }
+    return 0;
+}
+
+fn code_arena_field_type_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> i64 {
+    if type_node_is_i64(text, ast, type_node) {
+        return code_kind_i64();
+    }
+    let type_text = ast_node_text(text, ast, type_node);
+    if std::mem::equal_bytes(type_text, "bool") {
+        return code_kind_bool();
+    }
+    if std::mem::equal_bytes(type_text, "[]u8") {
+        return code_kind_slice();
+    }
+    return 0 - 1;
+}
+
+fn code_arena_kind_element_span_part(
+    code: &var std::array::Array<i64>,
+    kind: i64,
+    part: i64
+) -> !i64 {
+    let record_pos = code_kind_arena_record_pos(kind);
+    if record_pos < 0 {
+        return 0 - 1;
+    }
+    let type_start_pos = record_pos + 4;
+    let type_start = try code.get(type_start_pos);
+    let type_end_pos = record_pos + 5;
+    let type_end = try code.get(type_end_pos);
+    if part == 0 {
+        return type_start;
+    }
+    return type_end;
+}
+
 fn lower_code_mem_page_allocator(
     args: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
@@ -10333,7 +10653,7 @@ fn lower_code_runtime_field_expr_method(
     if receiver_kind == code_kind_owned_map_i64() {
         return try lower_code_map_i64_expr_method(text, ast, decls, method, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
-    if receiver_kind == code_kind_owned_arena_slice_struct() {
+    if code_kind_is_arena(receiver_kind) {
         return try lower_code_arena_expr_method(text, ast, decls, method, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
     return code_eval_unsupported(receiver_eval.next);
@@ -10598,25 +10918,205 @@ fn lower_code_arena_add(
     }
     let record_pos = element_kind - record_base;
     let field_value = try arena_single_slice_field_value(code, kinds, record_pos);
-    if field_value < 0 {
-        return code_eval_unsupported(element_eval.next);
+    if field_value >= 0 {
+        return try lower_code_arena_add_single_field(text, ast, decls, element_arg, receiver_value, record_pos, field_value, code, kinds, args_scratch, element_eval.next);
     }
-    let field_slice = try lower_code_arg_slice(text, code, kinds, field_value, element_eval.next);
+    return try lower_code_arena_add_struct(text, ast, decls, element_arg, receiver_value, record_pos, code, kinds, args_scratch, element_eval.next);
+}
+
+fn lower_code_arena_add_single_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    element_arg: std::kizu::ast::NodeId,
+    receiver_value: i64,
+    record_pos: i64,
+    field_value: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let field_slice = try lower_code_arg_slice(text, code, kinds, field_value, next_value);
     let kind_slice = code_kind_slice();
     let field_kind = try kinds.get(field_slice.value_id);
-    if field_kind != kind_slice {
-        return code_eval_unsupported(field_slice.next);
+    if field_kind == kind_slice {
+        return try finish_code_arena_add_slice_struct(receiver_value, field_slice.value_id, code, kinds, field_slice.next);
     }
+    return try lower_code_arena_add_struct(text, ast, decls, element_arg, receiver_value, record_pos, code, kinds, args_scratch, next_value);
+}
+
+fn finish_code_arena_add_slice_struct(
+    receiver_value: i64,
+    field_value: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
     let op = code_op_arena_add_slice_struct();
     try code.append(op);
-    try code.append(field_slice.next);
+    try code.append(next_value);
     try code.append(receiver_value);
-    try code.append(field_slice.value_id);
+    try code.append(field_value);
     let kind_handle = code_kind_handle();
     try kinds.append(kind_handle);
-    let result_value = field_slice.next;
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+fn lower_code_arena_add_struct(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    element_arg: std::kizu::ast::NodeId,
+    receiver_value: i64,
+    record_pos: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(element_arg);
+    return match node.data {
+        StructLiteralExpr(struct_lit) => try lower_code_arena_add_struct_literal(text, ast, decls, struct_lit.type_name, receiver_value, record_pos, code, kinds, args_scratch, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_arena_add_struct_literal(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    type_name: std::kizu::ast::NodeId,
+    receiver_value: i64,
+    record_pos: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let payload_size = try code_arena_element_size(text, ast, decls, type_name, 0);
+    if payload_size < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let count_pos = record_pos + 2;
+    let field_count = try code.get(count_pos);
+    if field_count <= 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let scratch_base = try args_scratch.get(0);
+    let scratch_bound = scratch_base + field_count * 4;
+    try args_scratch.set(0, scratch_bound);
+    let type_span = code_node_span(text, ast, type_name);
+    let fields_eval = try prepare_code_arena_add_struct_fields(text, ast, decls, type_span.start, type_span.end, record_pos, field_count, code, kinds, args_scratch, scratch_base, 0, next_value);
+    if !fields_eval.ok {
+        return try code_eval_unsupported_after_scratch_reset(args_scratch, scratch_base, fields_eval.next);
+    }
+    let op = code_op_arena_add_struct();
+    try code.append(op);
+    try code.append(fields_eval.next);
+    try code.append(receiver_value);
+    try code.append(payload_size);
+    try code.append(field_count);
+    try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
+    try args_scratch.set(0, scratch_base);
+    let kind_handle = code_kind_handle();
+    try kinds.append(kind_handle);
+    let result_value = fields_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
+}
+
+fn code_eval_unsupported_after_scratch_reset(
+    args_scratch: &var std::array::Array<i64>,
+    scratch_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    try args_scratch.set(0, scratch_base);
+    return code_eval_unsupported(next_value);
+}
+
+fn prepare_code_arena_add_struct_fields(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    type_start: i64,
+    type_end: i64,
+    record_pos: i64,
+    field_count: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    scratch_base: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= field_count {
+        return code_eval_value(0, next_value);
+    }
+    let entry_slots = index * 3;
+    let entry_pos = record_pos + 3 + entry_slots;
+    let name_start = try code.get(entry_pos);
+    let name_end_pos = entry_pos + 1;
+    let name_end = try code.get(name_end_pos);
+    let value_pos = entry_pos + 2;
+    let raw_value = try code.get(value_pos);
+    let kind_part = code_arena_layout_part_kind();
+    let layout_kind = try code_arena_struct_field_layout_part_by_span(text, ast, decls, type_start, type_end, name_start, name_end, kind_part, 0);
+    if layout_kind < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let value_eval = try code_arena_struct_field_payload_value(text, code, kinds, raw_value, layout_kind, next_value);
+    if !value_eval.ok {
+        return code_eval_unsupported(value_eval.next);
+    }
+    let offset_part = code_arena_layout_part_offset();
+    let layout_offset = try code_arena_struct_field_layout_part_by_span(text, ast, decls, type_start, type_end, name_start, name_end, offset_part, 0);
+    let size_part = code_arena_layout_part_size();
+    let layout_size = try code_arena_struct_field_layout_part_by_span(text, ast, decls, type_start, type_end, name_start, name_end, size_part, 0);
+    let out_pos = scratch_base + index * 4;
+    try scratch_put(args_scratch, out_pos, layout_offset);
+    let size_pos = out_pos + 1;
+    try scratch_put(args_scratch, size_pos, layout_size);
+    let kind_pos = out_pos + 2;
+    try scratch_put(args_scratch, kind_pos, layout_kind);
+    let value_out_pos = out_pos + 3;
+    try scratch_put(args_scratch, value_out_pos, value_eval.value_id);
+    let after = index + 1;
+    return try prepare_code_arena_add_struct_fields(text, ast, decls, type_start, type_end, record_pos, field_count, code, kinds, args_scratch, scratch_base, after, value_eval.next);
+}
+
+fn code_arena_struct_field_payload_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    raw_value: i64,
+    layout_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    if layout_kind == code_kind_slice() {
+        return try code_arena_struct_slice_field_payload_value(text, code, kinds, raw_value, next_value);
+    }
+    let raw_kind = try kinds.get(raw_value);
+    if raw_kind != layout_kind {
+        return code_eval_unsupported(next_value);
+    }
+    return code_eval_value(raw_value, next_value);
+}
+
+fn code_arena_struct_slice_field_payload_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    raw_value: i64,
+    next_value: i64
+) -> !CodeEval {
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, raw_value, next_value);
+    let slice_kind = try kinds.get(slice_eval.value_id);
+    if slice_kind != code_kind_slice() {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    return slice_eval;
 }
 
 fn lower_code_arena_get_slice_struct_field(
@@ -10653,6 +11153,50 @@ fn lower_code_arena_get_slice_struct_field(
     try code.append(handle_eval.value_id);
     let kind_slice = code_kind_slice();
     try kinds.append(kind_slice);
+    let result_value = handle_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+fn lower_code_arena_get_struct_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver_value: i64,
+    args: std::kizu::ast::ChildRange,
+    field_offset: i64,
+    field_size: i64,
+    field_kind: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let handle_arg = try ast.child_at(args, 0);
+    let handle_eval = try lower_code_expr(text, ast, decls, handle_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !handle_eval.ok {
+        return code_eval_unsupported(handle_eval.next);
+    }
+    let handle_kind = try kinds.get(handle_eval.value_id);
+    if handle_kind != code_kind_handle() {
+        return code_eval_unsupported(handle_eval.next);
+    }
+    let op = code_op_arena_get_struct_field();
+    try code.append(op);
+    try code.append(handle_eval.next);
+    try code.append(receiver_value);
+    try code.append(handle_eval.value_id);
+    try code.append(field_offset);
+    try code.append(field_size);
+    try code.append(field_kind);
+    try kinds.append(field_kind);
     let result_value = handle_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);

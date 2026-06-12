@@ -988,7 +988,7 @@ fn value_kind_is_owned(kind: i64) -> bool {
     if kind == codegen::code_kind_owned_map_i64() {
         return true;
     }
-    return kind == codegen::code_kind_arena();
+    return codegen::code_kind_is_arena(kind);
 }
 
 // value_kind_is_union reports whether a record-backed value kind references a
@@ -1362,6 +1362,14 @@ fn render_one_instruction(
     let arena_get = codegen::code_op_arena_get_slice_struct_field();
     if op == arena_get {
         try render_arena_get_slice_struct_field(out, code, index);
+    }
+    let arena_add_struct = codegen::code_op_arena_add_struct();
+    if op == arena_add_struct {
+        try render_arena_add_struct(out, code, index);
+    }
+    let arena_get_struct = codegen::code_op_arena_get_struct_field();
+    if op == arena_get_struct {
+        try render_arena_get_struct_field(out, code, index);
     }
     let if_begin = codegen::code_op_if_begin();
     if op == if_begin {
@@ -2902,7 +2910,7 @@ fn storage_new_needs_size(kind: i64) -> bool {
     if kind == codegen::code_kind_owned_array_i64() {
         return true;
     }
-    return kind == codegen::code_kind_arena();
+    return codegen::code_kind_is_arena(kind);
 }
 
 fn render_storage_deinit(
@@ -3309,6 +3317,220 @@ fn render_arena_get_slice_struct_field(
     try w(out, " = load %kizu.slice.u8, ptr %arg");
     try wi(out, dst);
     try wl(out, "_ptr");
+    return;
+}
+
+fn render_arena_add_struct(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let arena = try code.get(index + 2);
+    let payload_size = try code.get(index + 3);
+    let field_count = try code.get(index + 4);
+    try w(out, "  %ar");
+    try wi(out, dst);
+    try w(out, "_slot = alloca i8, i64 ");
+    try wi(out, payload_size);
+    try nl(out);
+    try render_arena_add_struct_fields(out, code, dst, index + 5, field_count, 0);
+    try w(out, "  %ar");
+    try wi(out, dst);
+    try w(out, "_slice0 = insertvalue %kizu.slice.u8 poison, ptr %ar");
+    try wi(out, dst);
+    try wl(out, "_slot, 0");
+    try w(out, "  %ar");
+    try wi(out, dst);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %ar");
+    try wi(out, dst);
+    try w(out, "_slice0, i64 ");
+    try wi(out, payload_size);
+    try wl(out, ", 1");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %v");
+    try wi(out, arena);
+    try w(out, ", %kizu.slice.u8 %ar");
+    try wi(out, dst);
+    try wl(out, "_slice)");
+    return;
+}
+
+fn render_arena_add_struct_fields(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    dst: i64,
+    fields_start: i64,
+    field_count: i64,
+    index: i64
+) -> !void {
+    if index < field_count {
+        let entry_pos = fields_start + index * 4;
+        let offset = try code.get(entry_pos);
+        let kind_pos = entry_pos + 2;
+        let kind = try code.get(kind_pos);
+        let value_pos = entry_pos + 3;
+        let value = try code.get(value_pos);
+        try w(out, "  %ar");
+        try wi(out, dst);
+        try w(out, "_f");
+        try wi(out, index);
+        try w(out, " = getelementptr i8, ptr %ar");
+        try wi(out, dst);
+        try w(out, "_slot, i64 ");
+        try wi(out, offset);
+        try nl(out);
+        try render_arena_add_struct_field_store(out, dst, index, kind, value);
+        let after = index + 1;
+        try render_arena_add_struct_fields(out, code, dst, fields_start, field_count, after);
+    }
+    return;
+}
+
+fn render_arena_add_struct_field_store(
+    out: &var std::string::String,
+    dst: i64,
+    index: i64,
+    kind: i64,
+    value: i64
+) -> !void {
+    if kind == codegen::code_kind_i64() {
+        try w(out, "  store i64 %v");
+        try wi(out, value);
+        try w(out, ", ptr %ar");
+        try wi(out, dst);
+        try w(out, "_f");
+        try wi(out, index);
+        try nl(out);
+    }
+    if kind == codegen::code_kind_bool() {
+        try w(out, "  %ar");
+        try wi(out, dst);
+        try w(out, "_b");
+        try wi(out, index);
+        try w(out, " = zext i1 %v");
+        try wi(out, value);
+        try wl(out, " to i8");
+        try w(out, "  store i8 %ar");
+        try wi(out, dst);
+        try w(out, "_b");
+        try wi(out, index);
+        try w(out, ", ptr %ar");
+        try wi(out, dst);
+        try w(out, "_f");
+        try wi(out, index);
+        try nl(out);
+    }
+    if kind == codegen::code_kind_slice() {
+        try w(out, "  store %kizu.slice.u8 %v");
+        try wi(out, value);
+        try w(out, ", ptr %ar");
+        try wi(out, dst);
+        try w(out, "_f");
+        try wi(out, index);
+        try nl(out);
+    }
+    return;
+}
+
+fn render_arena_get_struct_field(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let arena = try code.get(index + 2);
+    let handle = try code.get(index + 3);
+    let offset = try code.get(index + 4);
+    let kind_pos = index + 6;
+    let kind = try code.get(kind_pos);
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %v");
+    try wi(out, arena);
+    try w(out, ", %kizu.handle %v");
+    try wi(out, handle);
+    try wl(out, ")");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %arg");
+    try wi(out, dst);
+    try w(out, "_ok, label %arg");
+    try wi(out, dst);
+    try w(out, "_cont, label %arg");
+    try wi(out, dst);
+    try wl(out, "_fail");
+    try w(out, "arg");
+    try wi(out, dst);
+    try wl(out, "_fail:");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_msg = extractvalue %kizu.error.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, ", 2");
+    try w(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, "_msg)");
+    try wl(out, "  unreachable");
+    try w(out, "arg");
+    try wi(out, dst);
+    try wl(out, "_cont:");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, ", 1");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %arg");
+    try wi(out, dst);
+    try wl(out, "_slice, 0");
+    try w(out, "  %arg");
+    try wi(out, dst);
+    try w(out, "_field = getelementptr i8, ptr %arg");
+    try wi(out, dst);
+    try w(out, "_ptr, i64 ");
+    try wi(out, offset);
+    try nl(out);
+    try render_arena_get_struct_field_load(out, dst, kind);
+    return;
+}
+
+fn render_arena_get_struct_field_load(
+    out: &var std::string::String,
+    dst: i64,
+    kind: i64
+) -> !void {
+    if kind == codegen::code_kind_i64() {
+        try w(out, "  %v");
+        try wi(out, dst);
+        try w(out, " = load i64, ptr %arg");
+        try wi(out, dst);
+        try wl(out, "_field");
+    }
+    if kind == codegen::code_kind_bool() {
+        try w(out, "  %arg");
+        try wi(out, dst);
+        try w(out, "_byte = load i8, ptr %arg");
+        try wi(out, dst);
+        try wl(out, "_field");
+        try w(out, "  %v");
+        try wi(out, dst);
+        try w(out, " = icmp ne i8 %arg");
+        try wi(out, dst);
+        try wl(out, "_byte, 0");
+    }
+    if kind == codegen::code_kind_slice() {
+        try w(out, "  %v");
+        try wi(out, dst);
+        try w(out, " = load %kizu.slice.u8, ptr %arg");
+        try wi(out, dst);
+        try wl(out, "_field");
+    }
     return;
 }
 
@@ -3856,6 +4078,14 @@ fn tape_struct_lit_record_end(code: &std::array::Array<i64>, index: i64) -> !i64
     return index + 3 + field_slots;
 }
 
+// tape_arena_add_struct_record_end returns the index past an ARENA_ADD_STRUCT
+// record ('op dst arena payload_size field_count [offset size kind value]...').
+fn tape_arena_add_struct_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let field_count = try code.get(index + 4);
+    let field_slots = field_count * 4;
+    return index + 5 + field_slots;
+}
+
 // tape_var_struct_record_end returns the index past a VAR_STRUCT record, reading
 // its field count ('op dst field_count [name_start name_end slot kind] per
 // field'). The renderer emits nothing for the record itself: field reads and
@@ -3950,7 +4180,7 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let arena_new = codegen::code_op_arena_new();
     if op == arena_new {
-        return index + 4;
+        return index + 6;
     }
     let arena_deinit = codegen::code_op_arena_deinit();
     if op == arena_deinit {
@@ -3995,6 +4225,14 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let arena_get = codegen::code_op_arena_get_slice_struct_field();
     if op == arena_get {
         return index + 4;
+    }
+    let arena_add_struct = codegen::code_op_arena_add_struct();
+    if op == arena_add_struct {
+        return try tape_arena_add_struct_record_end(code, index);
+    }
+    let arena_get_struct = codegen::code_op_arena_get_struct_field();
+    if op == arena_get_struct {
+        return index + 7;
     }
     let struct_lit = codegen::code_op_struct_lit();
     if op == struct_lit {
