@@ -436,11 +436,12 @@ fn render_string_format_helpers(out: &var std::string::String) -> !void {
 }
 
 // render_string_globals walks the tape and emits a private constant for every
-// CONST_STR record's payload span (named '@.kizu.run.s<dst>') and for every
-// ENUM_CONST record's qualified variant span (named '@.kizu.run.e<dst>').
-// UNION_CONST records get no global: the print lowering rejects union values,
-// so nothing references '@.kizu.run.e' for them (lift both sides together if
-// union printing ever lands).
+// CONST_STR record's payload span (named '@.kizu.run.s<dst>'), every ENUM_CONST
+// record's qualified variant span (named '@.kizu.run.e<dst>'), and every
+// ENUM_DECL variant span (named '@.kizu.run.ed<record>v<tag>'). UNION_CONST
+// records get no global: the print lowering rejects union values, so nothing
+// references enum globals for them (lift both sides together if union printing
+// ever lands).
 fn render_string_globals(
     out: &var std::string::String,
     text: []u8,
@@ -459,6 +460,10 @@ fn render_string_globals(
     let enum_const = codegen::code_op_enum_const();
     if op == enum_const {
         try render_one_enum_global(out, text, code, index);
+    }
+    let enum_decl = codegen::code_op_enum_decl();
+    if op == enum_decl {
+        try render_enum_decl_globals(out, text, code, index, 0);
     }
     try render_string_globals(out, text, code, next);
     return;
@@ -484,6 +489,58 @@ fn render_one_enum_global(
     try w(out, " x i8] c");
     try out.append_byte(cast<u8>(34));
     try render_llvm_c_bytes(out, payload);
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
+    return;
+}
+
+fn render_enum_decl_globals(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    record_pos: i64,
+    index: i64
+) -> !void {
+    let count_pos = record_pos + 3;
+    let variant_count = try code.get(count_pos);
+    if index >= variant_count {
+        return;
+    }
+    try render_one_enum_decl_global(out, text, code, record_pos, index);
+    let after = index + 1;
+    try render_enum_decl_globals(out, text, code, record_pos, after);
+    return;
+}
+
+fn render_one_enum_decl_global(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    record_pos: i64,
+    tag: i64
+) -> !void {
+    let enum_start = try code.get(record_pos + 1);
+    let enum_end = try code.get(record_pos + 2);
+    let entry_pos = enum_decl_variant_entry_pos(record_pos, tag);
+    let var_start = try code.get(entry_pos);
+    let name_end_pos = entry_pos + 1;
+    let var_end = try code.get(name_end_pos);
+    let enum_name = text[enum_start..enum_end];
+    let variant_name = text[var_start..var_end];
+    let enum_len = enum_end - enum_start;
+    let variant_len = var_end - var_start;
+    let byte_len = enum_len + 2 + variant_len;
+    try w(out, "@.kizu.run.ed");
+    try wi(out, record_pos);
+    try w(out, "v");
+    try wi(out, tag);
+    try w(out, " = private unnamed_addr constant [");
+    try wi(out, byte_len);
+    try w(out, " x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try render_llvm_c_bytes(out, enum_name);
+    try w(out, "::");
+    try render_llvm_c_bytes(out, variant_name);
     try out.append_byte(cast<u8>(34));
     try nl(out);
     return;
@@ -3609,7 +3666,7 @@ fn render_print(
         try render_print_bool_line(out, value_id, index);
     }
     if is_record {
-        try render_print_enum_line(out, code, value_kind, index);
+        try render_print_enum_line(out, code, value_id, value_kind, index);
     }
     if is_struct_param {
         try render_print_struct_param_line(out, code, value_id, value_kind, index);
@@ -3645,18 +3702,36 @@ fn render_print_struct_param_line(
     return;
 }
 
-// render_print_enum_line writes a record-backed print value: the lowering only
-// admits ENUM_CONST-backed values here (lower_code_print_record verifies the
-// record opcode), so this reads the ENUM_CONST layout without re-checking it
-// and writes the record's qualified variant global followed by the newline.
+// render_print_enum_line writes enum record-backed print values. ENUM_CONST
+// keeps the existing qualified-name global path, while ENUM_DECL dispatches a
+// runtime tag to the variant globals emitted from the declaration record.
 fn render_print_enum_line(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
+    value_id: i64,
     value_kind: i64,
     suffix: i64
 ) -> !void {
     let record_base = codegen::code_kind_struct_base();
     let record_pos = value_kind - record_base;
+    let record_op = try code.get(record_pos);
+    let enum_const = codegen::code_op_enum_const();
+    if record_op == enum_const {
+        try render_print_enum_const_line(out, code, record_pos, suffix);
+    }
+    let enum_decl = codegen::code_op_enum_decl();
+    if record_op == enum_decl {
+        try render_print_runtime_enum_line(out, code, value_id, record_pos, suffix);
+    }
+    return;
+}
+
+fn render_print_enum_const_line(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    record_pos: i64,
+    suffix: i64
+) -> !void {
     let dst = try code.get(record_pos + 1);
     let qual_start = try code.get(record_pos + 2);
     let qual_end = try code.get(record_pos + 3);
@@ -3680,6 +3755,141 @@ fn render_print_enum_line(
     try wl(out, "_slice)");
     try render_print_newline(out, suffix);
     return;
+}
+
+fn render_print_runtime_enum_line(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64,
+    record_pos: i64,
+    suffix: i64
+) -> !void {
+    let count_pos = record_pos + 3;
+    let variant_count = try code.get(count_pos);
+    try w(out, "  switch i64 %v");
+    try wi(out, value_id);
+    try w(out, ", label %pe");
+    try wi(out, suffix);
+    try wl(out, "_bad [");
+    try render_print_runtime_enum_switch_entries(out, suffix, variant_count, 0);
+    try wl(out, "  ]");
+    try w(out, "pe");
+    try wi(out, suffix);
+    try wl(out, "_bad:");
+    try wl(out, "  unreachable");
+    try render_print_runtime_enum_cases(out, code, record_pos, suffix, variant_count, 0);
+    try w(out, "pe");
+    try wi(out, suffix);
+    try wl(out, "_done:");
+    try render_print_newline(out, suffix);
+    return;
+}
+
+fn render_print_runtime_enum_switch_entries(
+    out: &var std::string::String,
+    suffix: i64,
+    variant_count: i64,
+    tag: i64
+) -> !void {
+    if tag >= variant_count {
+        return;
+    }
+    try w(out, "    i64 ");
+    try wi(out, tag);
+    try w(out, ", label %pe");
+    try wi(out, suffix);
+    try w(out, "_case");
+    try wi(out, tag);
+    try nl(out);
+    let after = tag + 1;
+    try render_print_runtime_enum_switch_entries(out, suffix, variant_count, after);
+    return;
+}
+
+fn render_print_runtime_enum_cases(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    record_pos: i64,
+    suffix: i64,
+    variant_count: i64,
+    tag: i64
+) -> !void {
+    if tag >= variant_count {
+        return;
+    }
+    try render_print_runtime_enum_case(out, code, record_pos, suffix, tag);
+    let after = tag + 1;
+    try render_print_runtime_enum_cases(out, code, record_pos, suffix, variant_count, after);
+    return;
+}
+
+fn render_print_runtime_enum_case(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    record_pos: i64,
+    suffix: i64,
+    tag: i64
+) -> !void {
+    let byte_len = try enum_decl_variant_byte_len(code, record_pos, tag);
+    try w(out, "pe");
+    try wi(out, suffix);
+    try w(out, "_case");
+    try wi(out, tag);
+    try wl(out, ":");
+    try w(out, "  %pe");
+    try wi(out, suffix);
+    try w(out, "_");
+    try wi(out, tag);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.ed");
+    try wi(out, record_pos);
+    try w(out, "v");
+    try wi(out, tag);
+    try wl(out, ", 0");
+    try w(out, "  %pe");
+    try wi(out, suffix);
+    try w(out, "_");
+    try wi(out, tag);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %pe");
+    try wi(out, suffix);
+    try w(out, "_");
+    try wi(out, tag);
+    try w(out, "_base, i64 ");
+    try wi(out, byte_len);
+    try wl(out, ", 1");
+    try w(out, "  %pe");
+    try wi(out, suffix);
+    try w(out, "_");
+    try wi(out, tag);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %pe");
+    try wi(out, suffix);
+    try w(out, "_");
+    try wi(out, tag);
+    try wl(out, "_slice)");
+    try w(out, "  br label %pe");
+    try wi(out, suffix);
+    try wl(out, "_done");
+    return;
+}
+
+fn enum_decl_variant_byte_len(
+    code: &std::array::Array<i64>,
+    record_pos: i64,
+    tag: i64
+) -> !i64 {
+    let enum_start = try code.get(record_pos + 1);
+    let enum_end = try code.get(record_pos + 2);
+    let entry_pos = enum_decl_variant_entry_pos(record_pos, tag);
+    let var_start = try code.get(entry_pos);
+    let name_end_pos = entry_pos + 1;
+    let var_end = try code.get(name_end_pos);
+    let enum_len = enum_end - enum_start;
+    let variant_len = var_end - var_start;
+    return enum_len + 2 + variant_len;
+}
+
+fn enum_decl_variant_entry_pos(record_pos: i64, tag: i64) -> i64 {
+    let entry_slots = tag * 2;
+    return record_pos + 4 + entry_slots;
 }
 
 // render_print_slice_line writes a runtime slice print value (its '%v<id>' SSA
@@ -4106,6 +4316,14 @@ fn tape_union_decl_record_end(code: &std::array::Array<i64>, index: i64) -> !i64
     return index + 4 + entry_slots;
 }
 
+// tape_enum_decl_record_end steps past an ENUM_DECL record: the fixed head plus
+// two source-span slots per variant.
+fn tape_enum_decl_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let variant_count = try code.get(index + 3);
+    let entry_slots = variant_count * 2;
+    return index + 4 + entry_slots;
+}
+
 fn tape_struct_param_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let field_count = try code.get(index + 1);
     let field_slots = field_count * 3;
@@ -4244,7 +4462,7 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let enum_decl = codegen::code_op_enum_decl();
     if op == enum_decl {
-        return index + 3;
+        return try tape_enum_decl_record_end(code, index);
     }
     let union_const = codegen::code_op_union_const();
     if op == union_const {

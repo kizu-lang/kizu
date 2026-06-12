@@ -3398,9 +3398,11 @@ pub fn code_op_enum_const() -> i64 {
     return 9;
 }
 
-// ENUM_DECL records one enum declaration's identity at the head of the tape.
-// Enum values still use the i64 tag ABI, but call results need a record-backed
-// kind so bare match-arm patterns can resolve against the enum declaration.
+// ENUM_DECL records one enum declaration's identity and variant names at the
+// head of the tape. Enum values still use the i64 tag ABI, but call results
+// need a record-backed kind so bare match-arm patterns and runtime enum prints
+// can resolve against the enum declaration:
+// 'op name_start name_end variant_count [vname_start vname_end] per variant'.
 pub fn code_op_enum_decl() -> i64 {
     return 113;
 }
@@ -4232,7 +4234,7 @@ fn emit_enum_decl_record(
 ) -> !CodeEval {
     let node = ast.get(child);
     return match node.data {
-        EnumDecl(enum_decl) => try emit_one_enum_decl(text, ast, enum_decl.name, code),
+        EnumDecl(enum_decl) => try emit_one_enum_decl(text, ast, enum_decl.name, enum_decl.tags, code),
         _ => code_eval_value(0, 0),
     };
 }
@@ -4241,6 +4243,7 @@ fn emit_one_enum_decl(
     text: []u8,
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
+    tags: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>
 ) -> !CodeEval {
     let name_span = code_node_span(text, ast, name);
@@ -4248,7 +4251,26 @@ fn emit_one_enum_decl(
     try code.append(op_enum_decl);
     try code.append(name_span.start);
     try code.append(name_span.end);
-    return code_eval_value(0, 0);
+    try code.append(tags.len);
+    return try append_enum_decl_variants(text, ast, tags, code, 0);
+}
+
+fn append_enum_decl_variants(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    tags: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    index: i64
+) -> !CodeEval {
+    if index >= tags.len {
+        return code_eval_value(0, 0);
+    }
+    let child = try ast.child_at(tags, index);
+    let tag_span = code_node_span(text, ast, child);
+    try code.append(tag_span.start);
+    try code.append(tag_span.end);
+    let after = index + 1;
+    return try append_enum_decl_variants(text, ast, tags, code, after);
 }
 
 // union_payload_kind classifies a variant payload type for the runtime layout:
@@ -5085,6 +5107,13 @@ fn code_union_decl_record_end(code: &var std::array::Array<i64>, pos: i64) -> !i
     return pos + 4 + entry_slots;
 }
 
+fn code_enum_decl_record_end(code: &var std::array::Array<i64>, pos: i64) -> !i64 {
+    let count_pos = pos + 3;
+    let variant_count = try code.get(count_pos);
+    let entry_slots = variant_count * 2;
+    return pos + 4 + entry_slots;
+}
+
 fn enum_decl_pos_by_span(
     text: []u8,
     code: &var std::array::Array<i64>,
@@ -5109,7 +5138,7 @@ fn enum_decl_pos_by_span(
     let rec_name_end = try code.get(pos + 2);
     let rec_name = text[rec_name_start..rec_name_end];
     let wanted = text[name_start..name_end];
-    let next_pos = pos + 3;
+    let next_pos = try code_enum_decl_record_end(code, pos);
     if !std::mem::equal_bytes(rec_name, wanted) {
         return try enum_decl_pos_by_span(text, code, name_start, name_end, next_pos);
     }
@@ -5722,9 +5751,9 @@ fn lower_code_match_arm(
 }
 
 // match_pattern_tag resolves an arm pattern against the matched record's
-// declaration: ENUM_DECL records keep their enum name at +1/+2, UNION_DECL
-// keeps its variant entries inline, and compile-time ENUM_CONST/UNION_CONST
-// records keep the declaration name span at +4/+5.
+// declaration: ENUM_DECL and UNION_DECL records keep their variant entries
+// inline, and compile-time ENUM_CONST/UNION_CONST records keep the declaration
+// name span at +4/+5.
 fn match_pattern_tag(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -5744,7 +5773,7 @@ fn match_pattern_tag(
     }
     let op_enum_decl = code_op_enum_decl();
     if record_op == op_enum_decl {
-        return try enum_decl_pattern_tag(text, ast, decls, code, record_pos, p_start, p_end);
+        return try enum_decl_pattern_tag(text, code, record_pos, p_start, p_end);
     }
     let name_start_pos = record_pos + 4;
     let name_start = try code.get(name_start_pos);
@@ -5759,16 +5788,42 @@ fn match_pattern_tag(
 
 fn enum_decl_pattern_tag(
     text: []u8,
-    ast: std::kizu::ast::Ast,
-    decls: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     record_pos: i64,
     p_start: i64,
     p_end: i64
 ) -> !i64 {
-    let name_start = try code.get(record_pos + 1);
-    let name_end = try code.get(record_pos + 2);
-    return try enum_variant_tag_lookup(text, ast, decls, name_start, name_end, p_start, p_end, 0);
+    let count_pos = record_pos + 3;
+    let variant_count = try code.get(count_pos);
+    return try enum_decl_variant_index(text, code, record_pos, variant_count, p_start, p_end, 0);
+}
+
+// enum_decl_variant_index returns the declaration-order index of the named
+// variant in an ENUM_DECL record (-1 when the record does not carry it).
+fn enum_decl_variant_index(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    record_pos: i64,
+    variant_count: i64,
+    name_start: i64,
+    name_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= variant_count {
+        return 0 - 1;
+    }
+    let entry_slots = index * 2;
+    let entry_pos = record_pos + 4 + entry_slots;
+    let entry_name_start = try code.get(entry_pos);
+    let entry_end_pos = entry_pos + 1;
+    let entry_name_end = try code.get(entry_end_pos);
+    let entry_name = text[entry_name_start..entry_name_end];
+    let wanted = text[name_start..name_end];
+    let after = index + 1;
+    if !std::mem::equal_bytes(entry_name, wanted) {
+        return try enum_decl_variant_index(text, code, record_pos, variant_count, name_start, name_end, after);
+    }
+    return index;
 }
 
 // union_decl_pattern_tag resolves an arm pattern against a UNION_DECL record's
@@ -8303,8 +8358,9 @@ fn lower_code_print_call(
     let kind = try kinds.get(eval.value_id);
     // Record-backed values print only when their record carries a printable
     // scalar/slice representation: ENUM_CONST writes the qualified variant name,
-    // and STRUCT_PARAM unwraps to the parameter field ABI. Other struct records
-    // have no printable SSA temp, so 'print(<struct>)' stays unsupported.
+    // ENUM_DECL dispatches the runtime tag through its declaration variants, and
+    // STRUCT_PARAM unwraps to the parameter field ABI. Other struct records have
+    // no printable SSA temp, so 'print(<struct>)' stays unsupported.
     let record_base = code_kind_struct_base();
     if kind >= record_base {
         return try lower_code_print_record(code, eval.value_id, kind, record_base, eval.next);
@@ -8316,13 +8372,13 @@ fn lower_code_print_call(
     return code_eval_value(eval.value_id, eval.next);
 }
 
-// lower_code_print_record keeps printable record-backed values on the tape. An
-// ENUM_CONST resolves to its qualified variant text; a STRUCT_PARAM resolves
-// through the receiver parameter metadata to the field ABI kind. UNION_CONST
-// stays rejected on purpose: the renderer's string-globals walk emits
-// '@.kizu.run.e' globals for ENUM_CONST records only, so admitting a union here
-// would reference an undefined global (lift both sides together if union
-// printing ever lands).
+// lower_code_print_record keeps printable record-backed values on the tape.
+// ENUM_CONST resolves to its qualified variant text; ENUM_DECL resolves its
+// runtime tag against declaration variant spans; a STRUCT_PARAM resolves through
+// the receiver parameter metadata to the field ABI kind. UNION_CONST stays
+// rejected on purpose: the renderer's string-globals walk emits enum globals
+// only, so admitting a union here would reference an undefined global (lift both
+// sides together if union printing ever lands).
 fn lower_code_print_record(
     code: &var std::array::Array<i64>,
     value_id: i64,
@@ -8333,10 +8389,12 @@ fn lower_code_print_record(
     let record_pos = kind - record_base;
     let record_op = try code.get(record_pos);
     let op_enum_const = code_op_enum_const();
+    let op_enum_decl = code_op_enum_decl();
     let op_struct_param = code_op_struct_param();
     let is_enum = record_op == op_enum_const;
+    let is_enum_runtime = record_op == op_enum_decl;
     let is_struct_param = record_op == op_struct_param;
-    let printable = is_enum or is_struct_param;
+    let printable = is_enum or is_enum_runtime or is_struct_param;
     if !printable {
         return code_eval_unsupported(next_value);
     }
