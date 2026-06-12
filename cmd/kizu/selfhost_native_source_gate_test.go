@@ -24,6 +24,12 @@ type nativeSelfhostBuildConfig struct {
 	cacheDir   string
 }
 
+type nativeSourceDeferralCase struct {
+	name    string
+	args    []string
+	command string
+}
+
 // TestSelfhostNativeSourceExecutableGate builds selfhost from source and runs
 // executable artifacts through the Kizu-owned checked-AST lowering path.
 func TestSelfhostNativeSourceExecutableGate(t *testing.T) {
@@ -92,6 +98,7 @@ func runSelfhostNativeSourceExecutable(t *testing.T) (string, int) {
 	appendNativeSourceCommandResult(&report, "stage", stage)
 	failures += expectNativeSourceCommand(t, "stage selfhost", stage, bootstrapStageStdout(), "", 0)
 	failures += countNativeSourceStageArtifactFailures(t, &report)
+	failures += countNativeSourceDeferralFailures(t, &report, nativeSourceRunnerPath)
 	if failures == 0 {
 		failures += countNativeSourceRunCaseFailures(t, &report, clang, nativeSourceRunnerPath)
 		failures += countNativeSourceTestCaseFailures(t, &report, clang, nativeSourceRunnerPath)
@@ -266,6 +273,51 @@ func countNativeSourceRunCaseFailures(
 		appendRunParityResult(report, item, result)
 	}
 	return failures
+}
+
+// countNativeSourceDeferralFailures checks public-but-unowned CLI grammar is explicit.
+func countNativeSourceDeferralFailures(
+	t *testing.T,
+	report *strings.Builder,
+	runner string,
+) int {
+	t.Helper()
+	failures := 0
+	for _, item := range nativeSourceDeferralCases() {
+		result := runNativeSourceCommand(t, runner, item.args...)
+		appendNativeSourceCommandResult(report, "deferred."+item.name, result)
+		wantErr := "selfhost: command '" + item.command +
+			"' is not owned yet; deferred to Go cmd/kizu\n"
+		failures += expectNativeSourceCommand(
+			t,
+			"deferred "+item.name,
+			result,
+			"",
+			wantErr,
+			64,
+		)
+	}
+	return failures
+}
+
+// nativeSourceDeferralCases returns recognized public CLI shapes selfhost defers.
+func nativeSourceDeferralCases() []nativeSourceDeferralCase {
+	hello := "examples/hello.kizu"
+	return []nativeSourceDeferralCase{
+		nativeSourceDeferral("build_emit_llvm", "build", "build", "--emit-llvm", hello),
+		nativeSourceDeferral("build_target_native", "build", "build", "--target", "native", hello),
+		nativeSourceDeferral("cache_status", "cache status", "cache", "status"),
+		nativeSourceDeferral("cache_prune", "cache prune", "cache", "prune"),
+		nativeSourceDeferral("why_rebuild", "why-rebuild", "why-rebuild", hello),
+		nativeSourceDeferral("init_default", "init", "init"),
+		nativeSourceDeferral("ir_opt", "ir", "ir", "--opt", hello),
+		nativeSourceDeferral("import_c_header", "import-c-header", "import-c-header", "examples/c_abi.h"),
+	}
+}
+
+// nativeSourceDeferral builds one public CLI deferral expectation.
+func nativeSourceDeferral(name string, command string, args ...string) nativeSourceDeferralCase {
+	return nativeSourceDeferralCase{name: name, args: args, command: command}
 }
 
 // nativeSourceRunOK builds an exit-0 hosted-artifact run case whose program

@@ -102,34 +102,73 @@ pub fn cli_main() -> !i64 {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
     let arg_count = std::process::arg_count();
-    if arg_count != 2 and arg_count != 3 {
-        try output::usage(allocator, io);
-        return std::process::exit_code(64);
+    if arg_count == 0 {
+        return try usage_cli(allocator, io);
     }
-
     let command = try std::process::arg(0);
     if std::mem::starts_with(command, "-") {
-        try output::usage(allocator, io);
-        return std::process::exit_code(64);
+        return try usage_cli(allocator, io);
+    }
+    if std::mem::equal_bytes(command, "build") {
+        if try is_public_build_deferral_shape(arg_count) {
+            return try deferred_public_command_cli(allocator, io, "build");
+        }
+        return try usage_cli(allocator, io);
+    }
+    if std::mem::equal_bytes(command, "cache") {
+        if arg_count == 2 {
+            let subcommand = try std::process::arg(1);
+            if std::mem::equal_bytes(subcommand, "status") {
+                return try deferred_public_command_cli(allocator, io, "cache status");
+            }
+            if std::mem::equal_bytes(subcommand, "prune") {
+                return try deferred_public_command_cli(allocator, io, "cache prune");
+            }
+        }
+        return try usage_cli(allocator, io);
+    }
+    if std::mem::equal_bytes(command, "why-rebuild") {
+        if try is_one_target_deferral_shape(arg_count) {
+            return try deferred_public_command_cli(allocator, io, "why-rebuild");
+        }
+        return try usage_cli(allocator, io);
+    }
+    if std::mem::equal_bytes(command, "init") {
+        if try is_public_init_deferral_shape(arg_count) {
+            return try deferred_public_command_cli(allocator, io, "init");
+        }
+        return try usage_cli(allocator, io);
+    }
+    if std::mem::equal_bytes(command, "ir") {
+        if try is_public_ir_deferral_shape(arg_count) {
+            return try deferred_public_command_cli(allocator, io, "ir");
+        }
+        return try usage_cli(allocator, io);
+    }
+    if std::mem::equal_bytes(command, "import-c-header") {
+        if try is_one_target_deferral_shape(arg_count) {
+            return try deferred_public_command_cli(allocator, io, "import-c-header");
+        }
+        return try usage_cli(allocator, io);
+    }
+    if arg_count != 2 and arg_count != 3 {
+        return try usage_cli(allocator, io);
     }
     if arg_count == 3 {
         if !std::mem::equal_bytes(command, "fmt") {
-            try output::usage(allocator, io);
-            return std::process::exit_code(64);
+            return try usage_cli(allocator, io);
         }
         let flag = try std::process::arg(1);
         let target = try std::process::arg(2);
         if !is_fmt_write_flag(flag) or std::mem::starts_with(target, "-") {
-            try output::usage(allocator, io);
-            return std::process::exit_code(64);
+            return try usage_cli(allocator, io);
         }
         return try fmt_write_file_cli(allocator, io, target);
     }
 
     let target = try std::process::arg(1);
     if std::mem::starts_with(target, "-") {
-        try output::usage(allocator, io);
-        return std::process::exit_code(64);
+        return try usage_cli(allocator, io);
     }
     if std::mem::equal_bytes(command, "check") {
         return try check_file_or_package_cli(allocator, io, target);
@@ -147,8 +186,7 @@ pub fn cli_main() -> !i64 {
         return try execute::test_file_cli(allocator, io, target);
     }
     if !std::mem::equal_bytes(target, "selfhost") {
-        try output::usage(allocator, io);
-        return std::process::exit_code(64);
+        return try usage_cli(allocator, io);
     }
     if std::mem::equal_bytes(command, "stage") {
         let llvm = try stage_selfhost(allocator, io);
@@ -164,6 +202,70 @@ pub fn cli_main() -> !i64 {
 
     try output::error_line(allocator, io, "unsupported selfhost command");
     return std::process::exit_code(64);
+}
+
+fn usage_cli(allocator: Allocator, io: Io) -> !i64 {
+    try output::usage(allocator, io);
+    return std::process::exit_code(64);
+}
+fn deferred_public_command_cli(allocator: Allocator, io: Io, command: []u8) -> !i64 {
+    try output::deferred_public_command(allocator, io, command);
+    return std::process::exit_code(64);
+}
+
+fn is_public_build_deferral_shape(arg_count: i64) -> !bool {
+    if arg_count == 3 {
+        let flag = try std::process::arg(1);
+        let target = try std::process::arg(2);
+        return std::mem::equal_bytes(flag, "--emit-llvm") and
+            !std::mem::starts_with(target, "-");
+    }
+    if arg_count == 4 {
+        let flag = try std::process::arg(1);
+        if std::mem::equal_bytes(flag, "--emit-llvm") {
+            let opt = try std::process::arg(2);
+            let target = try std::process::arg(3);
+            return std::mem::equal_bytes(opt, "--opt") and
+                !std::mem::starts_with(target, "-");
+        }
+    }
+    if arg_count >= 4 {
+        let flag = try std::process::arg(1);
+        let target_kind = try std::process::arg(2);
+        let target = try std::process::arg(arg_count - 1);
+        return std::mem::equal_bytes(flag, "--target") and
+            !std::mem::starts_with(target_kind, "-") and
+            !std::mem::starts_with(target, "-");
+    }
+    return false;
+}
+
+fn is_one_target_deferral_shape(arg_count: i64) -> !bool {
+    if arg_count != 2 {
+        return false;
+    }
+    let target = try std::process::arg(1);
+    return !std::mem::starts_with(target, "-");
+}
+
+fn is_public_init_deferral_shape(arg_count: i64) -> !bool {
+    if arg_count == 1 {
+        return true;
+    }
+    return try is_one_target_deferral_shape(arg_count);
+}
+
+fn is_public_ir_deferral_shape(arg_count: i64) -> !bool {
+    if arg_count == 2 {
+        return try is_one_target_deferral_shape(arg_count);
+    }
+    if arg_count == 3 {
+        let opt = try std::process::arg(1);
+        let target = try std::process::arg(2);
+        return std::mem::equal_bytes(opt, "--opt") and
+            !std::mem::starts_with(target, "-");
+    }
+    return false;
 }
 
 fn is_fmt_write_flag(flag: []u8) -> bool {
