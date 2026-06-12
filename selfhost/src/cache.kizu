@@ -1,0 +1,206 @@
+pub enum CacheBackend {
+    Interpreter,
+    Llvm,
+    Wat,
+    C,
+}
+
+pub enum OptimizationMode {
+    Debug,
+    ReleaseSafe,
+    ReleaseFast,
+    ReleaseSmall,
+}
+
+pub struct CacheKeyInput {
+    pub compiler_version: []u8,
+    pub manifest_path: []u8,
+    pub manifest_hash: []u8,
+    pub module_graph_hash: []u8,
+    pub source_hashes: []u8,
+    pub public_interface_hash: []u8,
+    pub target: []u8,
+    pub backend: CacheBackend,
+    pub optimization_mode: OptimizationMode,
+    pub stdlib_hash: []u8,
+    pub stdlib_version: []u8,
+}
+
+pub struct CacheKey {
+    pub fingerprint: i64,
+}
+
+pub fn compute_key(input: CacheKeyInput) -> CacheKey {
+    var state = 17;
+    state = mix_field(state, "compiler-version", input.compiler_version);
+    state = mix_field(state, "manifest-path", input.manifest_path);
+    state = mix_field(state, "manifest-hash", input.manifest_hash);
+    state = mix_field(state, "module-graph-hash", input.module_graph_hash);
+    state = mix_field(state, "source-hashes", input.source_hashes);
+    state = mix_field(state, "public-interface-hash", input.public_interface_hash);
+    state = mix_field(state, "target", input.target);
+    state = mix_field(state, "backend", backend_name(input.backend));
+    state = mix_field(state, "optimization-mode", optimization_mode_name(input.optimization_mode));
+    state = mix_field(state, "stdlib-hash", input.stdlib_hash);
+    state = mix_field(state, "stdlib-version", input.stdlib_version);
+    return CacheKey { fingerprint: state };
+}
+
+pub fn gate() -> !void {
+    let base = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
+    let same = sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0");
+    let base_key = compute_key(base);
+    let same_key = compute_key(same);
+    std::testing::expect_equal<i64>(base_key.fingerprint, same_key.fingerprint);
+
+    expect_changed(&base_key, sample_input("0.3.1", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0"));
+    expect_changed(&base_key, sample_input_at_path("package/kizu.toml"));
+    expect_changed(&base_key, sample_input("0.3.0", "manifest-b", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0"));
+    expect_changed(&base_key, sample_input("0.3.0", "manifest-a", "graph-b", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0"));
+    expect_changed(&base_key, sample_input("0.3.0", "manifest-a", "graph-a", "source-b", "iface-a", "x86_64-linux", "stdlib-a", "0.3.0"));
+    expect_changed(&base_key, sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-b", "x86_64-linux", "stdlib-a", "0.3.0"));
+    expect_changed(&base_key, sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "aarch64-linux", "stdlib-a", "0.3.0"));
+    expect_changed(&base_key, CacheKeyInput {
+        compiler_version: "0.3.0",
+        manifest_path: "selfhost/kizu.toml",
+        manifest_hash: "manifest-a",
+        module_graph_hash: "graph-a",
+        source_hashes: "source-a",
+        public_interface_hash: "iface-a",
+        target: "x86_64-linux",
+        backend: CacheBackend::Wat,
+        optimization_mode: OptimizationMode::Debug,
+        stdlib_hash: "stdlib-a",
+        stdlib_version: "0.3.0"
+    });
+    expect_changed(&base_key, CacheKeyInput {
+        compiler_version: "0.3.0",
+        manifest_path: "selfhost/kizu.toml",
+        manifest_hash: "manifest-a",
+        module_graph_hash: "graph-a",
+        source_hashes: "source-a",
+        public_interface_hash: "iface-a",
+        target: "x86_64-linux",
+        backend: CacheBackend::Llvm,
+        optimization_mode: OptimizationMode::ReleaseSafe,
+        stdlib_hash: "stdlib-a",
+        stdlib_version: "0.3.0"
+    });
+    expect_changed(&base_key, sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-b", "0.3.0"));
+    expect_changed(&base_key, sample_input("0.3.0", "manifest-a", "graph-a", "source-a", "iface-a", "x86_64-linux", "stdlib-a", "0.3.1"));
+
+    print("cache-key");
+    print(base_key.fingerprint);
+    return;
+}
+
+fn sample_input(
+    compiler_version: []u8,
+    manifest_hash: []u8,
+    module_graph_hash: []u8,
+    source_hashes: []u8,
+    public_interface_hash: []u8,
+    target: []u8,
+    stdlib_hash: []u8,
+    stdlib_version: []u8
+) -> CacheKeyInput {
+    return CacheKeyInput {
+        compiler_version: compiler_version,
+        manifest_path: "selfhost/kizu.toml",
+        manifest_hash: manifest_hash,
+        module_graph_hash: module_graph_hash,
+        source_hashes: source_hashes,
+        public_interface_hash: public_interface_hash,
+        target: target,
+        backend: CacheBackend::Llvm,
+        optimization_mode: OptimizationMode::Debug,
+        stdlib_hash: stdlib_hash,
+        stdlib_version: stdlib_version
+    };
+}
+
+fn sample_input_at_path(manifest_path: []u8) -> CacheKeyInput {
+    return CacheKeyInput {
+        compiler_version: "0.3.0",
+        manifest_path: manifest_path,
+        manifest_hash: "manifest-a",
+        module_graph_hash: "graph-a",
+        source_hashes: "source-a",
+        public_interface_hash: "iface-a",
+        target: "x86_64-linux",
+        backend: CacheBackend::Llvm,
+        optimization_mode: OptimizationMode::Debug,
+        stdlib_hash: "stdlib-a",
+        stdlib_version: "0.3.0"
+    };
+}
+
+fn expect_changed(base_key: &CacheKey, input: CacheKeyInput) -> void {
+    let changed_key = compute_key(input);
+    std::testing::expect(base_key.fingerprint != changed_key.fingerprint);
+    return;
+}
+
+fn mix_field(state: i64, name: []u8, value: []u8) -> i64 {
+    var next = mix_bytes(state, name);
+    next = mix_byte(next, cast<u8>(0));
+    next = mix_len(next, std::mem::len(value));
+    next = mix_byte(next, cast<u8>(0));
+    next = mix_bytes(next, value);
+    next = mix_byte(next, cast<u8>(10));
+    return next;
+}
+
+fn mix_len(state: i64, length: i64) -> i64 {
+    var next = state;
+    var current = length;
+    if current == 0 {
+        return mix_byte(next, cast<u8>(48));
+    }
+    while current > 0 {
+        let digit = current % 10;
+        next = mix_byte(next, cast<u8>(48 + digit));
+        current = current / 10;
+    }
+    return next;
+}
+
+fn mix_bytes(state: i64, bytes: []u8) -> i64 {
+    var next = state;
+    var index = 0;
+    while index < std::mem::len(bytes) {
+        next = mix_byte(next, bytes[index]);
+        index = index + 1;
+    }
+    return next;
+}
+
+fn mix_byte(state: i64, byte: u8) -> i64 {
+    return ((state * 257) + cast<i64>(byte) + 1) % 1000000007;
+}
+
+fn backend_name(backend: CacheBackend) -> []u8 {
+    if backend == CacheBackend::Interpreter {
+        return "interpreter";
+    }
+    if backend == CacheBackend::Llvm {
+        return "llvm";
+    }
+    if backend == CacheBackend::Wat {
+        return "wat";
+    }
+    return "c";
+}
+
+fn optimization_mode_name(mode: OptimizationMode) -> []u8 {
+    if mode == OptimizationMode::Debug {
+        return "debug";
+    }
+    if mode == OptimizationMode::ReleaseSafe {
+        return "release-safe";
+    }
+    if mode == OptimizationMode::ReleaseFast {
+        return "release-fast";
+    }
+    return "release-small";
+}
