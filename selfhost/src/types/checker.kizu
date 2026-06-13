@@ -382,33 +382,45 @@ pub fn first_hosted_check_undefined_variable_start_ast_node(
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId
 ) -> !i64 {
-    let no_local = hosted_check_no_undefined_variable(text);
-    return hosted_check_undefined_variable_in_node(text, ast, root, no_local, no_local);
+    return hosted_check_undefined_variable_in_node(text, ast, root, root);
 }
 
+// hosted_check_undefined_variable_in_node walks the statement structure of a program.
+// scope is the node id of the enclosing FnDecl: every Var reference is reported only
+// when its name is not bound anywhere in that function (params, lets, for/if bindings).
+// This conservative over-approximation never reports a false positive; unsupported
+// statement forms fall through the wildcard arm and stay silent.
 fn hosted_check_undefined_variable_in_node(
     text: []u8,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    local_start: i64,
-    local_end: i64
+    scope: std::kizu::ast::NodeId
 ) -> !i64 {
     let node = ast.get(node_id);
     return match node.data {
         Program(program) => try hosted_check_undefined_variable_in_declarations(
             text, ast, program.declarations
         ),
-        FnDecl(fn_decl) => try hosted_check_undefined_variable_in_function(
-            text, ast, fn_decl.params, fn_decl.body
+        ImplDecl(impl_decl) => try hosted_check_undefined_variable_in_declarations(
+            text, ast, impl_decl.methods
+        ),
+        FnDecl(fn_decl) => try hosted_check_undefined_variable_in_node(
+            text, ast, fn_decl.body, node_id
         ),
         Block(block) => try hosted_check_undefined_variable_in_statements(
-            text, ast, block.statements, local_start, local_end
+            text, ast, block.statements, scope
         ),
         ExprStmt(expr_stmt) => try hosted_check_undefined_variable_in_expr(
-            text, ast, expr_stmt.expr, local_start, local_end
+            text, ast, expr_stmt.expr, scope
         ),
         Let(let_node) => try hosted_check_undefined_variable_in_expr(
-            text, ast, let_node.value, local_start, local_end
+            text, ast, let_node.value, scope
+        ),
+        Return(return_node) => try hosted_check_undefined_variable_in_expr(
+            text, ast, return_node.value, scope
+        ),
+        If(if_node) => try hosted_check_undefined_variable_in_if(
+            text, ast, if_node.condition, if_node.then_block, if_node.else_block, scope
         ),
         _ => hosted_check_no_undefined_variable(text),
     };
@@ -418,111 +430,16 @@ fn hosted_check_no_undefined_variable(text: []u8) -> i64 {
     return 0 - 1;
 }
 
-fn hosted_check_undefined_variable_in_function(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    params: std::kizu::ast::ChildRange,
-    body: std::kizu::ast::NodeId
-) -> !i64 {
-    let no_local = hosted_check_no_undefined_variable(text);
-    if params.len > 0 {
-        return no_local;
-    }
-    let has_binding_surface = try hosted_check_statement_has_binding_surface(text, ast, body);
-    if has_binding_surface {
-        return no_local;
-    }
-    return hosted_check_undefined_variable_in_node(text, ast, body, no_local, no_local);
-}
-
-fn hosted_check_statement_has_binding_surface(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
-) -> !bool {
-    let node = ast.get(node_id);
-    return match node.data {
-        Block(block) => try hosted_check_statement_range_has_binding_surface(
-            text, ast, block.statements
-        ),
-        ExprStmt(expr_stmt) => try hosted_check_expr_has_binding_surface(
-            text, ast, expr_stmt.expr
-        ),
-        Let(let_node) => true,
-        For(for_node) => true,
-        _ => true,
-    };
-}
-
-fn hosted_check_statement_range_has_binding_surface(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    statements: std::kizu::ast::ChildRange
-) -> !bool {
-    var index = 0;
-    while index < statements.len {
-        let child = try ast.child_at(statements, index);
-        let child_has_binding_surface = try hosted_check_statement_has_binding_surface(text, ast, child);
-        if child_has_binding_surface {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
-fn hosted_check_expr_has_binding_surface(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
-) -> !bool {
-    let node = ast.get(node_id);
-    return match node.data {
-        Var(var_node) => false,
-        FieldExpr(field_expr) => try hosted_check_expr_has_binding_surface(
-            text, ast, field_expr.receiver
-        ),
-        Call(call_node) => try hosted_check_expr_range_has_binding_surface(
-            text, ast, call_node.args
-        ),
-        StructLiteralExpr(struct_literal) => try hosted_check_expr_range_has_binding_surface(
-            text, ast, struct_literal.fields
-        ),
-        StructFieldInit(field_init) => try hosted_check_expr_has_binding_surface(
-            text, ast, field_init.value
-        ),
-        _ => true,
-    };
-}
-
-fn hosted_check_expr_range_has_binding_surface(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    expressions: std::kizu::ast::ChildRange
-) -> !bool {
-    var index = 0;
-    while index < expressions.len {
-        let child = try ast.child_at(expressions, index);
-        let child_has_binding_surface = try hosted_check_expr_has_binding_surface(text, ast, child);
-        if child_has_binding_surface {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
 fn hosted_check_undefined_variable_in_declarations(
     text: []u8,
     ast: std::kizu::ast::Ast,
     declarations: std::kizu::ast::ChildRange
 ) -> !i64 {
-    let no_local = hosted_check_no_undefined_variable(text);
     var index = 0;
     while index < declarations.len {
         let child = try ast.child_at(declarations, index);
         let found = try hosted_check_undefined_variable_in_node(
-            text, ast, child, no_local, no_local
+            text, ast, child, child
         );
         if found >= 0 {
             return found;
@@ -536,109 +453,67 @@ fn hosted_check_undefined_variable_in_statements(
     text: []u8,
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange,
-    local_start: i64,
-    local_end: i64
+    scope: std::kizu::ast::NodeId
 ) -> !i64 {
-    if statements.len <= 0 {
-        return hosted_check_no_undefined_variable(text);
-    }
-    let first = try ast.child_at(statements, 0);
-    let first_found = try hosted_check_undefined_variable_in_node(
-        text, ast, first, local_start, local_end
-    );
-    if first_found >= 0 {
-        return first_found;
-    }
-    let first_local_start = try hosted_check_statement_local_start(text, ast, first);
-    let first_local_end = try hosted_check_statement_local_end(text, ast, first);
-    if statements.len <= 1 {
-        return hosted_check_no_undefined_variable(text);
-    }
-    let second = try ast.child_at(statements, 1);
-    let second_found = try hosted_check_undefined_variable_in_node(
-        text, ast, second, first_local_start, first_local_end
-    );
-    if second_found >= 0 {
-        return second_found;
-    }
-    if statements.len <= 2 {
-        return hosted_check_no_undefined_variable(text);
-    }
-    let third = try ast.child_at(statements, 2);
-    let third_found = try hosted_check_undefined_variable_in_node(
-        text, ast, third, first_local_start, first_local_end
-    );
-    if third_found >= 0 {
-        return third_found;
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let found = try hosted_check_undefined_variable_in_node(
+            text, ast, child, scope
+        );
+        if found >= 0 {
+            return found;
+        }
+        index = index + 1;
     }
     return hosted_check_no_undefined_variable(text);
 }
 
-fn hosted_check_statement_local_start(
+fn hosted_check_undefined_variable_in_if(
     text: []u8,
     ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    scope: std::kizu::ast::NodeId
 ) -> !i64 {
-    let node = ast.get(node_id);
-    return match node.data {
-        Let(let_node) => hosted_check_ast_node_start(text, ast, let_node.name),
-        _ => hosted_check_no_undefined_variable(text),
-    };
-}
-
-fn hosted_check_statement_local_end(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
-) -> !i64 {
-    let node = ast.get(node_id);
-    return match node.data {
-        Let(let_node) => hosted_check_ast_node_end(text, ast, let_node.name),
-        _ => hosted_check_no_undefined_variable(text),
-    };
-}
-
-fn hosted_check_ast_node_start(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
-) -> i64 {
-    let node = ast.get(node_id);
-    return node.span.start;
-}
-
-fn hosted_check_ast_node_end(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
-) -> i64 {
-    let node = ast.get(node_id);
-    return node.span.end;
+    let condition_found = try hosted_check_undefined_variable_in_expr(
+        text, ast, condition, scope
+    );
+    if condition_found >= 0 {
+        return condition_found;
+    }
+    let then_found = try hosted_check_undefined_variable_in_node(
+        text, ast, then_block, scope
+    );
+    if then_found >= 0 {
+        return then_found;
+    }
+    return hosted_check_undefined_variable_in_node(text, ast, else_block, scope);
 }
 
 fn hosted_check_undefined_variable_in_expr(
     text: []u8,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    local_start: i64,
-    local_end: i64
+    scope: std::kizu::ast::NodeId
 ) -> !i64 {
     let node = ast.get(node_id);
     return match node.data {
         Var(var_node) => try hosted_check_undefined_variable_for_var(
-            text, ast, node_id, local_start, local_end
+            text, ast, node_id, scope
         ),
         FieldExpr(field_expr) => try hosted_check_undefined_variable_for_field_expr(
-            text, ast, field_expr.receiver, field_expr.namespace, local_start, local_end
+            text, ast, field_expr.receiver, field_expr.namespace, scope
         ),
         Call(call_node) => try hosted_check_undefined_variable_in_expr_range(
-            text, ast, call_node.args, local_start, local_end
+            text, ast, call_node.args, scope
         ),
         StructLiteralExpr(struct_literal) => try hosted_check_undefined_variable_in_expr_range(
-            text, ast, struct_literal.fields, local_start, local_end
+            text, ast, struct_literal.fields, scope
         ),
         StructFieldInit(field_init) => try hosted_check_undefined_variable_in_expr(
-            text, ast, field_init.value, local_start, local_end
+            text, ast, field_init.value, scope
         ),
         _ => hosted_check_no_undefined_variable(text),
     };
@@ -648,16 +523,13 @@ fn hosted_check_undefined_variable_for_var(
     text: []u8,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    local_start: i64,
-    local_end: i64
+    scope: std::kizu::ast::NodeId
 ) -> !i64 {
     let node = ast.get(node_id);
     let name = hosted_check_ast_node_text(text, ast, node_id);
-    if local_start >= 0 {
-        let local = text[local_start..local_end];
-        if std::mem::equal_bytes(local, name) {
-            return hosted_check_no_undefined_variable(text);
-        }
+    let defined = try hosted_check_name_defined_in_scope(text, ast, scope, name);
+    if defined {
+        return hosted_check_no_undefined_variable(text);
     }
     return node.span.start;
 }
@@ -667,27 +539,25 @@ fn hosted_check_undefined_variable_for_field_expr(
     ast: std::kizu::ast::Ast,
     receiver: std::kizu::ast::NodeId,
     namespace: bool,
-    local_start: i64,
-    local_end: i64
+    scope: std::kizu::ast::NodeId
 ) -> !i64 {
     if namespace {
         return hosted_check_no_undefined_variable(text);
     }
-    return hosted_check_undefined_variable_in_expr(text, ast, receiver, local_start, local_end);
+    return hosted_check_undefined_variable_in_expr(text, ast, receiver, scope);
 }
 
 fn hosted_check_undefined_variable_in_expr_range(
     text: []u8,
     ast: std::kizu::ast::Ast,
     expressions: std::kizu::ast::ChildRange,
-    local_start: i64,
-    local_end: i64
+    scope: std::kizu::ast::NodeId
 ) -> !i64 {
     var index = 0;
     while index < expressions.len {
         let child = try ast.child_at(expressions, index);
         let found = try hosted_check_undefined_variable_in_expr(
-            text, ast, child, local_start, local_end
+            text, ast, child, scope
         );
         if found >= 0 {
             return found;
@@ -695,6 +565,147 @@ fn hosted_check_undefined_variable_in_expr_range(
         index = index + 1;
     }
     return hosted_check_no_undefined_variable(text);
+}
+
+// hosted_check_name_defined_in_scope answers whether name is bound anywhere in the
+// enclosing function. It is intentionally an over-approximation of scope (it ignores
+// ordering and block nesting), so it can only suppress reports, never manufacture one.
+fn hosted_check_name_defined_in_scope(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    scope_node: std::kizu::ast::NodeId,
+    name: []u8
+) -> !bool {
+    let node = ast.get(scope_node);
+    return match node.data {
+        FnDecl(fn_decl) => try hosted_check_name_defined_in_function(
+            text, ast, fn_decl.params, fn_decl.body, name
+        ),
+        _ => false,
+    };
+}
+
+fn hosted_check_name_defined_in_function(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    name: []u8
+) -> !bool {
+    let param_match = try hosted_check_name_in_param_range(text, ast, params, name);
+    if param_match {
+        return true;
+    }
+    return hosted_check_name_bound_in_statement(text, ast, body, name);
+}
+
+fn hosted_check_name_in_param_range(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !bool {
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        let bound = try hosted_check_param_binds_name(text, ast, child, name);
+        if bound {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn hosted_check_param_binds_name(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> !bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Param(param_node) => hosted_check_name_matches(text, ast, param_node.name, name),
+        _ => false,
+    };
+}
+
+fn hosted_check_name_bound_in_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> !bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Block(block) => try hosted_check_name_bound_in_statement_range(
+            text, ast, block.statements, name
+        ),
+        Let(let_node) => hosted_check_name_matches(text, ast, let_node.name, name),
+        For(for_node) => try hosted_check_name_bound_in_for(
+            text, ast, for_node.name, for_node.body, name
+        ),
+        If(if_node) => try hosted_check_name_bound_in_if(
+            text, ast, if_node.then_block, if_node.else_block, name
+        ),
+        _ => false,
+    };
+}
+
+fn hosted_check_name_bound_in_statement_range(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !bool {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let bound = try hosted_check_name_bound_in_statement(text, ast, child, name);
+        if bound {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn hosted_check_name_bound_in_for(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    for_name: std::kizu::ast::NodeId,
+    for_body: std::kizu::ast::NodeId,
+    name: []u8
+) -> !bool {
+    let name_match = hosted_check_name_matches(text, ast, for_name, name);
+    if name_match {
+        return true;
+    }
+    return hosted_check_name_bound_in_statement(text, ast, for_body, name);
+}
+
+fn hosted_check_name_bound_in_if(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    name: []u8
+) -> !bool {
+    let then_bound = try hosted_check_name_bound_in_statement(text, ast, then_block, name);
+    if then_bound {
+        return true;
+    }
+    return hosted_check_name_bound_in_statement(text, ast, else_block, name);
+}
+
+fn hosted_check_name_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name_node: std::kizu::ast::NodeId,
+    name: []u8
+) -> bool {
+    let bound = hosted_check_ast_node_text(text, ast, name_node);
+    return std::mem::equal_bytes(bound, name);
 }
 
 fn hosted_check_ast_node_text(
