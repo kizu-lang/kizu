@@ -1395,7 +1395,7 @@ fn append_parse_block_function(out: &var std::string::String) -> !void {
     try append_line(out, "  %first_index = add i64 %open_index, 1");
     try append_line(out, "  br label %loop");
     try append_line(out, "loop:");
-    try append_line(out, "  %index = phi i64 [ %first_index, %entry ], [ %stmt_next, %store_stmt ]");
+    try append_line(out, "  %index = phi i64 [ %first_index, %entry ], [ %store_next, %store_stmt ]");
     try append_line(out, "  %stmt_count = phi i64 [ 0, %entry ], [ %stmt_count_next, %store_stmt ]");
     try append_line(out,
         "  %token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %index)");
@@ -1409,7 +1409,7 @@ fn append_parse_block_function(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %stmt = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_statement(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
     try append_line(out, "  %stmt_ok = extractvalue %kizu.selfhost.cli.parse_node_result %stmt, 0");
-    try append_line(out, "  br i1 %stmt_ok, label %stmt_ok_block, label %fail");
+    try append_line(out, "  br i1 %stmt_ok, label %stmt_ok_block, label %maybe_trailing");
     try append_line(out, "stmt_ok_block:");
     try append_line(out, "  %stmt_next = extractvalue %kizu.selfhost.cli.parse_node_result %stmt, 1");
     try append_line(out, "  %stmt_node = extractvalue %kizu.selfhost.cli.parse_node_result %stmt, 2");
@@ -1417,10 +1417,36 @@ fn append_parse_block_function(out: &var std::string::String) -> !void {
     try append_line(out, "  %has_capacity = icmp slt i64 %stmt_count, 32");
     try append_line(out, "  %can_store = and i1 %advanced, %has_capacity");
     try append_line(out, "  br i1 %can_store, label %store_stmt, label %fail");
+    // A statement that does not parse may instead be the block's trailing value
+    // expression (no semicolon, immediately before the closing brace): a bare
+    // expression node stored as the last child. lower_code_block_value unwraps it
+    // as the branch value, so value-position 'if'/'else' arms like '{ 1 }' parse
+    // here while ordinary statement-only blocks never reach this path.
+    try append_line(out, "maybe_trailing:");
+    try append_line(out,
+        "  %trailing = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
+    try append_line(out, "  %trailing_ok = extractvalue %kizu.selfhost.cli.parse_node_result %trailing, 0");
+    try append_line(out, "  br i1 %trailing_ok, label %trailing_check_close, label %fail");
+    try append_line(out, "trailing_check_close:");
+    try append_line(out, "  %trailing_next = extractvalue %kizu.selfhost.cli.parse_node_result %trailing, 1");
+    try append_line(out, "  %trailing_node = extractvalue %kizu.selfhost.cli.parse_node_result %trailing, 2");
+    try append_line(out,
+        "  %trailing_close = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %trailing_next)");
+    try append_line(out, "  %trailing_close_kind = extractvalue %kizu.kizu.lexer.token %trailing_close, 0");
+    try append_line(out, "  %trailing_is_close = icmp eq i64 %trailing_close_kind, 30");
+    try append_line(out, "  %trailing_advanced = icmp sgt i64 %trailing_next, %index");
+    try append_line(out, "  %trailing_has_capacity = icmp slt i64 %stmt_count, 32");
+    try append_line(out, "  %trailing_progress = and i1 %trailing_is_close, %trailing_advanced");
+    try append_line(out, "  %trailing_can_store = and i1 %trailing_progress, %trailing_has_capacity");
+    try append_line(out, "  br i1 %trailing_can_store, label %store_stmt, label %fail");
     try append_line(out, "store_stmt:");
     try append_line(out,
+        "  %store_node = phi %kizu.kizu.ast.node_id [ %stmt_node, %stmt_ok_block ], [ %trailing_node, %trailing_check_close ]");
+    try append_line(out,
+        "  %store_next = phi i64 [ %stmt_next, %stmt_ok_block ], [ %trailing_next, %trailing_check_close ]");
+    try append_line(out,
         "  %stmt_slot = getelementptr inbounds [32 x %kizu.kizu.ast.node_id], ptr %stmt_slots, i64 0, i64 %stmt_count");
-    try append_line(out, "  store %kizu.kizu.ast.node_id %stmt_node, ptr %stmt_slot, align 8");
+    try append_line(out, "  store %kizu.kizu.ast.node_id %store_node, ptr %stmt_slot, align 8");
     try append_line(out, "  %stmt_count_next = add i64 %stmt_count, 1");
     try append_line(out, "  br label %loop");
     try append_line(out, "finish:");
@@ -1802,10 +1828,22 @@ fn append_parse_let_function(out: &var std::string::String) -> !void {
     // builds expression arm bodies, so its node serves as the let value.
     try append_line(out, "maybe_match_value:");
     try append_line(out, "  %vi_is_match = icmp eq i64 %vi_kind, 19");
-    try append_line(out, "  br i1 %vi_is_match, label %parse_value_match, label %parse_value_expr");
+    try append_line(out, "  br i1 %vi_is_match, label %parse_value_match, label %maybe_if_value");
     try append_line(out, "parse_value_match:");
     try append_line(out,
         "  %match_value = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_match(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %value_index)");
+    try append_line(out, "  br label %parse_value_join");
+    // An 'if' keyword init is a value-position if expression; cli_parse_if already
+    // builds an If node whose then/else blocks carry trailing expression values, so
+    // its node serves as the let value (the lowering routes If through
+    // lower_code_if_expr). The if parser stops at the trailing brace, leaving the
+    // shared semicolon check to validate the let terminator.
+    try append_line(out, "maybe_if_value:");
+    try append_line(out, "  %vi_is_if = icmp eq i64 %vi_kind, 13");
+    try append_line(out, "  br i1 %vi_is_if, label %parse_value_if, label %parse_value_expr");
+    try append_line(out, "parse_value_if:");
+    try append_line(out,
+        "  %if_value = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_if(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %value_index)");
     try append_line(out, "  br label %parse_value_join");
     try append_line(out, "parse_value_expr:");
     try append_line(out,
@@ -1813,7 +1851,7 @@ fn append_parse_let_function(out: &var std::string::String) -> !void {
     try append_line(out, "  br label %parse_value_join");
     try append_line(out, "parse_value_join:");
     try append_line(out,
-        "  %value_result = phi %kizu.selfhost.cli.parse_node_result [ %struct_value, %parse_value_struct ], [ %match_value, %parse_value_match ], [ %expr_value, %parse_value_expr ]");
+        "  %value_result = phi %kizu.selfhost.cli.parse_node_result [ %struct_value, %parse_value_struct ], [ %match_value, %parse_value_match ], [ %if_value, %parse_value_if ], [ %expr_value, %parse_value_expr ]");
     try append_line(out, "  %value_ok = extractvalue %kizu.selfhost.cli.parse_node_result %value_result, 0");
     try append_line(out, "  br i1 %value_ok, label %check_semicolon, label %fail");
     try append_line(out, "check_semicolon:");
