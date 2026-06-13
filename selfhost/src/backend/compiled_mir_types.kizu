@@ -3,6 +3,7 @@ import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_type_lower;
 import selfhost::backend::compiled_util;
 import selfhost::backend::ir_contract;
+import selfhost::backend::ir_index;
 
 pub struct FieldAccessInfo {
     pub receiver_kizu_type: []u8,
@@ -292,11 +293,33 @@ pub fn lower_call_arg_types(
     );
 }
 
+pub fn lower_call_arg_types_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    arg_count: i64
+) -> !std::array::Array<[]u8> {
+    let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
+    if std::mem::len(qualified) > 0 {
+        return try lower_signature_call_arg_types_indexed(
+            index, ir_bytes, ir_bytes[0..0], qualified, ir_bytes[0..0], arg_count
+        );
+    }
+    if compiled_fact_lookup::is_stdlib_callee(callee_name) {
+        return try lower_stdlib_call_arg_types(ir_bytes, callee_name, arg_count);
+    }
+    return try lower_signature_call_arg_types_indexed(
+        index, ir_bytes, module_prefix, callee_name, module_prefix, arg_count
+    );
+}
+
 pub fn lower_call_arg_types_cached(
     ir_bytes: []u8,
     module_prefix: []u8,
     callee_name: []u8,
     arg_count: i64,
+    ir_lookup_index: &ir_index::IrIndex,
     cache: &var CallArgTypeCache
 ) -> !std::array::Array<[]u8> {
     cache.lookups = cache.lookups + 1;
@@ -313,7 +336,9 @@ pub fn lower_call_arg_types_cached(
         index = index + 1;
     }
 
-    var types = try lower_call_arg_types(ir_bytes, module_prefix, callee_name, arg_count);
+    var types = try lower_call_arg_types_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, callee_name, arg_count
+    );
     let type_start = cache.types.len();
     try append_cached_call_arg_types(cache, &types);
     try cache.module_prefixes.append(module_prefix);
@@ -392,6 +417,48 @@ fn lower_signature_call_arg_types(
             }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    if types.len() != arg_count {
+        return error("compiled function: call arg type not found");
+    }
+    return types;
+}
+
+fn lower_signature_call_arg_types_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    lookup_prefix: []u8,
+    callee_name: []u8,
+    type_module_prefix: []u8,
+    arg_count: i64
+) -> !std::array::Array<[]u8> {
+    var types = std::array::Array<[]u8>(std::mem::page_allocator());
+    let prefix = "function-signature-param ";
+    var entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, lookup_prefix, callee_name
+    );
+    while arg_count > 0 and
+        entry_index >= 0 and
+        ir_index::entry_matches_query(
+            index, ir_bytes, entry_index, prefix, lookup_prefix, callee_name
+        ) and
+        types.len() < arg_count {
+        let key_end = ir_index::entry_key_end(index, entry_index);
+        let line_end = ir_index::entry_line_end(index, entry_index);
+        let line = ir_bytes[key_end..line_end];
+        let entry_len = std::mem::len(line);
+        let colon1 = compiled_util::find_byte(line, cast<u8>(58), 0);
+        let colon2 = compiled_util::find_byte(line, cast<u8>(58), colon1 + 1);
+        if colon2 >= entry_len {
+            return error("compiled function: call arg type not found");
+        }
+        let kizu_type = line[colon2 + 1..entry_len];
+        try types.append(
+            try compiled_type_lower::kizu_type_to_llvm(
+                ir_bytes, type_module_prefix, kizu_type
+            )
+        );
+        entry_index = entry_index + 1;
     }
     if types.len() != arg_count {
         return error("compiled function: call arg type not found");

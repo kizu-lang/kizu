@@ -2441,10 +2441,11 @@ func assertCompiledMirPaths(t *testing.T, compiled string) {
 // selfhost_codegen_compiled_closure_test.go.
 func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
 	t.Helper()
-	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto(") {
-		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto")
+	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto_indexed(") {
+		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto_indexed")
 	}
-	if !strings.Contains(cliLlvm, "try append_codegen_reachable_compiled_functions(out, ir_bytes);") {
+	delegation := "try append_codegen_reachable_compiled_functions(out, lookup_index, ir_bytes);"
+	if !strings.Contains(cliLlvm, delegation) {
 		t.Fatal("cli_llvm does not delegate to the shared codegen compiled closure")
 	}
 }
@@ -2614,7 +2615,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"cli_artifact_dir_llvm::append_functions(",
 		"cli_ast_boundary_llvm::append_functions(",
 		"cli_test_ast_llvm::append_functions(",
-		"compiled_llvm::append_compiled_function_auto(",
+		"compiled_llvm::append_compiled_function_auto_indexed(",
 	},
 	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
 		"pub fn append_globals(",
@@ -3886,7 +3887,7 @@ func assertExecutableIRThreading(
 		}
 	}
 	for _, fragment := range []string{
-		"try cli_llvm::append_functions(out, ir_bytes)",
+		"try cli_llvm::append_functions(out, lookup_index, ir_bytes)",
 		"try cli_ast_boundary_llvm::append_functions(out)",
 		"try cli_test_ast_llvm::append_functions(out)",
 		"try cli_test_llvm::append_functions(out, ir_bytes)",
