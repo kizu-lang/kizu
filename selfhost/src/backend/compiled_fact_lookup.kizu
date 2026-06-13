@@ -57,6 +57,32 @@ pub fn lookup_type_llvm_by_prefix(
     return error("compiled function: type-llvm mapping not found");
 }
 
+pub fn lookup_type_llvm_by_prefix_or_empty_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_name: []u8
+) -> []u8 {
+    return ir_index::lookup_fact_value_by_prefix_or_empty(
+        index, ir_bytes, "type-llvm ", module_prefix, short_name
+    );
+}
+
+pub fn lookup_type_llvm_by_prefix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_name: []u8
+) -> ![]u8 {
+    let value = lookup_type_llvm_by_prefix_or_empty_indexed(
+        index, ir_bytes, module_prefix, short_name
+    );
+    if std::mem::len(value) > 0 {
+        return value;
+    }
+    return try lookup_type_llvm_by_prefix(ir_bytes, module_prefix, short_name);
+}
+
 pub fn lookup_struct_field_index_by_prefix(
     ir_bytes: []u8,
     module_prefix: []u8,
@@ -72,6 +98,22 @@ pub fn lookup_struct_field_index_by_prefix(
     return error("compiled function: struct field not found");
 }
 
+pub fn lookup_struct_field_index_by_prefix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    field_name: []u8
+) -> !i64 {
+    let lookup = try lookup_struct_field_by_prefix_indexed(
+        index, ir_bytes, module_prefix, short_type, field_name
+    );
+    if lookup.found {
+        return lookup.index;
+    }
+    return error("compiled function: struct field not found");
+}
+
 pub fn lookup_struct_field_type_by_prefix(
     ir_bytes: []u8,
     module_prefix: []u8,
@@ -80,6 +122,22 @@ pub fn lookup_struct_field_type_by_prefix(
 ) -> ![]u8 {
     let field_type = try lookup_struct_field_type_by_prefix_or_empty(
         ir_bytes, module_prefix, short_type, target_index
+    );
+    if std::mem::len(field_type) > 0 {
+        return field_type;
+    }
+    return error("compiled function: struct field type not found");
+}
+
+pub fn lookup_struct_field_type_by_prefix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    target_index: i64
+) -> ![]u8 {
+    let field_type = try lookup_struct_field_type_by_prefix_or_empty_indexed(
+        index, ir_bytes, module_prefix, short_type, target_index
     );
     if std::mem::len(field_type) > 0 {
         return field_type;
@@ -134,6 +192,32 @@ pub fn lookup_struct_field_by_prefix(
     return suffix_match;
 }
 
+pub fn lookup_struct_field_by_prefix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    field_name: []u8
+) -> !StructFieldLookup {
+    let prefix = "struct-field ";
+    var entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, module_prefix, short_type
+    );
+    while entry_index >= 0 and
+        ir_index::entry_matches_query(
+            index, ir_bytes, entry_index, prefix, module_prefix, short_type
+        ) {
+        let field = try extract_struct_field_by_name(
+            ir_bytes, ir_index::entry_key_end(index, entry_index), field_name
+        );
+        if field.found {
+            return field;
+        }
+        entry_index = entry_index + 1;
+    }
+    return try lookup_struct_field_by_prefix(ir_bytes, module_prefix, short_type, field_name);
+}
+
 fn lookup_struct_field_type_by_prefix_or_empty(
     ir_bytes: []u8,
     module_prefix: []u8,
@@ -179,6 +263,34 @@ fn lookup_struct_field_type_by_prefix_or_empty(
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return suffix_type;
+}
+
+fn lookup_struct_field_type_by_prefix_or_empty_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    target_index: i64
+) -> ![]u8 {
+    let prefix = "struct-field ";
+    var entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, module_prefix, short_type
+    );
+    while entry_index >= 0 and
+        ir_index::entry_matches_query(
+            index, ir_bytes, entry_index, prefix, module_prefix, short_type
+        ) {
+        let field_type = try extract_struct_field_type_at_index(
+            ir_bytes, ir_index::entry_key_end(index, entry_index), target_index
+        );
+        if std::mem::len(field_type) > 0 {
+            return field_type;
+        }
+        entry_index = entry_index + 1;
+    }
+    return try lookup_struct_field_type_by_prefix_or_empty(
+        ir_bytes, module_prefix, short_type, target_index
+    );
 }
 
 fn type_matches_suffix(full_type: []u8, short_type: []u8) -> bool {
@@ -324,6 +436,23 @@ pub fn lookup_stdlib_symbol(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
     return error("compiled function: stdlib symbol not found");
 }
 
+pub fn lookup_stdlib_symbol_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    callee_name: []u8
+) -> ![]u8 {
+    let entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, "stdlib-symbol ", ir_bytes[0..0], callee_name
+    );
+    if entry_index < 0 {
+        return error("compiled function: stdlib symbol not found");
+    }
+    let line_end = ir_index::entry_line_end(index, entry_index);
+    let sym_start = skip_spaces_until(ir_bytes, ir_index::entry_key_end(index, entry_index), line_end);
+    let sym_end = token_end_until(ir_bytes, sym_start, line_end);
+    return ir_bytes[sym_start..sym_end];
+}
+
 pub fn lookup_stdlib_return(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "stdlib-symbol ";
@@ -362,6 +491,26 @@ pub fn lookup_stdlib_return(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return error("compiled function: stdlib return not found");
+}
+
+pub fn lookup_stdlib_return_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    callee_name: []u8
+) -> ![]u8 {
+    let entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, "stdlib-symbol ", ir_bytes[0..0], callee_name
+    );
+    if entry_index < 0 {
+        return error("compiled function: stdlib return not found");
+    }
+    let line_end = ir_index::entry_line_end(index, entry_index);
+    var pos = skip_spaces_until(ir_bytes, ir_index::entry_key_end(index, entry_index), line_end);
+    pos = token_end_until(ir_bytes, pos, line_end);
+    pos = skip_spaces_until(ir_bytes, pos, line_end);
+    let ret_start = pos;
+    let ret_end = token_end_until(ir_bytes, ret_start, line_end);
+    return ir_bytes[ret_start..ret_end];
 }
 
 // lookup_stdlib_arg_type resolves the LLVM argument type of a stdlib callee from the optional
@@ -441,6 +590,56 @@ pub fn lookup_stdlib_arg_type(ir_bytes: []u8, callee_name: []u8, arg_index: i64)
     return "%kizu.slice.u8";
 }
 
+pub fn lookup_stdlib_arg_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    callee_name: []u8,
+    arg_index: i64
+) -> ![]u8 {
+    let entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, "stdlib-symbol ", ir_bytes[0..0], callee_name
+    );
+    if entry_index < 0 {
+        return "%kizu.slice.u8";
+    }
+    let line_end = ir_index::entry_line_end(index, entry_index);
+    var pos = ir_index::entry_key_end(index, entry_index);
+    var token = 0;
+    while token < 2 {
+        pos = skip_spaces_until(ir_bytes, pos, line_end);
+        pos = token_end_until(ir_bytes, pos, line_end);
+        token = token + 1;
+    }
+    pos = skip_spaces_until(ir_bytes, pos, line_end);
+    if pos >= line_end {
+        return "%kizu.slice.u8";
+    }
+    let args_start = pos;
+    var scan = args_start;
+    var arg_count = 0;
+    while scan < line_end {
+        scan = skip_spaces_until(ir_bytes, scan, line_end);
+        if scan < line_end {
+            arg_count = arg_count + 1;
+            scan = token_end_until(ir_bytes, scan, line_end);
+        }
+    }
+    scan = args_start;
+    var current = 0;
+    while scan < line_end {
+        scan = skip_spaces_until(ir_bytes, scan, line_end);
+        if scan < line_end {
+            let arg_start = scan;
+            scan = token_end_until(ir_bytes, scan, line_end);
+            if arg_count == 1 or current == arg_index {
+                return ir_bytes[arg_start..scan];
+            }
+            current = current + 1;
+        }
+    }
+    return error("compiled function: stdlib arg type not found");
+}
+
 pub fn enum_variant_tag_by_prefix(
     ir_bytes: []u8,
     module_prefix: []u8,
@@ -475,6 +674,34 @@ pub fn enum_variant_tag_by_prefix(
             }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return error("compiled function: enum variant not found");
+}
+
+pub fn enum_variant_tag_by_prefix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_enum: []u8,
+    variant: []u8
+) -> !i64 {
+    let marker = "enum-variant ";
+    var entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, marker, module_prefix, short_enum
+    );
+    while entry_index >= 0 and
+        ir_index::entry_matches_query(
+            index, ir_bytes, entry_index, marker, module_prefix, short_enum
+        ) {
+        let tag = try match_enum_variant_suffix(
+            ir_bytes,
+            ir_index::entry_key_end(index, entry_index),
+            variant
+        );
+        if tag >= 0 {
+            return tag;
+        }
+        entry_index = entry_index + 1;
     }
     return error("compiled function: enum variant not found");
 }
@@ -523,6 +750,34 @@ pub fn lookup_union_variant_by_prefix(
             }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return error("compiled function: union variant not found");
+}
+
+pub fn lookup_union_variant_by_prefix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_union: []u8,
+    variant: []u8
+) -> !UnionVariantLookup {
+    let marker = "union-variant ";
+    var entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, marker, module_prefix, short_union
+    );
+    while entry_index >= 0 and
+        ir_index::entry_matches_query(
+            index, ir_bytes, entry_index, marker, module_prefix, short_union
+        ) {
+        let lookup = try match_union_variant_suffix(
+            ir_bytes,
+            ir_index::entry_key_end(index, entry_index),
+            variant
+        );
+        if lookup.found {
+            return lookup;
+        }
+        entry_index = entry_index + 1;
     }
     return error("compiled function: union variant not found");
 }
@@ -758,4 +1013,32 @@ pub fn is_enum_type(ir_bytes: []u8, module_prefix: []u8, short_name: []u8) -> bo
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return false;
+}
+
+pub fn is_enum_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_name: []u8
+) -> bool {
+    let entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, "enum-variant ", module_prefix, short_name
+    );
+    return entry_index >= 0;
+}
+
+fn skip_spaces_until(ir_bytes: []u8, start: i64, end: i64) -> i64 {
+    var pos = start;
+    while pos < end and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+fn token_end_until(ir_bytes: []u8, start: i64, end: i64) -> i64 {
+    var pos = start;
+    while pos < end and ir_bytes[pos] != cast<u8>(32) {
+        pos = pos + 1;
+    }
+    return pos;
 }
