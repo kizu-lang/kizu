@@ -3368,6 +3368,12 @@ pub fn code_op_method_call() -> i64 {
     return 120;
 }
 
+// MEM_EQUAL_BYTES compares two '%kizu.slice.u8' values and yields an i1 result:
+// 'op dst left right'. It backs std::mem::equal_bytes on the run tape.
+pub fn code_op_mem_equal_bytes() -> i64 {
+    return 121;
+}
+
 // CONST_BOOL materializes a 'true'/'false' literal as an i1 value: the record is
 // 'op dst literal' where literal is 1 (true) or 0 (false).
 pub fn code_op_const_bool() -> i64 {
@@ -10413,6 +10419,9 @@ fn lower_code_call(
     if std::mem::equal_bytes(callee_text, "std::string::String") {
         return try lower_code_string_new(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if std::mem::equal_bytes(callee_text, "std::mem::equal_bytes") {
+        return try lower_code_mem_equal_bytes(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     let runtime_ctor = try lower_code_runtime_constructor(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if runtime_ctor.ok {
         return runtime_ctor;
@@ -11262,6 +11271,56 @@ fn lower_code_string_len_expr(
     try kinds.append(kind_i64);
     let after_value = next_value + 1;
     return code_eval_value(next_value, after_value);
+}
+
+fn lower_code_mem_equal_bytes(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 2 {
+        return code_eval_unsupported(next_value);
+    }
+    let left_arg = try ast.child_at(args, 0);
+    let left_eval = try lower_code_expr(text, ast, decls, left_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !left_eval.ok {
+        return code_eval_unsupported(left_eval.next);
+    }
+    let left_slice = try lower_code_arg_slice(text, code, kinds, left_eval.value_id, left_eval.next);
+    let kind_slice = code_kind_slice();
+    let left_kind = try kinds.get(left_slice.value_id);
+    if left_kind != kind_slice {
+        return code_eval_unsupported(left_slice.next);
+    }
+    let right_arg = try ast.child_at(args, 1);
+    let right_eval = try lower_code_expr(text, ast, decls, right_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, left_slice.next);
+    if !right_eval.ok {
+        return code_eval_unsupported(right_eval.next);
+    }
+    let right_slice = try lower_code_arg_slice(text, code, kinds, right_eval.value_id, right_eval.next);
+    let right_kind = try kinds.get(right_slice.value_id);
+    if right_kind != kind_slice {
+        return code_eval_unsupported(right_slice.next);
+    }
+    let result_value = right_slice.next;
+    let op = code_op_mem_equal_bytes();
+    try code.append(op);
+    try code.append(result_value);
+    try code.append(left_slice.value_id);
+    try code.append(right_slice.value_id);
+    let kind_bool = code_kind_bool();
+    try kinds.append(kind_bool);
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
 }
 
 fn lower_code_array_i64_expr_method(
