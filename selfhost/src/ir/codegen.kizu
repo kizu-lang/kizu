@@ -3643,9 +3643,9 @@ pub fn code_op_var_store_slice() -> i64 {
 }
 
 // VAR_STRUCT scalarizes a 'var' struct binding: the record is
-// 'op dst field_count [name_start name_end slot kind] per field' where each
-// field owns its own slot and the kind (i64 or slice) selects the slot trio its
-// reads and assignments use. The renderer emits nothing for the record itself.
+// 'op dst type_start type_end field_count [name_start name_end slot_or_value kind] per field'
+// where scalar fields own a slot and nested struct fields point at another
+// VAR_STRUCT value. The renderer emits nothing for the record itself.
 pub fn code_op_var_struct() -> i64 {
     return 56;
 }
@@ -3813,7 +3813,7 @@ pub fn code_op_map_len() -> i64 {
 
 // STRUCT_DECL records a returned struct's ABI shape at the head of the tape:
 // 'op name_start name_end field_count [field_name_start field_name_end field_kind]...'.
-// Supported field kinds are i64, bool, and []u8.
+// Supported field kinds are i64, bool, []u8, and declared struct records.
 pub fn code_op_struct_decl() -> i64 {
     return 117;
 }
@@ -4445,7 +4445,7 @@ fn emit_one_struct_decl(
     if fields.len == 0 {
         return code_eval_value(0, 0);
     }
-    let supported = try struct_decl_fields_supported(text, ast, fields, 0);
+    let supported = try struct_decl_fields_supported(text, ast, fields, code, 0);
     if !supported {
         return code_eval_value(0, 0);
     }
@@ -4462,18 +4462,19 @@ fn struct_decl_fields_supported(
     text: []u8,
     ast: std::kizu::ast::Ast,
     fields: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
     index: i64
 ) -> !bool {
     if index >= fields.len {
         return true;
     }
     let child = try ast.child_at(fields, index);
-    let kind = try code_arena_struct_field_kind(text, ast, child);
+    let kind = try code_struct_decl_field_kind(text, ast, child, code);
     if kind < 0 {
         return false;
     }
     let after = index + 1;
-    return try struct_decl_fields_supported(text, ast, fields, after);
+    return try struct_decl_fields_supported(text, ast, fields, code, after);
 }
 
 fn append_struct_decl_fields(
@@ -4518,9 +4519,41 @@ fn append_struct_decl_field_entry(
     let name_span = code_node_span(text, ast, name);
     try code.append(name_span.start);
     try code.append(name_span.end);
-    let field_kind = code_arena_field_type_kind(text, ast, type_node);
+    let field_kind = try code_struct_decl_field_type_kind(text, ast, type_node, code);
     try code.append(field_kind);
     return code_eval_value(0, 0);
+}
+
+fn code_struct_decl_field_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    field_id: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !i64 {
+    let node = ast.get(field_id);
+    return match node.data {
+        Field(field_node) => try code_struct_decl_field_type_kind(text, ast, field_node.type_node, code),
+        _ => code_kind_missing(),
+    };
+}
+
+fn code_struct_decl_field_type_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !i64 {
+    if type_node_is_i64(text, ast, type_node) {
+        return code_kind_i64();
+    }
+    let type_text = ast_node_text(text, ast, type_node);
+    if std::mem::equal_bytes(type_text, "bool") {
+        return code_kind_bool();
+    }
+    if std::mem::equal_bytes(type_text, "[]u8") {
+        return code_kind_slice();
+    }
+    return try code_return_struct_kind(text, ast, type_node, code);
 }
 
 // union_payload_kind classifies a variant payload type for the runtime layout:
@@ -7084,7 +7117,7 @@ fn lower_code_let(
         return code_eval_unsupported(eval.next);
     }
     if mutable {
-        return try lower_code_var_binding(text, name_span.start, name_span.end, eval.value_id, code, kinds, local_starts, local_ends, local_values, eval.next);
+        return try lower_code_var_binding(text, name_span.start, name_span.end, eval.value_id, code, kinds, local_starts, local_ends, local_values, args_scratch, eval.next);
     }
     try local_starts.append(name_span.start);
     try local_ends.append(name_span.end);
@@ -7106,6 +7139,7 @@ fn lower_code_var_binding(
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
     let kind_i64 = code_kind_i64();
@@ -7127,7 +7161,14 @@ fn lower_code_var_binding(
     if record_op != op_struct_lit {
         return code_eval_unsupported(next_value);
     }
-    return try bind_code_var_struct(text, name_start, name_end, record_pos, code, kinds, local_starts, local_ends, local_values, next_value);
+    let struct_eval = try emit_var_struct_from_lit(text, record_pos, code, kinds, local_starts, local_ends, local_values, args_scratch, next_value);
+    if !struct_eval.ok {
+        return code_eval_unsupported(struct_eval.next);
+    }
+    try local_starts.append(name_start);
+    try local_ends.append(name_end);
+    try local_values.append(struct_eval.value_id);
+    return struct_eval;
 }
 
 fn bind_code_owned_var(
@@ -7145,52 +7186,52 @@ fn bind_code_owned_var(
     return code_eval_value(init_value_id, next_value);
 }
 
-// bind_code_var_struct scalarizes a 'var <name> = <struct literal>' binding:
-// every literal field takes its own slot (i64 fields through the i64 trio,
-// str/slice fields through the slice trio after STR_SLICE materialization),
-// the VAR_STRUCT record maps the field names to their slots and kinds, and the
-// local binds the record's dst value like a let binding.
-fn bind_code_var_struct(
+// emit_var_struct_from_lit scalarizes a struct literal into mutable slots:
+// scalar fields take their matching slot trio, nested struct literals recursively
+// become child VAR_STRUCT values, and the parent record stores explicit
+// slot/value metadata for each field.
+fn emit_var_struct_from_lit(
     text: []u8,
-    name_start: i64,
-    name_end: i64,
     record_pos: i64,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
-    let count_pos = record_pos + 2;
+    let count_pos = record_pos + 4;
     let field_count = try code.get(count_pos);
-    // Slot ids come from the locals-array length, so the two field walks see the
-    // same deterministic numbering: the decl walk reserves one blank row per
-    // field, then the record walk recomputes slot_base + index.
-    let slot_base = local_starts.len();
-    let decls_eval = try emit_var_struct_decls(text, code, kinds, local_starts, local_ends, local_values, record_pos, field_count, 0, next_value);
+    let scratch_base = try args_scratch.get(0);
+    let field_meta_slots = field_count * 2;
+    let scratch_bound = scratch_base + field_meta_slots;
+    try args_scratch.set(0, scratch_bound);
+    let decls_eval = try emit_var_struct_decls(text, code, kinds, local_starts, local_ends, local_values, args_scratch, record_pos, field_count, scratch_base, 0, next_value);
     if !decls_eval.ok {
-        return code_eval_unsupported(decls_eval.next);
+        return try code_eval_unsupported_after_scratch_reset(args_scratch, scratch_base, decls_eval.next);
     }
+    let type_start = try code.get(record_pos + 2);
+    let type_end = try code.get(record_pos + 3);
     let var_struct_pos = code.len();
     let op_var_struct = code_op_var_struct();
     try code.append(op_var_struct);
     try code.append(decls_eval.next);
+    try code.append(type_start);
+    try code.append(type_end);
     try code.append(field_count);
-    try append_var_struct_fields(code, kinds, record_pos, field_count, slot_base, 0);
+    try append_var_struct_fields(code, record_pos, field_count, args_scratch, scratch_base, 0);
+    try args_scratch.set(0, scratch_base);
     let record_base = code_kind_struct_base();
     let record_kind = record_base + var_struct_pos;
     try kinds.append(record_kind);
-    try local_starts.append(name_start);
-    try local_ends.append(name_end);
-    try local_values.append(decls_eval.next);
     let after_value = decls_eval.next + 1;
     return code_eval_value(decls_eval.next, after_value);
 }
 
 // emit_var_struct_decls walks the STRUCT_LIT record's fields and emits one slot
-// decl per field (reserving its blank locals row); a str field materializes its
-// slice first, and any other non-i64/non-slice field is unsupported.
+// decl per scalar field (reserving its blank locals row); nested struct literal
+// fields recursively emit their own VAR_STRUCT value.
 fn emit_var_struct_decls(
     text: []u8,
     code: &var std::array::Array<i64>,
@@ -7198,8 +7239,10 @@ fn emit_var_struct_decls(
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
     record_pos: i64,
     field_count: i64,
+    scratch_base: i64,
     index: i64,
     next_value: i64
 ) -> !CodeEval {
@@ -7209,12 +7252,15 @@ fn emit_var_struct_decls(
     let entry_slots = index * 3;
     let value_pos = record_pos + 7 + entry_slots;
     let field_value = try code.get(value_pos);
-    let eval = try emit_one_var_struct_decl(text, code, kinds, local_starts, local_ends, local_values, field_value, next_value);
+    let meta_slots = index * 2;
+    let out_pos = scratch_base + meta_slots;
+    let kind_pos = out_pos + 1;
+    let eval = try emit_one_var_struct_decl(text, code, kinds, local_starts, local_ends, local_values, args_scratch, field_value, out_pos, kind_pos, next_value);
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
     let after = index + 1;
-    return try emit_var_struct_decls(text, code, kinds, local_starts, local_ends, local_values, record_pos, field_count, after, eval.next);
+    return try emit_var_struct_decls(text, code, kinds, local_starts, local_ends, local_values, args_scratch, record_pos, field_count, scratch_base, after, eval.next);
 }
 
 // emit_one_var_struct_decl gives one scalarized field its slot: the slot id is
@@ -7227,18 +7273,26 @@ fn emit_one_var_struct_decl(
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
     field_value: i64,
+    out_pos: i64,
+    kind_pos: i64,
     next_value: i64
 ) -> !CodeEval {
+    let field_kind = try kinds.get(field_value);
+    let record_base = code_kind_struct_base();
+    if field_kind >= record_base {
+        return try emit_one_var_struct_record_decl(text, code, kinds, local_starts, local_ends, local_values, args_scratch, field_value, field_kind, out_pos, kind_pos, next_value);
+    }
     let slice_eval = try lower_code_arg_slice(text, code, kinds, field_value, next_value);
     let stored_kind = try kinds.get(slice_eval.value_id);
     let slot = local_starts.len();
     let kind_i64 = code_kind_i64();
     let slice_kind = code_kind_slice();
-    if stored_kind != kind_i64 {
-        if stored_kind != slice_kind {
-            return code_eval_unsupported(slice_eval.next);
-        }
+    let kind_bool = code_kind_bool();
+    let scalar_ok = stored_kind == kind_i64 or stored_kind == slice_kind or stored_kind == kind_bool;
+    if !scalar_ok {
+        return code_eval_unsupported(slice_eval.next);
     }
     let decl_op = var_struct_decl_op(stored_kind);
     try code.append(decl_op);
@@ -7247,7 +7301,40 @@ fn emit_one_var_struct_decl(
     try local_starts.append(0);
     try local_ends.append(0);
     try local_values.append(0);
-    return code_eval_value(slice_eval.value_id, slice_eval.next);
+    try scratch_put(args_scratch, out_pos, slot);
+    try scratch_put(args_scratch, kind_pos, stored_kind);
+    return code_eval_value(0, slice_eval.next);
+}
+
+fn emit_one_var_struct_record_decl(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    field_value: i64,
+    field_kind: i64,
+    out_pos: i64,
+    kind_pos: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    let record_pos = field_kind - record_base;
+    let op = try code.get(record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if op != op_struct_lit {
+        return code_eval_unsupported(next_value);
+    }
+    let struct_eval = try emit_var_struct_from_lit(text, record_pos, code, kinds, local_starts, local_ends, local_values, args_scratch, next_value);
+    if !struct_eval.ok {
+        return code_eval_unsupported(struct_eval.next);
+    }
+    let nested_kind = try kinds.get(struct_eval.value_id);
+    try scratch_put(args_scratch, out_pos, struct_eval.value_id);
+    try scratch_put(args_scratch, kind_pos, nested_kind);
+    return code_eval_value(0, struct_eval.next);
 }
 
 // var_struct_decl_op picks the slot trio for a scalarized field's stored kind.
@@ -7256,29 +7343,21 @@ fn var_struct_decl_op(stored_kind: i64) -> i64 {
     if stored_kind == kind_i64 {
         return code_op_var_decl();
     }
+    let kind_bool = code_kind_bool();
+    if stored_kind == kind_bool {
+        return code_op_var_decl_bool();
+    }
     return code_op_var_decl_slice();
 }
 
-// var_struct_slot_kind maps a literal field's original kind to its slot kind:
-// an i64 field keeps an i64 slot, a str/slice field takes a slice slot. The
-// fallthrough is only reachable for str/slice because emit_var_struct_decls
-// already rejected every other kind before this walk runs.
-fn var_struct_slot_kind(field_kind: i64) -> i64 {
-    let kind_i64 = code_kind_i64();
-    if field_kind == kind_i64 {
-        return kind_i64;
-    }
-    return code_kind_slice();
-}
-
-// append_var_struct_fields copies each field's name span, recomputed slot, and
-// slot kind onto the VAR_STRUCT record, mirroring the emit_var_struct_decls walk.
+// append_var_struct_fields copies each field's name span plus the explicit
+// slot/value and kind metadata produced by emit_var_struct_decls.
 fn append_var_struct_fields(
     code: &var std::array::Array<i64>,
-    kinds: &var std::array::Array<i64>,
     record_pos: i64,
     field_count: i64,
-    slot_base: i64,
+    args_scratch: &var std::array::Array<i64>,
+    scratch_base: i64,
     index: i64
 ) -> !void {
     if index >= field_count {
@@ -7289,17 +7368,17 @@ fn append_var_struct_fields(
     let entry_name_start = try code.get(entry_pos);
     let entry_end_pos = entry_pos + 1;
     let entry_name_end = try code.get(entry_end_pos);
-    let value_pos = entry_pos + 2;
-    let field_value = try code.get(value_pos);
-    let field_kind = try kinds.get(field_value);
-    let slot_kind = var_struct_slot_kind(field_kind);
-    let slot = slot_base + index;
+    let meta_slots = index * 2;
+    let out_pos = scratch_base + meta_slots;
+    let kind_pos = out_pos + 1;
+    let slot_or_value = try args_scratch.get(out_pos);
+    let slot_kind = try args_scratch.get(kind_pos);
     try code.append(entry_name_start);
     try code.append(entry_name_end);
-    try code.append(slot);
+    try code.append(slot_or_value);
     try code.append(slot_kind);
     let after = index + 1;
-    try append_var_struct_fields(code, kinds, record_pos, field_count, slot_base, after);
+    try append_var_struct_fields(code, record_pos, field_count, args_scratch, scratch_base, after);
     return;
 }
 
@@ -7348,16 +7427,16 @@ fn lower_code_assign(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
     let field_entry = try code_assign_field_entry(text, ast, target, code, kinds, local_starts, local_ends, local_values, locals_base);
     if field_entry >= 0 {
-        return try lower_code_field_assign(text, ast, decls, field_entry, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+        return try lower_code_field_assign(text, field_entry, eval.value_id, code, kinds, eval.next);
     }
     let slot = try code_assign_target_slot(text, ast, target, local_starts, local_ends, local_values, locals_base);
     if slot < 0 {
-        return code_eval_unsupported(next_value);
-    }
-    let eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
-    if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
     // Var slots are i64 allocas; storing a non-i64 value is not owned yet.
@@ -7436,7 +7515,7 @@ fn code_assign_field_expr_entry(
     if record_op != op_var_struct {
         return 0 - 1;
     }
-    let count_pos = record_pos + 2;
+    let count_pos = record_pos + 4;
     let field_count = try code.get(count_pos);
     let name_span = code_node_span(text, ast, name);
     return try var_struct_field_entry(text, code, record_pos, field_count, name_span.start, name_span.end, 0);
@@ -7447,27 +7526,114 @@ fn code_assign_field_expr_entry(
 // must match the field's slot kind, and the matching store writes the slot.
 fn lower_code_field_assign(
     text: []u8,
-    ast: std::kizu::ast::Ast,
-    decls: std::kizu::ast::ChildRange,
     field_entry: i64,
-    value: std::kizu::ast::NodeId,
+    value_id: i64,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
-    local_starts: &var std::array::Array<i64>,
-    local_ends: &var std::array::Array<i64>,
-    local_values: &var std::array::Array<i64>,
-    args_scratch: &var std::array::Array<i64>,
-    locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
-    let eval = try lower_code_expr(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
-    if !eval.ok {
-        return code_eval_unsupported(eval.next);
-    }
-    let slice_eval = try lower_code_arg_slice(text, code, kinds, eval.value_id, eval.next);
-    let stored_kind = try kinds.get(slice_eval.value_id);
     let kind_pos = field_entry + 3;
     let slot_kind = try code.get(kind_pos);
+    let record_base = code_kind_struct_base();
+    if slot_kind >= record_base {
+        return try lower_code_nested_var_struct_assign(text, code, kinds, field_entry, value_id, next_value);
+    }
+    let slot_pos = field_entry + 2;
+    let slot = try code.get(slot_pos);
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    let stored_kind = try kinds.get(slice_eval.value_id);
+    if stored_kind != slot_kind {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let store_op = var_struct_store_op(slot_kind);
+    try code.append(store_op);
+    try code.append(slot);
+    try code.append(slice_eval.value_id);
+    return code_eval_value(slice_eval.value_id, slice_eval.next);
+}
+
+fn lower_code_nested_var_struct_assign(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    field_entry: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let kind_pos = field_entry + 3;
+    let slot_kind = try code.get(kind_pos);
+    let record_base = code_kind_struct_base();
+    let record_pos = slot_kind - record_base;
+    return try lower_code_nested_var_struct_assign_record(text, code, kinds, record_pos, value_id, next_value);
+}
+
+fn lower_code_nested_var_struct_assign_record(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    record_pos: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = try code.get(record_pos);
+    let op_var_struct = code_op_var_struct();
+    if op != op_var_struct {
+        return code_eval_unsupported(next_value);
+    }
+    let source_kind = try kinds.get(value_id);
+    let assign_eval = try lower_code_var_struct_assign_fields(text, code, kinds, record_pos, value_id, source_kind, 0, next_value);
+    if !assign_eval.ok {
+        return code_eval_unsupported(assign_eval.next);
+    }
+    return code_eval_value(value_id, assign_eval.next);
+}
+
+fn lower_code_var_struct_assign_fields(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    target_record_pos: i64,
+    source_value: i64,
+    source_kind: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    let field_count = try code.get(target_record_pos + 4);
+    if index >= field_count {
+        return code_eval_value(source_value, next_value);
+    }
+    let entry_slots = index * 4;
+    let entry_pos = target_record_pos + 5 + entry_slots;
+    let name_start = try code.get(entry_pos);
+    let name_end = try code.get(entry_pos + 1);
+    let field_eval = try lower_code_source_struct_field_value(text, code, kinds, source_value, source_kind, name_start, name_end, next_value);
+    if !field_eval.ok {
+        return code_eval_unsupported(field_eval.next);
+    }
+    let store_eval = try lower_code_var_struct_store_entry_value(text, code, kinds, entry_pos, field_eval.value_id, field_eval.next);
+    if !store_eval.ok {
+        return code_eval_unsupported(store_eval.next);
+    }
+    let after = index + 1;
+    return try lower_code_var_struct_assign_fields(text, code, kinds, target_record_pos, source_value, source_kind, after, store_eval.next);
+}
+
+fn lower_code_var_struct_store_entry_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    field_entry: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let kind_pos = field_entry + 3;
+    let slot_kind = try code.get(kind_pos);
+    let record_base = code_kind_struct_base();
+    if slot_kind >= record_base {
+        return try lower_code_var_struct_store_nested_entry_kind(text, code, kinds, slot_kind, value_id, next_value);
+    }
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    let stored_kind = try kinds.get(slice_eval.value_id);
     if stored_kind != slot_kind {
         return code_eval_unsupported(slice_eval.next);
     }
@@ -7478,6 +7644,100 @@ fn lower_code_field_assign(
     try code.append(slot);
     try code.append(slice_eval.value_id);
     return code_eval_value(slice_eval.value_id, slice_eval.next);
+}
+
+fn lower_code_var_struct_store_nested_entry_kind(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    slot_kind: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    let nested_record_pos = slot_kind - record_base;
+    return try lower_code_var_struct_store_nested_entry_value(text, code, kinds, nested_record_pos, value_id, next_value);
+}
+
+fn lower_code_var_struct_store_nested_entry_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    nested_record_pos: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = try code.get(nested_record_pos);
+    let op_var_struct = code_op_var_struct();
+    if op != op_var_struct {
+        return code_eval_unsupported(next_value);
+    }
+    let source_kind = try kinds.get(value_id);
+    return try lower_code_var_struct_assign_fields(text, code, kinds, nested_record_pos, value_id, source_kind, 0, next_value);
+}
+
+fn lower_code_source_struct_field_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    source_value: i64,
+    source_kind: i64,
+    name_start: i64,
+    name_end: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    if source_kind < record_base {
+        return code_eval_unsupported(next_value);
+    }
+    let source_record_pos = source_kind - record_base;
+    let op = try code.get(source_record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if op == op_struct_lit {
+        return try lower_code_source_struct_lit_field_value(text, code, source_record_pos, name_start, name_end, next_value);
+    }
+    let op_struct_decl = code_op_struct_decl();
+    if op == op_struct_decl {
+        return try lower_code_struct_decl_field_read_by_span(text, code, kinds, source_record_pos, source_value, name_start, name_end, next_value);
+    }
+    let op_var_struct = code_op_var_struct();
+    if op == op_var_struct {
+        return try lower_code_source_var_struct_field_value(text, code, kinds, source_record_pos, name_start, name_end, next_value);
+    }
+    return code_eval_unsupported(next_value);
+}
+
+fn lower_code_source_struct_lit_field_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    source_record_pos: i64,
+    name_start: i64,
+    name_end: i64,
+    next_value: i64
+) -> !CodeEval {
+    let field_count = try code.get(source_record_pos + 4);
+    let field_value = try struct_record_field(text, code, source_record_pos, field_count, name_start, name_end, 0);
+    if field_value < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    return code_eval_value(field_value, next_value);
+}
+
+fn lower_code_source_var_struct_field_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    source_record_pos: i64,
+    name_start: i64,
+    name_end: i64,
+    next_value: i64
+) -> !CodeEval {
+    let field_count = try code.get(source_record_pos + 4);
+    let field_entry = try var_struct_field_entry(text, code, source_record_pos, field_count, name_start, name_end, 0);
+    if field_entry < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    return try lower_code_var_struct_entry_value(code, kinds, field_entry, next_value);
 }
 
 // code_assign_target_slot resolves an assignment target to its var slot, or -1
@@ -8919,15 +9179,36 @@ fn lower_code_struct_pack_from_span(
     if decl_pos < 0 {
         return code_eval_unsupported(next_value);
     }
+    let record_base = code_kind_struct_base();
+    let source_kind = record_base + lit_record_pos;
+    let no_source_value = 0 - 1;
+    return try lower_code_struct_pack_from_decl(text, decl_pos, no_source_value, source_kind, code, kinds, args_scratch, next_value);
+}
+
+fn lower_code_struct_pack_from_decl(
+    text: []u8,
+    decl_pos: i64,
+    source_value: i64,
+    source_kind: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    if source_kind < record_base {
+        return code_eval_unsupported(next_value);
+    }
+    let source_record_pos = source_kind - record_base;
     let field_count = try code.get(decl_pos + 3);
-    let lit_count = try code.get(lit_record_pos + 4);
-    if field_count != lit_count {
+    let source_count = try code_struct_source_field_count(code, source_record_pos);
+    if field_count != source_count {
         return code_eval_unsupported(next_value);
     }
     let scratch_base = try args_scratch.get(0);
     let scratch_bound = scratch_base + field_count;
     try args_scratch.set(0, scratch_bound);
-    let fields_eval = try prepare_code_struct_return_pack_fields(text, code, kinds, decl_pos, lit_record_pos, field_count, args_scratch, scratch_base, 0, next_value);
+    let fields_eval = try prepare_code_struct_pack_fields(text, code, kinds, decl_pos, source_value, source_kind, field_count, args_scratch, scratch_base, 0, next_value);
     if !fields_eval.ok {
         return try code_eval_unsupported_after_scratch_reset(args_scratch, scratch_base, fields_eval.next);
     }
@@ -8938,7 +9219,6 @@ fn lower_code_struct_pack_from_span(
     try code.append(field_count);
     try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
     try args_scratch.set(0, scratch_base);
-    let record_base = code_kind_struct_base();
     let struct_kind = record_base + decl_pos;
     try kinds.append(struct_kind);
     let result_value = fields_eval.next;
@@ -8946,12 +9226,30 @@ fn lower_code_struct_pack_from_span(
     return code_eval_value(result_value, after_value);
 }
 
-fn prepare_code_struct_return_pack_fields(
+fn code_struct_source_field_count(
+    code: &var std::array::Array<i64>,
+    source_record_pos: i64
+) -> !i64 {
+    let op = try code.get(source_record_pos);
+    let field_count = try code.get(source_record_pos + 4);
+    let op_struct_lit = code_op_struct_lit();
+    if op == op_struct_lit {
+        return field_count;
+    }
+    let op_var_struct = code_op_var_struct();
+    if op == op_var_struct {
+        return field_count;
+    }
+    return 0 - 1;
+}
+
+fn prepare_code_struct_pack_fields(
     text: []u8,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     decl_pos: i64,
-    lit_record_pos: i64,
+    source_value: i64,
+    source_kind: i64,
     field_count: i64,
     args_scratch: &var std::array::Array<i64>,
     scratch_base: i64,
@@ -8966,18 +9264,76 @@ fn prepare_code_struct_return_pack_fields(
     let name_start = try code.get(entry_pos);
     let name_end = try code.get(entry_pos + 1);
     let field_kind = try code.get(entry_pos + 2);
-    let raw_value = try struct_record_field(text, code, lit_record_pos, field_count, name_start, name_end, 0);
-    if raw_value < 0 {
-        return code_eval_unsupported(next_value);
+    let raw_eval = try lower_code_source_struct_field_value(text, code, kinds, source_value, source_kind, name_start, name_end, next_value);
+    if !raw_eval.ok {
+        return code_eval_unsupported(raw_eval.next);
     }
-    let field_eval = try code_arena_struct_field_payload_value(text, code, kinds, raw_value, field_kind, next_value);
+    let field_eval = try code_struct_pack_field_payload_value(text, code, kinds, raw_eval.value_id, field_kind, args_scratch, raw_eval.next);
     if !field_eval.ok {
         return code_eval_unsupported(field_eval.next);
     }
     let value_pos = scratch_base + index;
     try scratch_put(args_scratch, value_pos, field_eval.value_id);
     let after = index + 1;
-    return try prepare_code_struct_return_pack_fields(text, code, kinds, decl_pos, lit_record_pos, field_count, args_scratch, scratch_base, after, field_eval.next);
+    return try prepare_code_struct_pack_fields(text, code, kinds, decl_pos, source_value, source_kind, field_count, args_scratch, scratch_base, after, field_eval.next);
+}
+
+fn code_struct_pack_field_payload_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    raw_value: i64,
+    field_kind: i64,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    if field_kind >= record_base {
+        return try code_struct_pack_record_field_payload_value(text, code, kinds, raw_value, field_kind, args_scratch, next_value);
+    }
+    let slice_kind = code_kind_slice();
+    if field_kind == slice_kind {
+        return try code_arena_struct_slice_field_payload_value(text, code, kinds, raw_value, next_value);
+    }
+    let raw_kind = try kinds.get(raw_value);
+    if raw_kind != field_kind {
+        return code_eval_unsupported(next_value);
+    }
+    return code_eval_value(raw_value, next_value);
+}
+
+fn code_struct_pack_record_field_payload_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    raw_value: i64,
+    field_kind: i64,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let raw_kind = try kinds.get(raw_value);
+    let record_base = code_kind_struct_base();
+    if raw_kind < record_base {
+        return code_eval_unsupported(next_value);
+    }
+    let raw_record_pos = raw_kind - record_base;
+    let raw_op = try code.get(raw_record_pos);
+    let op_struct_decl = code_op_struct_decl();
+    let raw_decl_mismatch = raw_op == op_struct_decl and raw_kind != field_kind;
+    if raw_decl_mismatch {
+        return code_eval_unsupported(next_value);
+    }
+    if raw_op == op_struct_decl {
+        return code_eval_value(raw_value, next_value);
+    }
+    let op_struct_lit = code_op_struct_lit();
+    let op_var_struct = code_op_var_struct();
+    let raw_packable = raw_op == op_struct_lit or raw_op == op_var_struct;
+    if !raw_packable {
+        return code_eval_unsupported(next_value);
+    }
+    let decl_pos = field_kind - record_base;
+    return try lower_code_struct_pack_from_decl(text, decl_pos, raw_value, raw_kind, code, kinds, args_scratch, next_value);
 }
 
 fn lower_code_return_value(
@@ -9000,7 +9356,7 @@ fn lower_code_return_value(
     }
     // A return is a function boundary like a call argument: a UNION_CONST value
     // packs into the runtime union aggregate before the terminator records it.
-    let stored_eval = try lower_code_arg_slice(text, code, kinds, eval.value_id, eval.next);
+    let stored_eval = try lower_code_arg_value(text, code, kinds, args_scratch, eval.value_id, eval.next);
     if !stored_eval.ok {
         return code_eval_unsupported(stored_eval.next);
     }
@@ -9705,7 +10061,36 @@ fn lower_code_struct_decl_field_read(
     let count_pos = record_pos + 3;
     let field_count = try code.get(count_pos);
     let name_span = code_node_span(text, ast, name);
-    let field_index = try struct_decl_record_field_index(text, code, record_pos, field_count, name_span.start, name_span.end, 0);
+    return try lower_code_struct_decl_field_read_by_count(text, code, kinds, record_pos, value_id, field_count, name_span.start, name_span.end, next_value);
+}
+
+fn lower_code_struct_decl_field_read_by_span(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    record_pos: i64,
+    value_id: i64,
+    name_start: i64,
+    name_end: i64,
+    next_value: i64
+) -> !CodeEval {
+    let count_pos = record_pos + 3;
+    let field_count = try code.get(count_pos);
+    return try lower_code_struct_decl_field_read_by_count(text, code, kinds, record_pos, value_id, field_count, name_start, name_end, next_value);
+}
+
+fn lower_code_struct_decl_field_read_by_count(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    record_pos: i64,
+    value_id: i64,
+    field_count: i64,
+    name_start: i64,
+    name_end: i64,
+    next_value: i64
+) -> !CodeEval {
+    let field_index = try struct_decl_record_field_index(text, code, record_pos, field_count, name_start, name_end, 0);
     if field_index < 0 {
         return code_eval_unsupported(next_value);
     }
@@ -9935,7 +10320,7 @@ fn lower_code_runtime_arena_get_field_method(
 }
 
 // lower_code_var_struct_read loads a scalarized var-struct field from its slot
-// into a fresh value (the slot kind picks the i64 or slice load).
+// into a fresh value, or returns a nested VAR_STRUCT value directly.
 fn lower_code_var_struct_read(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -9946,7 +10331,7 @@ fn lower_code_var_struct_read(
     next_value: i64
 ) -> !CodeEval {
     let name_span = code_node_span(text, ast, name);
-    let count_pos = record_pos + 2;
+    let count_pos = record_pos + 4;
     let field_count = try code.get(count_pos);
     // 'field_entry' (not 'entry') keeps the binding clear of the function's
     // LLVM entry block label in the compiled value namespace.
@@ -9954,14 +10339,27 @@ fn lower_code_var_struct_read(
     if field_entry < 0 {
         return code_eval_unsupported(next_value);
     }
+    return try lower_code_var_struct_entry_value(code, kinds, field_entry, next_value);
+}
+
+fn lower_code_var_struct_entry_value(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    field_entry: i64,
+    next_value: i64
+) -> !CodeEval {
     let slot_pos = field_entry + 2;
-    let slot = try code.get(slot_pos);
+    let slot_or_value = try code.get(slot_pos);
     let kind_pos = field_entry + 3;
     let slot_kind = try code.get(kind_pos);
+    let record_base = code_kind_struct_base();
+    if slot_kind >= record_base {
+        return code_eval_value(slot_or_value, next_value);
+    }
     let load_op = var_struct_load_op(slot_kind);
     try code.append(load_op);
     try code.append(next_value);
-    try code.append(slot);
+    try code.append(slot_or_value);
     try kinds.append(slot_kind);
     let after_value = next_value + 1;
     return code_eval_value(next_value, after_value);
@@ -9982,7 +10380,7 @@ fn var_struct_field_entry(
         return 0 - 1;
     }
     let entry_slots = index * 4;
-    let entry_pos = record_pos + 3 + entry_slots;
+    let entry_pos = record_pos + 5 + entry_slots;
     let entry_name_start = try code.get(entry_pos);
     let entry_end_pos = entry_pos + 1;
     let entry_name_end = try code.get(entry_end_pos);
@@ -10002,6 +10400,10 @@ fn var_struct_load_op(slot_kind: i64) -> i64 {
     if slot_kind == kind_i64 {
         return code_op_var_load();
     }
+    let kind_bool = code_kind_bool();
+    if slot_kind == kind_bool {
+        return code_op_var_load_bool();
+    }
     return code_op_var_load_slice();
 }
 
@@ -10009,6 +10411,10 @@ fn var_struct_store_op(slot_kind: i64) -> i64 {
     let kind_i64 = code_kind_i64();
     if slot_kind == kind_i64 {
         return code_op_var_store();
+    }
+    let kind_bool = code_kind_bool();
+    if slot_kind == kind_bool {
+        return code_op_var_store_bool();
     }
     return code_op_var_store_slice();
 }
@@ -12628,10 +13034,34 @@ fn lower_code_arg_value(
     let record_pos = arg_kind - record_base;
     let op = try code.get(record_pos);
     let op_struct_lit = code_op_struct_lit();
-    if op != op_struct_lit {
-        return try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    if op == op_struct_lit {
+        return try lower_code_method_receiver_struct_lit_arg(text, code, kinds, args_scratch, record_pos, next_value);
     }
-    return try lower_code_method_receiver_struct_lit_arg(text, code, kinds, args_scratch, record_pos, next_value);
+    let op_var_struct = code_op_var_struct();
+    if op == op_var_struct {
+        return try lower_code_var_struct_arg(text, code, kinds, args_scratch, value_id, arg_kind, next_value);
+    }
+    return try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+}
+
+fn lower_code_var_struct_arg(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    value_id: i64,
+    value_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    let record_pos = value_kind - record_base;
+    let type_start = try code.get(record_pos + 2);
+    let type_end = try code.get(record_pos + 3);
+    let decl_pos = try struct_decl_pos_by_span(text, code, type_start, type_end, 0);
+    if decl_pos < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    return try lower_code_struct_pack_from_decl(text, decl_pos, value_id, value_kind, code, kinds, args_scratch, next_value);
 }
 
 // lower_code_arg_slice materializes a string argument (kind str, a CONST_STR
