@@ -4,6 +4,7 @@ import selfhost::cache::metadata;
 import selfhost::cache::prune;
 import selfhost::cache::status;
 import selfhost::cache::storage;
+import selfhost::source;
 
 pub enum CacheBackend {
     Interpreter,
@@ -45,6 +46,7 @@ pub struct CacheEntryMetadata {
 
 pub struct CacheLookup {
     pub found: bool,
+    pub artifact_path: []u8,
     pub metadata: CacheEntryMetadata,
 }
 
@@ -85,6 +87,14 @@ struct PruneFourKeys {
     b: CacheKey,
     c: CacheKey,
     d: CacheKey,
+}
+
+pub struct StageCacheInput {
+    pub manifest_hash: i64,
+    pub module_graph_hash: i64,
+    pub source_hashes: i64,
+    pub public_interface_hash: i64,
+    pub stdlib_hash: i64,
 }
 
 pub fn compute_key(input: &CacheKeyInput) -> CacheKey {
@@ -178,6 +188,7 @@ pub fn lookup_entry(
     let lookup = try storage::lookup_entry(allocator, io, key.fingerprint);
     return CacheLookup {
         found: lookup.found,
+        artifact_path: lookup.artifact_path,
         metadata: CacheEntryMetadata {
             key: CacheKey { fingerprint: lookup.fingerprint },
             input_description: lookup.input_description,
@@ -223,6 +234,240 @@ pub fn prune_cache(io: Io, policy: CachePrunePolicy) -> !CachePruneReport {
         freed_bytes: report.freed_bytes,
         remaining_entries: report.remaining_entries
     };
+}
+
+pub fn stage_cache_input(
+    files: &std::array::Array<source::SourceFile>
+) -> !StageCacheInput {
+    return StageCacheInput {
+        manifest_hash: try hash_selected_sources(files, true, false, false),
+        module_graph_hash: try stage_module_graph_hash(files),
+        source_hashes: try hash_selected_sources(files, false, true, true),
+        public_interface_hash: try hash_selected_sources(files, false, true, true),
+        stdlib_hash: try hash_selected_sources(files, false, false, true)
+    };
+}
+
+fn stage_module_graph_hash(files: &std::array::Array<source::SourceFile>) -> !i64 {
+    var fingerprint = 17;
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        fingerprint = fingerprint_append_bytes(fingerprint, source_kind_name(file.kind));
+        fingerprint = fingerprint_append_byte(fingerprint, cast<u8>(58));
+        fingerprint = fingerprint_append_bytes(fingerprint, file.package_name);
+        fingerprint = fingerprint_append_byte(fingerprint, cast<u8>(58));
+        fingerprint = fingerprint_append_bytes(fingerprint, source::module_path(file));
+        fingerprint = fingerprint_append_byte(fingerprint, cast<u8>(58));
+        fingerprint = fingerprint_append_bytes(fingerprint, file.path);
+        fingerprint = fingerprint_append_byte(fingerprint, cast<u8>(10));
+        index = index + 1;
+    }
+    return fingerprint;
+}
+
+fn hash_selected_sources(
+    files: &std::array::Array<source::SourceFile>,
+    include_manifest: bool,
+    include_selfhost: bool,
+    include_std: bool
+) -> !i64 {
+    var fingerprint = 17;
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if include_source_kind(file.kind, include_manifest, include_selfhost, include_std) {
+            fingerprint = fingerprint_append_bytes(fingerprint, source_kind_name(file.kind));
+            fingerprint = fingerprint_append_byte(fingerprint, cast<u8>(58));
+            fingerprint = fingerprint_append_bytes(fingerprint, file.path);
+            fingerprint = fingerprint_append_byte(fingerprint, cast<u8>(58));
+            fingerprint = fingerprint_append_bytes(fingerprint, file.text);
+            fingerprint = fingerprint_append_byte(fingerprint, cast<u8>(10));
+        }
+        index = index + 1;
+    }
+    return fingerprint;
+}
+
+pub fn stage_key(input: &StageCacheInput) -> CacheKey {
+    return CacheKey { fingerprint: stage_fingerprint(input) };
+}
+
+pub fn write_stage_entry(
+    allocator: Allocator,
+    io: Io,
+    input: &StageCacheInput,
+    artifact: &[]u8
+) -> !CacheEntryMetadata {
+    try layout::ensure_cache_layout(io);
+    let fingerprint = stage_fingerprint(input);
+    var artifact_path = try layout::cache_entry_artifact_path(allocator, fingerprint);
+    let artifact_path_bytes = artifact_path.as_bytes();
+    try std::fs::write_file(io, artifact_path_bytes, artifact);
+
+    var input_description = std::string::String(allocator);
+    try append_stage_input_description(input_description, input);
+    let input_description_bytes = input_description.as_bytes();
+    var metadata_path = try layout::cache_entry_metadata_path(allocator, fingerprint);
+    var metadata_bytes = std::string::String(allocator);
+    try metadata::append_line(metadata_bytes, "kizu-cache-entry-v0");
+    try metadata_bytes.append_bytes("fingerprint ");
+    try std::fmt::append_i64(metadata_bytes, fingerprint);
+    try metadata_bytes.append_byte(cast<u8>(10));
+    try metadata_bytes.append_bytes("input-description ");
+    try metadata_bytes.append_bytes(input_description_bytes);
+    try metadata_bytes.append_byte(cast<u8>(10));
+    try metadata_bytes.append_bytes("artifact ");
+    try metadata_bytes.append_bytes(artifact_path_bytes);
+    try metadata_bytes.append_byte(cast<u8>(10));
+    let metadata_path_bytes = metadata_path.as_bytes();
+    let metadata_view = metadata_bytes.as_bytes();
+    try std::fs::write_file(io, metadata_path_bytes, metadata_view);
+    metadata_path.deinit();
+    metadata_bytes.deinit();
+    input_description.deinit();
+    artifact_path.deinit();
+    let entry_key = CacheKey { fingerprint: fingerprint };
+    return try read_entry(allocator, io, &entry_key);
+}
+
+fn stage_fingerprint(input: &StageCacheInput) -> i64 {
+    var state = 17;
+    state = stage_mix_bytes(state, "compiler-version", stage_compiler_version());
+    state = stage_mix_bytes(state, "manifest-path", stage_manifest_path());
+    state = stage_mix_i64(state, "manifest-hash", input.manifest_hash);
+    state = stage_mix_i64(state, "module-graph-hash", input.module_graph_hash);
+    state = stage_mix_i64(state, "source-hashes", input.source_hashes);
+    state = stage_mix_i64(state, "public-interface-hash", input.public_interface_hash);
+    state = stage_mix_bytes(state, "target", stage_target());
+    state = stage_mix_bytes(state, "backend", "llvm");
+    state = stage_mix_bytes(state, "optimization-mode", "debug");
+    state = stage_mix_i64(state, "stdlib-hash", input.stdlib_hash);
+    state = stage_mix_bytes(state, "stdlib-version", stage_stdlib_version());
+    return state;
+}
+
+fn stage_mix_bytes(state: i64, name: []u8, value: []u8) -> i64 {
+    var next = fingerprint_append_bytes(state, name);
+    next = fingerprint_append_byte(next, cast<u8>(0));
+    next = fingerprint_append_bytes(next, value);
+    next = fingerprint_append_byte(next, cast<u8>(10));
+    return next;
+}
+
+fn stage_mix_i64(state: i64, name: []u8, value: i64) -> i64 {
+    var next = fingerprint_append_bytes(state, name);
+    next = fingerprint_append_byte(next, cast<u8>(0));
+    var divisor = 1;
+    while divisor * 10 <= value {
+        divisor = divisor * 10;
+    }
+    var current = value;
+    while divisor > 0 {
+        let digit = current / divisor;
+        next = fingerprint_append_byte(next, cast<u8>(48 + digit));
+        current = current - (digit * divisor);
+        divisor = divisor / 10;
+    }
+    next = fingerprint_append_byte(next, cast<u8>(10));
+    return next;
+}
+
+fn append_stage_input_description(
+    out: &var std::string::String,
+    input: &StageCacheInput
+) -> !void {
+    try metadata::append_input_pair(out, "compiler-version", stage_compiler_version());
+    try metadata::append_input_pair(out, "manifest-path", stage_manifest_path());
+    try append_stage_input_pair_i64(out, "manifest-hash", input.manifest_hash);
+    try append_stage_input_pair_i64(out, "module-graph-hash", input.module_graph_hash);
+    try append_stage_input_pair_i64(out, "source-hashes", input.source_hashes);
+    try append_stage_input_pair_i64(out, "public-interface-hash", input.public_interface_hash);
+    try metadata::append_input_pair(out, "target", stage_target());
+    try metadata::append_input_pair(out, "backend", "llvm");
+    try metadata::append_input_pair(out, "optimization-mode", "debug");
+    try append_stage_input_pair_i64(out, "stdlib-hash", input.stdlib_hash);
+    try metadata::append_input_pair(out, "stdlib-version", stage_stdlib_version());
+    return;
+}
+
+fn append_stage_input_pair_i64(
+    out: &var std::string::String,
+    name: []u8,
+    value: i64
+) -> !void {
+    if out.len() > 0 {
+        try out.append_byte(cast<u8>(59));
+    }
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(61));
+    try std::fmt::append_i64(out, value);
+    return;
+}
+
+fn stage_compiler_version() -> []u8 { return "selfhost-stage-cache-v0"; }
+fn stage_manifest_path() -> []u8 { return "selfhost/kizu.toml"; }
+fn stage_target() -> []u8 { return "native-hosted-selfhost-abi-v0"; }
+fn stage_stdlib_version() -> []u8 { return "selfhost-abi-v0"; }
+
+fn include_source_kind(
+    kind: source::SourceKind,
+    include_manifest: bool,
+    include_selfhost: bool,
+    include_std: bool
+) -> bool {
+    if kind == source::SourceKind::Manifest {
+        return include_manifest;
+    }
+    if kind == source::SourceKind::Selfhost {
+        return include_selfhost;
+    }
+    if kind == source::SourceKind::Std {
+        return include_std;
+    }
+    return false;
+}
+
+fn source_kind_name(kind: source::SourceKind) -> []u8 {
+    if kind == source::SourceKind::Manifest {
+        return "manifest";
+    }
+    if kind == source::SourceKind::Selfhost {
+        return "selfhost";
+    }
+    if kind == source::SourceKind::Std {
+        return "std";
+    }
+    return "user";
+}
+
+fn hash_bytes_to_string(allocator: Allocator, bytes: []u8) -> !std::string::String {
+    return try fingerprint_to_string(allocator, fingerprint_bytes(bytes));
+}
+
+fn fingerprint_to_string(allocator: Allocator, fingerprint: i64) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try std::fmt::append_i64(out, fingerprint);
+    return out;
+}
+
+fn fingerprint_bytes(bytes: []u8) -> i64 {
+    var state = 17;
+    return fingerprint_append_bytes(state, bytes);
+}
+
+fn fingerprint_append_bytes(state: i64, bytes: []u8) -> i64 {
+    var next = state;
+    var index = 0;
+    while index < std::mem::len(bytes) {
+        next = fingerprint_append_byte(next, bytes[index]);
+        index = index + 1;
+    }
+    return next;
+}
+
+fn fingerprint_append_byte(state: i64, byte: u8) -> i64 {
+    return ((state * 257) + cast<i64>(byte) + 1) % 1000000007;
 }
 
 pub fn compare_rebuild_inputs(
