@@ -1,4 +1,5 @@
 import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::ir_index;
 
 pub fn kizu_type_to_llvm(
     ir_bytes: []u8,
@@ -179,6 +180,46 @@ pub fn kizu_type_to_llvm(
         );
     }
     return try compiled_fact_lookup::lookup_type_llvm_by_prefix(ir_bytes, module_prefix, kizu_type);
+}
+
+pub fn kizu_type_to_llvm_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    kizu_type: []u8
+) -> ![]u8 {
+    let type_len = std::mem::len(kizu_type);
+    if type_len == 0 {
+        return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
+    }
+    if kizu_type[0] == cast<u8>(38) {
+        return try kizu_type_to_llvm_indexed(index, ir_bytes, module_prefix, kizu_type[1..type_len]);
+    }
+    if std::mem::starts_with(kizu_type, "var_") {
+        return try kizu_type_to_llvm_indexed(index, ir_bytes, module_prefix, kizu_type[4..type_len]);
+    }
+    if type_is_qualified(kizu_type) {
+        if compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, ir_bytes[0..0], kizu_type) {
+            return "i64";
+        }
+        let qualified = compiled_fact_lookup::lookup_type_llvm_by_prefix_or_empty_indexed(
+            index, ir_bytes, ir_bytes[0..0], kizu_type
+        );
+        if std::mem::len(qualified) > 0 {
+            return qualified;
+        }
+    } else {
+        if compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, module_prefix, kizu_type) {
+            return "i64";
+        }
+        let local = compiled_fact_lookup::lookup_type_llvm_by_prefix_or_empty_indexed(
+            index, ir_bytes, module_prefix, kizu_type
+        );
+        if std::mem::len(local) > 0 {
+            return local;
+        }
+    }
+    return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
 }
 
 // type_is_qualified reports whether a kizu type spelling carries a '::' module path, i.e. it
