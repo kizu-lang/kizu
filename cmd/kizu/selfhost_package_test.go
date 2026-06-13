@@ -2102,8 +2102,8 @@ func assertCodegenIRForbiddenBridges(t *testing.T, hosted string, codegen string
 }
 
 // assertHostedRunLLVMResponsibilities keeps the stage2 hosted run path split:
-// run orchestrates, the parse boundary builds ParseResult, codegen lowers
-// RunAst to Program, and hosted renderer owns the LLVM module rendering.
+// run orchestrates, the parse boundary builds ParseResult, and code_render lowers
+// the checked source to a tape-backed run artifact.
 func assertHostedRunLLVMResponsibilities(
 	t *testing.T,
 	cliRun string,
@@ -2143,7 +2143,7 @@ func assertHostedRunLLVMResponsibilities(
 	assertBuildMainPrintProgramBodyDerivedCodegen(t, cliCodegen)
 	assertLoweredMainPrintProgramBodyDerivedCodegen(t, cliCodegen)
 	assertStdoutPayloadBodyDerivedCodegen(t, cliCodegen)
-	assertLowerRunAstBodyDerivedCodegen(t, cliCodegen)
+	assertLegacyRunAstBridgeRemoved(t, cliCodegen)
 	assertCompiledFunctionGeneric(t)
 	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
 		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
@@ -2255,12 +2255,21 @@ func assertLoweredMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen st
 	}
 }
 
-// assertLowerRunAstBodyDerivedCodegen keeps the lower_run_ast shape checks body-fact derived.
-func assertLowerRunAstBodyDerivedCodegen(t *testing.T, cliCodegen string) {
+// assertLegacyRunAstBridgeRemoved keeps the dead RunAst -> Program bridge out of
+// the emitted CLI codegen surface.
+func assertLegacyRunAstBridgeRemoved(t *testing.T, cliCodegen string) {
 	t.Helper()
-	if !strings.Contains(cliCodegen,
-		"@kizu_selfhost__ir_codegen_lower_run_ast_to_program") {
-		t.Fatal("cli_codegen_lower_run_ast must delegate to body-derived lower_run_ast_to_program")
+	for _, fragment := range []string{
+		"@kizu_selfhost__cli_codegen_lower_run_ast",
+		"@kizu_selfhost__ir_codegen_lower_run_ast_to_program",
+		"codegen_main",
+		"codegen_entry",
+		"codegen_s0",
+		"codegen_print",
+	} {
+		if strings.Contains(cliCodegen, fragment) {
+			t.Fatalf("legacy RunAst bridge emission remains: %q", fragment)
+		}
 	}
 }
 

@@ -399,8 +399,6 @@ func requiredLLVMExecutableFragments() []string {
 	fragments := []string{
 		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
 		"%kizu.selfhost.codegen.run_ast = type { i1, i64, %kizu.slice.u8",
-		// !RunAst error union backs the run-codegen AST traversal lowering cluster compiled
-		// into stage2 (tracker 961, scope 4 prerequisite): { ok, RunAst value, diagnostic }.
 		"%kizu.error.run_ast = type { i1, %kizu.selfhost.codegen.run_ast, %kizu.slice.u8 }",
 		"%kizu.selfhost.codegen.value = type { i64, %kizu.slice.u8, %kizu.slice.u8 }",
 		"%kizu.selfhost.codegen.instruction = type { i64, i64, %kizu.slice.u8",
@@ -419,12 +417,11 @@ func requiredLLVMExecutableFragments() []string {
 		"%tokens_result = call %kizu.error.owned @kizu_kizu__lexer_tokenize",
 		"@kizu_kizu__ast_ast_add_node",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_lower_program",
-		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_ast",
+		"define %kizu.error.owned @kizu_selfhost__ir_code_render_render_run_artifact",
 		"define i1 @kizu_selfhost__ir_codegen_program_supported",
 	}
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
-	fragments = append(fragments, requiredLLVMReturnErrorFragments()...)
 	fragments = append(fragments, requiredLLVMArrayGetFragments()...)
 	fragments = append(fragments, requiredLLVMChildAtFragments()...)
 	fragments = append(fragments, requiredLLVMUnionAbiFragments()...)
@@ -434,15 +431,6 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMNodeCountLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMTextAccessorFragments()...)
 	fragments = append(fragments, requiredLLVMStringLiteralSpanFragments()...)
-	fragments = append(fragments, requiredLLVMPrintPayloadFragments()...)
-	fragments = append(fragments, requiredLLVMLowerPrintCallFragments()...)
-	fragments = append(fragments, requiredLLVMLowerPrintStatementFragments()...)
-	fragments = append(fragments, requiredLLVMLowerLetBindingFragments()...)
-	fragments = append(fragments, requiredLLVMLowerRunAstBlockFragments()...)
-	fragments = append(fragments, requiredLLVMLowerRunAstFunctionFragments()...)
-	fragments = append(fragments, requiredLLVMLowerRunAstDeclarationsFragments()...)
-	fragments = append(fragments, requiredLLVMLowerRunParseResultFragments()...)
-	fragments = append(fragments, requiredLLVMLowerRunAstFragments()...)
 	fragments = append(fragments, requiredLLVMLexerClassifierFragments()...)
 	fragments = append(fragments, requiredLLVMLexerAdvanceFragments()...)
 	fragments = append(fragments, requiredLLVMLexerTokenFragments()...)
@@ -453,12 +441,8 @@ func requiredLLVMExecutableFragments() []string {
 	fragments = append(fragments, requiredLLVMSourcePackagePrefixFragments()...)
 	fragments = append(fragments, requiredLLVMSourceLoaderFragments()...)
 	return append(fragments, []string{
-		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
-		"%payload = call %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
-		"%from_codegen_lowering = extractvalue %kizu.selfhost.codegen.program %program, 15",
-		"%shape_ok = and i1 %shape_12, %from_codegen_lowering",
 		"%escape_next_write = call i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
 		"define i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
 		"%run_emitted = call i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
@@ -597,50 +581,14 @@ func requiredLLVMSourceLoaderFragments() []string {
 	}
 }
 
-// requiredLLVMRunCodegenLoweringFragments returns the tracker-961 run-codegen
-// lowering members compiled into stage2.
+// requiredLLVMRunCodegenLoweringFragments returns run-artifact helper members
+// still needed by the tape-backed renderer compiled into stage2.
 func requiredLLVMRunCodegenLoweringFragments() []string {
 	return []string{
-		// tracker 961: first AST-traversal lowering member compiled into stage2.
-		// This lands the run-AST local-binding model (LocalTable / LocalBinding)
-		// plus the duplicate-name membership check used inside lower_run_ast_block.
-		"%kizu.selfhost.codegen.local_binding = type { %kizu.slice.u8, i64, i64 }",
-		"%kizu.selfhost.codegen.local_table = type { i64, " +
-			"%kizu.selfhost.codegen.local_binding, %kizu.selfhost.codegen.local_binding }",
-		"define i1 @kizu_selfhost__ir_codegen_local_table_contains",
-		// tracker 961 follow-up: run-AST local-binding lookup helpers compiled into
-		// stage2. empty_payload_span exercises the new Prefix(-Int) struct field
-		// lowering (i64 -1 sentinels); local_payload_span exercises nested field
-		// extraction plus an if-then struct-literal return with the empty_payload_span
-		// fallback. #1021 already unblocked the nested-field call arguments.
+		// empty_payload_span and string_literal_span are still used by the current
+		// code-render path for tape-backed run artifacts.
 		"%kizu.selfhost.codegen.payload_span = type { i64, i64 }",
 		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_empty_payload_span",
-		"define %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_empty_local",
-		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_local_payload_span",
-		// tracker 961 follow-up: empty_local_table compiled into stage2. It exercises
-		// the new call-valued struct field initializer lowering, where first/second
-		// are built by calling empty_local and feeding the result into the LocalTable
-		// insertvalue chain.
-		"define %kizu.selfhost.codegen.local_table @kizu_selfhost__ir_codegen_empty_local_table",
-		"%vc0_1 = call %kizu.selfhost.codegen.local_binding " +
-			"@kizu_selfhost__ir_codegen_empty_local",
-		// tracker 961 follow-up: insert_local compiled into stage2. It exercises
-		// nested struct-literal field initializers (first/second: LocalBinding { ... })
-		// rendered in their own %v5000000+ insertvalue chains, alongside a call-valued
-		// field (second: empty_local(text)) in the count == 0 then-block. Both the
-		// count == 0 and count != 0 LocalTable shapes are preserved.
-		"define %kizu.selfhost.codegen.local_table @kizu_selfhost__ir_codegen_insert_local",
-		"%vc0_2 = call %kizu.selfhost.codegen.local_binding " +
-			"@kizu_selfhost__ir_codegen_empty_local",
-		"%v5000001_0 = insertvalue %kizu.selfhost.codegen.local_binding poison",
-		// tracker 961 follow-up: is_payload_supported compiled into stage2 through the
-		// restricted bounded-counter while lowering. The loop emits a single loop-carried
-		// phi for the induction variable (%index), a comparison condition that branches to
-		// the loop body/exit, an index-plus-one latch increment, and an ADR-0053 checked
-		// payload index load (trap-guarded getelementptr) rather than an unchecked GEP.
-		// Var reads are copy-propagated, so the condition and checked index load use the
-		// loop-carried %index directly instead of a trivial %tN alias. The three sequential
-		// early-return byte-range checks reject bytes outside 32..126 and the quote byte.
 		"define i1 @kizu_selfhost__ir_codegen_is_payload_supported",
 		"%index = phi i64 [ 0, %loop4_preheader ], [ %index_next, %loop4_latch ]",
 		"%t5 = icmp slt i64 %index, %t4",
@@ -648,17 +596,14 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 		"%index_next = add i64 %index, 1",
 		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
 		"%t7_gep = getelementptr i8, ptr %t7_ptr, i64 %index",
-		// tracker 961 foundation: empty_int_env is the first stage2 function that
-		// takes a real std::kizu::ast value type (ChildRange) as a parameter and
-		// forwards it whole into a struct field, without touching the AstNode/AstData
-		// union. The ChildRange LLVM type and its embedding IntEnv type are emitted,
-		// and the decls parameter is inserted as an aggregate into field index 1.
 		"%kizu.kizu.ast.child_range = type { i64, i64 }",
 		"%kizu.selfhost.codegen.int_env = type { i64, %kizu.kizu.ast.child_range, " +
 			"%kizu.slice.u8, i64, %kizu.slice.u8, i64, %kizu.slice.u8, i64 }",
 		"define %kizu.selfhost.codegen.int_env @kizu_selfhost__ir_codegen_empty_int_env",
 		"%v0_1 = insertvalue %kizu.selfhost.codegen.int_env %v0_0, " +
 			"%kizu.kizu.ast.child_range %decls, 1",
+		"define %kizu.error.i64 @kizu_selfhost__ir_codegen_parse_int_literal",
+		"call %kizu.error.i64 @kizu_selfhost__ir_codegen_parse_int_literal",
 	}
 }
 
@@ -680,24 +625,6 @@ func requiredLLVMAstAccessorFragments() []string {
 		"%result = call i64 @kizu_rt_array_len(%kizu.owned %arg0_0_ex)",
 		"define i64 @kizu_rt_array_len(%kizu.owned %array)",
 		"%len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2",
-	}
-}
-
-// requiredLLVMReturnErrorFragments returns the stdout_payload error-union
-// contract used by the hosted compiler. Both the direct print payload and the
-// try-void payload are wrapped as successful %kizu.error.slice.u8 values; the
-// unsupported branch materializes the diagnostic slice at failure field 2.
-func requiredLLVMReturnErrorFragments() []string {
-	return []string{
-		"@.kizu.cli.stdout_payload_error = " +
-			"private unnamed_addr constant [34 x i8] c\"unsupported codegen stdout payload\"",
-		"%string_result = insertvalue %kizu.error.slice.u8 %string_ok, %kizu.slice.u8 %string_payload, 1",
-		"%try_void = call i1 @kizu_selfhost__ir_codegen_try_void_program_supported",
-		"%try_result = insertvalue %kizu.error.slice.u8 %try_ok, %kizu.slice.u8 %second_payload, 1",
-		"%err = insertvalue %kizu.slice.u8 %err_base, i64 34, 1",
-		"%fail0 = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 false, 0",
-		"%fail1 = insertvalue %kizu.error.slice.u8 %fail0, %kizu.slice.u8 %err, 2",
-		"  ret %kizu.error.slice.u8 %fail1",
 	}
 }
 
@@ -1060,226 +987,6 @@ func requiredLLVMStringLiteralSpanFragments() []string {
 			"i64 %sls_payload_end, 1",
 		"%sls_empty_call = call %kizu.selfhost.codegen.payload_span " +
 			"@kizu_selfhost__ir_codegen_empty_payload_span()",
-	}
-}
-
-// requiredLLVMPrintPayloadFragments returns the tracker-961 scope-4 prerequisite print_payload
-// AST traversal accessor compiled into stage2: it binds the print argument node via Ast.get,
-// reads the AstData tag (AstNode field 1, tag field 0), and dispatches by variant - String
-// (tag 2) returns string_literal_span, Var (tag 4) returns local_payload_span(locals,
-// ast_node_text(...)), and every other variant returns the shared empty_payload_span() sentinel.
-// Its callees are already compiled so selfhost.ll links. These fragments lock the lowered shape.
-func requiredLLVMPrintPayloadFragments() []string {
-	return []string{
-		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_print_payload(",
-		"%pp_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg)",
-		"%pp_data = extractvalue %kizu.kizu.ast.ast_node %pp_node, 1",
-		"%pp_tag = extractvalue %kizu.kizu.ast.ast_data %pp_data, 0",
-		"%pp_is_string = icmp eq i64 %pp_tag, 2",
-		"  br i1 %pp_is_string, label %pp_string, label %pp_check_var",
-		"%pp_string_result = call %kizu.selfhost.codegen.payload_span " +
-			"@kizu_selfhost__ir_codegen_string_literal_span(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg)",
-		"%pp_is_var = icmp eq i64 %pp_tag, 4",
-		"%pp_name = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(" +
-			"%kizu.slice.u8 %text, %kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg)",
-		"%pp_var_result = call %kizu.selfhost.codegen.payload_span " +
-			"@kizu_selfhost__ir_codegen_local_payload_span(" +
-			"%kizu.selfhost.codegen.local_table %locals, %kizu.slice.u8 %pp_name)",
-		"%pp_empty = call %kizu.selfhost.codegen.payload_span " +
-			"@kizu_selfhost__ir_codegen_empty_payload_span()",
-	}
-}
-
-// requiredLLVMLowerPrintCallFragments returns the tracker-961 scope-4 prerequisite
-// lower_print_call AST traversal lowering compiled into stage2: the first compiled !RunAst
-// error-union lowering. It compares the callee text against the "print" literal global, checks
-// the arity, propagates the checked Ast.child_at failure into the !RunAst error, extracts the
-// argument payload via print_payload, slices the source text, and wraps print_run_ast /
-// unsupported_run_ast into the !RunAst success. These fragments lock the lowered body shape.
-func requiredLLVMLowerPrintCallFragments() []string {
-	return []string{
-		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_call(",
-		"@.kizu.compiled.kizu_selfhost__ir_codegen_lower_print_call.s0 = " +
-			"private unnamed_addr constant [5 x i8] c\"print\"",
-		"%lpc_callee_text = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(",
-		"%lpc_is_print = call i1 @kizu_selfhost__slice_equal(" +
-			"%kizu.slice.u8 %lpc_callee_text, %kizu.slice.u8 %lpc_print_slice)",
-		"%lpc_args_len = extractvalue %kizu.kizu.ast.child_range %args, 1",
-		"%lpc_child = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(",
-		"%lpc_fail2 = insertvalue %kizu.error.run_ast %lpc_fail1, %kizu.slice.u8 %lpc_child_err, 2",
-		"%lpc_payload = call %kizu.selfhost.codegen.payload_span " +
-			"@kizu_selfhost__ir_codegen_print_payload(",
-		"%lpc_run = call %kizu.selfhost.codegen.run_ast " +
-			"@kizu_selfhost__ir_codegen_print_run_ast(%kizu.slice.u8 %function_name, " +
-			"i64 %statement_count, %kizu.slice.u8 %lpc_callee_text, %kizu.slice.u8 %lpc_payload_text)",
-		"%lpc_ok1 = insertvalue %kizu.error.run_ast %lpc_ok0, " +
-			"%kizu.selfhost.codegen.run_ast %lpc_run, 1",
-		"%lpc_us = call %kizu.selfhost.codegen.run_ast " +
-			"@kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lpc_empty)",
-	}
-}
-
-// requiredLLVMLowerPrintStatementFragments returns the tracker-961 scope-4 prerequisite
-// lower_print_statement AST traversal lowering compiled into stage2: it binds the AstNode via
-// Ast.get, and on the Call variant (tag 10) loads the CallNode payload, extracts callee/args, and
-// forwards lower_print_call's !RunAst result, while every other variant returns the wrapped
-// unsupported_run_ast(). These fragments lock the lowered body shape.
-func requiredLLVMLowerPrintStatementFragments() []string {
-	return []string{
-		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_statement(",
-		"%lps_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %expr)",
-		"%lps_data = extractvalue %kizu.kizu.ast.ast_node %lps_node, 1",
-		"%lps_is_call = icmp eq i64 %lps_tag, 10",
-		"%lps_call_node = load %kizu.kizu.ast.call_node, ptr %lps_payload_ptr, align 8",
-		"%lps_callee = extractvalue %kizu.kizu.ast.call_node %lps_call_node, 0",
-		"%lps_args = extractvalue %kizu.kizu.ast.call_node %lps_call_node, 1",
-		"%lps_result = call %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_call(",
-		"  ret %kizu.error.run_ast %lps_result",
-		"%lps_us = call %kizu.selfhost.codegen.run_ast " +
-			"@kizu_selfhost__ir_codegen_unsupported_run_ast(%kizu.slice.u8 %lps_empty)",
-	}
-}
-
-// requiredLLVMLowerLetBindingFragments returns the tracker-961 scope-4 prerequisite
-// lower_let_binding AST traversal lowering compiled into stage2 (through the generic
-// multi-statement path): it reads the binding name text, rejects a duplicate / over-capacity
-// local, slices the string-literal payload via string_literal_span, and returns the LocalBinding
-// or empty_local() on rejection. These fragments lock the lowered body shape.
-func requiredLLVMLowerLetBindingFragments() []string {
-	return []string{
-		"define %kizu.selfhost.codegen.local_binding " +
-			"@kizu_selfhost__ir_codegen_lower_let_binding(",
-		"%local_name = call %kizu.slice.u8 @kizu_selfhost__ir_codegen_ast_node_text(",
-		"call i1 @kizu_selfhost__ir_codegen_local_table_contains(" +
-			"%kizu.selfhost.codegen.local_table %locals, %kizu.slice.u8 %local_name)",
-		"%payload = call %kizu.selfhost.codegen.payload_span " +
-			"@kizu_selfhost__ir_codegen_string_literal_span(",
-		"call %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_empty_local(" +
-			"%kizu.slice.u8 %text)",
-		"insertvalue %kizu.selfhost.codegen.local_binding poison, %kizu.slice.u8 %local_name, 0",
-	}
-}
-
-// requiredLLVMLowerRunAstBlockFragments returns the tracker-961 scope-4 prerequisite
-// lower_run_ast_block AST traversal lowering compiled into stage2: the stateful run-block
-// traversal. It first probes the try-void and loop-i64 block shapes, then threads a mutable
-// LocalTable + index through a bounded loop (two head phis), lowering non-terminal Let bindings
-// (lower_let_binding + insert_local) and the terminal ExprStmt (lower_print_statement),
-// propagating the checked Ast.child_at failure and returning the wrapped unsupported_run_ast() on
-// rejection. These fragments lock the lowered body shape.
-func requiredLLVMLowerRunAstBlockFragments() []string {
-	return []string{
-		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_block(",
-		"%lrb_try_result = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_try_void_block(",
-		"%lrb_loop_result = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_loop_i64_block(",
-		"%lrb_locals0 = call %kizu.selfhost.codegen.local_table " +
-			"@kizu_selfhost__ir_codegen_empty_local_table(%kizu.slice.u8 %text)",
-		"%lrb_locals = phi %kizu.selfhost.codegen.local_table " +
-			"[ %lrb_locals0, %lrb_loop_continue ], [ %lrb_locals_next, %lrb_insert ]",
-		"%lrb_index = phi i64 [ 0, %lrb_loop_continue ], [ %lrb_index_next, %lrb_insert ]",
-		"%lrb_child = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(",
-		"%lrb_terminal = icmp eq i64 %lrb_index1, %lrb_stmts_len",
-		"%lrb_is_let = icmp eq i64 %lrb_tag, 21",
-		"%lrb_let_node = load %kizu.kizu.ast.let_node, ptr %lrb_let_ptr, align 8",
-		"%lrb_binding_let = call %kizu.selfhost.codegen.local_binding " +
-			"@kizu_selfhost__ir_codegen_lower_let_binding(",
-		"%lrb_locals_next = call %kizu.selfhost.codegen.local_table " +
-			"@kizu_selfhost__ir_codegen_insert_local(",
-		"%lrb_is_exprstmt = icmp eq i64 %lrb_tag, 26",
-		"%lrb_ps = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_print_statement(",
-		"  ret %kizu.error.run_ast %lrb_ps",
-	}
-}
-
-// requiredLLVMLowerRunAstFunctionFragments returns the tracker-961 scope-4 prerequisite
-// lower_run_ast_function AST traversal lowering compiled into stage2: it requires the function
-// name text to equal the "main" literal global, binds the body AstNode via Ast.get, and on the
-// Block variant (tag 19) forwards lower_run_ast_block's !RunAst result (passing declarations,
-// the block statements, and the recomputed name text); a non-main name or non-Block body returns
-// the wrapped unsupported_run_ast(). These fragments lock the lowered body shape.
-func requiredLLVMLowerRunAstFunctionFragments() []string {
-	return []string{
-		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_function(",
-		"@.kizu.compiled.kizu_selfhost__ir_codegen_lower_run_ast_function.s0 = " +
-			"private unnamed_addr constant [4 x i8] c\"main\"",
-		"%lraf_is_main = call i1 @kizu_selfhost__slice_equal(" +
-			"%kizu.slice.u8 %lraf_name_text, %kizu.slice.u8 %lraf_main_slice)",
-		"%lraf_is_block = icmp eq i64 %lraf_tag, 19",
-		"%lraf_block_node = load %kizu.kizu.ast.block_node, ptr %lraf_payload_ptr, align 8",
-		"%lraf_stmts = extractvalue %kizu.kizu.ast.block_node %lraf_block_node, 0",
-		"%lraf_result = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_run_ast_block(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %declarations, " +
-			"%kizu.slice.u8 %lraf_name_text, " +
-			"%kizu.kizu.ast.child_range %lraf_stmts)",
-		"  ret %kizu.error.run_ast %lraf_result",
-	}
-}
-
-// requiredLLVMLowerRunAstDeclarationsFragments returns the tracker-961 scope-4 prerequisite
-// lower_run_ast_declarations AST traversal lowering compiled into stage2: it scans the program
-// declarations for the first FnDecl (tag 43, name field 3 / body field 8) whose
-// lower_run_ast_function produces a run_ast_supported RunAst, returning it wrapped, propagating the
-// checked Ast.child_at / lower_run_ast_function failure, and falling through to the wrapped
-// unsupported_run_ast(). These fragments lock the lowered body shape.
-func requiredLLVMLowerRunAstDeclarationsFragments() []string {
-	return []string{
-		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_declarations(",
-		"%lrad_index = phi i64 [ 0, %entry ], [ %lrad_index_next, %lrad_advance ]",
-		"%lrad_is_fndecl = icmp eq i64 %lrad_tag, 43",
-		"%lrad_name = extractvalue %kizu.kizu.ast.fn_decl_node %lrad_fn_node, 3",
-		"%lrad_fn_body = extractvalue %kizu.kizu.ast.fn_decl_node %lrad_fn_node, 8",
-		"%lrad_fcall = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_run_ast_function(",
-		"%lrad_run_ast = phi %kizu.selfhost.codegen.run_ast " +
-			"[ %lrad_run_ast_fn, %lrad_fcall_ready ], [ %lrad_run_ast_us, %lrad_not_fndecl ]",
-		"%lrad_supported = call i1 @kizu_selfhost__ir_codegen_run_ast_supported(" +
-			"%kizu.selfhost.codegen.run_ast %lrad_run_ast)",
-		"%lrad_r1 = insertvalue %kizu.error.run_ast %lrad_r0, " +
-			"%kizu.selfhost.codegen.run_ast %lrad_run_ast, 1",
-	}
-}
-
-// requiredLLVMLowerRunParseResultFragments returns the tracker-961 parser boundary bridge compiled
-// into stage2: ParseResult is consumed as a parsed AST value, then ast/root are forwarded into the
-// lower_run_ast traversal.
-func requiredLLVMLowerRunParseResultFragments() []string {
-	return []string{
-		"%kizu.kizu.ast.parse_result = type { %kizu.kizu.ast.ast, %kizu.kizu.ast.node_id }",
-		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_parse_result(",
-		"%lrpr_ast = extractvalue %kizu.kizu.ast.parse_result %parsed, 0",
-		"%lrpr_root = extractvalue %kizu.kizu.ast.parse_result %parsed, 1",
-		"%lrpr_result = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_run_ast(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %lrpr_ast, %kizu.kizu.ast.node_id %lrpr_root)",
-		"  ret %kizu.error.run_ast %lrpr_result",
-	}
-}
-
-// requiredLLVMLowerRunAstFragments returns the tracker-961 scope-4 prerequisite lower_run_ast AST
-// traversal root compiled into stage2: it binds the root AstNode via Ast.get and on the Program
-// variant (tag 0) loads the ProgramNode declarations (field 0) and forwards
-// lower_run_ast_declarations' !RunAst result, while every other root returns the wrapped
-// unsupported_run_ast(). With this the whole lower_run_ast traversal cluster is compiled. These
-// fragments lock the lowered body shape.
-func requiredLLVMLowerRunAstFragments() []string {
-	return []string{
-		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast(",
-		"%lra_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %root)",
-		"%lra_is_program = icmp eq i64 %lra_tag, 0",
-		"%lra_program_node = load %kizu.kizu.ast.program_node, ptr %lra_payload_ptr, align 8",
-		"%lra_decls = extractvalue %kizu.kizu.ast.program_node %lra_program_node, 0",
-		"%lra_result = call %kizu.error.run_ast " +
-			"@kizu_selfhost__ir_codegen_lower_run_ast_declarations(%kizu.slice.u8 %text, " +
-			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.child_range %lra_decls)",
-		"  ret %kizu.error.run_ast %lra_result",
 	}
 }
 
@@ -2086,6 +1793,13 @@ func requiredLLVMParserPredicateFragments() []string {
 
 // forbiddenLLVMFragments returns source-shape gates removed from the hosted CLI.
 func forbiddenLLVMFragments() []string {
+	fragments := forbiddenLegacyCLISourceShapeFragments()
+	fragments = append(fragments, forbiddenLegacyRunAstEmissionFragments()...)
+	return append(fragments, forbiddenLegacyRunArtifactFragments()...)
+}
+
+// forbiddenLegacyCLISourceShapeFragments returns removed fixture-shape CLI gates.
+func forbiddenLegacyCLISourceShapeFragments() []string {
 	return []string{
 		"@.kizu.cli.main_fn_pattern",
 		"@.kizu.cli.run_hello_pattern",
@@ -2113,6 +1827,47 @@ func forbiddenLLVMFragments() []string {
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_main_print_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_local_print_payload",
 		"define i1 @kizu_selfhost__cli_is_supported_run_print_payload",
+	}
+}
+
+// forbiddenLegacyRunAstEmissionFragments returns removed RunAst lowering emission roots.
+func forbiddenLegacyRunAstEmissionFragments() []string {
+	return []string{
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_ast",
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_i64_call_run_ast",
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_return_void_run_ast",
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_try_void_run_ast",
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_loop_i64_run_ast",
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_fs_read_run_ast",
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_print_run_ast",
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__ir_codegen_unsupported_run_ast",
+		"define i1 @kizu_selfhost__ir_codegen_run_ast_supported",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_i64_call_program",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_return_void_program",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_try_void_program",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_loop_i64_program",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_fs_read_program",
+		"define i1 @kizu_selfhost__ir_codegen_local_table_contains",
+		"define %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_empty_local",
+		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_local_payload_span",
+		"define %kizu.selfhost.codegen.local_table @kizu_selfhost__ir_codegen_empty_local_table",
+		"define %kizu.selfhost.codegen.local_table @kizu_selfhost__ir_codegen_insert_local",
+		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_print_payload",
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_call",
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_print_statement",
+		"define %kizu.selfhost.codegen.local_binding @kizu_selfhost__ir_codegen_lower_let_binding",
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_block",
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_function",
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast_declarations",
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_parse_result",
+		"define %kizu.error.run_ast @kizu_selfhost__ir_codegen_lower_run_ast",
+		"define %kizu.error.slice.u8 @kizu_selfhost__ir_codegen_stdout_payload",
+	}
+}
+
+// forbiddenLegacyRunArtifactFragments returns removed static run artifact branches.
+func forbiddenLegacyRunArtifactFragments() []string {
+	return []string{
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_run_codegen_program",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_codegen = call %kizu.selfhost.codegen.program",
