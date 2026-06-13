@@ -3361,6 +3361,13 @@ pub fn code_op_call() -> i64 {
     return 4;
 }
 
+// METHOD_CALL mirrors CALL but carries the receiver type span so impl methods
+// dispatch to the mangled '<Type>__<method>' symbol instead of the name-only
+// bridge: 'op dst type_start type_end name_start name_end arg_count args...'.
+pub fn code_op_method_call() -> i64 {
+    return 120;
+}
+
 // CONST_BOOL materializes a 'true'/'false' literal as an i1 value: the record is
 // 'op dst literal' where literal is 1 (true) or 0 (false).
 pub fn code_op_const_bool() -> i64 {
@@ -3381,10 +3388,11 @@ pub fn code_op_str_slice() -> i64 {
 }
 
 // STRUCT_LIT scalarizes a struct literal at lowering time: the record is
-// 'op dst field_count name_start1 name_end1 value1 ...' where each value id is
-// the field initializer's lowered tape value. The renderer emits nothing for it
-// (the dst value is never referenced by LLVM); a field read resolves through
-// the record back to the field's own value id.
+// 'op dst type_start type_end field_count name_start1 name_end1 value1 ...'
+// where each value id is the field initializer's lowered tape value. The
+// renderer emits nothing for it (the dst value is never referenced by LLVM); a
+// field read resolves through the record back to the field's own value id, and
+// method calls use the type span for impl dispatch.
 pub fn code_op_struct_lit() -> i64 {
     return 8;
 }
@@ -5428,6 +5436,10 @@ fn code_param_kind(
     if union_kind >= 0 {
         return union_kind;
     }
+    let struct_kind = try code_return_struct_kind(text, ast, type_node, code);
+    if struct_kind >= 0 {
+        return struct_kind;
+    }
     return try code_param_single_field_struct_kind(text, ast, decls, type_node, code, 0);
 }
 
@@ -7107,7 +7119,7 @@ fn emit_var_struct_decls(
         return code_eval_value(0, next_value);
     }
     let entry_slots = index * 3;
-    let value_pos = record_pos + 5 + entry_slots;
+    let value_pos = record_pos + 7 + entry_slots;
     let field_value = try code.get(value_pos);
     let eval = try emit_one_var_struct_decl(text, code, kinds, local_starts, local_ends, local_values, field_value, next_value);
     if !eval.ok {
@@ -7185,7 +7197,7 @@ fn append_var_struct_fields(
         return;
     }
     let entry_slots = index * 3;
-    let entry_pos = record_pos + 3 + entry_slots;
+    let entry_pos = record_pos + 5 + entry_slots;
     let entry_name_start = try code.get(entry_pos);
     let entry_end_pos = entry_pos + 1;
     let entry_name_end = try code.get(entry_end_pos);
@@ -7750,11 +7762,8 @@ fn lower_code_statement_call(
         return runtime_eval;
     }
     let method_kind = try code_method_call_return_kind(text, ast, decls, code, callee);
-    if method_kind == 0 {
-        return try emit_code_method_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 1, next_value);
-    }
-    if method_kind == 1 {
-        return try emit_code_method_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 1, next_value);
+    if method_kind >= 0 {
+        return try emit_code_method_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, true, next_value);
     }
     return try lower_code_user_call_statement(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
 }
@@ -8758,7 +8767,7 @@ fn lower_code_return_struct_literal(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
-    let lit_eval = try lower_code_struct_literal(text, ast, decls, fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    let lit_eval = try lower_code_struct_literal(text, ast, decls, type_name, fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !lit_eval.ok {
         return code_eval_unsupported(lit_eval.next);
     }
@@ -8789,12 +8798,25 @@ fn lower_code_struct_return_pack(
     next_value: i64
 ) -> !CodeEval {
     let type_span = code_node_span(text, ast, type_name);
-    let decl_pos = try struct_decl_pos_by_span(text, code, type_span.start, type_span.end, 0);
+    return try lower_code_struct_pack_from_span(text, type_span.start, type_span.end, lit_record_pos, code, kinds, args_scratch, next_value);
+}
+
+fn lower_code_struct_pack_from_span(
+    text: []u8,
+    type_start: i64,
+    type_end: i64,
+    lit_record_pos: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let decl_pos = try struct_decl_pos_by_span(text, code, type_start, type_end, 0);
     if decl_pos < 0 {
         return code_eval_unsupported(next_value);
     }
     let field_count = try code.get(decl_pos + 3);
-    let lit_count = try code.get(lit_record_pos + 2);
+    let lit_count = try code.get(lit_record_pos + 4);
     if field_count != lit_count {
         return code_eval_unsupported(next_value);
     }
@@ -8968,7 +8990,7 @@ fn lower_code_expr(
         Binary(binary) => try lower_code_binary(text, ast, decls, binary.op, binary.left, binary.right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Call(call_node) => try lower_code_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         FieldExpr(field_expr) => try lower_code_field_expr(text, ast, decls, node_id, field_expr.receiver, field_expr.name, field_expr.namespace, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
-        StructLiteralExpr(struct_lit) => try lower_code_struct_literal(text, ast, decls, struct_lit.fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        StructLiteralExpr(struct_lit) => try lower_code_struct_literal(text, ast, decls, struct_lit.type_name, struct_lit.fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         TryExpr(try_expr) => try lower_code_try_expr(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         If(if_node) => try lower_code_if_expr(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Match(match_node) => try lower_code_match_expr(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
@@ -9350,6 +9372,7 @@ fn lower_code_struct_literal(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
+    type_name: std::kizu::ast::NodeId,
     fields: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -9367,8 +9390,11 @@ fn lower_code_struct_literal(
     }
     let record_pos = code.len();
     let op_struct_lit = code_op_struct_lit();
+    let type_span = code_node_span(text, ast, type_name);
     try code.append(op_struct_lit);
     try code.append(fields_eval.next);
+    try code.append(type_span.start);
+    try code.append(type_span.end);
     try code.append(fields.len);
     // The fields walk left [name_start, name_end, value] per field on the
     // scratch frame, so the record copies the frame verbatim.
@@ -9533,7 +9559,7 @@ fn lower_code_field_expr(
     if record_op != op_struct_lit {
         return code_eval_unsupported(base_eval.next);
     }
-    let count_pos = record_pos + 2;
+    let count_pos = record_pos + 4;
     let field_count = try code.get(count_pos);
     let name_span = code_node_span(text, ast, name);
     let field_value = try struct_record_field(text, code, record_pos, field_count, name_span.start, name_span.end, 0);
@@ -10187,7 +10213,7 @@ fn struct_record_field(
         return 0 - 1;
     }
     let entry_slots = index * 3;
-    let entry_pos = record_pos + 3 + entry_slots;
+    let entry_pos = record_pos + 5 + entry_slots;
     let entry_name_start = try code.get(entry_pos);
     let entry_end_pos = entry_pos + 1;
     let entry_name_end = try code.get(entry_end_pos);
@@ -10401,16 +10427,14 @@ fn lower_code_call(
         return try lower_code_union_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     let method_kind = try code_method_call_return_kind(text, ast, decls, code, callee);
-    let record_base = code_kind_struct_base();
-    let method_i64_ret = method_kind == 1;
-    let method_union_ret = method_kind >= record_base;
-    if method_i64_ret or method_union_ret {
-        return try emit_code_method_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, method_kind, next_value);
+    if method_kind >= 0 {
+        return try emit_code_method_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, false, next_value);
     }
     let runtime_method = try lower_code_runtime_expr_method(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if runtime_method.ok {
         return runtime_method;
     }
+    let record_base = code_kind_struct_base();
     let callee_span = code_node_span(text, ast, callee);
     let callee_kind = try code_callee_return_kind(text, ast, decls, code, callee_span.start, callee_span.end, 0);
     let is_i64_ret = callee_kind == 1;
@@ -11523,7 +11547,7 @@ fn lower_code_arena_add_struct_literal(
     if payload_size < 0 {
         return code_eval_unsupported(next_value);
     }
-    let count_pos = record_pos + 2;
+    let count_pos = record_pos + 4;
     let field_count = try code.get(count_pos);
     if field_count <= 0 {
         return code_eval_unsupported(next_value);
@@ -11579,7 +11603,7 @@ fn prepare_code_arena_add_struct_fields(
         return code_eval_value(0, next_value);
     }
     let entry_slots = index * 3;
-    let entry_pos = record_pos + 3 + entry_slots;
+    let entry_pos = record_pos + 5 + entry_slots;
     let name_start = try code.get(entry_pos);
     let name_end_pos = entry_pos + 1;
     let name_end = try code.get(name_end_pos);
@@ -11736,12 +11760,12 @@ fn arena_single_slice_field_value(
     if op != op_struct_lit {
         return 0 - 1;
     }
-    let count_pos = record_pos + 2;
+    let count_pos = record_pos + 4;
     let field_count = try code.get(count_pos);
     if field_count != 1 {
         return 0 - 1;
     }
-    let value_pos = record_pos + 5;
+    let value_pos = record_pos + 7;
     let value_id = try code.get(value_pos);
     return value_id;
 }
@@ -11901,12 +11925,12 @@ fn emit_code_method_call(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
-    result_kind: i64,
+    allow_void: bool,
     next_value: i64
 ) -> !CodeEval {
     let node = ast.get(callee);
     return match node.data {
-        FieldExpr(field_expr) => try emit_code_field_method_call(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, result_kind, next_value),
+        FieldExpr(field_expr) => try emit_code_field_method_call(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, allow_void, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -11926,7 +11950,7 @@ fn emit_code_field_method_call(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
-    result_kind: i64,
+    allow_void: bool,
     next_value: i64
 ) -> !CodeEval {
     if namespace {
@@ -11939,15 +11963,40 @@ fn emit_code_field_method_call(
     if !receiver_eval.ok {
         return code_eval_unsupported(receiver_eval.next);
     }
+    let receiver_kind = try kinds.get(receiver_eval.value_id);
+    let record_base = code_kind_struct_base();
+    if receiver_kind < record_base {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let receiver_record_pos = receiver_kind - record_base;
+    let receiver_op = try code.get(receiver_record_pos);
+    let op_struct_decl = code_op_struct_decl();
+    if receiver_op != op_struct_decl {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let name_span = code_node_span(text, ast, name);
+    let type_start = try code.get(receiver_record_pos + 1);
+    let type_end = try code.get(receiver_record_pos + 2);
+    let method_kind = try code_impl_method_return_kind_for_type(text, ast, decls, code, type_start, type_end, name_span.start, name_span.end, 0);
+    let method_i64_ret = method_kind == 1;
+    let method_record_ret = method_kind >= record_base;
+    let method_void_ret = method_kind == 0;
+    if method_void_ret and !allow_void {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    if !method_i64_ret and !method_record_ret and !method_void_ret {
+        return code_eval_unsupported(receiver_eval.next);
+    }
     try scratch_put(args_scratch, scratch_base, receiver_eval.value_id);
     let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, arg_base, 0, receiver_eval.next);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
-    let op_call = code_op_call();
+    let op_call = code_op_method_call();
     try code.append(op_call);
     try code.append(args_eval.next);
-    let name_span = code_node_span(text, ast, name);
+    try code.append(type_start);
+    try code.append(type_end);
     try code.append(name_span.start);
     try code.append(name_span.end);
     let arg_count = args.len + 1;
@@ -11955,6 +12004,10 @@ fn emit_code_field_method_call(
     let scratch_bound = scratch_base + arg_count;
     try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
     try args_scratch.set(0, scratch_base);
+    var result_kind = method_kind;
+    if method_kind == 0 {
+        result_kind = code_kind_i64();
+    }
     try kinds.append(result_kind);
     let result_value = args_eval.next;
     let after_value = result_value + 1;
@@ -11982,19 +12035,16 @@ fn lower_code_method_receiver_arg(
     let kind = try kinds.get(eval.value_id);
     let record_base = code_kind_struct_base();
     if kind >= record_base {
-        return try lower_code_method_receiver_record_arg(text, code, kinds, eval.value_id, kind, eval.next);
+        return try lower_code_method_receiver_record_arg(text, code, kinds, args_scratch, eval.value_id, kind, eval.next);
     }
-    let slice_eval = try lower_code_arg_slice(text, code, kinds, eval.value_id, eval.next);
-    if !slice_eval.ok {
-        return code_eval_unsupported(slice_eval.next);
-    }
-    return slice_eval;
+    return code_eval_unsupported(eval.next);
 }
 
 fn lower_code_method_receiver_record_arg(
     text: []u8,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
     value_id: i64,
     kind: i64,
     next_value: i64
@@ -12004,54 +12054,30 @@ fn lower_code_method_receiver_record_arg(
     let op = try code.get(record_pos);
     let op_struct_lit = code_op_struct_lit();
     if op == op_struct_lit {
-        return try lower_code_method_receiver_struct_lit_arg(text, code, kinds, record_pos, next_value);
+        return try lower_code_method_receiver_struct_lit_arg(text, code, kinds, args_scratch, record_pos, next_value);
     }
-    let op_var_struct = code_op_var_struct();
-    if op == op_var_struct {
-        return try lower_code_method_receiver_var_struct_arg(code, kinds, record_pos, next_value);
+    let op_struct_decl = code_op_struct_decl();
+    if op == op_struct_decl {
+        return code_eval_value(value_id, next_value);
     }
-    return code_eval_value(value_id, next_value);
+    return code_eval_unsupported(next_value);
 }
 
 fn lower_code_method_receiver_struct_lit_arg(
     text: []u8,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
     record_pos: i64,
     next_value: i64
 ) -> !CodeEval {
-    let count_pos = record_pos + 2;
-    let field_count = try code.get(count_pos);
-    if field_count != 1 {
-        return code_eval_unsupported(next_value);
+    let type_start = try code.get(record_pos + 2);
+    let type_end = try code.get(record_pos + 3);
+    let pack_eval = try lower_code_struct_pack_from_span(text, type_start, type_end, record_pos, code, kinds, args_scratch, next_value);
+    if !pack_eval.ok {
+        return code_eval_unsupported(pack_eval.next);
     }
-    let value_pos = record_pos + 5;
-    let field_value = try code.get(value_pos);
-    return try lower_code_arg_slice(text, code, kinds, field_value, next_value);
-}
-
-fn lower_code_method_receiver_var_struct_arg(
-    code: &var std::array::Array<i64>,
-    kinds: &var std::array::Array<i64>,
-    record_pos: i64,
-    next_value: i64
-) -> !CodeEval {
-    let count_pos = record_pos + 2;
-    let field_count = try code.get(count_pos);
-    if field_count != 1 {
-        return code_eval_unsupported(next_value);
-    }
-    let slot_pos = record_pos + 5;
-    let slot = try code.get(slot_pos);
-    let kind_pos = record_pos + 6;
-    let slot_kind = try code.get(kind_pos);
-    let load_op = var_struct_load_op(slot_kind);
-    try code.append(load_op);
-    try code.append(next_value);
-    try code.append(slot);
-    try kinds.append(slot_kind);
-    let after_value = next_value + 1;
-    return code_eval_value(next_value, after_value);
+    return pack_eval;
 }
 
 // lower_code_io_blocking lowers a 'std::io::blocking()' call to the IO_BLOCKING
@@ -12591,6 +12617,29 @@ fn code_impl_method_return_kind(
     return try code_impl_method_return_kind(text, ast, decls, code, name_start, name_end, after);
 }
 
+fn code_impl_method_return_kind_for_type(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    type_start: i64,
+    type_end: i64,
+    name_start: i64,
+    name_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= decls.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(decls, index);
+    let kind = try code_impl_decl_method_return_kind_for_type(text, ast, child, code, type_start, type_end, name_start, name_end);
+    let after = index + 1;
+    if kind > 0 - 2 {
+        return kind;
+    }
+    return try code_impl_method_return_kind_for_type(text, ast, decls, code, type_start, type_end, name_start, name_end, after);
+}
+
 fn code_impl_decl_method_return_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -12602,6 +12651,23 @@ fn code_impl_decl_method_return_kind(
     let node = ast.get(child);
     return match node.data {
         ImplDecl(impl_decl) => try code_impl_methods_return_kind(text, ast, impl_decl.methods, code, name_start, name_end, 0),
+        _ => code_decl_kind_skip(),
+    };
+}
+
+fn code_impl_decl_method_return_kind_for_type(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    type_start: i64,
+    type_end: i64,
+    name_start: i64,
+    name_end: i64
+) -> !i64 {
+    let node = ast.get(child);
+    return match node.data {
+        ImplDecl(impl_decl) => try code_impl_methods_return_kind_for_type(text, ast, impl_decl.type_name, impl_decl.methods, code, type_start, type_end, name_start, name_end),
         _ => code_decl_kind_skip(),
     };
 }
@@ -12625,6 +12691,25 @@ fn code_impl_methods_return_kind(
         return kind;
     }
     return try code_impl_methods_return_kind(text, ast, methods, code, name_start, name_end, after);
+}
+
+fn code_impl_methods_return_kind_for_type(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_name: std::kizu::ast::NodeId,
+    methods: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    type_start: i64,
+    type_end: i64,
+    name_start: i64,
+    name_end: i64
+) -> !i64 {
+    let impl_type = ast_node_text(text, ast, type_name);
+    let wanted_type = text[type_start..type_end];
+    if !std::mem::equal_bytes(impl_type, wanted_type) {
+        return code_decl_kind_skip();
+    }
+    return try code_impl_methods_return_kind(text, ast, methods, code, name_start, name_end, 0);
 }
 
 fn code_impl_method_decl_return_kind(

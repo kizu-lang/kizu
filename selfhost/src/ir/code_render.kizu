@@ -823,7 +823,6 @@ fn render_user_method_function(
     try render_user_tail(out, code, abi, ret_kind);
     try wl(out, "}");
     try nl(out);
-    try render_user_method_bridge(out, code, kinds, type_name, name, param_base, param_count, ret_kind);
     return func_end + 1;
 }
 
@@ -910,36 +909,6 @@ fn render_user_return_type(
     if is_word_ret {
         try w(out, "i64");
     }
-    return;
-}
-
-fn render_user_method_bridge(
-    out: &var std::string::String,
-    code: &std::array::Array<i64>,
-    kinds: &std::array::Array<i64>,
-    type_name: []u8,
-    name: []u8,
-    param_base: i64,
-    param_count: i64,
-    ret_kind: i64
-) -> !void {
-    try render_user_define_head(out, code, name, ret_kind);
-    try w(out, "(");
-    try render_param_list(out, code, kinds, param_base, param_count, 0);
-    try wl(out, ") {");
-    try wl(out, "entry:");
-    try w(out, "  %bridge = call ");
-    try render_user_return_type(out, code, ret_kind);
-    try w(out, " @kizu_run_user_");
-    try render_method_symbol(out, type_name, name);
-    try w(out, "(");
-    try render_param_list(out, code, kinds, param_base, param_count, 0);
-    try wl(out, ")");
-    try w(out, "  ret ");
-    try render_user_return_type(out, code, ret_kind);
-    try wl(out, " %bridge");
-    try wl(out, "}");
-    try nl(out);
     return;
 }
 
@@ -1406,6 +1375,10 @@ fn render_one_instruction(
     let call = codegen::code_op_call();
     if op == call {
         try render_call(out, text, code, kinds, index);
+    }
+    let method_call = codegen::code_op_method_call();
+    if op == method_call {
+        try render_method_call(out, text, code, kinds, index);
     }
     let try_call = codegen::code_op_try_call();
     if op == try_call {
@@ -2443,6 +2416,34 @@ fn render_call(
     return;
 }
 
+fn render_method_call(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let type_start = try code.get(index + 2);
+    let type_end = try code.get(index + 3);
+    let name_start = try code.get(index + 4);
+    let name_end = try code.get(index + 5);
+    let arg_count = try code.get(index + 6);
+    let type_name = text[type_start..type_end];
+    let name = text[name_start..name_end];
+    let dst_kind = try kinds.get(dst);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call ");
+    try render_value_type(out, code, dst_kind);
+    try w(out, " @kizu_run_user_");
+    try render_method_symbol(out, type_name, name);
+    try w(out, "(");
+    try render_method_call_args(out, code, kinds, index, arg_count, 0);
+    try wl(out, ")");
+    return;
+}
+
 // render_call_args emits the '<type> %v<arg>' operands read from the CALL record's
 // trailing arg-id list (which begins at index + 5), typing each argument from its
 // value kind.
@@ -2467,6 +2468,30 @@ fn render_call_args(
     try wi(out, arg_value);
     let after = arg_index + 1;
     try render_call_args(out, code, kinds, index, arg_count, after);
+    return;
+}
+
+fn render_method_call_args(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    arg_count: i64,
+    arg_index: i64
+) -> !void {
+    if arg_index >= arg_count {
+        return;
+    }
+    if arg_index > 0 {
+        try w(out, ", ");
+    }
+    let arg_value = try code.get(index + 7 + arg_index);
+    let arg_kind = try kinds.get(arg_value);
+    try render_value_type(out, code, arg_kind);
+    try w(out, " %v");
+    try wi(out, arg_value);
+    let after = arg_index + 1;
+    try render_method_call_args(out, code, kinds, index, arg_count, after);
     return;
 }
 
@@ -4566,6 +4591,11 @@ fn tape_call_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     return index + 5 + arg_count;
 }
 
+fn tape_method_call_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let arg_count = try code.get(index + 6);
+    return index + 7 + arg_count;
+}
+
 // tape_try_call_record_end returns the index past a TRY_CALL record. TRY_CALL has
 // no result value, so its arg-id list begins at index + 4 (one slot earlier than
 // CALL's, which carries a leading result value id).
@@ -4583,13 +4613,13 @@ fn tape_const_str_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 
 }
 
 // tape_struct_lit_record_end returns the index past a STRUCT_LIT record, reading
-// its field count ('op dst field_count [name_start name_end value] per field').
+// its field count ('op dst type_start type_end field_count [name_start name_end value] per field').
 // The renderer emits nothing for the record itself: struct field reads were
 // already resolved to the field values' own ids at lowering time.
 fn tape_struct_lit_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
-    let field_count = try code.get(index + 2);
+    let field_count = try code.get(index + 4);
     let field_slots = field_count * 3;
-    return index + 3 + field_slots;
+    return index + 5 + field_slots;
 }
 
 // tape_arena_add_struct_record_end returns the index past an ARENA_ADD_STRUCT
@@ -4830,6 +4860,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let call = codegen::code_op_call();
     if op == call {
         return try tape_call_record_end(code, index);
+    }
+    let method_call = codegen::code_op_method_call();
+    if op == method_call {
+        return try tape_method_call_record_end(code, index);
     }
     let try_call = codegen::code_op_try_call();
     if op == try_call {
