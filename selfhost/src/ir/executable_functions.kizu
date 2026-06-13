@@ -22,6 +22,7 @@ pub fn append_facts(
     var diagnostic_found = false;
     var mem_found = false;
     var selfhost_ast_found = false;
+    var types_checker_found = false;
     var format_found = false;
 
     var index = 0;
@@ -90,6 +91,10 @@ pub fn append_facts(
                 try append_selfhost_ast_function_facts(allocator, out, file);
                 selfhost_ast_found = true;
             }
+            if std::mem::equal_bytes(module, "types/checker") {
+                try append_types_checker_function_facts(allocator, out, file);
+                types_checker_found = true;
+            }
             if std::mem::equal_bytes(module, "parser/format") {
                 try append_format_function_facts(allocator, out, file);
                 format_found = true;
@@ -135,6 +140,9 @@ pub fn append_facts(
     }
     if !selfhost_ast_found {
         return error("missing selfhost ast source");
+    }
+    if !types_checker_found {
+        return error("missing selfhost types checker source");
     }
     if !format_found {
         return error("missing selfhost parser format source");
@@ -1587,6 +1595,82 @@ fn selfhost_ast_closure_role(local_name: []u8) -> []u8 {
     return "checked-ast-traversal";
 }
 
+fn append_types_checker_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "selfhost::types::checker"
+    );
+    defer catalog.deinit();
+
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try pending.append(try component_function_catalog::find_local_function_index(
+        catalog,
+        "first_hosted_check_undefined_variable_start_ast_node"
+    ));
+    var index = 0;
+    while index < pending.len() {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
+            try append_types_checker_closure_helper_body(
+                out,
+                file.text,
+                parsed.ast,
+                &catalog,
+                function_index,
+                &var pending
+            );
+            try emitted.append(function_index);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_types_checker_closure_helper_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_catalog_helper_body_ir(
+        out,
+        text,
+        ast,
+        catalog,
+        function_index,
+        "checked-type-diagnostic",
+        body
+    );
+    try collect_catalog_closure_direct_callees(
+        text,
+        ast,
+        body,
+        catalog,
+        pending,
+        "selfhost::types::checker::",
+        "types checker closure: unsupported call form",
+        "types checker closure: unsupported qualified callee"
+    );
+    return;
+}
+
 // append_selected_function_signature emits only the function-signature facts (return type
 // + param types) for a top-level helper named local_name, without its body. It backs the
 // type/facts foundation for functions whose lowering lands in a later PR (tracker 961).
@@ -2237,6 +2321,9 @@ fn collect_catalog_closure_external_callee_allowed(
     if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::") {
         return backend_wrapper_external_callee_allowed(callee_text);
     }
+    if std::mem::equal_bytes(qualified_prefix, "selfhost::types::checker::") {
+        return types_checker_closure_external_callee_allowed(callee_text);
+    }
     if !std::mem::equal_bytes(qualified_prefix, "selfhost::ast::") {
         return false;
     }
@@ -2254,6 +2341,11 @@ fn collect_catalog_closure_external_callee_allowed(
 fn executable_closure_external_callee_allowed(callee_text: []u8) -> bool {
     return std::mem::equal_bytes(callee_text, "ast.get") or
         std::mem::equal_bytes(callee_text, "executable_lowering::lower_test_executable");
+}
+
+fn types_checker_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "ast.get") or
+        std::mem::equal_bytes(callee_text, "ast.child_at");
 }
 
 // hosted_closure_external_callee_allowed enumerates the codegen module boundary
