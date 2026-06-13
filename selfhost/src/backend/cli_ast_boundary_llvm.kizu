@@ -3032,6 +3032,12 @@ fn append_parse_call_function(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %arg2_first = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %arg2_index)");
     try append_line(out, "  %arg2_first_kind = extractvalue %kizu.kizu.lexer.token %arg2_first, 0");
+    // A comma immediately followed by the close paren is a trailing comma after a
+    // single argument (f(x,)); fold it into the one-argument call shape rather than
+    // trying to parse the close paren as a second argument.
+    try append_line(out, "  %arg2_is_rparen = icmp eq i64 %arg2_first_kind, 32");
+    try append_line(out, "  br i1 %arg2_is_rparen, label %append_one_arg, label %parse_second_arg_expr");
+    try append_line(out, "parse_second_arg_expr:");
     try append_line(out, "  %arg2_is_ident = icmp eq i64 %arg2_first_kind, 27");
     try append_line(out, "  br i1 %arg2_is_ident, label %arg2_peek_struct, label %arg2_expr");
     try append_line(out, "arg2_peek_struct:");
@@ -3061,18 +3067,36 @@ fn append_parse_call_function(out: &var std::string::String) -> !void {
         "  %close2 = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %arg2_next)");
     try append_line(out, "  %close2_kind = extractvalue %kizu.kizu.lexer.token %close2, 0");
     try append_line(out, "  %close2_ok = icmp eq i64 %close2_kind, 32");
-    try append_line(out, "  br i1 %close2_ok, label %append_two_first, label %fail");
+    try append_line(out, "  br i1 %close2_ok, label %append_two_first, label %check_second_trailing");
+    // A comma after the second argument is only valid as a trailing comma: accept it
+    // when the following token is the close paren (f(x, y,)), otherwise fail.
+    try append_line(out, "check_second_trailing:");
+    try append_line(out, "  %close2_is_comma = icmp eq i64 %close2_kind, 34");
+    try append_line(out, "  br i1 %close2_is_comma, label %peek_second_trailing, label %fail");
+    try append_line(out, "peek_second_trailing:");
+    try append_line(out, "  %trail_index = add i64 %arg2_next, 1");
+    try append_line(out,
+        "  %trail_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %trail_index)");
+    try append_line(out, "  %trail_kind = extractvalue %kizu.kizu.lexer.token %trail_token, 0");
+    try append_line(out, "  %trail_is_rparen = icmp eq i64 %trail_kind, 32");
+    try append_line(out, "  br i1 %trail_is_rparen, label %append_two_first, label %fail");
     try append_line(out, "append_one_arg:");
+    // The close paren is %separator for a plain f(x) and %arg2_first for the
+    // trailing-comma f(x,); pick its token (and the token after it) per predecessor.
+    try append_line(out,
+        "  %close_tok_1 = phi %kizu.kizu.lexer.token [ %separator, %check_separator ], [ %arg2_first, %parse_second_arg ]");
+    try append_line(out,
+        "  %next_base_1 = phi i64 [ %arg_next, %check_separator ], [ %arg2_index, %parse_second_arg ]");
     try append_line(out, "  %child_start_one = call i64 @kizu_selfhost__cli_ast_child_len(%kizu.kizu.ast.ast %ast)");
     try append_line(out,
         "  %append_one_result = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg_node)");
     try append_line(out, "  %append_one_ok = extractvalue %kizu.error.void %append_one_result, 0");
     try append_line(out, "  br i1 %append_one_ok, label %build_one_arg, label %fail");
     try append_line(out, "build_one_arg:");
-    try append_line(out, "  %close_end = extractvalue %kizu.kizu.lexer.token %separator, 2");
+    try append_line(out, "  %close_end = extractvalue %kizu.kizu.lexer.token %close_tok_1, 2");
     try append_line(out,
         "  %call = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_call(%kizu.kizu.ast.ast %ast, i64 %close_end, %kizu.kizu.ast.node_id %callee, i64 %child_start_one, i64 1)");
-    try append_line(out, "  %next = add i64 %arg_next, 1");
+    try append_line(out, "  %next = add i64 %next_base_1, 1");
     try append_line(out,
         "  %ok0 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
     try append_line(out,
@@ -3081,6 +3105,12 @@ fn append_parse_call_function(out: &var std::string::String) -> !void {
         "  %ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %ok1, %kizu.kizu.ast.node_id %call, 2");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %ok2");
     try append_line(out, "append_two_first:");
+    // The close paren is %close2 for a plain f(x, y) and %trail_token for the
+    // trailing-comma f(x, y,); pick its token (and the token after it) per predecessor.
+    try append_line(out,
+        "  %close_tok_2 = phi %kizu.kizu.lexer.token [ %close2, %check_second_close ], [ %trail_token, %peek_second_trailing ]");
+    try append_line(out,
+        "  %next_base_2 = phi i64 [ %arg2_next, %check_second_close ], [ %trail_index, %peek_second_trailing ]");
     try append_line(out, "  %child_start_two = call i64 @kizu_selfhost__cli_ast_child_len(%kizu.kizu.ast.ast %ast)");
     try append_line(out,
         "  %append_two_arg0 = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %arg_node)");
@@ -3092,10 +3122,10 @@ fn append_parse_call_function(out: &var std::string::String) -> !void {
     try append_line(out, "  %append_two_arg1_ok = extractvalue %kizu.error.void %append_two_arg1, 0");
     try append_line(out, "  br i1 %append_two_arg1_ok, label %build_two_args, label %fail");
     try append_line(out, "build_two_args:");
-    try append_line(out, "  %close2_end = extractvalue %kizu.kizu.lexer.token %close2, 2");
+    try append_line(out, "  %close2_end = extractvalue %kizu.kizu.lexer.token %close_tok_2, 2");
     try append_line(out,
         "  %call2 = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_call(%kizu.kizu.ast.ast %ast, i64 %close2_end, %kizu.kizu.ast.node_id %callee, i64 %child_start_two, i64 2)");
-    try append_line(out, "  %next2 = add i64 %arg2_next, 1");
+    try append_line(out, "  %next2 = add i64 %next_base_2, 1");
     try append_line(out,
         "  %ok20 = insertvalue %kizu.selfhost.cli.parse_node_result zeroinitializer, i1 true, 0");
     try append_line(out,
