@@ -3857,6 +3857,13 @@ pub fn code_kind_bool() -> i64 {
     return 3;
 }
 
+// Return-kind ids are stored on FUNC_BEGIN records. Bool stays outside the
+// scalar value-kind range because return kind 3 is already the error-union-i64
+// ABI, while call results still use code_kind_bool().
+pub fn code_return_kind_bool() -> i64 {
+    return 900;
+}
+
 // code_kind_owned marks a '%kizu.owned' runtime handle value (e.g. the io handle
 // returned by std::io::blocking()). code_kind_slice marks a runtime
 // '%kizu.slice.u8' value (e.g. the bytes returned by std::fs::read_file), as
@@ -3983,7 +3990,8 @@ fn code_binary_kind_is_comparison(kind: i64) -> bool {
 
 // code_return_kind classifies a function's declared return type for the tape:
 // 0 = void (empty or 'void'), 1 = i64, 2 = error-union void ('!void'),
-// 3 = error-union i64 ('!i64'), record_base + <UNION_DECL position> for a
+// 3 = error-union i64 ('!i64'), code_return_kind_bool() = bool,
+// record_base + <UNION_DECL position> for a
 // declared union (the runtime aggregate return), record_base + <ENUM_DECL
 // position> for a declared enum (the i64 tag ABI with enum identity),
 // record_base + <STRUCT_DECL position> for a declared struct aggregate, -1 = a
@@ -4001,6 +4009,9 @@ fn code_return_kind(
         return 1;
     }
     let type_text = ast_node_text(text, ast, type_node);
+    if std::mem::equal_bytes(type_text, "bool") {
+        return code_return_kind_bool();
+    }
     if std::mem::equal_bytes(type_text, "void") {
         return 0;
     }
@@ -4023,6 +4034,14 @@ fn code_return_kind(
         return struct_kind;
     }
     return 0 - 1;
+}
+
+fn code_return_kind_result_kind(ret_kind: i64) -> i64 {
+    let bool_ret = code_return_kind_bool();
+    if ret_kind == bool_ret {
+        return code_kind_bool();
+    }
+    return ret_kind;
 }
 
 // code_node_span returns the trimmed (start, end) byte span of a node's source
@@ -7932,8 +7951,8 @@ fn lower_code_expect_equal_call(
 }
 
 // lower_code_user_call_statement lowers a statement-position call to a declared
-// void (kind 0) or i64 (kind 1) function as a CALL record; a void callee compiles
-// as an i64 define returning 0, so the same record shape serves both.
+// void (kind 0), i64 (kind 1), or bool function as a CALL record; a void callee
+// compiles as an i64 define returning 0, so the same record shape serves both.
 fn lower_code_user_call_statement(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -7958,6 +7977,11 @@ fn lower_code_user_call_statement(
     }
     if callee_kind == 1 {
         return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, 1, next_value);
+    }
+    let bool_ret = code_return_kind_bool();
+    let kind_bool = code_kind_bool();
+    if callee_kind == bool_ret {
+        return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, kind_bool, next_value);
     }
     return code_eval_unsupported(next_value);
 }
@@ -10447,12 +10471,15 @@ fn lower_code_call(
     let callee_span = code_node_span(text, ast, callee);
     let callee_kind = try code_callee_return_kind(text, ast, decls, code, callee_span.start, callee_span.end, 0);
     let is_i64_ret = callee_kind == 1;
+    let bool_ret = code_return_kind_bool();
+    let is_bool_ret = callee_kind == bool_ret;
     let is_union_ret = callee_kind >= record_base;
-    let value_ret = is_i64_ret or is_union_ret;
+    let value_ret = is_i64_ret or is_bool_ret or is_union_ret;
     if !value_ret {
         return code_eval_unsupported(next_value);
     }
-    return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, callee_kind, next_value);
+    let result_kind = code_return_kind_result_kind(callee_kind);
+    return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, result_kind, next_value);
 }
 
 fn lower_code_page_allocator(

@@ -717,14 +717,26 @@ fn ret_abi_user_err_i64() -> i64 {
     return 3;
 }
 
+fn ret_abi_user_bool() -> i64 {
+    return 4;
+}
+
+fn return_kind_bool() -> i64 {
+    return 900;
+}
+
 // user_ret_abi maps a user function's declared return kind (0 void, 1 i64, 2
-// error-union void, 3 error-union i64) to its render ABI.
+// error-union void, 3 error-union i64, bool) to its render ABI.
 fn user_ret_abi(ret_kind: i64) -> i64 {
     if ret_kind == 2 {
         return ret_abi_user_err_void();
     }
     if ret_kind == 3 {
         return ret_abi_user_err_i64();
+    }
+    let bool_ret = return_kind_bool();
+    if ret_kind == bool_ret {
+        return ret_abi_user_bool();
     }
     return ret_abi_user_i64();
 }
@@ -828,7 +840,7 @@ fn render_user_method_function(
 
 // render_user_define_head writes the 'define <ret> @kizu_run_user_<name>' opener
 // whose return type follows the declared kind: '%kizu.error.void' for '!void',
-// '%kizu.error.i64' for '!i64', and 'i64' for every other user function.
+// '%kizu.error.i64' for '!i64', i1 for bool, and i64 for other word returns.
 fn render_user_define_head(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
@@ -837,6 +849,8 @@ fn render_user_define_head(
 ) -> !void {
     let is_err_void = ret_kind == 2;
     let is_err_i64 = ret_kind == 3;
+    let bool_ret = return_kind_bool();
+    let is_bool = ret_kind == bool_ret;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
     let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
@@ -851,7 +865,10 @@ fn render_user_define_head(
     if is_struct_ret {
         try render_user_define_head_struct(out, code, ret_kind);
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret and !is_struct_ret;
+    if is_bool {
+        try w(out, "define i1 @kizu_run_user_");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try w(out, "define i64 @kizu_run_user_");
     }
@@ -891,6 +908,8 @@ fn render_user_return_type(
 ) -> !void {
     let is_err_void = ret_kind == 2;
     let is_err_i64 = ret_kind == 3;
+    let bool_ret = return_kind_bool();
+    let is_bool = ret_kind == bool_ret;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
     let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
@@ -905,7 +924,10 @@ fn render_user_return_type(
     if is_struct_ret {
         try render_struct_decl_value_type(out, code, ret_kind);
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret and !is_struct_ret;
+    if is_bool {
+        try w(out, "i1");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try w(out, "i64");
     }
@@ -931,6 +953,8 @@ fn render_user_tail(
     let err_i64 = ret_abi_user_err_i64();
     let is_err_void = abi == err_void;
     let is_err_i64 = abi == err_i64;
+    let bool_ret = return_kind_bool();
+    let is_bool = ret_kind == bool_ret;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
     let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
@@ -947,7 +971,10 @@ fn render_user_tail(
     if is_struct_ret {
         try render_user_tail_struct(out, code, ret_kind);
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret and !is_struct_ret;
+    if is_bool {
+        try wl(out, "  ret i1 false");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try wl(out, "  ret i64 0");
     }
@@ -2205,16 +2232,21 @@ fn render_ret_value_err_i64(
 }
 
 // render_ret_void emits the terminator for a 'return;' statement, then opens a
-// fresh dead block. An i64 function (and the kizu_run_main entry, which maps it
-// to process exit 0) yields 'ret i64 0'; an error-union-void function yields the
-// ok union.
+// fresh dead block. Plain scalar functions use their ABI default value, while an
+// error-union-void function yields the ok union.
 fn render_ret_void(out: &var std::string::String, index: i64, abi: i64) -> !void {
     let err_void = ret_abi_user_err_void();
+    let bool_abi = ret_abi_user_bool();
     if abi == err_void {
         try render_ret_err_ok(out);
     }
+    if abi == bool_abi {
+        try wl(out, "  ret i1 false");
+    }
     if abi != err_void {
-        try wl(out, "  ret i64 0");
+        if abi != bool_abi {
+            try wl(out, "  ret i64 0");
+        }
     }
     try render_dead_label(out, index);
     return;
