@@ -87,7 +87,7 @@ func TestSelfhostCodegenCompiledClosureDerivedFromSharedBFS(t *testing.T) {
 
 	// The append_functions entry point delegates to the shared walk rather than
 	// re-listing the cluster members.
-	delegation := "try append_codegen_reachable_compiled_functions(out, ir_bytes);"
+	delegation := "try append_codegen_reachable_compiled_functions(out, lookup_index, ir_bytes);"
 	if !strings.Contains(cli, delegation) {
 		t.Fatalf("append_functions missing shared codegen closure delegation")
 	}

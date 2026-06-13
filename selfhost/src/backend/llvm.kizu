@@ -1,6 +1,7 @@
 import selfhost::backend::cli_llvm;
 import selfhost::backend::data;
 import selfhost::backend::ir_contract;
+import selfhost::backend::ir_index;
 import selfhost::backend::runtime;
 
 pub fn consume_ir_artifact(io: Io, path: &[]u8) -> !data::BackendSummary {
@@ -19,11 +20,13 @@ pub fn emit_llvm_artifact(
 ) -> !data::LlvmArtifact {
     let ir_bytes = try std::fs::read_file(io, ir_path);
     try validate_ir_artifact(ir_bytes);
+    var lookup_index = try ir_index::build(ir_bytes);
+    defer lookup_index.deinit();
 
     let manifest_bytes = try std::fs::read_file(io, manifest_path);
     try validate_shape_manifest(manifest_bytes);
 
-    var module = try render_llvm_module(allocator, ir_bytes, ir_path);
+    var module = try render_llvm_module(allocator, &lookup_index, ir_bytes, ir_path);
     let module_view = module.as_bytes();
     let module_len = try write_backend_bytes(
         io,
@@ -1377,6 +1380,7 @@ fn write_backend_bytes(
 
 fn render_llvm_module(
     allocator: Allocator,
+    lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     ir_path: []u8
 ) -> !std::string::String {
@@ -1949,7 +1953,7 @@ fn render_llvm_module(
     try append_line(out, "}");
     try append_line(out, "");
     try append_string_runtime(out);
-    try cli_llvm::append_functions(out, ir_bytes);
+    try cli_llvm::append_functions(out, lookup_index, ir_bytes);
     try append_line(out, "");
     try append_line(out, "define i64 @kizu_selfhost__smoke() {");
     try append_line(out, "entry:");

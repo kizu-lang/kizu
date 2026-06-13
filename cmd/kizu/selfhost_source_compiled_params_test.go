@@ -56,7 +56,7 @@ func assertSharedCompiledClosurePath(t *testing.T, cli string) {
 		"if !(try compiled_closure_name_seen(&emitted, local_name)) {",
 		"try append_component_compiled_closure_member(",
 		"allow_empty_params",
-		"try collect_component_compiled_callees(ir_bytes, prefix, local_name, pending);",
+		"try collect_component_compiled_callees(lookup_index, ir_bytes, prefix, local_name, pending);",
 	} {
 		if !strings.Contains(bfs, fragment) {
 			t.Fatalf("shared compiled closure BFS missing %q", fragment)
@@ -88,7 +88,9 @@ func assertSharedCompiledClosurePath(t *testing.T, cli string) {
 	for _, fragment := range []string{
 		"try append_component_qualified_name(&var function_name, prefix, local_name);",
 		"let function_name_bytes = function_name.as_bytes();",
-		"try emit_compiled_closure_member(out, ir_bytes, function_name_bytes, allow_empty_params);",
+		"try emit_compiled_closure_member(",
+		"lookup_index,",
+		"function_name_bytes,",
 	} {
 		if !strings.Contains(member, fragment) {
 			t.Fatalf("shared compiled closure member builder missing %q", fragment)
@@ -111,9 +113,9 @@ func assertComponentCompiledCalleeFactGate(t *testing.T, cli string) {
 		"if std::mem::starts_with(callee, \"std::mem::\") {",
 		"if std::mem::starts_with(callee, prefix) {",
 		"if compiled_callee_has_namespace(local) {",
-		"if !component_compiled_local_present(ir_bytes, prefix, local) {",
+		"if !component_compiled_local_present(lookup_index, ir_bytes, prefix, local) {",
 		"if compiled_callee_has_namespace(callee) {",
-		"if component_compiled_local_present(ir_bytes, prefix, callee) {",
+		"if component_compiled_local_present(lookup_index, ir_bytes, prefix, callee) {",
 	} {
 		if !strings.Contains(callee, fragment) {
 			t.Fatalf("collect_component_compiled_callee missing fact-based gate %q", fragment)
@@ -224,7 +226,8 @@ func TestSelfhostSourceLoaderCompiledClosureResolvedFromFacts(t *testing.T) {
 
 	present := selfhostKizuFunctionBody(t, cli, "fn component_compiled_local_present(")
 	presentRequired := []string{
-		"compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(",
+		"compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(",
+		"lookup_index,",
 		"\"function-signature-return \",",
 		"prefix,",
 		"local_name",
