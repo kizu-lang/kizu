@@ -225,7 +225,53 @@ fn field_expression_type(
     if !std::mem::equal_bytes(typed_field, "unknown") {
         return typed_field;
     }
+    let struct_field = try struct_field_declared_type(
+        allocator,
+        receiver_type,
+        field,
+        function_returns
+    );
+    if !std::mem::equal_bytes(struct_field, "unknown") {
+        return struct_field;
+    }
     return field_name_type(field);
+}
+
+// Resolve a field access against a user-declared struct's real field type.
+// Struct field facts are collected into function_returns under keys built by
+// append_struct_field_key (see checker.kizu collect_struct_field_types_*).
+// This runs after typed_field_name_type (compiler self-AST special cases) but
+// before the name-based field_name_type fallback, so user structs get their
+// declared field type instead of a name-keyed guess.
+fn struct_field_declared_type(
+    allocator: Allocator,
+    receiver_type: []u8,
+    field: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try append_struct_field_key(key, receiver_type, field);
+    let key_bytes = key.as_bytes();
+    if function_returns.contains(key_bytes) {
+        return try function_returns.get(key_bytes);
+    }
+    return "unknown";
+}
+
+// Build the lookup key for a struct field fact. The leading "sf " tag and the
+// space separators cannot appear in a function name (function_returns' other
+// keys are module::name with no spaces), so the two key spaces never collide.
+pub fn append_struct_field_key(
+    key: &var std::string::String,
+    struct_name: []u8,
+    field: []u8
+) -> !void {
+    try key.append_bytes("sf ");
+    try key.append_bytes(struct_name);
+    try key.append_bytes(" ");
+    try key.append_bytes(field);
+    return;
 }
 
 fn typed_field_name_type(receiver_type: []u8, field: []u8) -> []u8 {
