@@ -1658,8 +1658,28 @@ fn append_parse_return_function(out: &var std::string::String) -> !void {
         "  %empty_ok2 = insertvalue %kizu.selfhost.cli.parse_node_result %empty_ok1, %kizu.kizu.ast.node_id %empty_node, 2");
     try append_line(out, "  ret %kizu.selfhost.cli.parse_node_result %empty_ok2");
     try append_line(out, "parse_value:");
+    // A return value starting with 'Ident {' is a struct literal, matching the
+    // let-initializer boundary path and keeping run parsing on real AST nodes.
+    try append_line(out, "  %value_is_ident = icmp eq i64 %first_kind, 27");
+    try append_line(out, "  br i1 %value_is_ident, label %return_peek_struct, label %parse_value_expr");
+    try append_line(out, "return_peek_struct:");
+    try append_line(out, "  %struct_brace_index = add i64 %value_index, 1");
     try append_line(out,
-        "  %value_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %value_index)");
+        "  %struct_brace = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %struct_brace_index)");
+    try append_line(out, "  %struct_brace_kind = extractvalue %kizu.kizu.lexer.token %struct_brace, 0");
+    try append_line(out, "  %return_is_struct = icmp eq i64 %struct_brace_kind, 29");
+    try append_line(out, "  br i1 %return_is_struct, label %parse_value_struct, label %parse_value_expr");
+    try append_line(out, "parse_value_struct:");
+    try append_line(out,
+        "  %struct_value = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_struct_literal(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %value_index)");
+    try append_line(out, "  br label %parse_value_join");
+    try append_line(out, "parse_value_expr:");
+    try append_line(out,
+        "  %expr_value = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %value_index)");
+    try append_line(out, "  br label %parse_value_join");
+    try append_line(out, "parse_value_join:");
+    try append_line(out,
+        "  %value_result = phi %kizu.selfhost.cli.parse_node_result [ %struct_value, %parse_value_struct ], [ %expr_value, %parse_value_expr ]");
     try append_line(out, "  %value_ok = extractvalue %kizu.selfhost.cli.parse_node_result %value_result, 0");
     try append_line(out, "  br i1 %value_ok, label %check_semicolon, label %fail");
     try append_line(out, "check_semicolon:");
