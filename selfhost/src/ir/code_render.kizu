@@ -1073,7 +1073,7 @@ fn value_kind_is_owned(kind: i64) -> bool {
     if kind == codegen::code_kind_owned_string() {
         return true;
     }
-    if kind == codegen::code_kind_owned_array_i64() {
+    if codegen::code_kind_is_owned_array(kind) {
         return true;
     }
     if kind == codegen::code_kind_owned_map_i64() {
@@ -1511,13 +1511,25 @@ fn render_one_instruction(
     if op == try_array_append {
         try render_try_array_append_i64(out, code, index, abi);
     }
+    let try_array_append_value = codegen::code_op_try_array_append();
+    if op == try_array_append_value {
+        try render_try_array_append(out, code, index, abi);
+    }
     let try_array_get = codegen::code_op_try_array_get_i64();
     if op == try_array_get {
         try render_try_array_get_i64(out, code, index, abi);
     }
+    let try_array_get_value = codegen::code_op_try_array_get();
+    if op == try_array_get_value {
+        try render_try_array_get(out, code, index, abi);
+    }
     let array_get = codegen::code_op_array_get_i64();
     if op == array_get {
         try render_array_get_i64(out, code, index);
+    }
+    let array_get_value = codegen::code_op_array_get();
+    if op == array_get_value {
+        try render_array_get(out, code, index);
     }
     let try_map_insert = codegen::code_op_try_map_insert_i64();
     if op == try_map_insert {
@@ -3283,7 +3295,7 @@ fn storage_new_symbol(kind: i64) -> []u8 {
     if kind == codegen::code_kind_owned_string() {
         return "kizu_rt_string_new";
     }
-    if kind == codegen::code_kind_owned_array_i64() {
+    if codegen::code_kind_is_owned_array(kind) {
         return "kizu_rt_array_new";
     }
     if kind == codegen::code_kind_owned_map_i64() {
@@ -3293,7 +3305,7 @@ fn storage_new_symbol(kind: i64) -> []u8 {
 }
 
 fn storage_new_needs_size(kind: i64) -> bool {
-    if kind == codegen::code_kind_owned_array_i64() {
+    if codegen::code_kind_is_owned_array(kind) {
         return true;
     }
     return codegen::code_kind_is_arena(kind);
@@ -3349,7 +3361,7 @@ fn storage_deinit_symbol(kind: i64) -> []u8 {
     if kind == codegen::code_kind_owned_string() {
         return "kizu_rt_string_deinit";
     }
-    if kind == codegen::code_kind_owned_array_i64() {
+    if codegen::code_kind_is_owned_array(kind) {
         return "kizu_rt_array_deinit";
     }
     if kind == codegen::code_kind_owned_map_i64() {
@@ -3413,16 +3425,32 @@ fn render_try_array_append_i64(
     index: i64,
     abi: i64
 ) -> !void {
+    let element_kind = codegen::code_kind_i64();
+    try render_try_array_append_kind(out, code, index, abi, element_kind);
+    return;
+}
+
+fn render_try_array_append(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let element_kind = try code.get(index + 3);
+    try render_try_array_append_kind(out, code, index, abi, element_kind);
+    return;
+}
+
+fn render_try_array_append_kind(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64,
+    element_kind: i64
+) -> !void {
     let receiver = try code.get(index + 1);
     let value = try code.get(index + 2);
-    try w(out, "  %aa");
-    try wi(out, index);
-    try wl(out, "_slot = alloca i64");
-    try w(out, "  store i64 %v");
-    try wi(out, value);
-    try w(out, ", ptr %aa");
-    try wi(out, index);
-    try wl(out, "_slot");
+    try render_array_append_slot(out, index, value, element_kind);
     try w(out, "  %aa");
     try wi(out, index);
     try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %aa");
@@ -3432,7 +3460,10 @@ fn render_try_array_append_i64(
     try wi(out, index);
     try w(out, "_slice = insertvalue %kizu.slice.u8 %aa");
     try wi(out, index);
-    try wl(out, "_base, i64 8, 1");
+    try w(out, "_base, i64 ");
+    let element_size = array_element_size(element_kind);
+    try wi(out, element_size);
+    try wl(out, ", 1");
     try w(out, "  %tc");
     try wi(out, index);
     try w(out, " = call %kizu.error.void @kizu_rt_array_append(%kizu.owned %v");
@@ -3442,6 +3473,55 @@ fn render_try_array_append_i64(
     try wl(out, "_slice)");
     try render_try_void_result(out, index, abi);
     return;
+}
+
+fn render_array_append_slot(out: &var std::string::String, index: i64, value: i64, element_kind: i64) -> !void {
+    if element_kind == codegen::code_kind_bool() {
+        try w(out, "  %aa");
+        try wi(out, index);
+        try w(out, "_byte = zext i1 %v");
+        try wi(out, value);
+        try wl(out, " to i8");
+        try w(out, "  %aa");
+        try wi(out, index);
+        try wl(out, "_slot = alloca i8");
+        try w(out, "  store i8 %aa");
+        try wi(out, index);
+        try w(out, "_byte, ptr %aa");
+        try wi(out, index);
+        try wl(out, "_slot");
+    }
+    if element_kind == codegen::code_kind_i64() {
+        try w(out, "  %aa");
+        try wi(out, index);
+        try wl(out, "_slot = alloca i64");
+        try w(out, "  store i64 %v");
+        try wi(out, value);
+        try w(out, ", ptr %aa");
+        try wi(out, index);
+        try wl(out, "_slot");
+    }
+    if element_kind == codegen::code_kind_slice() {
+        try w(out, "  %aa");
+        try wi(out, index);
+        try wl(out, "_slot = alloca %kizu.slice.u8");
+        try w(out, "  store %kizu.slice.u8 %v");
+        try wi(out, value);
+        try w(out, ", ptr %aa");
+        try wi(out, index);
+        try wl(out, "_slot");
+    }
+    return;
+}
+
+fn array_element_size(element_kind: i64) -> i64 {
+    if element_kind == codegen::code_kind_bool() {
+        return 1;
+    }
+    if element_kind == codegen::code_kind_slice() {
+        return 16;
+    }
+    return 8;
 }
 
 fn render_try_void_result(out: &var std::string::String, index: i64, abi: i64) -> !void {
@@ -3471,6 +3551,27 @@ fn render_array_get_i64(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64
+) -> !void {
+    let element_kind = codegen::code_kind_i64();
+    try render_array_get_kind(out, code, index, element_kind);
+    return;
+}
+
+fn render_array_get(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let element_kind = try code.get(index + 4);
+    try render_array_get_kind(out, code, index, element_kind);
+    return;
+}
+
+fn render_array_get_kind(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    element_kind: i64
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
@@ -3519,11 +3620,37 @@ fn render_array_get_i64(
     try w(out, "_ptr = extractvalue %kizu.slice.u8 %ag");
     try wi(out, dst);
     try wl(out, "_slice, 0");
-    try w(out, "  %v");
-    try wi(out, dst);
-    try w(out, " = load i64, ptr %ag");
-    try wi(out, dst);
-    try wl(out, "_ptr");
+    try render_array_get_load(out, dst, dst, element_kind);
+    return;
+}
+
+fn render_array_get_load(out: &var std::string::String, value_id: i64, temp_id: i64, element_kind: i64) -> !void {
+    if element_kind == codegen::code_kind_bool() {
+        try w(out, "  %ag");
+        try wi(out, temp_id);
+        try w(out, "_byte = load i8, ptr %ag");
+        try wi(out, temp_id);
+        try wl(out, "_ptr");
+        try w(out, "  %v");
+        try wi(out, value_id);
+        try w(out, " = icmp ne i8 %ag");
+        try wi(out, temp_id);
+        try wl(out, "_byte, 0");
+    }
+    if element_kind == codegen::code_kind_i64() {
+        try w(out, "  %v");
+        try wi(out, value_id);
+        try w(out, " = load i64, ptr %ag");
+        try wi(out, temp_id);
+        try wl(out, "_ptr");
+    }
+    if element_kind == codegen::code_kind_slice() {
+        try w(out, "  %v");
+        try wi(out, value_id);
+        try w(out, " = load %kizu.slice.u8, ptr %ag");
+        try wi(out, temp_id);
+        try wl(out, "_ptr");
+    }
     return;
 }
 
@@ -3532,6 +3659,29 @@ fn render_try_array_get_i64(
     code: &std::array::Array<i64>,
     index: i64,
     abi: i64
+) -> !void {
+    let element_kind = codegen::code_kind_i64();
+    try render_try_array_get_i64_kind(out, code, index, abi, element_kind);
+    return;
+}
+
+fn render_try_array_get(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let element_kind = try code.get(index + 4);
+    try render_try_array_get_kind(out, code, index, abi, element_kind);
+    return;
+}
+
+fn render_try_array_get_i64_kind(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64,
+    element_kind: i64
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
@@ -3582,11 +3732,93 @@ fn render_try_array_get_i64(
     try w(out, "_ptr = extractvalue %kizu.slice.u8 %ag");
     try wi(out, index);
     try wl(out, "_slice, 0");
-    try w(out, "  %v");
-    try wi(out, dst);
-    try w(out, " = load i64, ptr %ag");
+    try render_array_get_load(out, dst, index, element_kind);
+    return;
+}
+
+fn render_try_array_get_kind(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64,
+    element_kind: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    let item_index = try code.get(index + 3);
+    try w(out, "  %ag");
     try wi(out, index);
-    try wl(out, "_ptr");
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", i64 %v");
+    try wi(out, item_index);
+    try wl(out, ")");
+    try w(out, "  %ag");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %ag");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %ag");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.slice.u8 %ag");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try render_array_get_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %ag");
+    try wi(out, index);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %ag");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %ag");
+    try wi(out, index);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %ag");
+    try wi(out, index);
+    try wl(out, "_slice, 0");
+    try render_array_get_load(out, dst, index, element_kind);
+    return;
+}
+
+fn render_array_get_propagate(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    let main_abi = ret_abi_main();
+    let err_i64 = ret_abi_user_err_i64();
+    if abi == main_abi {
+        try render_try_propagate_exit(out, index);
+    }
+    if abi == err_i64 {
+        try w(out, "  %tc");
+        try wi(out, index);
+        try w(out, "_pv = insertvalue %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+        try wi(out, index);
+        try wl(out, "_pm, 2");
+        try w(out, "  ret %kizu.error.i64 %tc");
+        try wi(out, index);
+        try wl(out, "_pv");
+    }
+    if abi != main_abi {
+        if abi != err_i64 {
+            try w(out, "  %tc");
+            try wi(out, index);
+            try w(out, "_pv = insertvalue %kizu.error.void { i1 false, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+            try wi(out, index);
+            try wl(out, "_pm, 1");
+            try w(out, "  ret %kizu.error.void %tc");
+            try wi(out, index);
+            try wl(out, "_pv");
+        }
+    }
     return;
 }
 
@@ -4958,13 +5190,25 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     if op == try_array_append {
         return index + 3;
     }
+    let try_array_append_value = codegen::code_op_try_array_append();
+    if op == try_array_append_value {
+        return index + 4;
+    }
     let try_array_get = codegen::code_op_try_array_get_i64();
     if op == try_array_get {
         return index + 4;
     }
+    let try_array_get_value = codegen::code_op_try_array_get();
+    if op == try_array_get_value {
+        return index + 5;
+    }
     let array_get = codegen::code_op_array_get_i64();
     if op == array_get {
         return index + 4;
+    }
+    let array_get_value = codegen::code_op_array_get();
+    if op == array_get_value {
+        return index + 5;
     }
     let try_map_insert = codegen::code_op_try_map_insert_i64();
     if op == try_map_insert {

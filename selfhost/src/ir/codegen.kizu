@@ -3793,6 +3793,20 @@ pub fn code_op_try_array_get_i64() -> i64 {
     return 116;
 }
 
+// Non-i64 Array<T> records carry the element kind explicitly so the renderer can
+// marshal/load bool and []u8 elements without changing the existing i64 tape.
+pub fn code_op_try_array_append() -> i64 {
+    return 122;
+}
+
+pub fn code_op_array_get() -> i64 {
+    return 123;
+}
+
+pub fn code_op_try_array_get() -> i64 {
+    return 124;
+}
+
 // STRUCT_DECL records a returned struct's ABI shape at the head of the tape:
 // 'op name_start name_end field_count [field_name_start field_name_end field_kind]...'.
 // Supported field kinds are i64, bool, and []u8.
@@ -3889,6 +3903,14 @@ pub fn code_kind_owned_array_i64() -> i64 {
     return 8;
 }
 
+pub fn code_kind_owned_array_bool() -> i64 {
+    return 11;
+}
+
+pub fn code_kind_owned_array_slice() -> i64 {
+    return 12;
+}
+
 pub fn code_kind_owned_map_i64() -> i64 {
     return 9;
 }
@@ -3927,13 +3949,50 @@ fn code_kind_is_owned_resource(kind: i64) -> bool {
     if kind == code_kind_owned_string() {
         return true;
     }
-    if kind == code_kind_owned_array_i64() {
+    if code_kind_is_owned_array(kind) {
         return true;
     }
     if kind == code_kind_owned_map_i64() {
         return true;
     }
     return code_kind_is_arena(kind);
+}
+
+pub fn code_kind_is_owned_array(kind: i64) -> bool {
+    if kind == code_kind_owned_array_i64() {
+        return true;
+    }
+    if kind == code_kind_owned_array_bool() {
+        return true;
+    }
+    return kind == code_kind_owned_array_slice();
+}
+
+fn code_array_element_kind(array_kind: i64) -> i64 {
+    if array_kind == code_kind_owned_array_i64() {
+        return code_kind_i64();
+    }
+    if array_kind == code_kind_owned_array_bool() {
+        return code_kind_bool();
+    }
+    if array_kind == code_kind_owned_array_slice() {
+        return code_kind_slice();
+    }
+    return 0 - 1;
+}
+
+fn code_array_element_size(array_kind: i64) -> i64 {
+    let element_kind = code_array_element_kind(array_kind);
+    if element_kind == code_kind_i64() {
+        return 8;
+    }
+    if element_kind == code_kind_bool() {
+        return 1;
+    }
+    if element_kind == code_kind_slice() {
+        return 16;
+    }
+    return 0 - 1;
 }
 
 // code_kind_struct_base marks a record-backed value on the kinds array: the
@@ -8296,8 +8355,8 @@ fn lower_code_try_runtime_field_call(
     if receiver_kind == code_kind_owned_string() {
         return try lower_code_try_string_method(text, ast, decls, method, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
-    if receiver_kind == code_kind_owned_array_i64() {
-        return try lower_code_try_array_i64_method(text, ast, decls, method, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+    if code_kind_is_owned_array(receiver_kind) {
+        return try lower_code_try_array_method(text, ast, decls, method, receiver_eval.value_id, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
     if receiver_kind == code_kind_owned_map_i64() {
         return try lower_code_try_map_i64_method(text, ast, decls, method, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
@@ -8345,12 +8404,13 @@ fn lower_code_try_string_method(
     return code_eval_value(0, slice_eval.next);
 }
 
-fn lower_code_try_array_i64_method(
+fn lower_code_try_array_method(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
     method: []u8,
     receiver_value: i64,
+    receiver_kind: i64,
     args: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -8372,16 +8432,26 @@ fn lower_code_try_array_i64_method(
     if !arg_eval.ok {
         return code_eval_unsupported(arg_eval.next);
     }
-    let kind_i64 = code_kind_i64();
-    let arg_kind = try kinds.get(arg_eval.value_id);
-    if arg_kind != kind_i64 {
-        return code_eval_unsupported(arg_eval.next);
+    let element_eval = try lower_code_arg_slice(text, code, kinds, arg_eval.value_id, arg_eval.next);
+    let element_kind = code_array_element_kind(receiver_kind);
+    let arg_kind = try kinds.get(element_eval.value_id);
+    if arg_kind != element_kind {
+        return code_eval_unsupported(element_eval.next);
     }
-    let op = code_op_try_array_append_i64();
-    try code.append(op);
-    try code.append(receiver_value);
-    try code.append(arg_eval.value_id);
-    return code_eval_value(0, arg_eval.next);
+    if element_kind == code_kind_i64() {
+        let op_array_append_i64 = code_op_try_array_append_i64();
+        try code.append(op_array_append_i64);
+        try code.append(receiver_value);
+        try code.append(element_eval.value_id);
+    }
+    if element_kind != code_kind_i64() {
+        let op_array_append = code_op_try_array_append();
+        try code.append(op_array_append);
+        try code.append(receiver_value);
+        try code.append(element_eval.value_id);
+        try code.append(element_kind);
+    }
+    return code_eval_value(0, element_eval.next);
 }
 
 fn lower_code_try_map_i64_method(
@@ -10519,7 +10589,7 @@ fn lower_code_runtime_constructor(
     if arena_new.ok {
         return arena_new;
     }
-    let array_new = try lower_code_array_i64_new(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    let array_new = try lower_code_array_new(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if array_new.ok {
         return array_new;
     }
@@ -10531,7 +10601,7 @@ fn lower_code_runtime_constructor(
     return code_eval_unsupported(next_value);
 }
 
-fn lower_code_array_i64_new(
+fn lower_code_array_new(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
@@ -10546,40 +10616,62 @@ fn lower_code_array_i64_new(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
-    let is_array_i64 = try code_callee_is_array_i64(text, ast, callee);
-    if !is_array_i64 {
+    let kind_array = try code_callee_array_kind(text, ast, callee);
+    if kind_array < 0 {
         return code_eval_unsupported(next_value);
     }
-    let kind_array = code_kind_owned_array_i64();
-    return try lower_code_storage_new(text, ast, decls, args, kind_array, 8, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    let element_size = code_array_element_size(kind_array);
+    return try lower_code_storage_new(text, ast, decls, args, kind_array, element_size, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
 }
 
-fn code_callee_is_array_i64(
+fn code_callee_array_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
     callee: std::kizu::ast::NodeId
-) -> !bool {
+) -> !i64 {
     let node = ast.get(callee);
     return match node.data {
-        TypeApplyExpr(type_apply) => try code_type_apply_is_array_i64(text, ast, type_apply.callee, type_apply.type_args),
-        _ => false,
+        TypeApplyExpr(type_apply) => try code_type_apply_array_kind(text, ast, type_apply.callee, type_apply.type_args),
+        _ => code_no_array_kind(),
     };
 }
 
-fn code_type_apply_is_array_i64(
+fn code_no_array_kind() -> i64 {
+    return 0 - 1;
+}
+
+fn code_type_apply_array_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
     type_callee: std::kizu::ast::NodeId,
     type_args: std::kizu::ast::ChildRange
-) -> !bool {
+) -> !i64 {
     if type_args.len != 1 {
-        return false;
+        return 0 - 1;
     }
     if !std::mem::equal_bytes(ast_node_text(text, ast, type_callee), "std::array::Array") {
-        return false;
+        return 0 - 1;
     }
     let type_arg = try ast.child_at(type_args, 0);
-    return type_node_is_i64(text, ast, type_arg);
+    return code_array_type_arg_kind(text, ast, type_arg);
+}
+
+fn code_array_type_arg_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_arg: std::kizu::ast::NodeId
+) -> i64 {
+    if type_node_is_i64(text, ast, type_arg) {
+        return code_kind_owned_array_i64();
+    }
+    let type_text = ast_node_text(text, ast, type_arg);
+    if std::mem::equal_bytes(type_text, "bool") {
+        return code_kind_owned_array_bool();
+    }
+    if std::mem::equal_bytes(type_text, "[]u8") {
+        return code_kind_owned_array_slice();
+    }
+    return 0 - 1;
 }
 
 fn lower_code_arena_new(
@@ -11231,8 +11323,8 @@ fn lower_code_runtime_field_expr_method(
     if receiver_kind == code_kind_owned_string() {
         return try lower_code_string_expr_method(method, receiver_eval.value_id, args, code, kinds, receiver_eval.next);
     }
-    if receiver_kind == code_kind_owned_array_i64() {
-        return try lower_code_array_i64_expr_method(text, ast, decls, method, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+    if code_kind_is_owned_array(receiver_kind) {
+        return try lower_code_array_expr_method(text, ast, decls, method, receiver_eval.value_id, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
     if receiver_kind == code_kind_owned_map_i64() {
         return try lower_code_map_i64_expr_method(text, ast, decls, method, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
@@ -11350,12 +11442,13 @@ fn lower_code_mem_equal_bytes(
     return code_eval_value(result_value, after_value);
 }
 
-fn lower_code_array_i64_expr_method(
+fn lower_code_array_expr_method(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
     method: []u8,
     receiver_value: i64,
+    receiver_kind: i64,
     args: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -11370,7 +11463,7 @@ fn lower_code_array_i64_expr_method(
         return try lower_code_array_len(receiver_value, args, code, kinds, next_value);
     }
     if std::mem::equal_bytes(method, "get_or_panic") {
-        return try lower_code_array_get_i64(text, ast, decls, receiver_value, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+        return try lower_code_array_get(text, ast, decls, receiver_value, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
 }
@@ -11395,11 +11488,12 @@ fn lower_code_array_len(
     return code_eval_value(next_value, after_value);
 }
 
-fn lower_code_array_get_i64(
+fn lower_code_array_get(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
     receiver_value: i64,
+    receiver_kind: i64,
     args: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -11423,12 +11517,23 @@ fn lower_code_array_get_i64(
     if index_kind != kind_i64 {
         return code_eval_unsupported(index_eval.next);
     }
-    let op = code_op_array_get_i64();
-    try code.append(op);
-    try code.append(index_eval.next);
-    try code.append(receiver_value);
-    try code.append(index_eval.value_id);
-    try kinds.append(kind_i64);
+    let element_kind = code_array_element_kind(receiver_kind);
+    if element_kind == kind_i64 {
+        let op_array_get_i64 = code_op_array_get_i64();
+        try code.append(op_array_get_i64);
+        try code.append(index_eval.next);
+        try code.append(receiver_value);
+        try code.append(index_eval.value_id);
+    }
+    if element_kind != kind_i64 {
+        let op_array_get = code_op_array_get();
+        try code.append(op_array_get);
+        try code.append(index_eval.next);
+        try code.append(receiver_value);
+        try code.append(index_eval.value_id);
+        try code.append(element_kind);
+    }
+    try kinds.append(element_kind);
     let result_value = index_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
@@ -12294,8 +12399,8 @@ fn lower_code_try_runtime_field_expr_call(
         return code_eval_unsupported(receiver_eval.next);
     }
     let receiver_kind = try kinds.get(receiver_eval.value_id);
-    if receiver_kind == code_kind_owned_array_i64() {
-        return try lower_code_try_array_get_i64(text, ast, decls, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+    if code_kind_is_owned_array(receiver_kind) {
+        return try lower_code_try_array_get(text, ast, decls, receiver_eval.value_id, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
     if receiver_kind != code_kind_owned_map_i64() {
         return code_eval_unsupported(receiver_eval.next);
@@ -12303,11 +12408,12 @@ fn lower_code_try_runtime_field_expr_call(
     return try lower_code_try_map_get_i64(text, ast, decls, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
 }
 
-fn lower_code_try_array_get_i64(
+fn lower_code_try_array_get(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
     receiver_value: i64,
+    receiver_kind: i64,
     args: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -12332,12 +12438,23 @@ fn lower_code_try_array_get_i64(
         return code_eval_unsupported(index_eval.next);
     }
     let result_value = index_eval.next;
-    let op = code_op_try_array_get_i64();
-    try code.append(op);
-    try code.append(result_value);
-    try code.append(receiver_value);
-    try code.append(index_eval.value_id);
-    try kinds.append(kind_i64);
+    let element_kind = code_array_element_kind(receiver_kind);
+    if element_kind == kind_i64 {
+        let op_try_array_get_i64 = code_op_try_array_get_i64();
+        try code.append(op_try_array_get_i64);
+        try code.append(result_value);
+        try code.append(receiver_value);
+        try code.append(index_eval.value_id);
+    }
+    if element_kind != kind_i64 {
+        let op_try_array_get = code_op_try_array_get();
+        try code.append(op_try_array_get);
+        try code.append(result_value);
+        try code.append(receiver_value);
+        try code.append(index_eval.value_id);
+        try code.append(element_kind);
+    }
+    try kinds.append(element_kind);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
 }
