@@ -15,6 +15,11 @@ import selfhost::source;
 import selfhost::source::loader;
 import selfhost::types;
 
+struct CachedStageFile {
+    next: i64,
+    bytes: i64,
+}
+
 pub fn smoke() -> parser::ParseError!i64 {
     let allocator = std::mem::page_allocator();
     let path = "selfhost/smoke.kizu";
@@ -418,6 +423,7 @@ fn stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact {
 
 fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact {
     var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
+    defer files.deinit();
     let resolved = try resolver::resolve_sources(allocator, files);
     let typed = try types::check_sources(allocator, files, resolved);
     let checked = try ownership::check_package(allocator, files, typed);
@@ -425,13 +431,152 @@ fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact
         return error("selfhost check failed");
     }
 
+    let cache_input = try cache::stage_cache_input(files);
+    let cache_key = cache::stage_key(&cache_input);
+    let lookup = try cache::lookup_entry(allocator, io, &cache_key);
+    if lookup.found {
+        let packed = try std::fs::read_file(io, lookup.artifact_path);
+        return try restore_cached_stage_artifact(io, packed);
+    }
+
     let artifact = try ir::emit_checked_artifacts(allocator, io, files, checked);
-    files.deinit();
     let llvm = try backend::emit_llvm_artifact(
         allocator,
         io,
         artifact.ir_path,
         artifact.manifest_path
     );
+    var packed = try pack_stage_cache_artifact(allocator, io, &llvm);
+    let packed_bytes = packed.as_bytes();
+    let _written = try cache::write_stage_entry(allocator, io, &cache_input, packed_bytes);
     return llvm;
+}
+
+fn pack_stage_cache_artifact(
+    allocator: Allocator,
+    io: Io,
+    llvm: &data::LlvmArtifact
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try out.append_bytes("kizu-stage-cache-v0");
+    try out.append_byte(cast<u8>(10));
+    try append_cached_stage_file(io, out, llvm.ll_path);
+    try append_cached_stage_file(io, out, llvm.metadata_path);
+    try append_cached_stage_file(io, out, llvm.storage_path);
+    try append_cached_stage_file(io, out, llvm.storage_metadata_path);
+    try append_cached_stage_file(io, out, llvm.host_path);
+    try append_cached_stage_file(io, out, llvm.host_metadata_path);
+    return out;
+}
+
+fn append_cached_stage_file(
+    io: Io,
+    out: &var std::string::String,
+    path: []u8
+) -> !void {
+    let bytes = try std::fs::read_file(io, path);
+    try out.append_bytes("bytes ");
+    try std::fmt::append_i64(out, std::mem::len(bytes));
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(bytes);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn restore_cached_stage_artifact(io: Io, packed: []u8) -> !data::LlvmArtifact {
+    var cursor = try expect_cached_stage_line(packed, 0, "kizu-stage-cache-v0");
+    let llvm = try restore_cached_stage_file(io, packed, cursor, "target/selfhost/selfhost.ll");
+    cursor = llvm.next;
+    let metadata = try restore_cached_stage_file(io, packed, cursor, "target/selfhost/selfhost.ll.meta");
+    cursor = metadata.next;
+    let storage = try restore_cached_stage_file(io, packed, cursor, "target/selfhost/selfhost.storage.ll");
+    cursor = storage.next;
+    let storage_metadata = try restore_cached_stage_file(io, packed, cursor, "target/selfhost/selfhost.storage.ll.meta");
+    cursor = storage_metadata.next;
+    let host = try restore_cached_stage_file(io, packed, cursor, "target/selfhost/selfhost.host.ll");
+    cursor = host.next;
+    let host_metadata = try restore_cached_stage_file(io, packed, cursor, "target/selfhost/selfhost.host.ll.meta");
+
+    return data::LlvmArtifact {
+        ll_path: "target/selfhost/selfhost.ll",
+        metadata_path: "target/selfhost/selfhost.ll.meta",
+        storage_path: "target/selfhost/selfhost.storage.ll",
+        storage_metadata_path: "target/selfhost/selfhost.storage.ll.meta",
+        host_path: "target/selfhost/selfhost.host.ll",
+        host_metadata_path: "target/selfhost/selfhost.host.ll.meta",
+        bytes: llvm.bytes,
+        metadata_bytes: metadata.bytes,
+        storage_bytes: storage.bytes,
+        storage_metadata_bytes: storage_metadata.bytes,
+        host_bytes: host.bytes,
+        host_metadata_bytes: host_metadata.bytes
+    };
+}
+
+fn restore_cached_stage_file(
+    io: Io,
+    packed: []u8,
+    cursor: i64,
+    path: []u8
+) -> !CachedStageFile {
+    let bytes_start = cursor + std::mem::len("bytes ");
+    let line_end = cached_stage_line_end(packed, cursor);
+    if line_end < 0 or !std::mem::starts_with(packed[cursor..line_end], "bytes ") {
+        return error("invalid cached stage artifact field");
+    }
+    let byte_len = try parse_cached_i64(packed[bytes_start..line_end]);
+    var next = line_end + 1;
+    if byte_len < 0 or next + byte_len > std::mem::len(packed) {
+        return error("invalid cached stage artifact size");
+    }
+
+    let artifact = packed[next..next + byte_len];
+    try std::fs::write_file(io, path, artifact);
+    next = next + byte_len;
+    if next >= std::mem::len(packed) or packed[next] != cast<u8>(10) {
+        return error("invalid cached stage artifact terminator");
+    }
+    return CachedStageFile {
+        next: next + 1,
+        bytes: byte_len
+    };
+}
+
+fn expect_cached_stage_line(packed: []u8, start: i64, expected: []u8) -> !i64 {
+    let end = cached_stage_line_end(packed, start);
+    if end < 0 or !std::mem::equal_bytes(packed[start..end], expected) {
+        return error("invalid cached stage artifact");
+    }
+    return end + 1;
+}
+
+fn cached_stage_line_end(packed: []u8, start: i64) -> i64 {
+    if start < 0 or start >= std::mem::len(packed) {
+        return -1;
+    }
+    var index = start;
+    while index < std::mem::len(packed) and packed[index] != cast<u8>(10) {
+        index = index + 1;
+    }
+    if index >= std::mem::len(packed) {
+        return -1;
+    }
+    return index;
+}
+
+fn parse_cached_i64(bytes: []u8) -> !i64 {
+    if std::mem::len(bytes) == 0 {
+        return error("invalid cached i64");
+    }
+    var index = 0;
+    var value = 0;
+    while index < std::mem::len(bytes) {
+        let byte = bytes[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("invalid cached i64");
+        }
+        value = (value * 10) + cast<i64>(byte - cast<u8>(48));
+        index = index + 1;
+    }
+    return value;
 }
