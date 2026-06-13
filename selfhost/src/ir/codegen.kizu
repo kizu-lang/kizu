@@ -12458,10 +12458,36 @@ fn lower_code_args(
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
-    let arg_eval = try lower_code_arg_slice(text, code, kinds, eval.value_id, eval.next);
+    let arg_eval = try lower_code_arg_value(text, code, kinds, args_scratch, eval.value_id, eval.next);
     try scratch_put(args_scratch, arg_slot, arg_eval.value_id);
     let after = index + 1;
     return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, after, arg_eval.next);
+}
+
+// lower_code_arg_value materializes values that cross a user-call boundary:
+// string literals become runtime slices, UNION_CONST records become runtime
+// union aggregates, and STRUCT_LIT records become declaration-order struct
+// aggregates.
+fn lower_code_arg_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let arg_kind = try kinds.get(value_id);
+    let record_base = code_kind_struct_base();
+    if arg_kind < record_base {
+        return try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    }
+    let record_pos = arg_kind - record_base;
+    let op = try code.get(record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if op != op_struct_lit {
+        return try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    }
+    return try lower_code_method_receiver_struct_lit_arg(text, code, kinds, args_scratch, record_pos, next_value);
 }
 
 // lower_code_arg_slice materializes a string argument (kind str, a CONST_STR
