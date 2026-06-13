@@ -99,16 +99,27 @@ func TestSelfhostCodegenCompiledClosureDerivedFromSharedBFS(t *testing.T) {
 	}
 }
 
-// TestSelfhostCodegenLoopI64SupportedUsesCompiledAuto keeps the loop-i64
-// support predicate on real body lowering instead of restoring the old
-// hand-written LLVM renderer.
-func TestSelfhostCodegenLoopI64SupportedUsesCompiledAuto(t *testing.T) {
+// TestSelfhostCodegenRunAstSupportEmissionRemoved keeps the old RunAst support
+// predicates out of the stage2 emission list now that run dispatch uses the tape
+// renderer.
+func TestSelfhostCodegenRunAstSupportEmissionRemoved(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 
-	required := []string{
+	forbiddenRegistrations := []string{
+		`"selfhost::ir::codegen::try_void_run_ast_supported"`,
 		`"selfhost::ir::codegen::loop_i64_run_ast_supported"`,
 		`"kizu_selfhost__ir_codegen_loop_i64_run_ast_supported"`,
 		`"%kizu.selfhost.codegen.run_ast run_ast"`,
+		`"selfhost::ir::codegen::fs_read_run_ast_supported"`,
+		"try append_run_ast_supported_function(out, ir_bytes);",
+	}
+	for _, fragment := range forbiddenRegistrations {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("legacy RunAst support emission remains: %q", fragment)
+		}
+	}
+
+	required := []string{
 		`"selfhost::ir::codegen::loop_i64_program_supported"`,
 		`"kizu_selfhost__ir_codegen_loop_i64_program_supported"`,
 		`"%kizu.selfhost.codegen.program program"`,
@@ -172,36 +183,36 @@ func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
 	}
 }
 
-// TestSelfhostCodegenLoopI64BuildersUseCompiledAuto keeps the loop-i64 RunAst
-// and Program builders on compiled lowering instead of the old hand-written LLVM
-// emitters.
-func TestSelfhostCodegenLoopI64BuildersUseCompiledAuto(t *testing.T) {
+// TestSelfhostCodegenRunAstBuilderEmissionRemoved keeps the old RunAst builder
+// registrations out of stage2 while preserving the live parse_int_literal bridge
+// used by the tape lowering.
+func TestSelfhostCodegenRunAstBuilderEmissionRemoved(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 
-	required := []string{
+	forbiddenRegistrations := []string{
+		`"selfhost::ir::codegen::i64_call_run_ast"`,
+		`"selfhost::ir::codegen::return_void_run_ast"`,
+		`"selfhost::ir::codegen::try_void_run_ast"`,
 		`"selfhost::ir::codegen::loop_i64_run_ast"`,
 		`"kizu_selfhost__ir_codegen_loop_i64_run_ast"`,
-		"\"%kizu.slice.u8 function_name;i64 statement_count;" +
-			"%kizu.slice.u8 print_callee;i64 start_value;i64 bound;" +
-			"i64 continue_value;i64 break_value\"",
+		`"selfhost::ir::codegen::fs_read_run_ast"`,
 		`"selfhost::ir::codegen::lowered_loop_i64_program"`,
 		`"kizu_selfhost__ir_codegen_lowered_loop_i64_program"`,
+		"try append_lower_run_ast_to_program_function(out, ir_bytes);",
 	}
-	for _, fragment := range required {
-		if !strings.Contains(cli, fragment) {
-			t.Fatalf("loop-i64 compiled-auto builder registration missing %q", fragment)
+	for _, fragment := range forbiddenRegistrations {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("legacy RunAst builder emission remains: %q", fragment)
 		}
 	}
 
-	forbidden := []string{
-		"fn append_loop_i64_run_ast_function(",
-		"try append_loop_i64_run_ast_function(out, ir_bytes);",
-		"fn append_lowered_loop_i64_program_function(",
-		"try append_lowered_loop_i64_program_function(out, ir_bytes);",
+	required := []string{
+		"try cli_run_i64_codegen_llvm::append_functions(out, ir_bytes);",
+		`"parse_int_literal"`,
 	}
-	for _, fragment := range forbidden {
-		if strings.Contains(cli, fragment) {
-			t.Fatalf("loop-i64 builder keeps hand-written renderer fragment %q", fragment)
+	for _, fragment := range required {
+		if !strings.Contains(cli, fragment) {
+			t.Fatalf("live parse-int bridge emission missing %q", fragment)
 		}
 	}
 }
