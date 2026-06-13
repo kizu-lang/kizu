@@ -839,6 +839,7 @@ fn render_user_define_head(
     let is_err_void = ret_kind == 2;
     let is_err_i64 = ret_kind == 3;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
+    let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
         try w(out, "define %kizu.error.void @kizu_run_user_");
     }
@@ -848,11 +849,25 @@ fn render_user_define_head(
     if is_union_ret {
         try w(out, "define %kizu.run.union @kizu_run_user_");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret;
+    if is_struct_ret {
+        try render_user_define_head_struct(out, code, ret_kind);
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try w(out, "define i64 @kizu_run_user_");
     }
     try w(out, name);
+    return;
+}
+
+fn render_user_define_head_struct(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    ret_kind: i64
+) -> !void {
+    try w(out, "define ");
+    try render_struct_decl_value_type(out, code, ret_kind);
+    try w(out, " @kizu_run_user_");
     return;
 }
 
@@ -878,6 +893,7 @@ fn render_user_return_type(
     let is_err_void = ret_kind == 2;
     let is_err_i64 = ret_kind == 3;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
+    let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
         try w(out, "%kizu.error.void");
     }
@@ -887,7 +903,10 @@ fn render_user_return_type(
     if is_union_ret {
         try w(out, "%kizu.run.union");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret;
+    if is_struct_ret {
+        try render_struct_decl_value_type(out, code, ret_kind);
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try w(out, "i64");
     }
@@ -944,6 +963,7 @@ fn render_user_tail(
     let is_err_void = abi == err_void;
     let is_err_i64 = abi == err_i64;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
+    let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
         try render_ret_err_ok(out);
     }
@@ -955,10 +975,24 @@ fn render_user_tail(
     if is_union_ret {
         try wl(out, "  ret %kizu.run.union zeroinitializer");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret;
+    if is_struct_ret {
+        try render_user_tail_struct(out, code, ret_kind);
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try wl(out, "  ret i64 0");
     }
+    return;
+}
+
+fn render_user_tail_struct(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    ret_kind: i64
+) -> !void {
+    try w(out, "  ret ");
+    try render_struct_decl_value_type(out, code, ret_kind);
+    try wl(out, " zeroinitializer");
     return;
 }
 
@@ -1006,6 +1040,7 @@ fn render_value_type(
     let is_handle = kind == kind_handle;
     let is_owned = value_kind_is_owned(kind);
     let is_union = try value_kind_is_union(code, kind);
+    let is_struct_decl = try value_kind_is_struct_decl(code, kind);
     let is_struct_param = try value_kind_is_struct_param(code, kind);
     if is_bool {
         try w(out, "i1");
@@ -1022,10 +1057,13 @@ fn render_value_type(
     if is_union {
         try w(out, "%kizu.run.union");
     }
+    if is_struct_decl {
+        try render_struct_decl_value_type(out, code, kind);
+    }
     if is_struct_param {
         try render_struct_param_value_type(out, code, kind);
     }
-    let scalar = !is_bool and !is_slice and !is_handle and !is_owned and !is_union and !is_struct_param;
+    let scalar = !is_bool and !is_slice and !is_handle and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
     if scalar {
         try w(out, "i64");
     }
@@ -1059,6 +1097,71 @@ fn value_kind_is_union(code: &std::array::Array<i64>, kind: i64) -> !bool {
     let op = try code.get(record_pos);
     let op_union_decl = codegen::code_op_union_decl();
     return op == op_union_decl;
+}
+
+fn value_kind_is_struct_decl(code: &std::array::Array<i64>, kind: i64) -> !bool {
+    let record_base = codegen::code_kind_struct_base();
+    if kind < record_base {
+        return false;
+    }
+    let record_pos = kind - record_base;
+    let op = try code.get(record_pos);
+    let op_struct_decl = codegen::code_op_struct_decl();
+    return op == op_struct_decl;
+}
+
+fn render_struct_decl_value_type(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kind: i64
+) -> !void {
+    let record_base = codegen::code_kind_struct_base();
+    let record_pos = kind - record_base;
+    try render_struct_decl_type_at(out, code, record_pos);
+    return;
+}
+
+fn render_struct_decl_type_at(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    record_pos: i64
+) -> !void {
+    let field_count = try code.get(record_pos + 3);
+    try w(out, "{ ");
+    try render_struct_decl_type_fields(out, code, record_pos, field_count, 0);
+    try w(out, " }");
+    return;
+}
+
+fn render_struct_decl_type_fields(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    record_pos: i64,
+    field_count: i64,
+    index: i64
+) -> !void {
+    if index >= field_count {
+        return;
+    }
+    if index > 0 {
+        try w(out, ", ");
+    }
+    let field_kind = try struct_decl_field_kind(code, record_pos, index);
+    try render_value_type(out, code, field_kind);
+    let after = index + 1;
+    try render_struct_decl_type_fields(out, code, record_pos, field_count, after);
+    return;
+}
+
+fn struct_decl_field_kind(
+    code: &std::array::Array<i64>,
+    record_pos: i64,
+    index: i64
+) -> !i64 {
+    let entry_slots = index * 3;
+    let entry_pos = record_pos + 4 + entry_slots;
+    let field_kind = try code.get(entry_pos + 2);
+    return field_kind;
 }
 
 fn value_kind_is_struct_param(code: &std::array::Array<i64>, kind: i64) -> !bool {
@@ -1291,6 +1394,14 @@ fn render_one_instruction(
     let union_payload = codegen::code_op_union_payload();
     if op == union_payload {
         try render_union_payload(out, code, index);
+    }
+    let struct_pack = codegen::code_op_struct_pack();
+    if op == struct_pack {
+        try render_struct_pack(out, code, index);
+    }
+    let struct_field = codegen::code_op_struct_field();
+    if op == struct_field {
+        try render_struct_field(out, code, index);
     }
     let call = codegen::code_op_call();
     if op == call {
@@ -4109,6 +4220,132 @@ fn union_payload_field(payload_kind: i64, kind_slice: i64) -> i64 {
     return 1;
 }
 
+fn render_struct_pack(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let record_pos = try code.get(index + 2);
+    let field_count = try code.get(index + 3);
+    try render_struct_pack_fields(out, code, index, dst, record_pos, field_count, 0);
+    return;
+}
+
+fn render_struct_pack_fields(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    pack_pos: i64,
+    dst: i64,
+    record_pos: i64,
+    field_count: i64,
+    index: i64
+) -> !void {
+    if index >= field_count {
+        return;
+    }
+    try w(out, "  ");
+    try render_struct_pack_result(out, dst, index, field_count);
+    try w(out, " = insertvalue ");
+    try render_struct_decl_type_at(out, code, record_pos);
+    try w(out, " ");
+    try render_struct_pack_input(out, dst, index);
+    try w(out, ", ");
+    let field_kind = try struct_decl_field_kind(code, record_pos, index);
+    try render_value_type(out, code, field_kind);
+    try w(out, " %v");
+    let value = try code.get(pack_pos + 4 + index);
+    try wi(out, value);
+    try w(out, ", ");
+    try wi(out, index);
+    try nl(out);
+    let after = index + 1;
+    try render_struct_pack_fields(out, code, pack_pos, dst, record_pos, field_count, after);
+    return;
+}
+
+fn render_struct_pack_result(
+    out: &var std::string::String,
+    dst: i64,
+    index: i64,
+    field_count: i64
+) -> !void {
+    let next = index + 1;
+    if next == field_count {
+        try render_struct_pack_result_value(out, dst);
+    }
+    if next != field_count {
+        try render_struct_pack_result_temp(out, dst, index);
+    }
+    return;
+}
+
+fn render_struct_pack_result_value(out: &var std::string::String, dst: i64) -> !void {
+    try w(out, "%v");
+    try wi(out, dst);
+    return;
+}
+
+fn render_struct_pack_result_temp(
+    out: &var std::string::String,
+    dst: i64,
+    index: i64
+) -> !void {
+    try w(out, "%sp");
+    try wi(out, dst);
+    try w(out, "_");
+    try wi(out, index);
+    return;
+}
+
+fn render_struct_pack_input(
+    out: &var std::string::String,
+    dst: i64,
+    index: i64
+) -> !void {
+    if index == 0 {
+        try w(out, "poison");
+    }
+    if index != 0 {
+        try render_struct_pack_input_temp(out, dst, index);
+    }
+    return;
+}
+
+fn render_struct_pack_input_temp(
+    out: &var std::string::String,
+    dst: i64,
+    index: i64
+) -> !void {
+    let before = index - 1;
+    try w(out, "%sp");
+    try wi(out, dst);
+    try w(out, "_");
+    try wi(out, before);
+    return;
+}
+
+fn render_struct_field(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let src = try code.get(index + 2);
+    let record_pos = try code.get(index + 3);
+    let field_index = try code.get(index + 4);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue ");
+    try render_struct_decl_type_at(out, code, record_pos);
+    try w(out, " %v");
+    try wi(out, src);
+    try w(out, ", ");
+    try wi(out, field_index);
+    try nl(out);
+    return;
+}
+
 // render_str_slice materializes a CONST_STR global as a '%kizu.slice.u8' SSA
 // value: an insertvalue pair builds the slice from the '@.kizu.run.s<src>'
 // global pointer and its payload byte length.
@@ -4397,6 +4634,17 @@ fn tape_struct_param_record_end(code: &std::array::Array<i64>, index: i64) -> !i
     return index + 2 + field_slots;
 }
 
+fn tape_struct_decl_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let field_count = try code.get(index + 3);
+    let field_slots = field_count * 3;
+    return index + 4 + field_slots;
+}
+
+fn tape_struct_pack_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
+    let field_count = try code.get(index + 3);
+    return index + 4 + field_count;
+}
+
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let op = try code.get(index);
     let const_int = codegen::code_op_const_int();
@@ -4554,6 +4802,18 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let union_payload = codegen::code_op_union_payload();
     if op == union_payload {
         return index + 4;
+    }
+    let struct_decl = codegen::code_op_struct_decl();
+    if op == struct_decl {
+        return try tape_struct_decl_record_end(code, index);
+    }
+    let struct_pack = codegen::code_op_struct_pack();
+    if op == struct_pack {
+        return try tape_struct_pack_record_end(code, index);
+    }
+    let struct_field = codegen::code_op_struct_field();
+    if op == struct_field {
+        return index + 5;
     }
     let binary = codegen::code_op_binary();
     if op == binary {

@@ -3779,6 +3779,26 @@ pub fn code_op_try_array_get_i64() -> i64 {
     return 116;
 }
 
+// STRUCT_DECL records a returned struct's ABI shape at the head of the tape:
+// 'op name_start name_end field_count [field_name_start field_name_end field_kind]...'.
+// Supported field kinds are i64, bool, and []u8.
+pub fn code_op_struct_decl() -> i64 {
+    return 117;
+}
+
+// STRUCT_PACK materializes a struct literal into the declaration-order LLVM
+// aggregate used across a function boundary:
+// 'op dst struct_decl_pos field_count [field_value]...'.
+pub fn code_op_struct_pack() -> i64 {
+    return 118;
+}
+
+// STRUCT_FIELD extracts one field from a runtime struct aggregate:
+// 'op dst src struct_decl_pos field_index'.
+pub fn code_op_struct_field() -> i64 {
+    return 119;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -3951,7 +3971,8 @@ fn code_binary_kind_is_comparison(kind: i64) -> bool {
 // 0 = void (empty or 'void'), 1 = i64, 2 = error-union void ('!void'),
 // 3 = error-union i64 ('!i64'), record_base + <UNION_DECL position> for a
 // declared union (the runtime aggregate return), record_base + <ENUM_DECL
-// position> for a declared enum (the i64 tag ABI with enum identity), -1 = a
+// position> for a declared enum (the i64 tag ABI with enum identity),
+// record_base + <STRUCT_DECL position> for a declared struct aggregate, -1 = a
 // type the tape does not own yet.
 fn code_return_kind(
     text: []u8,
@@ -3982,6 +4003,10 @@ fn code_return_kind(
     let enum_kind = try code_return_enum_kind(text, ast, type_node, code);
     if enum_kind >= 0 {
         return enum_kind;
+    }
+    let struct_kind = try code_return_struct_kind(text, ast, type_node, code);
+    if struct_kind >= 0 {
+        return struct_kind;
     }
     return 0 - 1;
 }
@@ -4085,7 +4110,8 @@ fn lower_code_program(
 // lower_code_program_decls emits declaration identity records at the head of the
 // tape, then walks the functions. UNION_DECL records come first so the existing
 // union lookup can stop at the first non-union record; ENUM_DECL records follow
-// to preserve enum identity for function return values.
+// to preserve enum identity for function return values, then STRUCT_DECL records
+// preserve returned struct ABI shapes.
 fn lower_code_program_decls(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -4106,7 +4132,11 @@ fn lower_code_program_decls(
     if !enum_eval.ok {
         return code_eval_unsupported(enum_eval.next);
     }
-    return try lower_code_declarations(text, ast, decls, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, 0, enum_eval.next);
+    let struct_eval = try emit_struct_decl_records(text, ast, decls, code, 0);
+    if !struct_eval.ok {
+        return code_eval_unsupported(struct_eval.next);
+    }
+    return try lower_code_declarations(text, ast, decls, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, 0, struct_eval.next);
 }
 
 // emit_union_decl_records walks the top-level declarations and records every
@@ -4275,6 +4305,126 @@ fn append_enum_decl_variants(
     try code.append(tag_span.end);
     let after = index + 1;
     return try append_enum_decl_variants(text, ast, tags, code, after);
+}
+
+fn emit_struct_decl_records(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    index: i64
+) -> !CodeEval {
+    if index >= decls.len {
+        return code_eval_value(0, 0);
+    }
+    let child = try ast.child_at(decls, index);
+    let eval = try emit_struct_decl_record(text, ast, child, code);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try emit_struct_decl_records(text, ast, decls, code, after);
+}
+
+fn emit_struct_decl_record(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !CodeEval {
+    let node = ast.get(child);
+    return match node.data {
+        StructDecl(struct_decl) => try emit_one_struct_decl(text, ast, struct_decl.name, struct_decl.fields, code),
+        _ => code_eval_value(0, 0),
+    };
+}
+
+fn emit_one_struct_decl(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>
+) -> !CodeEval {
+    if fields.len == 0 {
+        return code_eval_value(0, 0);
+    }
+    let supported = try struct_decl_fields_supported(text, ast, fields, 0);
+    if !supported {
+        return code_eval_value(0, 0);
+    }
+    let name_span = code_node_span(text, ast, name);
+    let op_struct_decl = code_op_struct_decl();
+    try code.append(op_struct_decl);
+    try code.append(name_span.start);
+    try code.append(name_span.end);
+    try code.append(fields.len);
+    return try append_struct_decl_fields(text, ast, fields, code, 0);
+}
+
+fn struct_decl_fields_supported(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    fields: std::kizu::ast::ChildRange,
+    index: i64
+) -> !bool {
+    if index >= fields.len {
+        return true;
+    }
+    let child = try ast.child_at(fields, index);
+    let kind = try code_arena_struct_field_kind(text, ast, child);
+    if kind < 0 {
+        return false;
+    }
+    let after = index + 1;
+    return try struct_decl_fields_supported(text, ast, fields, after);
+}
+
+fn append_struct_decl_fields(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    fields: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    index: i64
+) -> !CodeEval {
+    if index >= fields.len {
+        return code_eval_value(0, 0);
+    }
+    let child = try ast.child_at(fields, index);
+    let eval = try append_struct_decl_field(text, ast, child, code);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let after = index + 1;
+    return try append_struct_decl_fields(text, ast, fields, code, after);
+}
+
+fn append_struct_decl_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !CodeEval {
+    let node = ast.get(child);
+    return match node.data {
+        Field(field_node) => try append_struct_decl_field_entry(text, ast, field_node.name, field_node.type_node, code),
+        _ => code_eval_unsupported(0),
+    };
+}
+
+fn append_struct_decl_field_entry(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !CodeEval {
+    let name_span = code_node_span(text, ast, name);
+    try code.append(name_span.start);
+    try code.append(name_span.end);
+    let field_kind = code_arena_field_type_kind(text, ast, type_node);
+    try code.append(field_kind);
+    return code_eval_value(0, 0);
 }
 
 // union_payload_kind classifies a variant payload type for the runtime layout:
@@ -5118,6 +5268,13 @@ fn code_enum_decl_record_end(code: &var std::array::Array<i64>, pos: i64) -> !i6
     return pos + 4 + entry_slots;
 }
 
+fn code_struct_decl_record_end(code: &var std::array::Array<i64>, pos: i64) -> !i64 {
+    let count_pos = pos + 3;
+    let field_count = try code.get(count_pos);
+    let entry_slots = field_count * 3;
+    return pos + 4 + entry_slots;
+}
+
 fn enum_decl_pos_by_span(
     text: []u8,
     code: &var std::array::Array<i64>,
@@ -5158,6 +5315,63 @@ fn enum_decl_pos_after_union(
 ) -> !i64 {
     let next_union = try code_union_decl_record_end(code, pos);
     return try enum_decl_pos_by_span(text, code, name_start, name_end, next_union);
+}
+
+fn struct_decl_pos_by_span(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    name_start: i64,
+    name_end: i64,
+    pos: i64
+) -> !i64 {
+    let total = code.len();
+    if pos >= total {
+        return 0 - 1;
+    }
+    let op = try code.get(pos);
+    let op_union_decl = code_op_union_decl();
+    if op == op_union_decl {
+        return try struct_decl_pos_after_union(text, code, name_start, name_end, pos);
+    }
+    let op_enum_decl = code_op_enum_decl();
+    if op == op_enum_decl {
+        return try struct_decl_pos_after_enum(text, code, name_start, name_end, pos);
+    }
+    let op_struct_decl = code_op_struct_decl();
+    if op != op_struct_decl {
+        return 0 - 1;
+    }
+    let rec_name_start = try code.get(pos + 1);
+    let rec_name_end = try code.get(pos + 2);
+    let rec_name = text[rec_name_start..rec_name_end];
+    let wanted = text[name_start..name_end];
+    let next_pos = try code_struct_decl_record_end(code, pos);
+    if !std::mem::equal_bytes(rec_name, wanted) {
+        return try struct_decl_pos_by_span(text, code, name_start, name_end, next_pos);
+    }
+    return pos;
+}
+
+fn struct_decl_pos_after_union(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    name_start: i64,
+    name_end: i64,
+    pos: i64
+) -> !i64 {
+    let next_union = try code_union_decl_record_end(code, pos);
+    return try struct_decl_pos_by_span(text, code, name_start, name_end, next_union);
+}
+
+fn struct_decl_pos_after_enum(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    name_start: i64,
+    name_end: i64,
+    pos: i64
+) -> !i64 {
+    let next_enum = try code_enum_decl_record_end(code, pos);
+    return try struct_decl_pos_by_span(text, code, name_start, name_end, next_enum);
 }
 
 // union_decl_variant_index returns the declaration-order index (the runtime
@@ -5338,6 +5552,21 @@ fn code_return_enum_kind(
 ) -> !i64 {
     let span = code_node_span(text, ast, type_node);
     let pos = try enum_decl_pos_by_span(text, code, span.start, span.end, 0);
+    if pos < 0 {
+        return 0 - 1;
+    }
+    let record_base = code_kind_struct_base();
+    return record_base + pos;
+}
+
+fn code_return_struct_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !i64 {
+    let span = code_node_span(text, ast, type_node);
+    let pos = try struct_decl_pos_by_span(text, code, span.start, span.end, 0);
     if pos < 0 {
         return 0 - 1;
     }
@@ -8449,6 +8678,7 @@ fn lower_code_return(
     return match node.data {
         Empty => try lower_code_return_void(code, next_value),
         Call(call_node) => try lower_code_return_call(text, ast, decls, value, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        StructLiteralExpr(struct_lit) => try lower_code_return_struct_literal(text, ast, decls, struct_lit.type_name, struct_lit.fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => try lower_code_return_value(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
     };
 }
@@ -8511,6 +8741,117 @@ fn lower_code_return_error(
     try code.append(op_ret_err_fail);
     try code.append(eval.value_id);
     return code_eval_value(0, eval.next);
+}
+
+fn lower_code_return_struct_literal(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    type_name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let lit_eval = try lower_code_struct_literal(text, ast, decls, fields, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !lit_eval.ok {
+        return code_eval_unsupported(lit_eval.next);
+    }
+    let lit_kind = try kinds.get(lit_eval.value_id);
+    let record_base = code_kind_struct_base();
+    if lit_kind < record_base {
+        return code_eval_unsupported(lit_eval.next);
+    }
+    let lit_record_pos = lit_kind - record_base;
+    let pack_eval = try lower_code_struct_return_pack(text, ast, type_name, lit_record_pos, code, kinds, args_scratch, lit_eval.next);
+    if !pack_eval.ok {
+        return code_eval_unsupported(pack_eval.next);
+    }
+    let op_ret_value = code_op_ret_value();
+    try code.append(op_ret_value);
+    try code.append(pack_eval.value_id);
+    return code_eval_value(pack_eval.value_id, pack_eval.next);
+}
+
+fn lower_code_struct_return_pack(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_name: std::kizu::ast::NodeId,
+    lit_record_pos: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let type_span = code_node_span(text, ast, type_name);
+    let decl_pos = try struct_decl_pos_by_span(text, code, type_span.start, type_span.end, 0);
+    if decl_pos < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let field_count = try code.get(decl_pos + 3);
+    let lit_count = try code.get(lit_record_pos + 2);
+    if field_count != lit_count {
+        return code_eval_unsupported(next_value);
+    }
+    let scratch_base = try args_scratch.get(0);
+    let scratch_bound = scratch_base + field_count;
+    try args_scratch.set(0, scratch_bound);
+    let fields_eval = try prepare_code_struct_return_pack_fields(text, code, kinds, decl_pos, lit_record_pos, field_count, args_scratch, scratch_base, 0, next_value);
+    if !fields_eval.ok {
+        return try code_eval_unsupported_after_scratch_reset(args_scratch, scratch_base, fields_eval.next);
+    }
+    let op_pack = code_op_struct_pack();
+    try code.append(op_pack);
+    try code.append(fields_eval.next);
+    try code.append(decl_pos);
+    try code.append(field_count);
+    try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
+    try args_scratch.set(0, scratch_base);
+    let record_base = code_kind_struct_base();
+    let struct_kind = record_base + decl_pos;
+    try kinds.append(struct_kind);
+    let result_value = fields_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+fn prepare_code_struct_return_pack_fields(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    decl_pos: i64,
+    lit_record_pos: i64,
+    field_count: i64,
+    args_scratch: &var std::array::Array<i64>,
+    scratch_base: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    if index >= field_count {
+        return code_eval_value(0, next_value);
+    }
+    let entry_slots = index * 3;
+    let entry_pos = decl_pos + 4 + entry_slots;
+    let name_start = try code.get(entry_pos);
+    let name_end = try code.get(entry_pos + 1);
+    let field_kind = try code.get(entry_pos + 2);
+    let raw_value = try struct_record_field(text, code, lit_record_pos, field_count, name_start, name_end, 0);
+    if raw_value < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let field_eval = try code_arena_struct_field_payload_value(text, code, kinds, raw_value, field_kind, next_value);
+    if !field_eval.ok {
+        return code_eval_unsupported(field_eval.next);
+    }
+    let value_pos = scratch_base + index;
+    try scratch_put(args_scratch, value_pos, field_eval.value_id);
+    let after = index + 1;
+    return try prepare_code_struct_return_pack_fields(text, code, kinds, decl_pos, lit_record_pos, field_count, args_scratch, scratch_base, after, field_eval.next);
 }
 
 fn lower_code_return_value(
@@ -9184,6 +9525,10 @@ fn lower_code_field_expr(
     if record_op == op_struct_param {
         return try lower_code_struct_param_field_read(text, ast, name, code, record_pos, base_eval.value_id, base_eval.next);
     }
+    let op_struct_decl = code_op_struct_decl();
+    if record_op == op_struct_decl {
+        return try lower_code_struct_decl_field_read(text, ast, name, code, kinds, record_pos, base_eval.value_id, base_eval.next);
+    }
     let op_struct_lit = code_op_struct_lit();
     if record_op != op_struct_lit {
         return code_eval_unsupported(base_eval.next);
@@ -9215,6 +9560,72 @@ fn lower_code_struct_param_field_read(
         return code_eval_unsupported(next_value);
     }
     return code_eval_value(value_id, next_value);
+}
+
+fn lower_code_struct_decl_field_read(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    record_pos: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let count_pos = record_pos + 3;
+    let field_count = try code.get(count_pos);
+    let name_span = code_node_span(text, ast, name);
+    let field_index = try struct_decl_record_field_index(text, code, record_pos, field_count, name_span.start, name_span.end, 0);
+    if field_index < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let field_kind = try struct_decl_record_field_kind(code, record_pos, field_index);
+    let op_field = code_op_struct_field();
+    try code.append(op_field);
+    try code.append(next_value);
+    try code.append(value_id);
+    try code.append(record_pos);
+    try code.append(field_index);
+    try kinds.append(field_kind);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+fn struct_decl_record_field_index(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    record_pos: i64,
+    field_count: i64,
+    name_start: i64,
+    name_end: i64,
+    index: i64
+) -> !i64 {
+    if index >= field_count {
+        return 0 - 1;
+    }
+    let entry_slots = index * 3;
+    let entry_pos = record_pos + 4 + entry_slots;
+    let entry_name_start = try code.get(entry_pos);
+    let entry_name_end = try code.get(entry_pos + 1);
+    let entry_name = text[entry_name_start..entry_name_end];
+    let wanted = text[name_start..name_end];
+    let after = index + 1;
+    if !std::mem::equal_bytes(entry_name, wanted) {
+        return try struct_decl_record_field_index(text, code, record_pos, field_count, name_start, name_end, after);
+    }
+    return index;
+}
+
+fn struct_decl_record_field_kind(
+    code: &var std::array::Array<i64>,
+    record_pos: i64,
+    field_index: i64
+) -> !i64 {
+    let entry_slots = field_index * 3;
+    let entry_pos = record_pos + 4 + entry_slots;
+    let kind_pos = entry_pos + 2;
+    let field_kind = try code.get(kind_pos);
+    return field_kind;
 }
 
 fn struct_param_record_field_kind(
