@@ -51,6 +51,8 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_llvm_constant(out, "check_ok", "10", "check: ok\0A");
     try append_llvm_constant(out, "move_prefix", "32", "error: move error: moved value `");
     try append_llvm_constant(out, "move_suffix", "10", "` was used");
+    try append_llvm_constant(out, "undefined_prefix", "39", "error: type error: undefined variable `");
+    try append_llvm_constant(out, "undefined_suffix", "1", "`");
     try append_llvm_constant(out, "stage_ok", "10", "stage: ok\0A");
     try append_llvm_constant(out, "usage", "58", "usage: selfhost <check|stage|parse|run|test|fmt> <target>\0A");
     try append_llvm_constant(out, "unsupported_run_codegen", "32", "unsupported run codegen program\0A");
@@ -2970,6 +2972,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
         "kizu_std__mem_starts_with",
         "%kizu.slice.u8 bytes;%kizu.slice.u8 prefix"
     );
+    try append_types_checker_reachable_compiled_functions(out, ir_bytes);
     // first_token / next_token seed the std::kizu::lexer tokenizer helper closure. The closure
     // reaches token_at, raw_token_at, scan helpers, Token constructors, position tracking, and byte
     // classifiers while leaving tokenize manual because it contains method calls on Array.
@@ -3044,6 +3047,23 @@ fn append_source_reachable_compiled_functions(
         out,
         ir_bytes,
         "selfhost::source::",
+        &var pending,
+        false
+    );
+    pending.deinit();
+    return;
+}
+
+fn append_types_checker_reachable_compiled_functions(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("first_hosted_check_undefined_variable_start_ast_node");
+    try append_component_reachable_compiled_functions(
+        out,
+        ir_bytes,
+        "selfhost::types::checker::",
         &var pending,
         false
     );
@@ -3342,6 +3362,10 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
             std::mem::starts_with(callee, "codegen::code_kind_") or
             std::mem::starts_with(callee, "codegen::code_loop_kind_") or
             std::mem::starts_with(callee, "codegen::code_io_stream_");
+    }
+    if std::mem::equal_bytes(prefix, "selfhost::types::checker::") {
+        return std::mem::equal_bytes(callee, "ast.get") or
+            std::mem::equal_bytes(callee, "ast.child_at");
     }
     if std::mem::equal_bytes(prefix, "selfhost::ir::codegen::") {
         // The tape's recursive list walks bind children through the compiled external
@@ -4213,6 +4237,23 @@ fn append_cli_corpus_blocks(out: &var std::string::String) -> !void {
         "check_file_ok"
     );
     try append_line(out, "check_file_ok:");
+    try append_line(out,
+        "  %check_allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
+    try append_line(out,
+        "  %check_parsed = call %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast(%kizu.owned %check_allocator, %kizu.slice.u8 %target, %kizu.slice.u8 %corpus_bytes)");
+    try append_line(out, "  %check_ast = extractvalue %kizu.kizu.ast.parse_result %check_parsed, 0");
+    try append_line(out, "  %check_root = extractvalue %kizu.kizu.ast.parse_result %check_parsed, 1");
+    try cli_check_gate_llvm::append_compiled_undefined_variable_gate(
+        out,
+        "check_file",
+        "check",
+        "corpus_io",
+        "corpus_bytes",
+        "check_ast",
+        "check_root",
+        "check_file_type_ok"
+    );
+    try append_line(out, "check_file_type_ok:");
     try append_line(out,
         "  %check_file_ok_ptr = getelementptr inbounds [10 x i8], ptr @.kizu.cli.check_ok, i64 0, i64 0");
     try append_line(out,
