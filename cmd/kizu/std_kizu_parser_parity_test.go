@@ -1773,7 +1773,7 @@ func summarizeExprSubset(expr kizuast.Expression) ([]string, string) {
 	case *kizuast.DerefExpr:
 		return summarizeDerefExprSubset(node)
 	case *kizuast.IfStmt:
-		return nil, "non-selfhost if expression outside std parser subset"
+		return summarizeIfSubset(node)
 	case *kizuast.MatchStmt:
 		return summarizeMatchSubset(node)
 	default:
