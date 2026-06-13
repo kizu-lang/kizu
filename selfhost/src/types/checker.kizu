@@ -390,7 +390,7 @@ fn hosted_check_undefined_variable_in_node(
             text, ast, program.declarations
         ),
         FnDecl(fn_decl) => try hosted_check_undefined_variable_in_function(
-            text, ast, fn_decl.body
+            text, ast, fn_decl.params, fn_decl.body
         ),
         Block(block) => try hosted_check_undefined_variable_in_statements(
             text, ast, block.statements, local_start, local_end
@@ -412,10 +412,95 @@ fn hosted_check_no_undefined_variable(text: []u8) -> i64 {
 fn hosted_check_undefined_variable_in_function(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId
 ) -> !i64 {
     let no_local = hosted_check_no_undefined_variable(text);
+    if params.len > 0 {
+        return no_local;
+    }
+    let has_binding_surface = try hosted_check_statement_has_binding_surface(text, ast, body);
+    if has_binding_surface {
+        return no_local;
+    }
     return hosted_check_undefined_variable_in_node(text, ast, body, no_local, no_local);
+}
+
+fn hosted_check_statement_has_binding_surface(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Block(block) => try hosted_check_statement_range_has_binding_surface(
+            text, ast, block.statements
+        ),
+        ExprStmt(expr_stmt) => try hosted_check_expr_has_binding_surface(
+            text, ast, expr_stmt.expr
+        ),
+        Let(let_node) => true,
+        For(for_node) => true,
+        _ => true,
+    };
+}
+
+fn hosted_check_statement_range_has_binding_surface(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !bool {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let child_has_binding_surface = try hosted_check_statement_has_binding_surface(text, ast, child);
+        if child_has_binding_surface {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn hosted_check_expr_has_binding_surface(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Var(var_node) => false,
+        FieldExpr(field_expr) => try hosted_check_expr_has_binding_surface(
+            text, ast, field_expr.receiver
+        ),
+        Call(call_node) => try hosted_check_expr_range_has_binding_surface(
+            text, ast, call_node.args
+        ),
+        StructLiteralExpr(struct_literal) => try hosted_check_expr_range_has_binding_surface(
+            text, ast, struct_literal.fields
+        ),
+        StructFieldInit(field_init) => try hosted_check_expr_has_binding_surface(
+            text, ast, field_init.value
+        ),
+        _ => true,
+    };
+}
+
+fn hosted_check_expr_range_has_binding_surface(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expressions: std::kizu::ast::ChildRange
+) -> !bool {
+    var index = 0;
+    while index < expressions.len {
+        let child = try ast.child_at(expressions, index);
+        let child_has_binding_surface = try hosted_check_expr_has_binding_surface(text, ast, child);
+        if child_has_binding_surface {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 fn hosted_check_undefined_variable_in_declarations(
