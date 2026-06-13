@@ -116,6 +116,13 @@ fn check_parsed_sources_core(
             function_arities,
             function_returns
         );
+        try collect_struct_field_types_from_ast(
+            allocator,
+            file,
+            parsed_source.ast,
+            parsed_source.root,
+            function_returns
+        );
         index = index + 1;
     }
 
@@ -232,6 +239,7 @@ pub fn first_pre_move_check_diagnostic_ast_node_with_types(
     defer enum_counts.deinit();
     defer enum_tags.deinit();
     try collect_function_returns_from_ast(allocator, file, ast, root, function_returns);
+    try collect_struct_field_types_from_ast(allocator, file, ast, root, function_returns);
     try collect_match_enum_types(allocator, file, ast, root, enum_counts, enum_tags);
     let match_diagnostic = try first_match_diagnostic_node(
         allocator,
@@ -281,6 +289,7 @@ pub fn first_post_move_check_diagnostic_ast_node(
     defer function_arities.deinit();
     defer local_function_param_types.deinit();
     try collect_function_returns_from_ast(allocator, file, ast, root, function_returns);
+    try collect_struct_field_types_from_ast(allocator, file, ast, root, function_returns);
     try function_calls::collect_function_arities_from_ast(allocator, file, &ast, root, function_arities);
     try function_params::collect_local_function_param_types(
         allocator,
@@ -759,6 +768,117 @@ fn collect_function_return(
         return error("duplicate function");
     }
     try returns.insert(key, ast_text::ast_return_type_text(file, ast, return_type));
+    return;
+}
+
+// Collect user-declared struct field types into returns so field-access
+// inference can resolve receiver.field to its real declared type instead of
+// the name-based field_name_type guess. Keys are namespaced by a spaced "sf "
+// tag (see expression_infer::append_struct_field_key) so they never collide
+// with the function-name keys also stored in this map.
+fn collect_struct_field_types_from_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_struct_field_types_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            returns
+        );,
+        StructDecl(struct_decl) => return collect_struct_field_types_for_struct(
+            allocator,
+            file,
+            ast,
+            struct_decl.name,
+            struct_decl.fields,
+            returns
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_struct_field_types_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_struct_field_types_from_ast(allocator, file, ast, child, returns);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_struct_field_types_for_struct(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    let struct_name = ast_text::ast_node_text(file, ast, name);
+    var index = 0;
+    while index < fields.len {
+        let child = try ast.child_at(fields, index);
+        try collect_struct_field_type_entry(allocator, file, ast, struct_name, child, returns);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_struct_field_type_entry(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    struct_name: []u8,
+    field_node_id: std::kizu::ast::NodeId,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    let node = ast.get(field_node_id);
+    match node.data {
+        Field(field) => return insert_struct_field_type(
+            allocator,
+            file,
+            ast,
+            struct_name,
+            field.name,
+            field.type_node,
+            returns
+        );,
+        _ => return;,
+    }
+}
+
+fn insert_struct_field_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    struct_name: []u8,
+    field_name_id: std::kizu::ast::NodeId,
+    type_node_id: std::kizu::ast::NodeId,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    let field_name = ast_text::ast_node_text(file, ast, field_name_id);
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try expression_infer::append_struct_field_key(key, struct_name, field_name);
+    let key_bytes = key.as_bytes();
+    if returns.contains(key_bytes) {
+        return;
+    }
+    try returns.insert(key_bytes, ast_text::ast_return_type_text(file, ast, type_node_id));
     return;
 }
 
