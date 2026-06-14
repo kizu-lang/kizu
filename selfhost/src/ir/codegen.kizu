@@ -5191,6 +5191,19 @@ fn append_code_defer_field_method_call(
     if !receiver_eval.ok {
         return code_eval_unsupported(receiver_eval.next);
     }
+    let receiver_kind = try kinds.get(receiver_eval.value_id);
+    let record_base = code_kind_struct_base();
+    if receiver_kind < record_base {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let receiver_record_pos = receiver_kind - record_base;
+    let receiver_op = try code.get(receiver_record_pos);
+    let op_struct_decl = code_op_struct_decl();
+    if receiver_op != op_struct_decl {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let type_start = try code.get(receiver_record_pos + 1);
+    let type_end = try code.get(receiver_record_pos + 2);
     try scratch_put(args_scratch, scratch_base, receiver_eval.value_id);
     let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, arg_base, 0, receiver_eval.next);
     if !args_eval.ok {
@@ -5203,10 +5216,12 @@ fn append_code_defer_field_method_call(
     try defer_records.append(result_kind);
     try defer_records.append(arg_count);
     try defer_records.append(1);
+    try defer_records.append(type_start);
+    try defer_records.append(type_end);
     let scratch_bound = scratch_base + arg_count;
     try append_code_defer_args(defer_records, args_scratch, scratch_base, scratch_bound);
     try args_scratch.set(0, scratch_base);
-    let record_size = arg_count + 6;
+    let record_size = arg_count + 8;
     try defer_records.append(record_size);
     return code_eval_value(0, args_eval.next);
 }
@@ -5298,9 +5313,15 @@ fn emit_code_defer_record(
     if name_start == runtime_tag {
         return try emit_code_defer_runtime_deinit(code, defer_records, record_index, next_value);
     }
-    let op_call = code_op_call();
-    try code.append(op_call);
+    let op_method_call = code_op_method_call();
+    try code.append(op_method_call);
     try code.append(next_value);
+    let type_start_pos = record_index + 5;
+    let type_start = try defer_records.get(type_start_pos);
+    try code.append(type_start);
+    let type_end_pos = record_index + 6;
+    let type_end = try defer_records.get(type_end_pos);
+    try code.append(type_end);
     try code.append(name_start);
     let name_end_pos = record_index + 1;
     let name_end = try defer_records.get(name_end_pos);
@@ -5310,7 +5331,7 @@ fn emit_code_defer_record(
     let arg_count_pos = record_index + 3;
     let arg_count = try defer_records.get(arg_count_pos);
     try code.append(arg_count);
-    let args_start = record_index + 5;
+    let args_start = record_index + 7;
     let args_end = args_start + arg_count;
     try copy_code_defer_args(code, defer_records, args_start, args_end);
     try defer_records.set(active_pos, 0);
