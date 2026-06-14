@@ -65,9 +65,36 @@ func TestSelfhostRunParityRecipes(t *testing.T) {
 	requireNoRecipeFragment(t, gate, "just selfhost-bootstrap")
 	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
 
+	one := justRecipe(content, "selfhost-run-one case")
+	requireRecipeFragment(t, one, "KIZU_RUN_SELFHOST_RUN_PARITY=1")
+	requireRecipeFragment(t, one, "KIZU_RUN_SELFHOST_RUN_PARITY_CASE='{{case}}'")
+	requireRecipeFragment(t, one, "TestSelfhostRunParityGate$")
+	requireNoRecipeFragment(t, one, "just selfhost-bootstrap")
+	requireNoRecipeFragment(t, one, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+
 	fromScratch := justRecipe(content, "selfhost-run-parity-gate-from-scratch")
 	requireRecipeFragment(t, fromScratch, "just selfhost-bootstrap")
 	requireRecipeFragment(t, fromScratch, "just selfhost-run-parity-gate")
+}
+
+// TestSelectRunParityCases covers name and fixture selectors for the inner loop.
+func TestSelectRunParityCases(t *testing.T) {
+	cases := []runParityCase{
+		{name: "run_hello", fixture: "selfhost/tests/cli/run_hello.kizu"},
+		{name: "run_example_hello", fixture: "examples/hello.kizu"},
+	}
+	for _, selector := range []string{"run_hello", "selfhost/tests/cli/run_hello.kizu"} {
+		got, err := selectRunParityCases(cases, selector)
+		if err != nil {
+			t.Fatalf("select %q: %v", selector, err)
+		}
+		if len(got) != 1 || got[0].name != "run_hello" {
+			t.Fatalf("select %q = %#v, want run_hello", selector, got)
+		}
+	}
+	if _, err := selectRunParityCases(cases, "missing"); err == nil {
+		t.Fatalf("select missing succeeded")
+	}
 }
 
 // runSelfhostRunParity executes the #569 manifest with the hosted compiler.
@@ -89,17 +116,47 @@ func runSelfhostRunParity(t *testing.T) (string, int) {
 		t.Errorf("load run parity manifest: %v", err)
 		return "", 1
 	}
+	selector := strings.TrimSpace(os.Getenv("KIZU_RUN_SELFHOST_RUN_PARITY_CASE"))
+	selected := selector != ""
+	if selected {
+		cases, err = selectRunParityCases(cases, selector)
+		if err != nil {
+			t.Errorf("select run parity case: %v", err)
+			return "", 1
+		}
+	}
 	start := time.Now()
 	var report strings.Builder
 	appendRunParityHeader(&report, len(cases))
+	if selected {
+		appendRunParitySelection(&report, selector)
+	}
 	failures := countRunParityCaseFailures(t, &report, runner, cases)
-	failures += countRunParityGuardFailures(t, &report, runner)
+	if selected {
+		appendRunParityGuardSelection(&report)
+	} else {
+		failures += countRunParityGuardFailures(t, &report, runner)
+	}
 	appendRunParityFooter(&report, start, failures)
 	if err := writeRunParityReport(report.String()); err != nil {
 		t.Errorf("write run parity report: %v", err)
 		failures++
 	}
 	return report.String(), failures
+}
+
+// selectRunParityCases filters the manifest by case name or fixture path.
+func selectRunParityCases(cases []runParityCase, selector string) ([]runParityCase, error) {
+	var selected []runParityCase
+	for _, item := range cases {
+		if item.name == selector || item.fixture == selector {
+			selected = append(selected, item)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no run parity case matches %q", selector)
+	}
+	return selected, nil
 }
 
 // loadRunParityCases parses the checked-in #569 manifest.
@@ -394,6 +451,12 @@ func appendRunParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "cases %d\n", count)
 }
 
+// appendRunParitySelection records an inner-loop manifest filter.
+func appendRunParitySelection(out *strings.Builder, selector string) {
+	fmt.Fprintf(out, "selection.mode single-case\n")
+	fmt.Fprintf(out, "selection.case %s\n", selector)
+}
+
 // appendRunParityResult writes one manifest result line group.
 func appendRunParityResult(
 	out *strings.Builder,
@@ -470,6 +533,12 @@ func appendRunParityGuardResult(
 	fmt.Fprintf(out, "guard.%s.exit %d\n", item.name, result.code)
 	fmt.Fprintf(out, "guard.%s.stdout.sha256 %s\n", item.name, textFingerprint(result.stdout))
 	fmt.Fprintf(out, "guard.%s.stderr.sha256 %s\n", item.name, textFingerprint(result.stderr))
+}
+
+// appendRunParityGuardSelection records guard omission for selected inner-loop runs.
+func appendRunParityGuardSelection(out *strings.Builder) {
+	fmt.Fprintf(out, "guards.executed false\n")
+	fmt.Fprintf(out, "guards.reason single-case-inner-loop\n")
 }
 
 // appendRunParityFooter writes elapsed time and pass/fail status.
