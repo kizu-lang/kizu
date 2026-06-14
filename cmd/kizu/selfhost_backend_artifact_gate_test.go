@@ -2158,7 +2158,7 @@ func runtimeStorageLayoutLLFragments() []string {
 		"%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }\n",
 		"%kizu.rt.string = type { ptr, ptr, i64, i64 }\n",
 		"%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }\n",
-		"%kizu.rt.arena = type { ptr, i64, i64, [48 x i8] }\n",
+		"%kizu.rt.arena = type { ptr, i64, i64, [64 x i8] }\n",
 		"@.kizu.rt.arena_invalid_handle",
 		"@.kizu.rt.abi_summary_name",
 		"@.kizu.rt.abi_failure",

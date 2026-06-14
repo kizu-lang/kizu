@@ -126,6 +126,10 @@ selfhost-fmt-parity-gate-from-scratch:
 selfhost-run-parity-gate:
     KIZU_RUN_SELFHOST_RUN_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1 -v
 
+# Run one #569 run parity case by manifest name or fixture path through stage2.
+selfhost-run-one case:
+    KIZU_RUN_SELFHOST_RUN_PARITY=1 KIZU_RUN_SELFHOST_RUN_PARITY_CASE='{{case}}' go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1 -v
+
 # Build the hosted artifact once, then run run <file> parity.
 selfhost-run-parity-gate-from-scratch:
     just selfhost-bootstrap

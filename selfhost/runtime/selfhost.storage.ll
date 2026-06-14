@@ -13,7 +13,7 @@ source_filename = "target/selfhost/selfhost.storage"
 %kizu.rt.string = type { ptr, ptr, i64, i64 }
 %kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }
 %kizu.rt.diagnostics = type { ptr, i64 }
-%kizu.rt.arena = type { ptr, i64, i64, [48 x i8] }
+%kizu.rt.arena = type { ptr, i64, i64, [64 x i8] }
 
 @.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c"invalid arena handle"
 @.kizu.rt.allocation_failed = private unnamed_addr constant [17 x i8] c"allocation failed"
@@ -778,7 +778,7 @@ entry:
 define %kizu.owned @kizu_rt_arena_new(%kizu.owned %allocator, i64 %element_size) {
 entry:
   %allocator_ptr = extractvalue %kizu.owned %allocator, 0
-  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 72)
+  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 88)
   %allocator_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 0
   store ptr %allocator_ptr, ptr %allocator_field
   %len_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 1
@@ -797,7 +797,7 @@ entry:
   %size_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 2
   %element_size = load i64, ptr %size_field
   %size_nonnegative = icmp sge i64 %element_size, 0
-  %size_bounded = icmp sle i64 %element_size, 24
+  %size_bounded = icmp sle i64 %element_size, 32
   %size_ok = icmp eq i64 %value_len, %element_size
   %positive_size = icmp sgt i64 %element_size, 0
   %value_ptr_ok = icmp ne ptr %value_ptr, null

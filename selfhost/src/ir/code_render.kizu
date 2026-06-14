@@ -722,12 +722,20 @@ fn ret_abi_user_bool() -> i64 {
     return 4;
 }
 
+fn ret_abi_user_slice() -> i64 {
+    return 5;
+}
+
 fn return_kind_bool() -> i64 {
     return 900;
 }
 
+fn return_kind_slice() -> i64 {
+    return 901;
+}
+
 // user_ret_abi maps a user function's declared return kind (0 void, 1 i64, 2
-// error-union void, 3 error-union i64, bool) to its render ABI.
+// error-union void, 3 error-union i64, bool, '[]u8' slice) to its render ABI.
 fn user_ret_abi(ret_kind: i64) -> i64 {
     if ret_kind == 2 {
         return ret_abi_user_err_void();
@@ -738,6 +746,10 @@ fn user_ret_abi(ret_kind: i64) -> i64 {
     let bool_ret = return_kind_bool();
     if ret_kind == bool_ret {
         return ret_abi_user_bool();
+    }
+    let slice_ret = return_kind_slice();
+    if ret_kind == slice_ret {
+        return ret_abi_user_slice();
     }
     return ret_abi_user_i64();
 }
@@ -852,6 +864,8 @@ fn render_user_define_head(
     let is_err_i64 = ret_kind == 3;
     let bool_ret = return_kind_bool();
     let is_bool = ret_kind == bool_ret;
+    let slice_ret = return_kind_slice();
+    let is_slice = ret_kind == slice_ret;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
     let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
@@ -869,7 +883,10 @@ fn render_user_define_head(
     if is_bool {
         try w(out, "define i1 @kizu_run_user_");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_union_ret and !is_struct_ret;
+    if is_slice {
+        try w(out, "define %kizu.slice.u8 @kizu_run_user_");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try w(out, "define i64 @kizu_run_user_");
     }
@@ -911,6 +928,8 @@ fn render_user_return_type(
     let is_err_i64 = ret_kind == 3;
     let bool_ret = return_kind_bool();
     let is_bool = ret_kind == bool_ret;
+    let slice_ret = return_kind_slice();
+    let is_slice = ret_kind == slice_ret;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
     let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
@@ -928,7 +947,10 @@ fn render_user_return_type(
     if is_bool {
         try w(out, "i1");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_union_ret and !is_struct_ret;
+    if is_slice {
+        try w(out, "%kizu.slice.u8");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try w(out, "i64");
     }
@@ -956,6 +978,8 @@ fn render_user_tail(
     let is_err_i64 = abi == err_i64;
     let bool_ret = return_kind_bool();
     let is_bool = ret_kind == bool_ret;
+    let slice_ret = return_kind_slice();
+    let is_slice = ret_kind == slice_ret;
     let is_union_ret = try value_kind_is_union(code, ret_kind);
     let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     if is_err_void {
@@ -975,7 +999,10 @@ fn render_user_tail(
     if is_bool {
         try wl(out, "  ret i1 false");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_union_ret and !is_struct_ret;
+    if is_slice {
+        try wl(out, "  ret %kizu.slice.u8 zeroinitializer");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret;
     if is_word_ret {
         try wl(out, "  ret i64 0");
     }
@@ -5082,13 +5109,13 @@ fn tape_arena_add_struct_record_end(code: &std::array::Array<i64>, index: i64) -
 }
 
 // tape_var_struct_record_end returns the index past a VAR_STRUCT record, reading
-// its field count ('op dst field_count [name_start name_end slot kind] per
+// its field count ('op dst type_start type_end field_count [name_start name_end slot_or_value kind] per
 // field'). The renderer emits nothing for the record itself: field reads and
 // assignments were already lowered onto the slot trios.
 fn tape_var_struct_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
-    let field_count = try code.get(index + 2);
+    let field_count = try code.get(index + 4);
     let field_slots = field_count * 4;
-    return index + 3 + field_slots;
+    return index + 5 + field_slots;
 }
 
 // tape_record_end returns the tape index just past the record beginning at index,

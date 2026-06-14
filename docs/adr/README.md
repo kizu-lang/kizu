@@ -96,3 +96,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0074: control expressions and statement semicolons](0074-control-expressions-and-statement-semicolons.md)
 - [ADR-0075: owner aggregate cleanup and errdefer](0075-owner-aggregate-cleanup-and-errdefer.md)
 - [ADR-0077: error union implicit widening](0077-error-union-implicit-widening.md)
+- [ADR-0078: native diagnostic completeness](0078-native-diagnostic-completeness.md) (提案)
