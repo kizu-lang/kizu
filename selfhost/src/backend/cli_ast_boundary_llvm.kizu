@@ -578,8 +578,32 @@ fn append_parse_match_arm_function(out: &var std::string::String) -> !void {
     try append_line(out, "  br i1 %arrow_ok, label %body, label %fail");
     try append_line(out, "body:");
     try append_line(out, "  %body_index = add i64 %arrow_index, 1");
+    // The arm value head dispatches like cli_parse_return: a 'match' (19) or 'if'
+    // (13) keyword routes to the dedicated parser so a nested match/if expression
+    // becomes the arm value, while every other head falls back to cli_parse_expr.
     try append_line(out,
-        "  %body_result = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %body_index)");
+        "  %body_head = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %body_index)");
+    try append_line(out, "  %body_head_kind = extractvalue %kizu.kizu.lexer.token %body_head, 0");
+    try append_line(out, "  %body_is_match = icmp eq i64 %body_head_kind, 19");
+    try append_line(out, "  br i1 %body_is_match, label %body_parse_match, label %body_maybe_if");
+    try append_line(out, "body_parse_match:");
+    try append_line(out,
+        "  %body_match = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_match(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %body_index)");
+    try append_line(out, "  br label %body_join");
+    try append_line(out, "body_maybe_if:");
+    try append_line(out, "  %body_is_if = icmp eq i64 %body_head_kind, 13");
+    try append_line(out, "  br i1 %body_is_if, label %body_parse_if, label %body_parse_expr");
+    try append_line(out, "body_parse_if:");
+    try append_line(out,
+        "  %body_if = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_if(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %body_index)");
+    try append_line(out, "  br label %body_join");
+    try append_line(out, "body_parse_expr:");
+    try append_line(out,
+        "  %body_expr = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_expr(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %body_index)");
+    try append_line(out, "  br label %body_join");
+    try append_line(out, "body_join:");
+    try append_line(out,
+        "  %body_result = phi %kizu.selfhost.cli.parse_node_result [ %body_match, %body_parse_match ], [ %body_if, %body_parse_if ], [ %body_expr, %body_parse_expr ]");
     try append_line(out, "  %body_ok = extractvalue %kizu.selfhost.cli.parse_node_result %body_result, 0");
     try append_line(out, "  br i1 %body_ok, label %binding_pick, label %fail");
     try append_line(out, "binding_pick:");
