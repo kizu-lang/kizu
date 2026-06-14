@@ -5,17 +5,18 @@ import (
 	"testing"
 )
 
-// codegenCompiledClosureSeeds lists the codegen compiled closure roots: the
-// Program builder / metadata / Value helper roots plus the stage2 backend roots
-// needed by the run tape lowering and renderer.
+// codegenCompiledClosureSeeds lists the codegen compiled closure roots after the
+// #1255 slice4 PR-1 shape contract severance: only the run tape lowering root
+// lower_code_module and the code_op_mem_page_allocator opcode accessor remain. The
+// hosted per-shape Program builder / metadata roots (lowered_main_print_program /
+// metadata_for_program / main_print_payload / unsupported_program) were severed once
+// shape emit became closure-excluded. metadata_line stays a direct root: the live
+// metadata constant leaf was previously reached via metadata_for_program.
 func codegenCompiledClosureSeeds() []string {
 	return []string{
-		"lowered_main_print_program",
-		"metadata_for_program",
-		"main_print_payload",
-		"unsupported_program",
 		"lower_code_module",
 		"code_op_mem_page_allocator",
+		"metadata_line",
 	}
 }
 
@@ -49,9 +50,10 @@ func codegenCompiledClosureForbiddenFragments() []string {
 		fragments = append(fragments, "\"selfhost::ir::codegen::"+name+"\"")
 		fragments = append(fragments, "\"kizu_selfhost__ir_codegen_"+name+"\"")
 	}
-	// The params_spec literals that were unique to a removed registration. The
-	// shared "%kizu.selfhost.codegen.program program" spelling is not forbidden: it
-	// is still carried by other compiled helpers (e.g. lowered_program_supported).
+	// The params_spec literals that were unique to a removed registration. The shared
+	// "%kizu.selfhost.codegen.program program" spelling is not listed here (it is
+	// covered by the program-support severance gate); after #1255 slice4 PR-1 no
+	// codegen compiled helper carries it any longer.
 	fragments = append(fragments,
 		"\"%kizu.slice.u8 payload;i1 from_codegen_lowering\"",
 		"\"%kizu.selfhost.codegen.value value\"",
@@ -119,22 +121,17 @@ func TestSelfhostCodegenRunAstSupportEmissionRemoved(t *testing.T) {
 		}
 	}
 
-	required := []string{
-		`"selfhost::ir::codegen::loop_i64_program_supported"`,
-		`"kizu_selfhost__ir_codegen_loop_i64_program_supported"`,
-		`"%kizu.selfhost.codegen.program program"`,
-	}
-	for _, fragment := range required {
-		if !strings.Contains(cli, fragment) {
-			t.Fatalf("loop-i64 support compiled-auto registration missing %q", fragment)
-		}
-	}
-
+	// #1255 slice4 PR-1: the loop_i64_program_supported compiled-auto registration
+	// was severed once shape emit became closure-excluded; its quoted qualified /
+	// mangled spellings and the shared program params_spec literal must now be gone.
 	forbidden := []string{
 		"fn append_loop_i64_run_ast_supported_function(",
 		"try append_loop_i64_run_ast_supported_function(out, ir_bytes);",
 		"fn append_loop_i64_program_supported_function(",
 		"try append_loop_i64_program_supported_function(out, ir_bytes);",
+		`"selfhost::ir::codegen::loop_i64_program_supported"`,
+		`"kizu_selfhost__ir_codegen_loop_i64_program_supported"`,
+		`"%kizu.selfhost.codegen.program program"`,
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(cli, fragment) {
@@ -143,13 +140,14 @@ func TestSelfhostCodegenRunAstSupportEmissionRemoved(t *testing.T) {
 	}
 }
 
-// TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto keeps converted
-// Program support predicates on real body lowering instead of restoring their
-// hand-written LLVM renderers.
-func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
+// TestSelfhostCodegenProgramSupportPredicatesSevered pins that the Program support
+// predicates are severed from the stage2 compiled closure (#1255 slice4 PR-1): once
+// shape emit became closure-excluded their compiled-auto registrations were removed,
+// and their hand-written LLVM renderers must stay gone too (they were never restored).
+func TestSelfhostCodegenProgramSupportPredicatesSevered(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 
-	required := []string{
+	forbidden := []string{
 		`"selfhost::ir::codegen::program_supported"`,
 		`"kizu_selfhost__ir_codegen_program_supported"`,
 		`"selfhost::ir::codegen::i64_call_program_supported"`,
@@ -158,15 +156,6 @@ func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
 		`"kizu_selfhost__ir_codegen_return_void_program_supported"`,
 		`"selfhost::ir::codegen::try_void_program_supported"`,
 		`"kizu_selfhost__ir_codegen_try_void_program_supported"`,
-		`"%kizu.selfhost.codegen.program program"`,
-	}
-	for _, fragment := range required {
-		if !strings.Contains(cli, fragment) {
-			t.Fatalf("program support compiled-auto registration missing %q", fragment)
-		}
-	}
-
-	forbidden := []string{
 		"fn append_program_supported_function(",
 		"try append_program_supported_function(out, ir_bytes);",
 		"fn append_i64_call_program_supported_function(",
@@ -178,7 +167,7 @@ func TestSelfhostCodegenProgramSupportPredicatesUseCompiledAuto(t *testing.T) {
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(cli, fragment) {
-			t.Fatalf("program support keeps hand-written renderer fragment %q", fragment)
+			t.Fatalf("program support predicate registration/renderer should be severed: %q", fragment)
 		}
 	}
 }

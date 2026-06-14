@@ -406,19 +406,17 @@ func requiredLLVMExecutableFragments() []string {
 		"%kizu.selfhost.codegen.function = type { %kizu.slice.u8, i64 }",
 		"%kizu.selfhost.codegen.program = type { i64, %kizu.slice.u8",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_parse_result",
-		"define %kizu.selfhost.codegen.value @kizu_selfhost__ir_codegen_const_string_value",
-		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__ir_codegen_const_string_instruction",
-		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__ir_codegen_call_instruction",
-		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__ir_codegen_return_void_instruction",
+		// #1255 slice4 PR-1: const_string_value / const_string_instruction /
+		// call_instruction / return_void_instruction / lowered_main_print_program were
+		// severed (closure-excluded). Only the live metadata_line constant + define
+		// remain; their absence is locked in by forbiddenSeveredShapeEmissionFragments.
 		"@.kizu.cli.codegen_metadata_line = private unnamed_addr constant",
 		"define %kizu.slice.u8 @kizu_selfhost__ir_codegen_metadata_line()",
-		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_main_print_program",
 		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
 		"%tokens_result = call %kizu.error.owned @kizu_kizu__lexer_tokenize",
 		"@kizu_kizu__ast_ast_add_node",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_lower_program",
 		"define %kizu.error.owned @kizu_selfhost__ir_code_render_render_run_artifact",
-		"define i1 @kizu_selfhost__ir_codegen_program_supported",
 	}
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
@@ -1795,7 +1793,33 @@ func requiredLLVMParserPredicateFragments() []string {
 func forbiddenLLVMFragments() []string {
 	fragments := forbiddenLegacyCLISourceShapeFragments()
 	fragments = append(fragments, forbiddenLegacyRunAstEmissionFragments()...)
+	fragments = append(fragments, forbiddenSeveredShapeEmissionFragments()...)
 	return append(fragments, forbiddenLegacyRunArtifactFragments()...)
+}
+
+// forbiddenSeveredShapeEmissionFragments returns the hosted per-shape Program builder
+// / consumer compiled defines severed by #1255 slice4 PR-1. Once the codegen compiled
+// closure dropped the lowered_main_print_program / metadata_for_program /
+// main_print_payload / unsupported_program roots and the *_program_supported
+// auto-index registrations, these defines are no longer emitted into stage2.
+func forbiddenSeveredShapeEmissionFragments() []string {
+	return []string{
+		"define %kizu.selfhost.codegen.value @kizu_selfhost__ir_codegen_const_string_value",
+		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__ir_codegen_const_string_instruction",
+		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__ir_codegen_call_instruction",
+		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__ir_codegen_return_void_instruction",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_build_main_print_program",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__ir_codegen_lowered_main_print_program",
+		"define %kizu.selfhost.codegen.value @kizu_selfhost__ir_codegen_main_print_payload",
+		"define %kizu.slice.u8 @kizu_selfhost__ir_codegen_metadata_for_program",
+		"define i1 @kizu_selfhost__ir_codegen_program_supported",
+		"define i1 @kizu_selfhost__ir_codegen_i64_call_program_supported",
+		"define i1 @kizu_selfhost__ir_codegen_return_void_program_supported",
+		"define i1 @kizu_selfhost__ir_codegen_try_void_program_supported",
+		"define i1 @kizu_selfhost__ir_codegen_loop_i64_program_supported",
+		"define i1 @kizu_selfhost__ir_codegen_fs_read_program_supported",
+		"define i1 @kizu_selfhost__ir_codegen_lowered_program_supported",
+	}
 }
 
 // forbiddenLegacyCLISourceShapeFragments returns removed fixture-shape CLI gates.
@@ -1977,32 +2001,10 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"run_file_cli !i64\n",
 		"backend-input function-signature-param selfhost::cli::execute::" +
 			"run_file_cli 0 allocator:runtime:Allocator\n",
-		"backend-input function-signature-return selfhost::backend::" +
-			"lower_run_codegen_program !codegen::Program\n",
-		"backend-input function-signature-param selfhost::backend::" +
-			"lower_run_codegen_program 1 ast:runtime:std::kizu::ast::Ast\n",
-		"backend-input function-signature-return selfhost::ir::codegen::" +
-			"lower_run_program !Program\n",
-		"backend-input function-signature-param selfhost::ir::codegen::" +
-			"lower_run_program 1 ast:runtime:std::kizu::ast::Ast\n",
-		"backend-input function-signature-return selfhost::ir::codegen::" +
-			"lower_run_ast !RunAst\n",
-		"backend-input function-signature-param selfhost::ir::codegen::" +
-			"lower_run_ast 1 ast:runtime:std::kizu::ast::Ast\n",
-		"backend-input function-signature-return selfhost::ir::codegen::" +
-			"lower_run_parse_result !RunAst\n",
-		"backend-input function-signature-param selfhost::ir::codegen::" +
-			"lower_run_parse_result 1 parsed:runtime:std::kizu::ast::ParseResult\n",
-		"backend-input function-signature-return selfhost::ir::codegen::" +
-			"lower_run_ast_to_program Program\n",
-		"backend-input function-signature-return selfhost::ir::codegen::" +
-			"main_print_program Program\n",
-		"backend-input function-signature-param selfhost::ir::codegen::" +
-			"main_print_program 0 payload:runtime:[]u8\n",
-		"backend-input function-signature-return selfhost::ir::codegen::" +
-			"stdout_payload ![]u8\n",
-		"backend-input function-signature-param selfhost::ir::codegen::" +
-			"stdout_payload 0 program:runtime:&Program\n",
+		// #1255 slice4 PR-1: the hosted per-shape signature metadata (lower_run_*/
+		// main_print_program/stdout_payload/lower_run_codegen_program) was severed once
+		// shape emit became closure-excluded. Only the live run_file_cli / metadata_line
+		// / lower_test_executable signature inputs remain.
 		"backend-input function-signature-return selfhost::ir::codegen::" +
 			"metadata_line []u8\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +

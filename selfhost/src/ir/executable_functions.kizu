@@ -2370,7 +2370,6 @@ fn hosted_closure_external_callee_allowed(callee_text: []u8) -> bool {
 // silently dropped.
 fn backend_wrapper_external_callee_allowed(callee_text: []u8) -> bool {
     return std::mem::equal_bytes(callee_text, "codegen::lower_run_program") or
-        std::mem::equal_bytes(callee_text, "hosted::emit_run_codegen_artifact") or
         std::mem::equal_bytes(callee_text, "code_render::render_run_ast_artifact") or
         std::mem::equal_bytes(callee_text, "hosted::emit_rendered_run_artifact");
 }
@@ -2790,14 +2789,6 @@ pub fn append_codegen_function_facts(
         "RunAst",
         "selfhost::ir::codegen::RunAst"
     );
-    try append_selected_struct_field_facts(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "FsReadBinding",
-        "selfhost::ir::codegen::FsReadBinding"
-    );
     // IntEnv carries the program's top-level declarations as a real
     // std::kizu::ast::ChildRange (tracker 961). Emitting its struct fields plus
     // the ChildRange type-llvm mapping is the first read-only AST value type
@@ -2827,7 +2818,6 @@ pub fn append_codegen_function_facts(
     try append_type_llvm_fact(out, "selfhost::ir::codegen::CodegenFunction", "%kizu.selfhost.codegen.function");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::Program", "%kizu.selfhost.codegen.program");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::RunAst", "%kizu.selfhost.codegen.run_ast");
-    try append_type_llvm_fact(out, "selfhost::ir::codegen::FsReadBinding", "%kizu.selfhost.codegen.fs_read_binding");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::LocalBinding", "%kizu.selfhost.codegen.local_binding");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::LocalTable", "%kizu.selfhost.codegen.local_table");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::PayloadSpan", "%kizu.selfhost.codegen.payload_span");
@@ -2860,22 +2850,11 @@ fn append_codegen_reachable_helper_bodies(
 ) -> !void {
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
-    try append_codegen_closure_seed(&var pending, catalog, "lower_run_program");
-    try append_codegen_closure_seed(&var pending, catalog, "lower_run_parse_result");
-    try append_codegen_closure_seed(&var pending, catalog, "lower_run_ast");
-    try append_codegen_closure_seed(&var pending, catalog, "main_print_program");
-    try append_codegen_closure_seed(&var pending, catalog, "unsupported_program");
-    try append_codegen_closure_seed(&var pending, catalog, "program_supported");
-    try append_codegen_closure_seed(&var pending, catalog, "lowered_program_supported");
-    try append_codegen_closure_seed(&var pending, catalog, "require_main_print");
-    try append_codegen_closure_seed(&var pending, catalog, "require_lowered_main_print");
-    try append_codegen_closure_seed(&var pending, catalog, "stdout_payload");
-    try append_codegen_closure_seed(&var pending, catalog, "fs_read_program_supported");
-    try append_codegen_closure_seed(&var pending, catalog, "i64_call_program_supported");
-    try append_codegen_closure_seed(&var pending, catalog, "return_void_program_supported");
-    try append_codegen_closure_seed(&var pending, catalog, "try_void_program_supported");
-    try append_codegen_closure_seed(&var pending, catalog, "loop_i64_program_supported");
-    try append_codegen_closure_seed(&var pending, catalog, "metadata_for_program");
+    // issue 1255 slice4 PR-1: the hosted per-shape Program builder / consumer / lowering
+    // seeds (lower_run_*/main_print_program/*_program_supported/metadata_for_program/
+    // stdout_payload/etc.) were severed once shape emit became closure-excluded. Only
+    // metadata_line remains as a codegen helper-body seed (live: tape run metadata +
+    // stage2 cli_codegen_llvm metadata constant).
     try append_codegen_closure_seed(&var pending, catalog, "metadata_line");
     // empty_int_env is a direct stage2 backend root: cli_llvm compiles it to keep
     // std::kizu::ast::ChildRange value-type ABI coverage, while lower_run_int_program
@@ -3047,21 +3026,13 @@ fn codegen_closure_builder_role(local_name: []u8) -> bool {
         std::mem::equal_bytes(local_name, "return_void_instruction");
 }
 
+// issue 1255 slice4 PR-1: the hosted per-shape consumer predicates (*_program_supported /
+// require_*_main_print / stdout_payload / metadata_for_program / main_print_payload /
+// unsupported_program) were severed once shape emit became closure-excluded. Only
+// metadata_line (live codegen metadata leaf) and none_value remain reachable through
+// the tape/metadata helper-body closure.
 fn codegen_closure_consumer_role(local_name: []u8) -> bool {
-    return std::mem::equal_bytes(local_name, "program_supported") or
-        std::mem::equal_bytes(local_name, "i64_call_program_supported") or
-        std::mem::equal_bytes(local_name, "return_void_program_supported") or
-        std::mem::equal_bytes(local_name, "try_void_program_supported") or
-        std::mem::equal_bytes(local_name, "loop_i64_program_supported") or
-        std::mem::equal_bytes(local_name, "fs_read_program_supported") or
-        std::mem::equal_bytes(local_name, "lowered_program_supported") or
-        std::mem::equal_bytes(local_name, "require_main_print") or
-        std::mem::equal_bytes(local_name, "require_lowered_main_print") or
-        std::mem::equal_bytes(local_name, "stdout_payload") or
-        std::mem::equal_bytes(local_name, "metadata_for_program") or
-        std::mem::equal_bytes(local_name, "metadata_line") or
-        std::mem::equal_bytes(local_name, "main_print_payload") or
-        std::mem::equal_bytes(local_name, "unsupported_program") or
+    return std::mem::equal_bytes(local_name, "metadata_line") or
         std::mem::equal_bytes(local_name, "none_value");
 }
 
@@ -3648,7 +3619,6 @@ fn append_backend_wrapper_body_facts(
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
     try pending.append(try component_function_catalog::find_local_function_index(catalog, "lower_run_codegen_program"));
-    try pending.append(try component_function_catalog::find_local_function_index(catalog, "emit_run_codegen_artifact"));
     try pending.append(try component_function_catalog::find_local_function_index(catalog, "render_run_codegen_artifact"));
     try pending.append(try component_function_catalog::find_local_function_index(catalog, "emit_rendered_run_artifact"));
     var index = 0;
@@ -3835,15 +3805,6 @@ fn append_hosted_function_facts(
         file.text,
         parsed.ast,
         parsed.root,
-        "emit_run_codegen_artifact",
-        "selfhost::backend::hosted::emit_run_codegen_artifact",
-        "hosted-run-codegen-writer"
-    );
-    try append_selected_function_with_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
         "emit_rendered_run_artifact",
         "selfhost::backend::hosted::emit_rendered_run_artifact",
         "hosted-run-codegen-writer"
@@ -3856,24 +3817,6 @@ fn append_hosted_function_facts(
         "emit_test_executable_artifact",
         "selfhost::backend::hosted::emit_test_executable_artifact",
         "hosted-test-writer"
-    );
-    try append_selected_function_with_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "render_main_print_llvm",
-        "selfhost::backend::hosted::render_main_print_llvm",
-        "hosted-run-codegen-writer"
-    );
-    try append_selected_function_with_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "render_return_void_llvm",
-        "selfhost::backend::hosted::render_return_void_llvm",
-        "hosted-run-codegen-writer"
     );
     // artifact_path is the first selfhost String builder compiled into stage2
     // (issue 1165 slice 1): it concatenates the directory, the source-path stem,
@@ -3964,36 +3907,6 @@ fn append_hosted_writer_helper_signatures(
         out, text, ast, root,
         "run_print_executable",
         "selfhost::backend::hosted::run_print_executable"
-    );
-    try append_selected_function_signature(
-        out, text, ast, root,
-        "write_fs_read_module",
-        "selfhost::backend::hosted::write_fs_read_module"
-    );
-    try append_selected_function_signature(
-        out, text, ast, root,
-        "write_loop_i64_module",
-        "selfhost::backend::hosted::write_loop_i64_module"
-    );
-    try append_selected_function_signature(
-        out, text, ast, root,
-        "write_i64_call_module",
-        "selfhost::backend::hosted::write_i64_call_module"
-    );
-    try append_selected_function_signature(
-        out, text, ast, root,
-        "write_try_void_module",
-        "selfhost::backend::hosted::write_try_void_module"
-    );
-    try append_selected_function_signature(
-        out, text, ast, root,
-        "write_main_print_module",
-        "selfhost::backend::hosted::write_main_print_module"
-    );
-    try append_selected_function_signature(
-        out, text, ast, root,
-        "write_return_void_module",
-        "selfhost::backend::hosted::write_return_void_module"
     );
     try append_selected_function_signature(
         out, text, ast, root,
