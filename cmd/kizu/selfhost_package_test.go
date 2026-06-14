@@ -796,7 +796,6 @@ func TestSelfhostBackendWrapperClosureUsesComponentCatalog(t *testing.T) {
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::backend\"",
 		"component_function_catalog::find_local_function_index(catalog, \"lower_run_codegen_program\")",
-		"component_function_catalog::find_local_function_index(catalog, \"emit_run_codegen_artifact\")",
 		"append_backend_wrapper_closure_body(",
 		"closure_index_seen(&emitted, function_index)",
 	}
@@ -878,7 +877,6 @@ func assertBackendWrapperClosureExternalCalleePolicy(
 	)
 	for _, fragment := range []string{
 		"std::mem::equal_bytes(callee_text, \"codegen::lower_run_program\")",
-		"std::mem::equal_bytes(callee_text, \"hosted::emit_run_codegen_artifact\")",
 		"std::mem::equal_bytes(callee_text, \"code_render::render_run_ast_artifact\")",
 		"std::mem::equal_bytes(callee_text, \"hosted::emit_rendered_run_artifact\")",
 	} {
@@ -3928,32 +3926,10 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 		"function-signature-return selfhost::cli::execute::run_file_cli !i64",
 		"function-signature-param selfhost::cli::execute::run_file_cli 0 " +
 			"allocator:runtime:Allocator",
-		"function-signature-return selfhost::backend::" +
-			"lower_run_codegen_program !codegen::Program",
-		"function-signature-param selfhost::backend::" +
-			"lower_run_codegen_program 1 ast:runtime:std::kizu::ast::Ast",
-		"function-signature-return selfhost::ir::codegen::" +
-			"lower_run_program !Program",
-		"function-signature-param selfhost::ir::codegen::" +
-			"lower_run_program 1 ast:runtime:std::kizu::ast::Ast",
-		"function-signature-return selfhost::ir::codegen::" +
-			"lower_run_ast !RunAst",
-		"function-signature-param selfhost::ir::codegen::" +
-			"lower_run_ast 1 ast:runtime:std::kizu::ast::Ast",
-		"function-signature-return selfhost::ir::codegen::" +
-			"lower_run_parse_result !RunAst",
-		"function-signature-param selfhost::ir::codegen::" +
-			"lower_run_parse_result 1 parsed:runtime:std::kizu::ast::ParseResult",
-		"function-signature-return selfhost::ir::codegen::" +
-			"lower_run_ast_to_program Program",
-		"function-signature-return selfhost::ir::codegen::" +
-			"main_print_program Program",
-		"function-signature-param selfhost::ir::codegen::" +
-			"main_print_program 0 payload:runtime:[]u8",
-		"function-signature-return selfhost::ir::codegen::" +
-			"stdout_payload ![]u8",
-		"function-signature-param selfhost::ir::codegen::" +
-			"stdout_payload 0 program:runtime:&Program",
+		// #1255 slice4 PR-1: the hosted per-shape signature details (lower_run_*/
+		// main_print_program/stdout_payload/lower_run_codegen_program) were severed from
+		// the executable signature contract. run_file_cli and lower_test_executable are
+		// the surviving live entrypoint / test-wrapper signature details.
 		"function-signature-param selfhost::backend::executable::" +
 			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast",
 	}
@@ -3968,7 +3944,9 @@ func hostedExecutableBodyContractFragments() []string {
 	return fragments
 }
 
-// hostedExecutableCommonBodyContractFragments returns shared body checks.
+// hostedExecutableCommonBodyContractFragments returns shared body checks. The shape
+// body edges (lower_run_codegen_program / codegen::stdout_payload) were severed by
+// #1255 slice4 PR-1; only the live tape run path body calls remain.
 func hostedExecutableCommonBodyContractFragments() []string {
 	return []string{
 		"ir_contract::require_body_call(",
@@ -3978,70 +3956,16 @@ func hostedExecutableCommonBodyContractFragments() []string {
 		`"backend::emit_rendered_run_artifact"`,
 		`"code_render::render_run_ast_artifact"`,
 		`"hosted::emit_rendered_run_artifact"`,
-		`"selfhost::backend::lower_run_codegen_program"`,
-		`"codegen::stdout_payload"`,
 	}
 }
 
-// hostedExecutableRunBodyContractFragments returns run-codegen body checks.
+// hostedExecutableRunBodyContractFragments returns run-codegen body checks. The
+// hosted per-shape run-codegen body contract (lower_run_*/main_print_program/
+// stdout_payload/write_X_module/render_*_llvm/metadata_for_program and the
+// program-builder struct-literal helpers) was severed by #1255 slice4 PR-1 once shape
+// emit became closure-excluded, so no shape run-body edges remain to validate.
 func hostedExecutableRunBodyContractFragments() []string {
-	return []string{
-		`"selfhost::ir::codegen::lower_run_program"`,
-		`"codegen::lower_run_program"`,
-		`"lower_run_ast"`,
-		`"lower_run_ast_to_program"`,
-		`"selfhost::ir::codegen::lower_run_ast"`,
-		`"lower_run_ast_declarations"`,
-		`"selfhost::ir::codegen::lower_run_ast_declarations"`,
-		`"lower_run_ast_function"`,
-		`"run_ast_supported"`,
-		"require_codegen_program_builder_body(bytes)",
-		"fn require_struct_literal_int_field(",
-		"fn require_struct_literal_field_expr(",
-		"fn require_struct_literal_var_field(",
-		"ir_contract::body_struct_literal_of_type(",
-		"ir_contract::body_struct_field_value(",
-		"ir_contract::body_field_expr_name(",
-		`"from_codegen_lowering"`,
-		`"function_name"`,
-		`"second_argument_payload"`,
-		`"selfhost::ir::codegen::lower_run_ast_to_program"`,
-		`"selfhost::ir::codegen::lower_run_ast_function"`,
-		`"lower_run_ast_block"`,
-		`"selfhost::ir::codegen::lower_run_ast_block"`,
-		`"lower_let_binding"`,
-		`"selfhost::ir::codegen::lower_let_binding"`,
-		`"lower_print_statement"`,
-		`"selfhost::ir::codegen::lower_print_statement"`,
-		`"lower_print_call"`,
-		`"selfhost::ir::codegen::lower_print_call"`,
-		`"print_run_ast"`,
-		`"print_payload"`,
-		`"selfhost::ir::codegen::print_payload"`,
-		`"string_literal_span"`,
-		`"selfhost::ir::codegen::string_literal_span"`,
-		`"local_payload_span"`,
-		`"selfhost::ir::codegen::local_payload_span"`,
-		`"selfhost::ir::codegen::main_print_program"`,
-		`"build_main_print_program"`,
-		`"selfhost::ir::codegen::lowered_main_print_program"`,
-		`"selfhost::ir::codegen::build_main_print_program"`,
-		`"const_string_value"`,
-		`"const_string_instruction"`,
-		`"call_instruction"`,
-		`"return_void_instruction"`,
-		`"selfhost::ir::codegen::stdout_payload"`,
-		`"main_print_payload"`,
-		`"codegen::stdout_payload"`,
-		// Relocated run_print template converter contract (#1161).
-		`"write_return_void_module"`,
-		`"write_main_print_module"`,
-		`"hosted_executable_metadata_from_codegen"`,
-		`"selfhost::backend::hosted::render_main_print_llvm"`,
-		`"selfhost::backend::hosted::render_return_void_llvm"`,
-		`"append_hosted_return_body"`,
-		`"codegen::metadata_for_program"`,
-	}
+	return nil
 }
 
 // hostedExecutableTestBodyContractFragments returns test executable body checks.

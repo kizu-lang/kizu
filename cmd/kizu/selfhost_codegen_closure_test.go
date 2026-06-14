@@ -5,26 +5,13 @@ import (
 	"testing"
 )
 
-// codegenClosureSeeds lists the public codegen entrypoints plus the documented
-// stage2 ABI/backend roots that replace the old handwritten body list.
+// codegenClosureSeeds lists the surviving codegen helper-body closure roots after
+// the #1255 slice4 PR-1 shape contract severance: only the live metadata leaf plus
+// the documented stage2 ABI/backend/tape roots remain. The hosted per-shape Program
+// builder / consumer / lowering seeds were removed once shape emit became
+// closure-excluded.
 func codegenClosureSeeds() []string {
 	return []string{
-		"lower_run_program",
-		"lower_run_parse_result",
-		"lower_run_ast",
-		"main_print_program",
-		"unsupported_program",
-		"program_supported",
-		"lowered_program_supported",
-		"require_main_print",
-		"require_lowered_main_print",
-		"stdout_payload",
-		"fs_read_program_supported",
-		"i64_call_program_supported",
-		"return_void_program_supported",
-		"try_void_program_supported",
-		"loop_i64_program_supported",
-		"metadata_for_program",
 		"metadata_line",
 		"empty_int_env",
 		"lower_code_module",
@@ -91,7 +78,6 @@ func assertCodegenClosureFactsPath(t *testing.T, factsBody string) {
 		"append_selected_struct_field_facts(",
 		"append_type_llvm_fact(",
 		"append_runtime_stdlib_symbol_preamble(out)",
-		"\"FsReadBinding\"",
 	} {
 		if !strings.Contains(factsBody, fragment) {
 			t.Fatalf("codegen closure facts path missing %q", fragment)

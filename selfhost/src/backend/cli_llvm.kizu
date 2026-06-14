@@ -2247,15 +2247,11 @@ pub fn append_functions(
     try cli_match_llvm::append_functions(out);
     try cli_test_ast_llvm::append_functions(out);
     try cli_test_llvm::append_functions(out, ir_bytes);
-    // The selfhost::ir::codegen Program builder / metadata / Value helper closure
-    // compiled into stage2: the const-string main-print Program builder and its
-    // lowered alias, the program-metadata line, the unsupported/none sentinels, and
-    // the Value / Instruction constructors that assemble the const-string program
-    // shape. The shared BFS walks the whole cluster from the four in-degree-zero
-    // roots (lowered_main_print_program / metadata_for_program / main_print_payload /
-    // unsupported_program) and derives each member's llvm symbol and params_spec from
-    // signature facts, so the cluster no longer needs a handwritten
-    // append_compiled_function_auto per helper.
+    // The selfhost::ir::codegen run codegen IR v1 tape closure compiled into stage2:
+    // the shared BFS walks the cluster from the tape lowering root lower_code_module
+    // plus the code_op_mem_page_allocator opcode accessor, deriving each member's llvm
+    // symbol and params_spec from signature facts. The hosted per-shape Program builder
+    // roots were severed once shape emit became closure-excluded (issue 1255 slice4 PR-1).
     try append_codegen_reachable_compiled_functions(out, lookup_index, ir_bytes);
     // The selfhost::ir::code_render run tape renderer closure compiled into stage2:
     // render_run_artifact lowers a parsed run source to the tape (via the codegen
@@ -2272,48 +2268,6 @@ pub fn append_functions(
         "selfhost::backend::hosted::artifact_path",
         "kizu_selfhost__backend_hosted_artifact_path",
         "%kizu.owned allocator;%kizu.slice.u8 directory;%kizu.slice.u8 source_path;%kizu.slice.u8 suffix"
-    );
-    try compiled_llvm::append_compiled_function_auto_indexed(
-        lookup_index,
-        out, ir_bytes,
-        "selfhost::ir::codegen::program_supported",
-        "kizu_selfhost__ir_codegen_program_supported",
-        "%kizu.selfhost.codegen.program program"
-    );
-    try compiled_llvm::append_compiled_function_auto_indexed(
-        lookup_index,
-        out, ir_bytes,
-        "selfhost::ir::codegen::i64_call_program_supported",
-        "kizu_selfhost__ir_codegen_i64_call_program_supported",
-        "%kizu.selfhost.codegen.program program"
-    );
-    try compiled_llvm::append_compiled_function_auto_indexed(
-        lookup_index,
-        out, ir_bytes,
-        "selfhost::ir::codegen::return_void_program_supported",
-        "kizu_selfhost__ir_codegen_return_void_program_supported",
-        "%kizu.selfhost.codegen.program program"
-    );
-    try compiled_llvm::append_compiled_function_auto_indexed(
-        lookup_index,
-        out, ir_bytes,
-        "selfhost::ir::codegen::try_void_program_supported",
-        "kizu_selfhost__ir_codegen_try_void_program_supported",
-        "%kizu.selfhost.codegen.program program"
-    );
-    try compiled_llvm::append_compiled_function_auto_indexed(
-        lookup_index,
-        out, ir_bytes,
-        "selfhost::ir::codegen::loop_i64_program_supported",
-        "kizu_selfhost__ir_codegen_loop_i64_program_supported",
-        "%kizu.selfhost.codegen.program program"
-    );
-    try compiled_llvm::append_compiled_function_auto_indexed(
-        lookup_index,
-        out, ir_bytes,
-        "selfhost::ir::codegen::fs_read_program_supported",
-        "kizu_selfhost__ir_codegen_fs_read_program_supported",
-        "%kizu.selfhost.codegen.program program"
     );
     try cli_run_i64_codegen_llvm::append_functions(out, ir_bytes);
     // empty_int_env is the first compiled function that takes a real
@@ -2574,13 +2528,6 @@ pub fn append_functions(
     // ast_node_text is emitted by the codegen closure BFS (reached from the run
     // tape descent seed lower_code_expr), so it no longer needs an explicit
     // registration here.
-    try compiled_llvm::append_compiled_function_auto_indexed(
-        lookup_index,
-        out, ir_bytes,
-        "selfhost::ir::codegen::lowered_program_supported",
-        "kizu_selfhost__ir_codegen_lowered_program_supported",
-        "%kizu.selfhost.codegen.program program"
-    );
     try append_lexer_reachable_compiled_functions(out, lookup_index, ir_bytes);
     try compiled_llvm::append_compiled_function_auto_indexed(
         lookup_index,
@@ -3162,30 +3109,21 @@ fn append_kizu_parser_reachable_compiled_functions(
     return;
 }
 
-// append_codegen_reachable_compiled_functions emits the selfhost::ir::codegen
-// Program builder / metadata / Value helper closure through the shared BFS. The
-// seeds are the four in-degree-zero cluster roots: lowered_main_print_program (the
-// const-string main-print builder alias), metadata_for_program (the program
-// metadata selector), main_print_payload (the program-shape Value reader), and
-// unsupported_program (the empty-program sentinel). The BFS pulls in the remaining
-// members through their body callees -- lowered_main_print_program reaches
-// build_main_print_program, which reaches const_string_value / const_string_instruction
-// / call_instruction / return_void_instruction; metadata_for_program reaches
-// metadata_line; main_print_payload reaches none_value and const_string_value. Each
-// member's llvm symbol and params_spec are derived from signature facts, so the
-// cluster no longer needs a handwritten append_compiled_function_auto per helper.
-// allow_empty_params is set because the parameterless members metadata_line and
-// return_void_instruction derive an empty params_spec from their zero-arg signatures.
+// append_codegen_reachable_compiled_functions emits the selfhost::ir::codegen run
+// codegen IR v1 tape closure through the shared BFS. After the issue 1255 slice4 PR-1
+// shape contract severance the hosted per-shape Program builder / metadata roots
+// (lowered_main_print_program / metadata_for_program / main_print_payload /
+// unsupported_program) are gone; only the tape lowering root lower_code_module, the
+// code_op_mem_page_allocator opcode accessor, and the live metadata_line constant
+// leaf remain. Each member's llvm symbol and params_spec are derived from signature
+// facts. allow_empty_params is set because the parameterless metadata_line member
+// derives an empty params_spec from its zero-arg signature.
 pub fn append_codegen_reachable_compiled_functions(
     out: &var std::string::String,
     lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8
 ) -> !void {
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
-    try pending.append("lowered_main_print_program");
-    try pending.append("metadata_for_program");
-    try pending.append("main_print_payload");
-    try pending.append("unsupported_program");
     // lower_code_module is the run codegen IR v1 tape lowering root: the
     // whole-file walk compiled into stage2 so the hosted run path can lower a
     // checked file onto the flat instruction tape.
@@ -3194,6 +3132,11 @@ pub fn append_codegen_reachable_compiled_functions(
     // boundary when rendering the tape; compile its definition through the same
     // closure path as the rest of the codegen roots.
     try pending.append("code_op_mem_page_allocator");
+    // metadata_line is the live codegen metadata leaf (zero-dependency constant): it
+    // backs the stage2 run metadata and the cli_codegen_llvm metadata constant. It was
+    // previously reached via the severed metadata_for_program root, so it is seeded
+    // directly here to keep its compiled define present without pulling in shape.
+    try pending.append("metadata_line");
     try append_component_reachable_compiled_functions(
         out,
         lookup_index,
