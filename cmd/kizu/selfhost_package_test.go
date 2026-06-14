@@ -1940,35 +1940,17 @@ func assertHostedOmitsRunCodegenArtifact(t *testing.T, hosted string) {
 // function/block/instruction/value model.
 func assertCodegenIRShape(t *testing.T, codegen string) {
 	t.Helper()
+	// #1255 slice4 PR-3: the hosted per-shape Program IR (shape types + builders +
+	// AST lowering) was deleted; the run-codegen boundary is now the flat
+	// function-block-instruction tape plus the live metadata leaf.
 	requiredCodegen := []string{
-		"pub enum ValueKind",
-		"pub enum InstructionKind",
-		"pub struct Value",
-		"pub struct Instruction",
-		"pub struct CodegenBlock",
-		"pub struct CodegenFunction",
-		"pub struct Program",
-		"pub struct RunAst",
-		"pub from_codegen_lowering: bool",
-		"pub fn lower_run_parse_result(",
-		"pub fn lower_run_ast(",
-		"fn lower_run_ast_to_program(",
-		"fn run_ast_supported(",
-		"pub fn main_print_program(payload: []u8) -> Program",
-		"fn lowered_main_print_program(payload: []u8) -> Program",
-		"name: \"main\"",
-		"function_name: function.name",
-		"block_label: block.label",
-		"first_kind: first.kind",
-		"second_callee: second.callee",
-		"third_kind: third.kind",
-		"from_codegen_lowering: from_codegen_lowering",
-		"pub fn require_main_print(program: &Program) -> !void",
-		"pub fn lowered_program_supported(program: &Program) -> bool",
-		"pub fn require_lowered_main_print(program: &Program) -> !void",
-		"pub fn stdout_payload(program: &Program) -> ![]u8",
-		"pub fn metadata_for_program(program: &Program) -> []u8",
+		"pub fn metadata_line() -> []u8",
 		"return \"selfhost::ir::codegen::Program function-block-instruction-v0\";",
+		"pub struct CodeEval",
+		"pub fn lower_code_module(",
+		"fn empty_int_env(text: []u8, decls: std::kizu::ast::ChildRange) -> IntEnv",
+		"fn string_literal_span(",
+		"fn ast_node_text(",
 	}
 	for _, fragment := range requiredCodegen {
 		if !strings.Contains(codegen, fragment) {
@@ -1982,9 +1964,20 @@ func assertCodegenIRShape(t *testing.T, codegen string) {
 		"returns_void",
 		"string_constant",
 		"main-print-v0",
+		// the deleted shape Program IR must stay gone (tape is the only lowering).
+		"pub struct Program",
+		"pub struct RunAst",
+		"pub enum ValueKind",
+		"pub enum InstructionKind",
+		"fn main_print_program(",
+		"fn build_main_print_program(",
+		"fn lower_run_ast(",
+		"fn lower_run_parse_result(",
+		"fn lower_run_int_program(",
+		"fn metadata_for_program(",
 	} {
 		if strings.Contains(codegen, forbidden) {
-			t.Fatalf("codegen IR boundary keeps obsolete ProgramKind shape %q", forbidden)
+			t.Fatalf("codegen IR boundary keeps deleted shape %q", forbidden)
 		}
 	}
 }
@@ -2484,14 +2477,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn function_param_key(",
 	},
 	"../../selfhost/src/ir/codegen.kizu": {
-		"pub struct Program",
-		"pub struct RunAst",
-		"pub fn lower_run_ast(",
-		"pub fn main_print_program(",
-		"pub fn require_main_print(",
-		"pub fn lowered_program_supported(",
-		"pub fn require_lowered_main_print(",
-		"pub fn metadata_for_program(",
+		"pub struct CodeEval",
+		"pub fn lower_code_module(",
+		"pub fn code_op_print(",
 		"pub fn metadata_line(",
 	},
 	"../../selfhost/src/backend/runtime.kizu": {
@@ -2705,7 +2693,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_hosted_function_facts(",
 		"fn append_selected_enum_variant_facts(",
 		"enum-variant ",
-		"InstructionKind",
+		"BinaryOp",
 		"function_signature::append(",
 		"fn append_codegen_reachable_helper_bodies(",
 		"fn append_codegen_closure_helper_body(",

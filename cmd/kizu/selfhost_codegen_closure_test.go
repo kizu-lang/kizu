@@ -74,7 +74,6 @@ func assertCodegenClosureFactsPath(t *testing.T, factsBody string) {
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::ir::codegen\"",
 		"append_codegen_reachable_helper_bodies(",
-		"append_selected_enum_variant_facts(",
 		"append_selected_struct_field_facts(",
 		"append_type_llvm_fact(",
 		"append_runtime_stdlib_symbol_preamble(out)",
@@ -184,8 +183,6 @@ func assertCodegenClosureRoles(t *testing.T, roleBody string) {
 	for _, fragment := range []string{
 		"ast_node_text",
 		"\"checked-text-accessor\"",
-		"codegen_closure_builder_role(local_name)",
-		"\"checked-run-codegen-builder\"",
 		"codegen_closure_consumer_role(local_name)",
 		"\"checked-run-codegen-consumer\"",
 		"\"checked-run-codegen-lowering\"",
@@ -213,7 +210,6 @@ func assertCodegenClosureExternalPolicy(t *testing.T, policyBody string, codegen
 		"std::mem::equal_bytes(callee_text, \"ast.child_at\")",
 		"std::mem::starts_with(callee_text, \"std::kizu::ast::binary_\")",
 		"codegen_closure_binary_op_accessor_allowed(callee_text)",
-		"std::mem::equal_bytes(callee_text, \"lower_run_int_program\")",
 	} {
 		if !strings.Contains(codegenPolicyBody, fragment) {
 			t.Fatalf("codegen external callee policy missing %q", fragment)
@@ -226,12 +222,9 @@ func assertCodegenClosureExternalPolicy(t *testing.T, policyBody string, codegen
 func assertCodegenPrivateHelpersReachedByBFS(t *testing.T, closureBody string, codegen string) {
 	t.Helper()
 	for _, helper := range []string{
-		"lower_fs_read_block",
-		"lower_loop_i64_block",
-		"lower_print_call",
-		"const_string_value",
-		"none_value",
 		"ast_node_text",
+		"string_literal_span",
+		"is_payload_supported",
 	} {
 		fragment := "append_codegen_closure_seed(&var pending, catalog, \"" + helper + "\")"
 		if strings.Contains(closureBody, fragment) {
@@ -239,12 +232,8 @@ func assertCodegenPrivateHelpersReachedByBFS(t *testing.T, closureBody string, c
 		}
 	}
 	for _, check := range [][]string{
-		{"fn lower_run_ast_block(", "lower_fs_read_block("},
-		{"fn lower_run_ast_block(", "lower_loop_i64_block("},
-		{"fn lower_print_call(", "print_payload("},
-		{"fn build_main_print_program(", "const_string_value("},
-		{"fn main_print_payload(", "none_value("},
 		{"fn string_literal_span(", "is_payload_supported("},
+		{"fn string_literal_span(", "empty_payload_span("},
 	} {
 		body := selfhostKizuFunctionBody(t, codegen, check[0])
 		if !strings.Contains(body, check[1]) {
