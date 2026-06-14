@@ -2832,6 +2832,16 @@ fn append_parse_ident_expr_function(out: &var std::string::String) -> !void {
         "  %receiver = phi %kizu.kizu.ast.node_id [ %base, %entry ], [ %field_node, %field_ok ], [ %dot_node, %dot_ok ], [ %type_apply_node, %type_apply_emit ], [ %call_node, %call_ok ]");
     try append_line(out,
         "  %current = phi i64 [ %first_next, %entry ], [ %after_name, %field_ok ], [ %after_dot, %dot_ok ], [ %after_type_apply, %type_apply_emit ], [ %call_next, %call_ok ]");
+    // A '<' only starts a type application when the receiver is a pure namespace
+    // path (a '::'-separated chain with no other postfix), mirroring the source
+    // parser's is_namespace_path_span gate. Without it 'i < n {' would read
+    // 'i<n ...' as a generic instantiation, swallow the loop body hunting for a
+    // closing '>', and fail. A '::' field sets the flag; a '.' field, call, or
+    // prior type application breaks path purity and clears it, so 'while i < n {'
+    // and 'std::foo() < n {' stay comparisons while 'std::array::Array<i64>' stays
+    // a type application.
+    try append_line(out,
+        "  %saw_namespace = phi i1 [ false, %entry ], [ true, %field_ok ], [ false, %dot_ok ], [ false, %type_apply_emit ], [ false, %call_ok ]");
     try append_line(out,
         "  %current_token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %current)");
     try append_line(out, "  %current_kind = extractvalue %kizu.kizu.lexer.token %current_token, 0");
@@ -2877,7 +2887,8 @@ fn append_parse_ident_expr_function(out: &var std::string::String) -> !void {
     // Type applications carry the same AST shape as the source parser: the
     // callee plus a child range of TypeName nodes for the type arguments.
     try append_line(out, "maybe_type_apply:");
-    try append_line(out, "  %is_type_apply = icmp eq i64 %current_kind, 46");
+    try append_line(out, "  %is_type_apply_lt = icmp eq i64 %current_kind, 46");
+    try append_line(out, "  %is_type_apply = and i1 %is_type_apply_lt, %saw_namespace");
     try append_line(out, "  br i1 %is_type_apply, label %type_apply_probe, label %maybe_call");
     try append_line(out, "type_apply_probe:");
     try append_line(out, "  %type_apply_first = add i64 %current, 1");
