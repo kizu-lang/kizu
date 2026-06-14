@@ -795,7 +795,7 @@ func TestSelfhostBackendWrapperClosureUsesComponentCatalog(t *testing.T) {
 	seedRequired := []string{
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::backend\"",
-		"component_function_catalog::find_local_function_index(catalog, \"lower_run_codegen_program\")",
+		"component_function_catalog::find_local_function_index(catalog, \"render_run_codegen_artifact\")",
 		"append_backend_wrapper_closure_body(",
 		"closure_index_seen(&emitted, function_index)",
 	}
@@ -835,15 +835,15 @@ func TestSelfhostBackendWrapperClosureUsesComponentCatalog(t *testing.T) {
 	assertBackendWrapperClosureExternalCalleePolicy(t, executableFunctions, policyBody)
 }
 
-// assertBackendWrapperClosureRoleMapping keeps lower_run_codegen_program on its
-// checked-run-codegen-wrapper role and emit_run_codegen_artifact on its
+// assertBackendWrapperClosureRoleMapping keeps render_run_codegen_artifact on its
+// checked-run-codegen-wrapper role and emit_rendered_run_artifact on its
 // checked-run-codegen-artifact-wrapper role, both resolved through the role
 // mapping rather than the hand-written append_selected_function_with_body call.
 func assertBackendWrapperClosureRoleMapping(t *testing.T, executableFunctions string) {
 	t.Helper()
 	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn backend_wrapper_role(")
 	for _, fragment := range []string{
-		"std::mem::equal_bytes(local_name, \"lower_run_codegen_program\")",
+		"std::mem::equal_bytes(local_name, \"render_run_codegen_artifact\")",
 		"\"checked-run-codegen-wrapper\"",
 		"\"checked-run-codegen-artifact-wrapper\"",
 	} {
@@ -876,7 +876,6 @@ func assertBackendWrapperClosureExternalCalleePolicy(
 		"fn backend_wrapper_external_callee_allowed(",
 	)
 	for _, fragment := range []string{
-		"std::mem::equal_bytes(callee_text, \"codegen::lower_run_program\")",
 		"std::mem::equal_bytes(callee_text, \"code_render::render_run_ast_artifact\")",
 		"std::mem::equal_bytes(callee_text, \"hosted::emit_rendered_run_artifact\")",
 	} {
@@ -1848,8 +1847,6 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	cliCodegen := readSelfhostFile(t, "../../selfhost/src/backend/cli_codegen_llvm.kizu")
 	assertExecuteRoutesRunThroughCodegenIR(t, execute)
 	assertHostedOmitsRunCodegenArtifact(t, hosted)
-	assertHostedMainPrintUsesCodegenRenderer(t, hosted)
-	assertHostedReturnVoidUsesCodegenRenderer(t, hosted)
 	assertCodegenIRShape(t, codegen)
 	assertCodegenIRForbiddenBridges(t, hosted, codegen)
 	assertHostedRunLLVMResponsibilities(t, cliRun, cliAstBoundary, cliCodegen)
@@ -1935,99 +1932,6 @@ func assertHostedOmitsRunCodegenArtifact(t *testing.T, hosted string) {
 	} {
 		if strings.Contains(hosted, forbidden) {
 			t.Fatalf("hosted backend keeps static executable-to-codegen bridge %q", forbidden)
-		}
-	}
-}
-
-// assertHostedMainPrintUsesCodegenRenderer keeps the main-print run slice on a
-// backend-owned renderer that emits LLVM directly from codegen::Program fields,
-// instead of routing back through the data::HostedExecutable run_print template
-// (hosted_executable_from_codegen(run_print_executable(), program) + the generic
-// render_hosted_llvm template renderer).
-func assertHostedMainPrintUsesCodegenRenderer(t *testing.T, hosted string) {
-	t.Helper()
-	emitBody := selfhostKizuFunctionBody(t, hosted, "pub fn emit_run_codegen_artifact(")
-	if !strings.Contains(
-		emitBody,
-		"write_main_print_module(allocator, io, source_path, ll_path_view, &program)",
-	) {
-		t.Fatal("emit_run_codegen_artifact main-print slice skips write_main_print_module")
-	}
-	for _, fragment := range []string{
-		"fn write_main_print_module(",
-		"fn render_main_print_llvm(",
-	} {
-		if !strings.Contains(hosted, fragment) {
-			t.Fatalf("hosted backend missing codegen-direct main-print renderer %q", fragment)
-		}
-	}
-	renderBody := selfhostKizuFunctionBody(t, hosted, "fn render_main_print_llvm(")
-	for _, fragment := range []string{
-		"codegen::stdout_payload(program)",
-		"append_hosted_global(out, \"kizu.run.stdout\"",
-		"append_hosted_output_body(",
-		"append_host_main(out, \"kizu_run_main\")",
-	} {
-		if !strings.Contains(renderBody, fragment) {
-			t.Fatalf("render_main_print_llvm does not emit from codegen::Program fields with %q", fragment)
-		}
-	}
-	for _, forbidden := range []string{
-		"run_print_executable",
-		"hosted_executable_from_codegen",
-		"render_hosted_llvm",
-		"write_hosted_module",
-	} {
-		if strings.Contains(renderBody, forbidden) {
-			t.Fatalf("render_main_print_llvm regressed onto the run_print hosted template via %q", forbidden)
-		}
-	}
-}
-
-// assertHostedReturnVoidUsesCodegenRenderer keeps the return_void run slice
-// (fn main() { return; }) on a backend-owned renderer that emits the bare-return
-// host main from codegen::Program, instead of routing back through the
-// data::HostedExecutable run_print template converter
-// (hosted_executable_from_codegen(run_print_executable(), program) +
-// render_hosted_llvm) that #1161 removed.
-func assertHostedReturnVoidUsesCodegenRenderer(t *testing.T, hosted string) {
-	t.Helper()
-	emitBody := selfhostKizuFunctionBody(t, hosted, "pub fn emit_run_codegen_artifact(")
-	if !strings.Contains(
-		emitBody,
-		"write_return_void_module(allocator, io, source_path, ll_path_view, &program)",
-	) {
-		t.Fatal("emit_run_codegen_artifact return_void slice skips write_return_void_module")
-	}
-	for _, fragment := range []string{
-		"fn write_return_void_module(",
-		"fn render_return_void_llvm(",
-	} {
-		if !strings.Contains(hosted, fragment) {
-			t.Fatalf("hosted backend missing codegen-direct return_void renderer %q", fragment)
-		}
-	}
-	renderBody := selfhostKizuFunctionBody(t, hosted, "fn render_return_void_llvm(")
-	for _, fragment := range []string{
-		"data::HostedOutputStream::None",
-		"append_hosted_return_body(out, \"kizu_run_main\", 0)",
-		"append_host_main(out, \"kizu_run_main\")",
-	} {
-		if !strings.Contains(renderBody, fragment) {
-			t.Fatalf("render_return_void_llvm does not emit the bare-return host main with %q", fragment)
-		}
-	}
-	for _, forbidden := range []string{
-		"run_print_executable",
-		"run_return_void_executable",
-		"hosted_executable_from_codegen",
-		"render_hosted_llvm",
-		"write_hosted_module",
-		"append_hosted_output_body",
-		"stdout_payload",
-	} {
-		if strings.Contains(renderBody, forbidden) {
-			t.Fatalf("render_return_void_llvm regressed onto the run_print template via %q", forbidden)
 		}
 	}
 }
@@ -3238,9 +3142,7 @@ func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm str
 			assertExecutableCatalogSignatureOrigin(t, selected, fact)
 			return
 		}
-		if name == "selfhost::backend::lower_run_codegen_program" ||
-			name == "selfhost::backend::emit_run_codegen_artifact" ||
-			name == "selfhost::backend::render_run_codegen_artifact" ||
+		if name == "selfhost::backend::render_run_codegen_artifact" ||
 			name == "selfhost::backend::emit_rendered_run_artifact" {
 			assertBackendWrapperCatalogSignatureOrigin(t, selected, fact)
 			return
@@ -3461,10 +3363,11 @@ func assertHostedHelperBodyFactsAreCatalogDriven(t *testing.T, selected string) 
 	for _, fragment := range []string{
 		"component_function_catalog::collect_from_ast(",
 		`"selfhost::backend::hosted"`,
-		// #1161 removed hosted_executable_from_codegen; the hosted helper closure
-		// now seeds from the metadata converter (its codegen::metadata_for_program
-		// crossing) plus the shared hosted_output_len helper.
-		findLocal + `"hosted_executable_metadata_from_codegen")`,
+		// #1255 slice4 PR-2 severed the hosted_executable_metadata_from_codegen shape
+		// seed; the hosted helper closure now seeds from the live tape run-metadata
+		// executable (its codegen::metadata_line crossing) plus the shared
+		// hosted_output_len helper.
+		findLocal + `"rendered_run_metadata_executable")`,
 		findLocal + `"hosted_output_len")`,
 		"append_hosted_helper_closure_body(",
 		"closure_index_seen(&emitted, function_index)",
