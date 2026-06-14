@@ -3992,7 +3992,10 @@ pub fn code_kind_is_owned_array(kind: i64) -> bool {
     if kind == code_kind_owned_array_bool() {
         return true;
     }
-    return kind == code_kind_owned_array_slice();
+    if kind == code_kind_owned_array_slice() {
+        return true;
+    }
+    return code_kind_is_owned_array_enum(kind);
 }
 
 fn code_array_element_kind(array_kind: i64) -> i64 {
@@ -4004,6 +4007,9 @@ fn code_array_element_kind(array_kind: i64) -> i64 {
     }
     if array_kind == code_kind_owned_array_slice() {
         return code_kind_slice();
+    }
+    if code_kind_is_owned_array_enum(array_kind) {
+        return code_kind_i64();
     }
     return 0 - 1;
 }
@@ -4020,6 +4026,47 @@ fn code_array_element_size(array_kind: i64) -> i64 {
         return 16;
     }
     return 0 - 1;
+}
+
+// An Array<EnumType> carries the i64-tag ABI like Array<i64>, but it must also
+// remember which enum its elements are so Array.get can restore the enum
+// identity on the result value: a bare owned_array_i64 kind erases that, and a
+// later print would emit the raw discriminant tag instead of the variant name
+// (issue 1347). The kind encodes the element enum's ENUM_DECL record position below a
+// dedicated base, kept above the arena-record band so it is never mistaken for
+// an arena handle. Storage/append/len stay on the i64 element path
+// (code_array_element_kind reports i64); only the get result kind differs.
+fn code_kind_owned_array_enum_base() -> i64 {
+    return 0 - 500000000;
+}
+
+fn code_kind_owned_array_enum(enum_decl_pos: i64) -> i64 {
+    return code_kind_owned_array_enum_base() - enum_decl_pos;
+}
+
+fn code_kind_is_owned_array_enum(kind: i64) -> bool {
+    if kind > code_kind_owned_array_enum_base() {
+        return false;
+    }
+    return kind > code_kind_arena_record_base();
+}
+
+fn code_kind_owned_array_enum_decl_pos(kind: i64) -> i64 {
+    return code_kind_owned_array_enum_base() - kind;
+}
+
+// code_array_get_result_kind reports the kinds-array entry for an Array.get
+// result: an enum-element array restores the enum record-backed value kind
+// (struct_base + ENUM_DECL pos, the same kind a plain enum value carries) so the
+// result prints as the variant name, while every other array yields its scalar
+// element kind.
+fn code_array_get_result_kind(receiver_kind: i64) -> i64 {
+    if !code_kind_is_owned_array_enum(receiver_kind) {
+        return code_array_element_kind(receiver_kind);
+    }
+    let enum_pos = code_kind_owned_array_enum_decl_pos(receiver_kind);
+    let record_base = code_kind_struct_base();
+    return record_base + enum_pos;
 }
 
 // code_kind_struct_base marks a record-backed value on the kinds array: the
@@ -11061,7 +11108,11 @@ fn lower_code_array_new(
     next_value: i64
 ) -> !CodeEval {
     let kind_array = try code_callee_array_kind(text, ast, callee, code);
-    if kind_array < 0 {
+    // code_no_array_kind() (-1) marks "not an Array<...>"; an enum-element array
+    // carries its own negative kind (ENUM_DECL pos embedded below a dedicated
+    // base), so match the sentinel exactly rather than rejecting every negative
+    // kind, which would discard Array<EnumType> (issue 1347).
+    if kind_array == code_no_array_kind() {
         return code_eval_unsupported(next_value);
     }
     let element_size = code_array_element_size(kind_array);
@@ -11119,14 +11170,16 @@ fn code_array_type_arg_kind(
         return code_kind_owned_array_slice();
     }
     // A declared enum element has the i64-tag ABI (an 8-byte discriminant), so
-    // Array<EnumType> lowers onto the same path as Array<i64>. We only take this
-    // branch when the type_arg resolves against an ENUM_DECL record on the tape;
-    // bare identifiers (e.g. struct element types, whose ABI differs) stay
+    // Array<EnumType> lowers onto the same storage path as Array<i64>. The kind
+    // embeds the ENUM_DECL record position so Array.get can restore the enum
+    // identity on the result value (issue 1347). We only take this branch when the
+    // type_arg resolves against an ENUM_DECL record on the tape; bare
+    // identifiers (e.g. struct element types, whose ABI differs) stay
     // unsupported.
     let span = code_node_span(text, ast, type_arg);
     let enum_pos = try enum_decl_pos_by_span(text, code, span.start, span.end, 0);
     if enum_pos >= 0 {
-        return code_kind_owned_array_i64();
+        return code_kind_owned_array_enum(enum_pos);
     }
     return 0 - 1;
 }
@@ -11990,7 +12043,8 @@ fn lower_code_array_get(
         try code.append(index_eval.value_id);
         try code.append(element_kind);
     }
-    try kinds.append(element_kind);
+    let result_kind = code_array_get_result_kind(receiver_kind);
+    try kinds.append(result_kind);
     let result_value = index_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
@@ -12934,7 +12988,8 @@ fn lower_code_try_array_get(
         try code.append(index_eval.value_id);
         try code.append(element_kind);
     }
-    try kinds.append(element_kind);
+    let result_kind = code_array_get_result_kind(receiver_kind);
+    try kinds.append(result_kind);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
 }
