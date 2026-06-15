@@ -1498,6 +1498,14 @@ fn render_one_instruction(
     if op == mem_equal_bytes {
         try render_mem_equal_bytes(out, code, index);
     }
+    let mem_starts_with = codegen::code_op_mem_starts_with();
+    if op == mem_starts_with {
+        try render_mem_starts_with(out, code, index);
+    }
+    let mem_trim_ascii = codegen::code_op_mem_trim_ascii();
+    if op == mem_trim_ascii {
+        try render_mem_trim_ascii(out, code, index);
+    }
     let try_fs_read = codegen::code_op_try_fs_read();
     if op == try_fs_read {
         try render_try_fs_read(out, code, index, abi);
@@ -3102,6 +3110,444 @@ fn render_mem_equal_bytes(
     try w(out, " = load i1, ptr %eb");
     try wi(out, index);
     try wl(out, "_result");
+    return;
+}
+
+// render_mem_starts_with lowers MEM_STARTS_WITH into the i1 result '%v<dst>'. It
+// mirrors render_mem_equal_bytes but guards on 'prefix_len <= bytes_len' (rather
+// than length equality) and iterates over the prefix length: a prefix longer than
+// the bytes yields false, otherwise the first byte mismatch yields false and a
+// fully matched prefix yields true. The '%sw<index>_*' temporaries and 'sw*_'
+// labels are keyed by the record position so they stay unique.
+fn render_mem_starts_with(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let bytes = try code.get(index + 2);
+    let prefix = try code.get(index + 3);
+    try w(out, "  %sw");
+    try wi(out, index);
+    try wl(out, "_i = alloca i64");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try wl(out, "_result = alloca i1");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_bytes_ptr = extractvalue %kizu.slice.u8 %v");
+    try wi(out, bytes);
+    try wl(out, ", 0");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_bytes_len = extractvalue %kizu.slice.u8 %v");
+    try wi(out, bytes);
+    try wl(out, ", 1");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_prefix_ptr = extractvalue %kizu.slice.u8 %v");
+    try wi(out, prefix);
+    try wl(out, ", 0");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_prefix_len = extractvalue %kizu.slice.u8 %v");
+    try wi(out, prefix);
+    try wl(out, ", 1");
+    try w(out, "  store i64 0, ptr %sw");
+    try wi(out, index);
+    try wl(out, "_i");
+    try w(out, "  store i1 false, ptr %sw");
+    try wi(out, index);
+    try wl(out, "_result");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_len_ok = icmp sle i64 %sw");
+    try wi(out, index);
+    try w(out, "_prefix_len, %sw");
+    try wi(out, index);
+    try wl(out, "_bytes_len");
+    try w(out, "  br i1 %sw");
+    try wi(out, index);
+    try w(out, "_len_ok, label %swcheck_");
+    try wi(out, index);
+    try w(out, ", label %swdone_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "swcheck_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_index = load i64, ptr %sw");
+    try wi(out, index);
+    try wl(out, "_i");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_at_end = icmp sge i64 %sw");
+    try wi(out, index);
+    try w(out, "_index, %sw");
+    try wi(out, index);
+    try wl(out, "_prefix_len");
+    try w(out, "  br i1 %sw");
+    try wi(out, index);
+    try w(out, "_at_end, label %swsuccess_");
+    try wi(out, index);
+    try w(out, ", label %swcompare_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "swcompare_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_bytes_byte_ptr = getelementptr i8, ptr %sw");
+    try wi(out, index);
+    try w(out, "_bytes_ptr, i64 %sw");
+    try wi(out, index);
+    try wl(out, "_index");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_prefix_byte_ptr = getelementptr i8, ptr %sw");
+    try wi(out, index);
+    try w(out, "_prefix_ptr, i64 %sw");
+    try wi(out, index);
+    try wl(out, "_index");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_bytes_byte = load i8, ptr %sw");
+    try wi(out, index);
+    try wl(out, "_bytes_byte_ptr");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_prefix_byte = load i8, ptr %sw");
+    try wi(out, index);
+    try wl(out, "_prefix_byte_ptr");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_byte_eq = icmp eq i8 %sw");
+    try wi(out, index);
+    try w(out, "_bytes_byte, %sw");
+    try wi(out, index);
+    try wl(out, "_prefix_byte");
+    try w(out, "  br i1 %sw");
+    try wi(out, index);
+    try w(out, "_byte_eq, label %swnext_");
+    try wi(out, index);
+    try w(out, ", label %swdone_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "swnext_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %sw");
+    try wi(out, index);
+    try w(out, "_next = add i64 %sw");
+    try wi(out, index);
+    try wl(out, "_index, 1");
+    try w(out, "  store i64 %sw");
+    try wi(out, index);
+    try w(out, "_next, ptr %sw");
+    try wi(out, index);
+    try wl(out, "_i");
+    try w(out, "  br label %swcheck_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "swsuccess_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  store i1 true, ptr %sw");
+    try wi(out, index);
+    try wl(out, "_result");
+    try w(out, "  br label %swdone_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "swdone_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load i1, ptr %sw");
+    try wi(out, index);
+    try wl(out, "_result");
+    return;
+}
+
+// render_mem_trim_ascii lowers MEM_TRIM_ASCII into the trimmed sub-slice '%v<dst>'.
+// It scans the head forward past ASCII whitespace bytes (advancing a start cursor)
+// and the tail backward past ASCII whitespace bytes (retreating an end cursor),
+// then assembles a fresh '%kizu.slice.u8' aggregate '{ptr+start, end-start}'. The
+// whitespace test matches std::mem::is_ascii_space ({9,10,11,12,13,32}) as
+// 'byte == 32 or (byte >= 9 and byte <= 13)'. The '%ta<index>_*' temporaries and
+// 'ta*_' labels are keyed by the record position so they stay unique.
+fn render_mem_trim_ascii(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slice_value = try code.get(index + 2);
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %v");
+    try wi(out, slice_value);
+    try wl(out, ", 0");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_len = extractvalue %kizu.slice.u8 %v");
+    try wi(out, slice_value);
+    try wl(out, ", 1");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try wl(out, "_start = alloca i64");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try wl(out, "_end = alloca i64");
+    try w(out, "  store i64 0, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_start");
+    try w(out, "  store i64 %ta");
+    try wi(out, index);
+    try w(out, "_len, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_end");
+    try w(out, "  br label %tahead_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "tahead_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_s = load i64, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_start");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_e = load i64, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_end");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_head_lt = icmp slt i64 %ta");
+    try wi(out, index);
+    try w(out, "_s, %ta");
+    try wi(out, index);
+    try wl(out, "_e");
+    try w(out, "  br i1 %ta");
+    try wi(out, index);
+    try w(out, "_head_lt, label %taheadcheck_");
+    try wi(out, index);
+    try w(out, ", label %tatail_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "taheadcheck_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_head_gep = getelementptr i8, ptr %ta");
+    try wi(out, index);
+    try w(out, "_ptr, i64 %ta");
+    try wi(out, index);
+    try wl(out, "_s");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_head_byte = load i8, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_head_gep");
+    try render_ascii_space_test(out, index, "head");
+    try w(out, "  br i1 %ta");
+    try wi(out, index);
+    try w(out, "_head_space, label %taheadadv_");
+    try wi(out, index);
+    try w(out, ", label %tatail_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "taheadadv_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_s_next = add i64 %ta");
+    try wi(out, index);
+    try wl(out, "_s, 1");
+    try w(out, "  store i64 %ta");
+    try wi(out, index);
+    try w(out, "_s_next, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_start");
+    try w(out, "  br label %tahead_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "tatail_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_s2 = load i64, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_start");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_e2 = load i64, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_end");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_tail_gt = icmp sgt i64 %ta");
+    try wi(out, index);
+    try w(out, "_e2, %ta");
+    try wi(out, index);
+    try wl(out, "_s2");
+    try w(out, "  br i1 %ta");
+    try wi(out, index);
+    try w(out, "_tail_gt, label %tatailcheck_");
+    try wi(out, index);
+    try w(out, ", label %tabuild_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "tatailcheck_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_prev = sub i64 %ta");
+    try wi(out, index);
+    try wl(out, "_e2, 1");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_tail_gep = getelementptr i8, ptr %ta");
+    try wi(out, index);
+    try w(out, "_ptr, i64 %ta");
+    try wi(out, index);
+    try wl(out, "_prev");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_tail_byte = load i8, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_tail_gep");
+    try render_ascii_space_test(out, index, "tail");
+    try w(out, "  br i1 %ta");
+    try wi(out, index);
+    try w(out, "_tail_space, label %tatailadv_");
+    try wi(out, index);
+    try w(out, ", label %tabuild_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "tatailadv_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  store i64 %ta");
+    try wi(out, index);
+    try w(out, "_prev, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_end");
+    try w(out, "  br label %tatail_");
+    try wi(out, index);
+    try nl(out);
+    try w(out, "tabuild_");
+    try wi(out, index);
+    try wl(out, ":");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_fs = load i64, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_start");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_fe = load i64, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_end");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_data = getelementptr i8, ptr %ta");
+    try wi(out, index);
+    try w(out, "_ptr, i64 %ta");
+    try wi(out, index);
+    try wl(out, "_fs");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_newlen = sub i64 %ta");
+    try wi(out, index);
+    try w(out, "_fe, %ta");
+    try wi(out, index);
+    try wl(out, "_fs");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %ta");
+    try wi(out, index);
+    try wl(out, "_data, 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = insertvalue %kizu.slice.u8 %v");
+    try wi(out, dst);
+    try w(out, "_base, i64 %ta");
+    try wi(out, index);
+    try wl(out, "_newlen, 1");
+    return;
+}
+
+// render_ascii_space_test emits the ASCII-whitespace predicate for the byte temp
+// '%ta<index>_<side>_byte' into '%ta<index>_<side>_space', matching
+// std::mem::is_ascii_space: 'byte == 32 or (byte >= 9 and byte <= 13)'.
+fn render_ascii_space_test(
+    out: &var std::string::String,
+    index: i64,
+    side: []u8
+) -> !void {
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try w(out, "_is_sp = icmp eq i8 %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try wl(out, "_byte, 32");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try w(out, "_ge9 = icmp uge i8 %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try wl(out, "_byte, 9");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try w(out, "_le13 = icmp ule i8 %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try wl(out, "_byte, 13");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try w(out, "_ctrl = and i1 %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try w(out, "_ge9, %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try wl(out, "_le13");
+    try w(out, "  %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try w(out, "_space = or i1 %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try w(out, "_is_sp, %ta");
+    try wi(out, index);
+    try w(out, "_");
+    try w(out, side);
+    try wl(out, "_ctrl");
     return;
 }
 
@@ -5666,6 +6112,14 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let mem_equal_bytes = codegen::code_op_mem_equal_bytes();
     if op == mem_equal_bytes {
         return index + 4;
+    }
+    let mem_starts_with = codegen::code_op_mem_starts_with();
+    if op == mem_starts_with {
+        return index + 4;
+    }
+    let mem_trim_ascii = codegen::code_op_mem_trim_ascii();
+    if op == mem_trim_ascii {
+        return index + 3;
     }
     let try_string_append_i64 = codegen::code_op_try_string_append_i64();
     if op == try_string_append_i64 {
