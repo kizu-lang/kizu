@@ -142,6 +142,17 @@ pub struct MirConstEnumTagExpr {
     pub int_value: i64,
 }
 
+// MirUnionConstructExpr materializes a tagged-union variant value built from a
+// payload-less variant reference (e.g. AstData::Empty). Unlike ConstEnumTag, whose i64
+// tag is literal-propagated, a union value is the aggregate { i64 tag, <payload> } named
+// by llvm_type, so it is emitted as an SSA temp via 'insertvalue <llvm_type>
+// zeroinitializer, i64 <tag>, 0' (issue 1157 PR-P1, tag-only first form).
+pub struct MirUnionConstructExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub tag: i64,
+}
+
 pub struct MirPrefixNotExpr {
     pub id: i64,
     pub llvm_type: []u8,
@@ -243,6 +254,7 @@ pub union MirExprInst {
     ArrayLen(MirArrayLenExpr),
     StringLen(MirStringLenExpr),
     IntCast(MirIntCastExpr),
+    UnionConstruct(MirUnionConstructExpr),
 }
 
 pub enum MirIfThenKind {
@@ -1343,6 +1355,7 @@ impl MirExprInst {
             ArrayLen(payload) => return;,
             StringLen(payload) => return;,
             IntCast(payload) => return;,
+            UnionConstruct(payload) => return;,
         }
     }
 }
@@ -2379,6 +2392,14 @@ pub fn enum_tag_expr_inst(id: i64, tag: i64) -> MirExprInst {
     });
 }
 
+pub fn union_construct_expr_inst(id: i64, llvm_type: []u8, tag: i64) -> MirExprInst {
+    return MirExprInst::UnionConstruct(MirUnionConstructExpr {
+        id: id,
+        llvm_type: llvm_type,
+        tag: tag
+    });
+}
+
 pub fn field_access_expr_inst(
     id: i64,
     field_type: []u8,
@@ -2505,6 +2526,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         ArrayLen(payload) => payload.id,
         StringLen(payload) => payload.id,
         IntCast(payload) => payload.id,
+        UnionConstruct(payload) => payload.id,
     };
 }
 
@@ -2524,6 +2546,7 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         ArrayLen(payload) => payload.llvm_type,
         StringLen(payload) => payload.llvm_type,
         IntCast(payload) => payload.llvm_type,
+        UnionConstruct(payload) => payload.llvm_type,
     };
 }
 
@@ -2640,6 +2663,11 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
             llvm_type: payload.llvm_type,
             operand: payload.operand,
             source_llvm: payload.source_llvm
+        }),
+        UnionConstruct(payload) => MirExprInst::UnionConstruct(MirUnionConstructExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            tag: payload.tag
         }),
     };
 }
