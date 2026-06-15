@@ -12019,14 +12019,34 @@ fn lower_expr_field(
             receiver,
             bs
         );
-        let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
-            ir_lookup_index,
-            ir_bytes,
-            module_prefix,
-            receiver_token,
-            variant_name
+        if compiled_fact_lookup::is_enum_type_indexed(
+            ir_lookup_index, ir_bytes, module_prefix, receiver_token
+        ) {
+            let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+                ir_lookup_index,
+                ir_bytes,
+                module_prefix,
+                receiver_token,
+                variant_name
+            );
+            try insts.append(compiled_mir::enum_tag_expr_inst(id, tag));
+            return id;
+        }
+        // A payload-less tagged-union variant reference (e.g.
+        // std::kizu::ast::AstData::Empty) builds the union aggregate value, not a bare
+        // enum tag (issue 1157 PR-P1, tag-only first form). Resolve the union's LLVM aggregate
+        // type and the variant discriminant, then materialize it through a UnionConstruct
+        // temp. A variant carrying a payload arrives as a Call (handled in lower_expr_into),
+        // never through this bare-FieldExpr path.
+        let union_llvm = try compiled_type_lower::kizu_type_to_llvm(
+            ir_bytes, module_prefix, receiver_token
         );
-        try insts.append(compiled_mir::enum_tag_expr_inst(id, tag));
+        let variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+            ir_bytes, module_prefix, receiver_token, variant_name
+        );
+        try insts.append(compiled_mir::union_construct_expr_inst(
+            id, union_llvm, variant.tag
+        ));
         return id;
     }
     let field_name = try ir_contract::body_field_expr_name_from(
