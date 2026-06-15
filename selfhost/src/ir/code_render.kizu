@@ -1103,6 +1103,7 @@ fn render_value_type(
     let is_bool = kind == kind_bool;
     let is_slice = kind == kind_slice;
     let is_handle = kind == kind_handle;
+    let is_mut_borrow = codegen::code_kind_is_mut_borrow_scalar(kind);
     let is_owned = value_kind_is_owned(kind);
     let is_union = try value_kind_is_union(code, kind);
     let is_struct_decl = try value_kind_is_struct_decl(code, kind);
@@ -1116,6 +1117,11 @@ fn render_value_type(
     if is_handle {
         try w(out, "%kizu.handle");
     }
+    // A scalar '&var i64' parameter/argument is a pointer to the caller's i64
+    // var slot; the body loads/stores through it (PTR_LOAD/PTR_STORE).
+    if is_mut_borrow {
+        try w(out, "ptr");
+    }
     if is_owned {
         try w(out, "%kizu.owned");
     }
@@ -1128,7 +1134,7 @@ fn render_value_type(
     if is_struct_param {
         try render_struct_param_value_type(out, code, kind);
     }
-    let scalar = !is_bool and !is_slice and !is_handle and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
+    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
     if scalar {
         try w(out, "i64");
     }
@@ -1723,6 +1729,18 @@ fn render_one_instruction(
     if op == var_store {
         try render_var_store(out, code, index);
     }
+    let var_addr = codegen::code_op_var_addr();
+    if op == var_addr {
+        try render_var_addr(out, code, index);
+    }
+    let ptr_load = codegen::code_op_ptr_load();
+    if op == ptr_load {
+        try render_ptr_load(out, code, index);
+    }
+    let ptr_store = codegen::code_op_ptr_store();
+    if op == ptr_store {
+        try render_ptr_store(out, code, index);
+    }
     let var_decl_slice = codegen::code_op_var_decl_slice();
     if op == var_decl_slice {
         try render_var_decl_slice(out, code, index);
@@ -1823,6 +1841,59 @@ fn render_var_store(
     try wi(out, value_id);
     try w(out, ", ptr %slot");
     try wi(out, slot);
+    try nl(out);
+    return;
+}
+
+// render_var_addr materializes a var slot's address as a 'ptr' SSA value so it
+// can be passed to a '&var i64' parameter. The getelementptr at offset 0 is a
+// no-op address-of that names the alloca pointer under '%v<dst>'.
+fn render_var_addr(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slot = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = getelementptr i64, ptr %slot");
+    try wi(out, slot);
+    try w(out, ", i64 0");
+    try nl(out);
+    return;
+}
+
+// render_ptr_load reads an i64 through a '&var i64' pointer value into a fresh
+// SSA value.
+fn render_ptr_load(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let ptr_value = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load i64, ptr %v");
+    try wi(out, ptr_value);
+    try nl(out);
+    return;
+}
+
+// render_ptr_store writes an i64 SSA value through a '&var i64' pointer value,
+// so the caller's var slot observes the mutation.
+fn render_ptr_store(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let ptr_value = try code.get(index + 1);
+    let value_id = try code.get(index + 2);
+    try w(out, "  store i64 %v");
+    try wi(out, value_id);
+    try w(out, ", ptr %v");
+    try wi(out, ptr_value);
     try nl(out);
     return;
 }
@@ -7443,6 +7514,18 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let var_store = codegen::code_op_var_store();
     if op == var_store {
+        return index + 3;
+    }
+    let var_addr = codegen::code_op_var_addr();
+    if op == var_addr {
+        return index + 3;
+    }
+    let ptr_load = codegen::code_op_ptr_load();
+    if op == ptr_load {
+        return index + 3;
+    }
+    let ptr_store = codegen::code_op_ptr_store();
+    if op == ptr_store {
         return index + 3;
     }
     let var_decl_slice = codegen::code_op_var_decl_slice();
