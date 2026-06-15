@@ -133,6 +133,33 @@ fn wl(out: &var std::string::String, text: []u8) -> !void {
     return;
 }
 
+// wr appends a positioned token 'prefix<index>suffix' with no trailing newline. It
+// compresses the per-token register/label emits the path renderers share, where
+// every name embeds the record index for uniqueness.
+fn wr(
+    out: &var std::string::String,
+    prefix: []u8,
+    index: i64,
+    suffix: []u8
+) -> !void {
+    try w(out, prefix);
+    try wi(out, index);
+    try w(out, suffix);
+    return;
+}
+
+// wrl is wr plus a trailing newline.
+fn wrl(
+    out: &var std::string::String,
+    prefix: []u8,
+    index: i64,
+    suffix: []u8
+) -> !void {
+    try wr(out, prefix, index, suffix);
+    try nl(out);
+    return;
+}
+
 // nl appends a single newline byte.
 fn nl(out: &var std::string::String) -> !void {
     try out.append_byte(cast<u8>(10));
@@ -209,6 +236,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare void @kizu_host_init(i32, ptr)");
     try nl(out);
     try wl(out, "@.kizu.run.newline = private unnamed_addr constant [1 x i8] [i8 10]");
+    try wl(out, "@.kizu.run.path_dot = private unnamed_addr constant [1 x i8] [i8 46]");
     try wl(out, "@.kizu.run.true_word = private unnamed_addr constant [4 x i8] [i8 116, i8 114, i8 117, i8 101]");
     try wl(out, "@.kizu.run.false_word = private unnamed_addr constant [5 x i8] [i8 102, i8 97, i8 108, i8 115, i8 101]");
     try render_bool_print_global(out, "@.kizu.run.bool_true = private unnamed_addr constant [5 x i8] c", "true");
@@ -1505,6 +1533,18 @@ fn render_one_instruction(
     let mem_trim_ascii = codegen::code_op_mem_trim_ascii();
     if op == mem_trim_ascii {
         try render_mem_trim_ascii(out, code, index);
+    }
+    let path_basename = codegen::code_op_path_basename();
+    if op == path_basename {
+        try render_path_basename(out, code, index);
+    }
+    let path_dirname = codegen::code_op_path_dirname();
+    if op == path_dirname {
+        try render_path_dirname(out, code, index);
+    }
+    let path_extension = codegen::code_op_path_extension();
+    if op == path_extension {
+        try render_path_extension(out, code, index);
     }
     let try_fs_read = codegen::code_op_try_fs_read();
     if op == try_fs_read {
@@ -3548,6 +3588,690 @@ fn render_ascii_space_test(
     try w(out, "_");
     try w(out, side);
     try wl(out, "_ctrl");
+    return;
+}
+
+// ptmp writes a path-record value temp or label reference '%p<index><tag><sub>'.
+// Every name the path renderers emit is keyed by the record index for uniqueness;
+// the per-block <tag> (e.g. "_bt", or "" for the shared ptr/len/result names)
+// keeps repeated loops in one record distinct.
+fn ptmp(
+    out: &var std::string::String,
+    index: i64,
+    tag: []u8,
+    sub: []u8
+) -> !void {
+    try w(out, "%p");
+    try wi(out, index);
+    try w(out, tag);
+    try w(out, sub);
+    return;
+}
+
+// plbl defines the matching path-record block label 'p<index><tag><sub>:' (no '%',
+// trailing newline). The reference form is ptmp(out, index, tag, sub).
+fn plbl(
+    out: &var std::string::String,
+    index: i64,
+    tag: []u8,
+    sub: []u8
+) -> !void {
+    try w(out, "p");
+    try wi(out, index);
+    try w(out, tag);
+    try w(out, sub);
+    try wl(out, ":");
+    return;
+}
+
+// render_path_extract emits the shared head for a path component op: the source
+// slice's pointer and length ('%p<index>_ptr' / '%p<index>_len') plus the result
+// pointer/length alloca slots every branch stores into before the build join.
+fn render_path_extract(
+    out: &var std::string::String,
+    index: i64,
+    slice_value: i64
+) -> !void {
+    try w(out, "  ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, " = extractvalue %kizu.slice.u8 %v");
+    try wi(out, slice_value);
+    try wl(out, ", 0");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_len");
+    try w(out, " = extractvalue %kizu.slice.u8 %v");
+    try wi(out, slice_value);
+    try wl(out, ", 1");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_rptr");
+    try wl(out, " = alloca ptr");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_rlen");
+    try wl(out, " = alloca i64");
+    return;
+}
+
+// render_path_trim emits std::path_bits::trim_trailing_slashes over '%p<index>_ptr'
+// seeded from the length register '%p<index><in_suffix>': it walks the end cursor
+// down while end > 1 and the byte before it is '/' (47). The trimmed end lands in
+// '%p<index><tag>_end'.
+fn render_path_trim(
+    out: &var std::string::String,
+    index: i64,
+    tag: []u8,
+    in_suffix: []u8
+) -> !void {
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_slot");
+    try wl(out, " = alloca i64");
+    try w(out, "  store i64 ");
+    try ptmp(out, index, "", in_suffix);
+    try w(out, ", ptr ");
+    try ptmp(out, index, tag, "_slot");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, tag, "_loop");
+    try nl(out);
+    try plbl(out, index, tag, "_loop");
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_e");
+    try w(out, " = load i64, ptr ");
+    try ptmp(out, index, tag, "_slot");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_gt1");
+    try w(out, " = icmp sgt i64 ");
+    try ptmp(out, index, tag, "_e");
+    try wl(out, ", 1");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, tag, "_gt1");
+    try w(out, ", label ");
+    try ptmp(out, index, tag, "_chk");
+    try w(out, ", label ");
+    try ptmp(out, index, tag, "_after");
+    try nl(out);
+    try plbl(out, index, tag, "_chk");
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_prev");
+    try w(out, " = sub i64 ");
+    try ptmp(out, index, tag, "_e");
+    try wl(out, ", 1");
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_gep");
+    try w(out, " = getelementptr i8, ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", i64 ");
+    try ptmp(out, index, tag, "_prev");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_byte");
+    try w(out, " = load i8, ptr ");
+    try ptmp(out, index, tag, "_gep");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_iss");
+    try w(out, " = icmp eq i8 ");
+    try ptmp(out, index, tag, "_byte");
+    try wl(out, ", 47");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, tag, "_iss");
+    try w(out, ", label ");
+    try ptmp(out, index, tag, "_adv");
+    try w(out, ", label ");
+    try ptmp(out, index, tag, "_after");
+    try nl(out);
+    try plbl(out, index, tag, "_adv");
+    try w(out, "  store i64 ");
+    try ptmp(out, index, tag, "_prev");
+    try w(out, ", ptr ");
+    try ptmp(out, index, tag, "_slot");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, tag, "_loop");
+    try nl(out);
+    try plbl(out, index, tag, "_after");
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_end");
+    try w(out, " = load i64, ptr ");
+    try ptmp(out, index, tag, "_slot");
+    try nl(out);
+    return;
+}
+
+// render_path_last_slash emits std::path_bits::last_slash_before over
+// '%p<index>_ptr' from the end register '%p<index><end_suffix>' down to 1: the
+// index of the last '/' (47) before end lands in '%p<index><tag>_slash', or -1.
+fn render_path_last_slash(
+    out: &var std::string::String,
+    index: i64,
+    tag: []u8,
+    end_suffix: []u8
+) -> !void {
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_res");
+    try wl(out, " = alloca i64");
+    try w(out, "  store i64 -1, ptr ");
+    try ptmp(out, index, tag, "_res");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_idx");
+    try wl(out, " = alloca i64");
+    try w(out, "  store i64 ");
+    try ptmp(out, index, "", end_suffix);
+    try w(out, ", ptr ");
+    try ptmp(out, index, tag, "_idx");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, tag, "_sloop");
+    try nl(out);
+    try plbl(out, index, tag, "_sloop");
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_si");
+    try w(out, " = load i64, ptr ");
+    try ptmp(out, index, tag, "_idx");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_sgt0");
+    try w(out, " = icmp sgt i64 ");
+    try ptmp(out, index, tag, "_si");
+    try wl(out, ", 0");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, tag, "_sgt0");
+    try w(out, ", label ");
+    try ptmp(out, index, tag, "_schk");
+    try w(out, ", label ");
+    try ptmp(out, index, tag, "_safter");
+    try nl(out);
+    try plbl(out, index, tag, "_schk");
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_sprev");
+    try w(out, " = sub i64 ");
+    try ptmp(out, index, tag, "_si");
+    try wl(out, ", 1");
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_sgep");
+    try w(out, " = getelementptr i8, ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", i64 ");
+    try ptmp(out, index, tag, "_sprev");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_sbyte");
+    try w(out, " = load i8, ptr ");
+    try ptmp(out, index, tag, "_sgep");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_siss");
+    try w(out, " = icmp eq i8 ");
+    try ptmp(out, index, tag, "_sbyte");
+    try wl(out, ", 47");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, tag, "_siss");
+    try w(out, ", label ");
+    try ptmp(out, index, tag, "_sfound");
+    try w(out, ", label ");
+    try ptmp(out, index, tag, "_sadv");
+    try nl(out);
+    try plbl(out, index, tag, "_sfound");
+    try w(out, "  store i64 ");
+    try ptmp(out, index, tag, "_sprev");
+    try w(out, ", ptr ");
+    try ptmp(out, index, tag, "_res");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, tag, "_safter");
+    try nl(out);
+    try plbl(out, index, tag, "_sadv");
+    try w(out, "  store i64 ");
+    try ptmp(out, index, tag, "_sprev");
+    try w(out, ", ptr ");
+    try ptmp(out, index, tag, "_idx");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, tag, "_sloop");
+    try nl(out);
+    try plbl(out, index, tag, "_safter");
+    try w(out, "  ");
+    try ptmp(out, index, tag, "_slash");
+    try w(out, " = load i64, ptr ");
+    try ptmp(out, index, tag, "_res");
+    try nl(out);
+    return;
+}
+
+// render_path_store_dot stores the '.' literal result ('{ @.kizu.run.path_dot, 1 }')
+// into the result slots and branches to the build join. It backs the empty-path and
+// no-slash shapes of basename/dirname.
+fn render_path_store_dot(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  store ptr @.kizu.run.path_dot, ptr ");
+    try ptmp(out, index, "", "_rptr");
+    try nl(out);
+    try w(out, "  store i64 1, ptr ");
+    try ptmp(out, index, "", "_rlen");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_done");
+    try nl(out);
+    return;
+}
+
+// render_path_store_root stores the '/' root result as the path[0..1] sub-slice
+// ('{ ptr, 1 }') and branches to the build join. The byte at offset 0 is always
+// '/' on this path, so the sub-slice is byte-identical to the literal "/".
+fn render_path_store_root(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  store ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rptr");
+    try nl(out);
+    try w(out, "  store i64 1, ptr ");
+    try ptmp(out, index, "", "_rlen");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_done");
+    try nl(out);
+    return;
+}
+
+// render_path_build defines the 'p<index>_done' join block: it loads the result
+// slots and assembles the '%kizu.slice.u8' aggregate '%v<dst>'. Like
+// render_mem_trim_ascii it leaves no terminator so the next record continues here.
+fn render_path_build(
+    out: &var std::string::String,
+    index: i64,
+    dst: i64
+) -> !void {
+    try plbl(out, index, "", "_done");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_fptr");
+    try w(out, " = load ptr, ptr ");
+    try ptmp(out, index, "", "_rptr");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_flen");
+    try w(out, " = load i64, ptr ");
+    try ptmp(out, index, "", "_rlen");
+    try nl(out);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr ");
+    try ptmp(out, index, "", "_fptr");
+    try wl(out, ", 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = insertvalue %kizu.slice.u8 %v");
+    try wi(out, dst);
+    try w(out, "_base, i64 ");
+    try ptmp(out, index, "", "_flen");
+    try wl(out, ", 1");
+    return;
+}
+
+// render_path_root_test emits the shared '%p<index>_b0s' predicate
+// 'is_slash(path[0])' and, for basename/dirname, the 'end == 1 and is_slash(path[0])'
+// root branch. The byte load is dominated by the non-empty guard, so path[0] is
+// always in bounds here. '%p<index>_b0s' is reused by dirname's dir_end root check.
+fn render_path_root_test(
+    out: &var std::string::String,
+    index: i64,
+    end_suffix: []u8
+) -> !void {
+    try w(out, "  ");
+    try ptmp(out, index, "", "_b0");
+    try w(out, " = load i8, ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_b0s");
+    try w(out, " = icmp eq i8 ");
+    try ptmp(out, index, "", "_b0");
+    try wl(out, ", 47");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_e1");
+    try w(out, " = icmp eq i64 ");
+    try ptmp(out, index, "", end_suffix);
+    try wl(out, ", 1");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_root1");
+    try w(out, " = and i1 ");
+    try ptmp(out, index, "", "_e1");
+    try w(out, ", ");
+    try ptmp(out, index, "", "_b0s");
+    try nl(out);
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_root1");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_root");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_nr");
+    try nl(out);
+    try plbl(out, index, "", "_nr");
+    return;
+}
+
+// render_path_basename lowers PATH_BASENAME following std::path_bits::basename:
+// empty -> ".", trailing slashes trimmed to 'end', the "/" root, then the last
+// slash before 'end' selects path[0..end] (no slash) or path[slash+1..end].
+fn render_path_basename(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slice_value = try code.get(index + 2);
+    try render_path_extract(out, index, slice_value);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_empty");
+    try w(out, " = icmp eq i64 ");
+    try ptmp(out, index, "", "_len");
+    try wl(out, ", 0");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_empty");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_dot");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_ne");
+    try nl(out);
+    try plbl(out, index, "", "_ne");
+    try render_path_trim(out, index, "_bt", "_len");
+    try render_path_root_test(out, index, "_bt_end");
+    try render_path_last_slash(out, index, "_bs", "_bt_end");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_nosl");
+    try w(out, " = icmp slt i64 ");
+    try ptmp(out, index, "_bs", "_slash");
+    try wl(out, ", 0");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_nosl");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_full");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_sub");
+    try nl(out);
+    try plbl(out, index, "", "_full");
+    try w(out, "  store ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rptr");
+    try nl(out);
+    try w(out, "  store i64 ");
+    try ptmp(out, index, "_bt", "_end");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rlen");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_done");
+    try nl(out);
+    try plbl(out, index, "", "_sub");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_st");
+    try w(out, " = add i64 ");
+    try ptmp(out, index, "_bs", "_slash");
+    try wl(out, ", 1");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_dgep");
+    try w(out, " = getelementptr i8, ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", i64 ");
+    try ptmp(out, index, "", "_st");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_nl");
+    try w(out, " = sub i64 ");
+    try ptmp(out, index, "_bt", "_end");
+    try w(out, ", ");
+    try ptmp(out, index, "", "_st");
+    try nl(out);
+    try w(out, "  store ptr ");
+    try ptmp(out, index, "", "_dgep");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rptr");
+    try nl(out);
+    try w(out, "  store i64 ");
+    try ptmp(out, index, "", "_nl");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rlen");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_done");
+    try nl(out);
+    try plbl(out, index, "", "_dot");
+    try render_path_store_dot(out, index);
+    try plbl(out, index, "", "_root");
+    try render_path_store_root(out, index);
+    try render_path_build(out, index, dst);
+    return;
+}
+
+// render_path_dirname lowers PATH_DIRNAME following std::path_bits::dirname:
+// empty -> ".", the "/" root, no slash -> ".", slash at 0 -> "/", else the parent
+// directory is path[0..dir_end] where dir_end trims trailing slashes before the
+// final separator (with the dir_end == 1 root collapsing back to "/").
+fn render_path_dirname(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slice_value = try code.get(index + 2);
+    try render_path_extract(out, index, slice_value);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_empty");
+    try w(out, " = icmp eq i64 ");
+    try ptmp(out, index, "", "_len");
+    try wl(out, ", 0");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_empty");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_dot");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_ne");
+    try nl(out);
+    try plbl(out, index, "", "_ne");
+    try render_path_trim(out, index, "_dt", "_len");
+    try render_path_root_test(out, index, "_dt_end");
+    try render_path_last_slash(out, index, "_ds", "_dt_end");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_nosl");
+    try w(out, " = icmp slt i64 ");
+    try ptmp(out, index, "_ds", "_slash");
+    try wl(out, ", 0");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_nosl");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_dot");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_hs");
+    try nl(out);
+    try plbl(out, index, "", "_hs");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_s0");
+    try w(out, " = icmp eq i64 ");
+    try ptmp(out, index, "_ds", "_slash");
+    try wl(out, ", 0");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_s0");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_root");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_de");
+    try nl(out);
+    try plbl(out, index, "", "_de");
+    try render_path_trim(out, index, "_d2", "_ds_slash");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_de1");
+    try w(out, " = icmp eq i64 ");
+    try ptmp(out, index, "_d2", "_end");
+    try wl(out, ", 1");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_rootd");
+    try w(out, " = and i1 ");
+    try ptmp(out, index, "", "_de1");
+    try w(out, ", ");
+    try ptmp(out, index, "", "_b0s");
+    try nl(out);
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_rootd");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_root");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_dfull");
+    try nl(out);
+    try plbl(out, index, "", "_dfull");
+    try w(out, "  store ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rptr");
+    try nl(out);
+    try w(out, "  store i64 ");
+    try ptmp(out, index, "_d2", "_end");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rlen");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_done");
+    try nl(out);
+    try plbl(out, index, "", "_dot");
+    try render_path_store_dot(out, index);
+    try plbl(out, index, "", "_root");
+    try render_path_store_root(out, index);
+    try render_path_build(out, index, dst);
+    return;
+}
+
+// render_path_extension lowers PATH_EXTENSION following std::path_bits::extension:
+// scanning back from the end, a '/' (47) before any '.' yields the empty slice and
+// a '.' (46) yields path[dot..len]; reaching the start also yields the empty slice.
+fn render_path_extension(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slice_value = try code.get(index + 2);
+    try render_path_extract(out, index, slice_value);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xidx");
+    try wl(out, " = alloca i64");
+    try w(out, "  store i64 ");
+    try ptmp(out, index, "", "_len");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_xidx");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_xloop");
+    try nl(out);
+    try plbl(out, index, "", "_xloop");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xi");
+    try w(out, " = load i64, ptr ");
+    try ptmp(out, index, "", "_xidx");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xgt0");
+    try w(out, " = icmp sgt i64 ");
+    try ptmp(out, index, "", "_xi");
+    try wl(out, ", 0");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_xgt0");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_xchk");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_xempty");
+    try nl(out);
+    try plbl(out, index, "", "_xchk");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xprev");
+    try w(out, " = sub i64 ");
+    try ptmp(out, index, "", "_xi");
+    try wl(out, ", 1");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xgep");
+    try w(out, " = getelementptr i8, ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", i64 ");
+    try ptmp(out, index, "", "_xprev");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xbyte");
+    try w(out, " = load i8, ptr ");
+    try ptmp(out, index, "", "_xgep");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xsl");
+    try w(out, " = icmp eq i8 ");
+    try ptmp(out, index, "", "_xbyte");
+    try wl(out, ", 47");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_xsl");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_xempty");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_xdotchk");
+    try nl(out);
+    try plbl(out, index, "", "_xdotchk");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xdot");
+    try w(out, " = icmp eq i8 ");
+    try ptmp(out, index, "", "_xbyte");
+    try wl(out, ", 46");
+    try w(out, "  br i1 ");
+    try ptmp(out, index, "", "_xdot");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_xfound");
+    try w(out, ", label ");
+    try ptmp(out, index, "", "_xadv");
+    try nl(out);
+    try plbl(out, index, "", "_xadv");
+    try w(out, "  store i64 ");
+    try ptmp(out, index, "", "_xprev");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_xidx");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_xloop");
+    try nl(out);
+    try plbl(out, index, "", "_xfound");
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xfgep");
+    try w(out, " = getelementptr i8, ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", i64 ");
+    try ptmp(out, index, "", "_xprev");
+    try nl(out);
+    try w(out, "  ");
+    try ptmp(out, index, "", "_xflen");
+    try w(out, " = sub i64 ");
+    try ptmp(out, index, "", "_len");
+    try w(out, ", ");
+    try ptmp(out, index, "", "_xprev");
+    try nl(out);
+    try w(out, "  store ptr ");
+    try ptmp(out, index, "", "_xfgep");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rptr");
+    try nl(out);
+    try w(out, "  store i64 ");
+    try ptmp(out, index, "", "_xflen");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rlen");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_done");
+    try nl(out);
+    try plbl(out, index, "", "_xempty");
+    try w(out, "  store ptr ");
+    try ptmp(out, index, "", "_ptr");
+    try w(out, ", ptr ");
+    try ptmp(out, index, "", "_rptr");
+    try nl(out);
+    try w(out, "  store i64 0, ptr ");
+    try ptmp(out, index, "", "_rlen");
+    try nl(out);
+    try w(out, "  br label ");
+    try ptmp(out, index, "", "_done");
+    try nl(out);
+    try render_path_build(out, index, dst);
     return;
 }
 
@@ -6119,6 +6843,18 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let mem_trim_ascii = codegen::code_op_mem_trim_ascii();
     if op == mem_trim_ascii {
+        return index + 3;
+    }
+    let path_basename = codegen::code_op_path_basename();
+    if op == path_basename {
+        return index + 3;
+    }
+    let path_dirname = codegen::code_op_path_dirname();
+    if op == path_dirname {
+        return index + 3;
+    }
+    let path_extension = codegen::code_op_path_extension();
+    if op == path_extension {
         return index + 3;
     }
     let try_string_append_i64 = codegen::code_op_try_string_append_i64();

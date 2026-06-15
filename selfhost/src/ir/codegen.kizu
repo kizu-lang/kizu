@@ -727,6 +727,25 @@ pub fn code_op_mem_trim_ascii() -> i64 {
     return 134;
 }
 
+// PATH_BASENAME / PATH_DIRNAME / PATH_EXTENSION build a sub-slice of a
+// '%kizu.slice.u8' value following std::path_bits semantics: 'op dst slice_value'.
+// All three are pure byte-slice scans with no I/O or allocation; the renderer owns
+// the slash/dot scan loops and the slice assembly, returning a '%kizu.slice.u8'
+// value (kind slice). basename/dirname return the literal '.' (a private module
+// global) for the empty / no-slash shapes and the '/' root as the path[0..1]
+// sub-slice; extension returns the empty slice as '{ptr, 0}'.
+pub fn code_op_path_basename() -> i64 {
+    return 135;
+}
+
+pub fn code_op_path_dirname() -> i64 {
+    return 136;
+}
+
+pub fn code_op_path_extension() -> i64 {
+    return 137;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -8437,6 +8456,15 @@ fn lower_code_call(
     if std::mem::equal_bytes(callee_text, "std::mem::trim_ascii") {
         return try lower_code_mem_trim_ascii(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if std::mem::equal_bytes(callee_text, "std::path::basename") {
+        return try lower_code_path_basename(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if std::mem::equal_bytes(callee_text, "std::path::dirname") {
+        return try lower_code_path_dirname(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if std::mem::equal_bytes(callee_text, "std::path::extension") {
+        return try lower_code_path_extension(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     let runtime_ctor = try lower_code_runtime_constructor(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if runtime_ctor.ok {
         return runtime_ctor;
@@ -9739,6 +9767,108 @@ fn lower_code_mem_trim_ascii(
     }
     let result_value = slice_eval.next;
     let op = code_op_mem_trim_ascii();
+    try code.append(op);
+    try code.append(result_value);
+    try code.append(slice_eval.value_id);
+    let kind_slice_result = code_kind_slice();
+    try kinds.append(kind_slice_result);
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+// lower_code_path_basename / dirname / extension bind their op in the function body
+// (compiled-MIR forbids a function-call argument and a 'let' in an if-then body, so
+// the std::path dispatch stays a single 'return try' per callee) and delegate to the
+// shared lower_code_path_component over PATH_BASENAME / PATH_DIRNAME / PATH_EXTENSION.
+fn lower_code_path_basename(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = code_op_path_basename();
+    return try lower_code_path_component(op, text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+fn lower_code_path_dirname(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = code_op_path_dirname();
+    return try lower_code_path_component(op, text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+fn lower_code_path_extension(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = code_op_path_extension();
+    return try lower_code_path_component(op, text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+// lower_code_path_component lowers std::path::basename / dirname / extension over a
+// '[]u8' or str slice argument. Identical in shape to lower_code_mem_trim_ascii:
+// the argument materializes to a '%kizu.slice.u8' value, then the path op ('op'
+// is one of PATH_BASENAME/PATH_DIRNAME/PATH_EXTENSION) yields the sub-slice the
+// renderer scans out. Its result is a '%kizu.slice.u8' value (kind slice).
+fn lower_code_path_component(
+    op: i64,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let arg = try ast.child_at(args, 0);
+    let arg_eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !arg_eval.ok {
+        return code_eval_unsupported(arg_eval.next);
+    }
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, arg_eval.value_id, arg_eval.next);
+    let kind_slice = code_kind_slice();
+    let slice_kind = try kinds.get(slice_eval.value_id);
+    if slice_kind != kind_slice {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let result_value = slice_eval.next;
     try code.append(op);
     try code.append(result_value);
     try code.append(slice_eval.value_id);
