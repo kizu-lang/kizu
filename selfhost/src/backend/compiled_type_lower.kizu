@@ -98,6 +98,16 @@ pub fn kizu_type_to_llvm(
         if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeEval") {
             return "%kizu.error.code_eval";
         }
+        // !std::kizu::ast::ParseResult backs the full std::kizu::parser::parse_program
+        // signature (issue 1157): parse_program returns the parsed AST + root node by
+        // value in an error union. ParseResult lowers to the %kizu.kizu.ast.parse_result
+        // value type the run pipeline already declares, so its error union follows the
+        // canonical { i1 ok, <value>, %kizu.slice.u8 message } shape RelatedSpan / NodeId /
+        // CodeEval already use: %kizu.error.parse_result. The closure spells the return
+        // type fully qualified, so only the qualified spelling reaches here.
+        if std::mem::equal_bytes(inner, "std::kizu::ast::ParseResult") {
+            return "%kizu.error.parse_result";
+        }
         return error("compiled function: unsupported error type");
     }
     if std::mem::equal_bytes(kizu_type, "i64") {
@@ -138,6 +148,14 @@ pub fn kizu_type_to_llvm(
     // (issue 1165 / 1162), so the cross-module call's arg-type resolution lowers it here.
     if std::mem::equal_bytes(kizu_type, "Allocator") {
         return "%kizu.owned";
+    }
+    // std::kizu::ast::SourceFile is the source record { path: []u8, text: []u8 } the full
+    // std::kizu::parser::parse_program takes by value (issue 1157). It lowers to the
+    // %kizu.kizu.ast.source_file value type (two %kizu.slice.u8 fields) the run pipeline
+    // already declares, so the SourceFile parameter and its field reads resolve here without
+    // a per-closure type-llvm fact (the strict ABI mapper assigns the same type).
+    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::SourceFile") {
+        return "%kizu.kizu.ast.source_file";
     }
     // CommentFormatState is the comment-preservation driver's loop-carried scalar state value
     // { last: u8, at_line_start: bool, after_comment: bool } -> { i8, i1, i1 }, constructed by
