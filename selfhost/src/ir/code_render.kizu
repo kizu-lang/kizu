@@ -348,7 +348,7 @@ fn render_string_format_helpers(out: &var std::string::String) -> !void {
     try wl(out, "entry:");
     try wl(out, "  %low = icmp ult i8 %value, 10");
     try wl(out, "  %num = add i8 %value, 48");
-    try wl(out, "  %hex = add i8 %value, 87");
+    try wl(out, "  %hex = add i8 %value, 55");
     try wl(out, "  %result = select i1 %low, i8 %num, i8 %hex");
     try wl(out, "  ret i8 %result");
     try wl(out, "}");
@@ -365,13 +365,25 @@ fn render_string_format_helpers(out: &var std::string::String) -> !void {
     try wl(out, "  ret %kizu.error.void %first");
     try wl(out, "}");
     try nl(out);
+    try wl(out, "define %kizu.error.void @kizu_run_string_append_double_escape_pair(%kizu.owned %text, i8 %second) {");
+    try wl(out, "entry:");
+    try wl(out, "  %first = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 92)");
+    try wl(out, "  %first_ok = extractvalue %kizu.error.void %first, 0");
+    try wl(out, "  br i1 %first_ok, label %append_pair, label %fail");
+    try wl(out, "append_pair:");
+    try wl(out, "  %result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 %second)");
+    try wl(out, "  ret %kizu.error.void %result");
+    try wl(out, "fail:");
+    try wl(out, "  ret %kizu.error.void %first");
+    try wl(out, "}");
+    try nl(out);
     try wl(out, "define %kizu.error.void @kizu_run_string_append_hex_escape(%kizu.owned %text, i8 %byte) {");
     try wl(out, "entry:");
     try wl(out, "  %high_nibble = lshr i8 %byte, 4");
     try wl(out, "  %low_nibble = and i8 %byte, 15");
     try wl(out, "  %high = call i8 @kizu_run_hex_digit(i8 %high_nibble)");
     try wl(out, "  %low = call i8 @kizu_run_hex_digit(i8 %low_nibble)");
-    try wl(out, "  %slash = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %text, i8 92)");
+    try wl(out, "  %slash = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 92)");
     try wl(out, "  %slash_ok = extractvalue %kizu.error.void %slash, 0");
     try wl(out, "  br i1 %slash_ok, label %write_x, label %slash_fail");
     try wl(out, "write_x:");
@@ -410,19 +422,19 @@ fn render_string_format_helpers(out: &var std::string::String) -> !void {
     try wl(out, "  %is_newline = icmp eq i8 %byte, 10");
     try wl(out, "  br i1 %is_newline, label %newline, label %check_return");
     try wl(out, "newline:");
-    try wl(out, "  %newline_result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 110)");
+    try wl(out, "  %newline_result = call %kizu.error.void @kizu_run_string_append_double_escape_pair(%kizu.owned %text, i8 110)");
     try wl(out, "  ret %kizu.error.void %newline_result");
     try wl(out, "check_return:");
     try wl(out, "  %is_return = icmp eq i8 %byte, 13");
     try wl(out, "  br i1 %is_return, label %return_byte, label %check_tab");
     try wl(out, "return_byte:");
-    try wl(out, "  %return_result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 114)");
+    try wl(out, "  %return_result = call %kizu.error.void @kizu_run_string_append_double_escape_pair(%kizu.owned %text, i8 114)");
     try wl(out, "  ret %kizu.error.void %return_result");
     try wl(out, "check_tab:");
     try wl(out, "  %is_tab = icmp eq i8 %byte, 9");
     try wl(out, "  br i1 %is_tab, label %tab, label %check_printable");
     try wl(out, "tab:");
-    try wl(out, "  %tab_result = call %kizu.error.void @kizu_run_string_append_escape_pair(%kizu.owned %text, i8 116)");
+    try wl(out, "  %tab_result = call %kizu.error.void @kizu_run_string_append_double_escape_pair(%kizu.owned %text, i8 116)");
     try wl(out, "  ret %kizu.error.void %tab_result");
     try wl(out, "check_printable:");
     try wl(out, "  %ge_space = icmp uge i8 %byte, 32");
@@ -7322,25 +7334,47 @@ fn render_llvm_c_bytes(out: &var std::string::String, payload: []u8) -> !void {
 }
 
 fn render_llvm_c_byte(out: &var std::string::String, byte: u8) -> !void {
-    // Escape the three c-string metacharacters through mutually exclusive void
-    // then-body guards and append any other byte verbatim, falling through to a
-    // single return -- the shape both the Go reference compiler and the compiled-MIR
-    // void if-lowering accept (a 'return try <void call>;' tail is rejected by the former).
+    // Escape c-string metacharacters and non-printable/high bytes through
+    // mutually exclusive void then-body guards and append printable bytes
+    // verbatim, falling through to a single return -- the shape both the Go
+    // reference compiler and the compiled-MIR void if-lowering accept.
     let quote = cast<u8>(34);
     let backslash = cast<u8>(92);
-    let newline = cast<u8>(10);
-    let is_special = byte == quote or byte == backslash or byte == newline;
+    let min = cast<u8>(32);
+    let max = cast<u8>(126);
+    let needs_hex = byte < min or byte > max;
+    let is_special = byte == quote or byte == backslash or needs_hex;
     if byte == quote {
         try w(out, "\22");
     }
     if byte == backslash {
         try w(out, "\5C");
     }
-    if byte == newline {
-        try w(out, "\0A");
+    if needs_hex {
+        try render_llvm_hex_escape(out, byte);
     }
     if !is_special {
         try out.append_byte(byte);
     }
+    return;
+}
+
+fn render_llvm_hex_escape(out: &var std::string::String, byte: u8) -> !void {
+    let value = cast<i64>(byte);
+    let high = value / 16;
+    let low = value - high * 16;
+    try out.append_byte(cast<u8>(92));
+    try render_llvm_hex_digit(out, high);
+    try render_llvm_hex_digit(out, low);
+    return;
+}
+
+fn render_llvm_hex_digit(out: &var std::string::String, value: i64) -> !void {
+    var digit = 55 + value;
+    if value < 10 {
+        digit = 48 + value;
+    }
+    let byte = cast<u8>(digit);
+    try out.append_byte(byte);
     return;
 }
