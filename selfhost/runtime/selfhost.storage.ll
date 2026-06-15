@@ -7,17 +7,20 @@ source_filename = "target/selfhost/selfhost.storage"
 %kizu.error.void = type { i1, %kizu.slice.u8 }
 %kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }
 %kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }
+%kizu.error.owned = type { i1, %kizu.owned, %kizu.slice.u8 }
 %kizu.record.abi.summary = type { i64, %kizu.slice.u8 }
 %kizu.error.record.abi.summary = type { i1, %kizu.record.abi.summary, %kizu.slice.u8 }
 %kizu.rt.array = type { ptr, ptr, i64, i64, i64 }
 %kizu.rt.string = type { ptr, ptr, i64, i64 }
 %kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }
+%kizu.rt.box = type { ptr, ptr, i64 }
 %kizu.rt.diagnostics = type { ptr, i64 }
 %kizu.rt.arena = type { ptr, i64, i64, [64 x i8] }
 
 @.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c"invalid arena handle"
 @.kizu.rt.allocation_failed = private unnamed_addr constant [17 x i8] c"allocation failed"
 @.kizu.rt.invalid_slice = private unnamed_addr constant [13 x i8] c"invalid slice"
+@.kizu.rt.invalid_box = private unnamed_addr constant [11 x i8] c"invalid box"
 @.kizu.rt.invalid_array_element = private unnamed_addr constant [21 x i8] c"invalid array element"
 @.kizu.rt.array_index_out_of_bounds = private unnamed_addr constant [25 x i8] c"array index out of bounds"
 @.kizu.rt.array_smoke = private unnamed_addr constant [8 x i8] c"array-ok"
@@ -741,6 +744,110 @@ free_key1:
   br label %free_map
 free_map:
   call void @kizu_rt_free(ptr %allocator_ptr, ptr %raw)
+  ret void
+}
+
+define %kizu.error.owned @kizu_rt_box_new(%kizu.owned %allocator, %kizu.slice.u8 %payload) {
+entry:
+  %allocator_ptr = extractvalue %kizu.owned %allocator, 0
+  %payload_ptr = extractvalue %kizu.slice.u8 %payload, 0
+  %payload_len = extractvalue %kizu.slice.u8 %payload, 1
+  %payload_len_ok = icmp sgt i64 %payload_len, 0
+  %payload_ptr_ok = icmp ne ptr %payload_ptr, null
+  %payload_ok = and i1 %payload_len_ok, %payload_ptr_ok
+  br i1 %payload_ok, label %allocate_box, label %invalid
+allocate_box:
+  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 24)
+  %box_allocated = icmp ne ptr %raw, null
+  br i1 %box_allocated, label %allocate_payload, label %allocation_failed
+allocate_payload:
+  %data = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %payload_len)
+  %payload_allocated = icmp ne ptr %data, null
+  br i1 %payload_allocated, label %copy_payload, label %allocation_failed_free_box
+copy_payload:
+  call void @llvm.memcpy.p0.p0.i64(ptr %data, ptr %payload_ptr, i64 %payload_len, i1 false)
+  %allocator_field = getelementptr inbounds %kizu.rt.box, ptr %raw, i32 0, i32 0
+  store ptr %allocator_ptr, ptr %allocator_field
+  %data_field = getelementptr inbounds %kizu.rt.box, ptr %raw, i32 0, i32 1
+  store ptr %data, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.box, ptr %raw, i32 0, i32 2
+  store i64 %payload_len, ptr %len_field
+  %handle = insertvalue %kizu.owned poison, ptr %raw, 0
+  %ok_base = insertvalue %kizu.error.owned poison, i1 true, 0
+  %ok_value = insertvalue %kizu.error.owned %ok_base, %kizu.owned %handle, 1
+  %ok_result = insertvalue %kizu.error.owned %ok_value, %kizu.slice.u8 zeroinitializer, 2
+  ret %kizu.error.owned %ok_result
+allocation_failed_free_box:
+  call void @kizu_rt_free(ptr %allocator_ptr, ptr %raw)
+  br label %allocation_failed
+allocation_failed:
+  %message_ptr = getelementptr inbounds [17 x i8], ptr @.kizu.rt.allocation_failed, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 17, 1
+  %failed_base = insertvalue %kizu.error.owned poison, i1 false, 0
+  %failed_value = insertvalue %kizu.error.owned %failed_base, %kizu.owned zeroinitializer, 1
+  %failed = insertvalue %kizu.error.owned %failed_value, %kizu.slice.u8 %message, 2
+  ret %kizu.error.owned %failed
+invalid:
+  %invalid_ptr = getelementptr inbounds [11 x i8], ptr @.kizu.rt.invalid_box, i64 0, i64 0
+  %invalid_message_base = insertvalue %kizu.slice.u8 poison, ptr %invalid_ptr, 0
+  %invalid_message = insertvalue %kizu.slice.u8 %invalid_message_base, i64 11, 1
+  %invalid_base = insertvalue %kizu.error.owned poison, i1 false, 0
+  %invalid_value = insertvalue %kizu.error.owned %invalid_base, %kizu.owned zeroinitializer, 1
+  %invalid_result = insertvalue %kizu.error.owned %invalid_value, %kizu.slice.u8 %invalid_message, 2
+  ret %kizu.error.owned %invalid_result
+}
+
+define %kizu.error.slice.u8 @kizu_rt_box_borrow(%kizu.owned %box) {
+entry:
+  %raw = extractvalue %kizu.owned %box, 0
+  %raw_ok = icmp ne ptr %raw, null
+  br i1 %raw_ok, label %load_box, label %invalid
+load_box:
+  %data_field = getelementptr inbounds %kizu.rt.box, ptr %raw, i32 0, i32 1
+  %data = load ptr, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.box, ptr %raw, i32 0, i32 2
+  %len = load i64, ptr %len_field
+  %data_ok = icmp ne ptr %data, null
+  %len_ok = icmp sgt i64 %len, 0
+  %ok = and i1 %data_ok, %len_ok
+  br i1 %ok, label %valid, label %invalid
+valid:
+  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %data, 0
+  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %len, 1
+  %valid_ok = insertvalue %kizu.error.slice.u8 poison, i1 true, 0
+  %valid_value = insertvalue %kizu.error.slice.u8 %valid_ok, %kizu.slice.u8 %slice, 1
+  %valid_result = insertvalue %kizu.error.slice.u8 %valid_value, %kizu.slice.u8 zeroinitializer, 2
+  ret %kizu.error.slice.u8 %valid_result
+invalid:
+  %message_ptr = getelementptr inbounds [11 x i8], ptr @.kizu.rt.invalid_box, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 11, 1
+  %invalid_ok = insertvalue %kizu.error.slice.u8 poison, i1 false, 0
+  %invalid_value = insertvalue %kizu.error.slice.u8 %invalid_ok, %kizu.slice.u8 zeroinitializer, 1
+  %invalid_result = insertvalue %kizu.error.slice.u8 %invalid_value, %kizu.slice.u8 %message, 2
+  ret %kizu.error.slice.u8 %invalid_result
+}
+
+define void @kizu_rt_box_deinit(%kizu.owned %box) {
+entry:
+  %raw = extractvalue %kizu.owned %box, 0
+  %raw_ok = icmp ne ptr %raw, null
+  br i1 %raw_ok, label %load_box, label %done
+load_box:
+  %allocator_field = getelementptr inbounds %kizu.rt.box, ptr %raw, i32 0, i32 0
+  %allocator_ptr = load ptr, ptr %allocator_field
+  %data_field = getelementptr inbounds %kizu.rt.box, ptr %raw, i32 0, i32 1
+  %data = load ptr, ptr %data_field
+  %has_data = icmp ne ptr %data, null
+  br i1 %has_data, label %free_data, label %free_box
+free_data:
+  call void @kizu_rt_free(ptr %allocator_ptr, ptr %data)
+  br label %free_box
+free_box:
+  call void @kizu_rt_free(ptr %allocator_ptr, ptr %raw)
+  br label %done
+done:
   ret void
 }
 
@@ -1527,6 +1634,31 @@ map_pass:
 arena_fail:
   ret i64 1
 arena_pass:
+  %box_payload_slot = alloca i64
+  store i64 7, ptr %box_payload_slot
+  %box_payload_base = insertvalue %kizu.slice.u8 poison, ptr %box_payload_slot, 0
+  %box_payload = insertvalue %kizu.slice.u8 %box_payload_base, i64 8, 1
+  %box_new = call %kizu.error.owned @kizu_rt_box_new(%kizu.owned zeroinitializer, %kizu.slice.u8 %box_payload)
+  %box_new_ok = extractvalue %kizu.error.owned %box_new, 0
+  br i1 %box_new_ok, label %box_borrow, label %box_fail
+box_borrow:
+  %box = extractvalue %kizu.error.owned %box_new, 1
+  %box_view = call %kizu.error.slice.u8 @kizu_rt_box_borrow(%kizu.owned %box)
+  %box_view_ok = extractvalue %kizu.error.slice.u8 %box_view, 0
+  br i1 %box_view_ok, label %box_load, label %box_borrow_fail
+box_borrow_fail:
+  call void @kizu_rt_box_deinit(%kizu.owned %box)
+  ret i64 1
+box_load:
+  %box_view_slice = extractvalue %kizu.error.slice.u8 %box_view, 1
+  %box_view_ptr = extractvalue %kizu.slice.u8 %box_view_slice, 0
+  %box_value = load i64, ptr %box_view_ptr
+  %box_value_ok = icmp eq i64 %box_value, 7
+  call void @kizu_rt_box_deinit(%kizu.owned %box)
+  br i1 %box_value_ok, label %box_pass, label %box_fail
+box_fail:
+  ret i64 1
+box_pass:
   %abi_roundtrip = call i64 @kizu_selfhost__runtime_abi_roundtrip_smoke()
   %abi_roundtrip_ok = icmp eq i64 %abi_roundtrip, 0
   br i1 %abi_roundtrip_ok, label %abi_pass, label %abi_fail
