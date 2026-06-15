@@ -2486,6 +2486,14 @@ fn code_param_kind(
     if std::mem::equal_bytes(type_text, "[]u8") {
         return code_kind_slice();
     }
+    // A read borrow '&T' parameter flows on the value tape as its referent 'T':
+    // the tape is a value model, so a read-only borrow carries the same kind as
+    // the value it borrows. The mutable borrow '&var T' (write-back semantics)
+    // is excluded and left to fall through to the unsupported path.
+    let borrow_kind = read_borrow_referent_kind(type_text);
+    if borrow_kind >= 0 {
+        return borrow_kind;
+    }
     let union_kind = try code_param_union_kind(text, ast, type_node, code);
     if union_kind >= 0 {
         return union_kind;
@@ -2502,6 +2510,42 @@ fn code_param_kind(
         return struct_kind;
     }
     return try code_param_single_field_struct_kind(text, ast, decls, type_node, code, 0);
+}
+
+// read_borrow_referent_kind resolves a read borrow '&T' parameter to the tape
+// kind of its referent 'T' for the scalar/slice kinds that resolve by type
+// text alone (i64, bool, []u8). The leading '&' is skipped with a byte compare
+// (the same convention as union_param_name_start), and the referent slice is
+// matched in place rather than returned from a helper. It returns -1 when the
+// type is not a read borrow (so non-borrow types fall through to the existing
+// resolution path), when it is the mutable borrow '&var T' (write-back borrows
+// stay unsupported), or when the referent is not a text-resolvable kind.
+fn read_borrow_referent_kind(type_text: []u8) -> i64 {
+    let length = std::mem::len(type_text);
+    if length < 2 {
+        return 0 - 1;
+    }
+    let amp = cast<u8>(38);
+    if type_text[0] != amp {
+        return 0 - 1;
+    }
+    let referent = type_text[1..length];
+    if std::mem::starts_with(referent, "var ") {
+        return 0 - 1;
+    }
+    if std::mem::equal_bytes(referent, "var") {
+        return 0 - 1;
+    }
+    if std::mem::equal_bytes(referent, "i64") {
+        return code_kind_i64();
+    }
+    if std::mem::equal_bytes(referent, "bool") {
+        return code_kind_bool();
+    }
+    if std::mem::equal_bytes(referent, "[]u8") {
+        return code_kind_slice();
+    }
+    return 0 - 1;
 }
 
 fn code_param_single_field_struct_kind(
@@ -6690,6 +6734,14 @@ fn lower_code_prefix(
 ) -> !CodeEval {
     if op == std::kizu::ast::prefix_not() {
         return try lower_code_not(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    // A read borrow '&<expr>' evaluates to the same value (and kind) as the
+    // operand it borrows: the tape is a value model, so a read-only borrow is
+    // an identity on the value side. The mutable borrow '&var <expr>' keeps the
+    // write-back semantics that this pass does not model, so it stays
+    // unsupported and falls through to the diagnostic below.
+    if op == std::kizu::ast::prefix_borrow() {
+        return try lower_code_expr(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
 }
