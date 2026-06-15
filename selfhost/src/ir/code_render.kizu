@@ -203,10 +203,12 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
     try wl(out, "%kizu.fs.metadata = type { i64, i1 }");
     try wl(out, "%kizu.error.metadata = type { i1, %kizu.fs.metadata, %kizu.slice.u8 }");
+    try wl(out, "%kizu.error.owned = type { i1, %kizu.owned, %kizu.slice.u8 }");
     try wl(out, "%kizu.run.union = type { i64, i64, %kizu.slice.u8 }");
     try wl(out, "%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }");
     try wl(out, "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
     try wl(out, "%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }");
+    try wl(out, "%kizu.rt.box = type { ptr, ptr, i64 }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
     try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
@@ -233,6 +235,9 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare i1 @kizu_rt_map_contains(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare void @kizu_rt_map_deinit(%kizu.owned)");
+    try wl(out, "declare %kizu.error.owned @kizu_rt_box_new(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_box_borrow(%kizu.owned)");
+    try wl(out, "declare void @kizu_rt_box_deinit(%kizu.owned)");
     try wl(out, "declare %kizu.owned @kizu_rt_arena_new(%kizu.owned, i64)");
     try wl(out, "declare %kizu.handle @kizu_rt_arena_add(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned, %kizu.handle)");
@@ -1112,10 +1117,12 @@ fn render_value_type(
     let kind_bool = codegen::code_kind_bool();
     let kind_slice = codegen::code_kind_slice();
     let kind_handle = codegen::code_kind_handle();
+    let kind_error_box = codegen::code_kind_error_box_i64();
     let is_bool = kind == kind_bool;
     let is_slice = kind == kind_slice;
     let is_handle = kind == kind_handle;
     let is_mut_borrow = codegen::code_kind_is_mut_borrow_ptr(kind);
+    let is_error_box = kind == kind_error_box;
     let is_owned = value_kind_is_owned(kind);
     let is_union = try value_kind_is_union(code, kind);
     let is_struct_decl = try value_kind_is_struct_decl(code, kind);
@@ -1138,6 +1145,9 @@ fn render_value_type(
     if is_owned {
         try w(out, "%kizu.owned");
     }
+    if is_error_box {
+        try w(out, "%kizu.error.owned");
+    }
     if is_union {
         try w(out, "%kizu.run.union");
     }
@@ -1147,7 +1157,7 @@ fn render_value_type(
     if is_struct_param {
         try render_struct_param_value_type(out, code, kind);
     }
-    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
+    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_error_box and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
     if scalar {
         try w(out, "i64");
     }
@@ -1165,6 +1175,9 @@ fn value_kind_is_owned(kind: i64) -> bool {
         return true;
     }
     if codegen::code_kind_is_owned_map(kind) {
+        return true;
+    }
+    if codegen::code_kind_is_owned_box(kind) {
         return true;
     }
     if codegen::code_kind_is_borrowed_map(kind) {
@@ -1625,6 +1638,18 @@ fn render_one_instruction(
     let storage_deinit = codegen::code_op_storage_deinit();
     if op == storage_deinit {
         try render_storage_deinit(out, code, index);
+    }
+    let box_new = codegen::code_op_box_new();
+    if op == box_new {
+        try render_box_new(out, code, index);
+    }
+    let try_box_new = codegen::code_op_try_box_new();
+    if op == try_box_new {
+        try render_try_box_new(out, code, index, abi);
+    }
+    let box_borrow_i64 = codegen::code_op_box_borrow_i64();
+    if op == box_borrow_i64 {
+        try render_box_borrow_i64(out, code, index, abi);
     }
     let arena_new = codegen::code_op_arena_new();
     if op == arena_new {
@@ -4934,7 +4959,146 @@ fn storage_deinit_symbol(kind: i64) -> []u8 {
     if codegen::code_kind_is_owned_map(kind) {
         return "kizu_rt_map_deinit";
     }
+    if codegen::code_kind_is_owned_box(kind) {
+        return "kizu_rt_box_deinit";
+    }
     return "kizu_rt_arena_deinit";
+}
+
+fn render_box_new(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let allocator = try code.get(index + 2);
+    let value = try code.get(index + 3);
+    try w(out, "  %bn");
+    try wi(out, index);
+    try wl(out, "_slot = alloca i64");
+    try w(out, "  store i64 %v");
+    try wi(out, value);
+    try w(out, ", ptr %bn");
+    try wi(out, index);
+    try wl(out, "_slot");
+    try w(out, "  %bn");
+    try wi(out, index);
+    try w(out, "_payload_base = insertvalue %kizu.slice.u8 poison, ptr %bn");
+    try wi(out, index);
+    try wl(out, "_slot, 0");
+    try w(out, "  %bn");
+    try wi(out, index);
+    try w(out, "_payload = insertvalue %kizu.slice.u8 %bn");
+    try wi(out, index);
+    try wl(out, "_payload_base, i64 8, 1");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = call %kizu.error.owned @kizu_rt_box_new(%kizu.owned %v");
+    try wi(out, allocator);
+    try w(out, ", %kizu.slice.u8 %bn");
+    try wi(out, index);
+    try wl(out, "_payload)");
+    return;
+}
+
+fn render_try_box_new(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let source = try code.get(index + 2);
+    try w(out, "  %tb");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.owned %v");
+    try wi(out, source);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tb");
+    try wi(out, index);
+    try w(out, "_ok, label %tb");
+    try wi(out, index);
+    try w(out, "_cont, label %tb");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tb");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.owned %v");
+    try wi(out, source);
+    try wl(out, ", 2");
+    try render_runtime_message_propagate(out, index, abi);
+    try w(out, "tb");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.owned %v");
+    try wi(out, source);
+    try wl(out, ", 1");
+    return;
+}
+
+fn render_box_borrow_i64(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    try w(out, "  %bb");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_box_borrow(%kizu.owned %v");
+    try wi(out, receiver);
+    try wl(out, ")");
+    try w(out, "  %bb");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %bb");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %bb");
+    try wi(out, index);
+    try w(out, "_ok, label %bb");
+    try wi(out, index);
+    try w(out, "_cont, label %bb");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "bb");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.slice.u8 %bb");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try render_runtime_message_propagate(out, index, abi);
+    try w(out, "bb");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %bb");
+    try wi(out, index);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %bb");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %bb");
+    try wi(out, index);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %bb");
+    try wi(out, index);
+    try wl(out, "_slice, 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load i64, ptr %bb");
+    try wi(out, index);
+    try wl(out, "_ptr");
+    return;
+}
+
+fn render_runtime_message_propagate(out: &var std::string::String, index: i64, abi: i64) -> !void {
+    try render_array_get_propagate(out, index, abi);
+    return;
 }
 
 fn render_string_len(
@@ -7374,6 +7538,18 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let storage_deinit = codegen::code_op_storage_deinit();
     if op == storage_deinit {
+        return index + 3;
+    }
+    let box_new = codegen::code_op_box_new();
+    if op == box_new {
+        return index + 4;
+    }
+    let try_box_new = codegen::code_op_try_box_new();
+    if op == try_box_new {
+        return index + 3;
+    }
+    let box_borrow_i64 = codegen::code_op_box_borrow_i64();
+    if op == box_borrow_i64 {
         return index + 3;
     }
     let arena_new = codegen::code_op_arena_new();

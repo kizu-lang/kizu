@@ -450,14 +450,21 @@ the allocator itself is not moved. Allocating operations that can fail return
 `!T` or `!void`. No hosted selfhost path may add a hidden default allocator or
 implicit global allocator.
 
-Box storage remains deferred to #496 unless a later selfhost IR artifact lists a
-concrete reachable call site.
+`Box<i64>` uses an owned runtime object whose constructor copies an 8-byte
+payload slice into heap storage. `Box<i64>.borrow()` returns a checked borrowed
+`[]u8` view over that stored payload, and `Box<i64>.deinit()` releases both the
+payload buffer and object header through the allocator captured at construction.
+`borrow_mut`, writes, recursive payloads, and non-`i64` Box payloads remain
+future issue-linked work; this ABI must not be widened by hidden fallback paths.
 
 ## External Primitives
 
 | Kizu primitive | Runtime symbol | Signature |
 | --- | --- | --- |
 | `std::mem::page_allocator` | `@kizu_rt_mem_page_allocator` | `() -> %kizu.owned` |
+| `std::mem::Box<i64>` constructor | `@kizu_rt_box_new` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.owned` |
+| `Box<i64>.borrow` | `@kizu_rt_box_borrow` | `(%kizu.owned) -> %kizu.error.slice.u8` |
+| `Box<i64>.deinit` | `@kizu_rt_box_deinit` | `(%kizu.owned) -> void` |
 | `std::io::blocking` | `@kizu_rt_io_blocking` | `() -> %kizu.owned` |
 | `std::fs::exists` | `@kizu_rt_fs_exists` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.bool` |
 | `std::fs::metadata` | `@kizu_rt_fs_metadata` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.metadata` |
@@ -490,6 +497,7 @@ Go-owned compiler helpers further:
 | arrays | available | `std::array::Array<T>` over opaque runtime storage |
 | strings | available | `std::string::String` over opaque runtime storage |
 | maps | available for current compiler tables | `std::map::Map<[]u8, i64>` style copy payloads; broader payloads need issue-linked ABI work |
+| boxes | available for `Box<i64>` constructor/read/deinit | copied 8-byte payload storage through `@kizu_rt_box_*`; borrow_mut/write/non-i64 payloads need issue-linked ABI work |
 | allocator capability | available | explicit `std::mem::page_allocator()`; no implicit allocator fallback |
 | diagnostics rendering | available for current CLI gates | structured source diagnostics remain a replacement blocker for broader frontend switches |
 | process args/env/exit | available | `std::process::{arg_count, arg, env, exit_code}` and explicit process exit boundary |
