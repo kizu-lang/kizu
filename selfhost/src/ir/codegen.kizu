@@ -665,6 +665,13 @@ pub fn code_op_slice_index() -> i64 {
     return 126;
 }
 
+// SLICE_LEN reads the length field of a '%kizu.slice.u8' value as an i64:
+// 'op dst slice_value'. It backs 'std::mem::len(s)' over a '[]u8' or str slice;
+// the length is already i64, so no extension is needed.
+pub fn code_op_slice_len() -> i64 {
+    return 127;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -8016,6 +8023,9 @@ fn lower_code_call(
     if std::mem::equal_bytes(callee_text, "std::mem::equal_bytes") {
         return try lower_code_mem_equal_bytes(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if std::mem::equal_bytes(callee_text, "std::mem::len") {
+        return try lower_code_mem_len(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     let runtime_ctor = try lower_code_runtime_constructor(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if runtime_ctor.ok {
         return runtime_ctor;
@@ -8959,6 +8969,50 @@ fn lower_code_mem_equal_bytes(
     try code.append(right_slice.value_id);
     let kind_bool = code_kind_bool();
     try kinds.append(kind_bool);
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+// lower_code_mem_len lowers 'std::mem::len(s)' over a '[]u8' or str slice: the
+// argument lowers to a value, a str-kind literal is materialized to a
+// '%kizu.slice.u8' via lower_code_arg_slice (the same boundary the equal_bytes
+// arguments use), and SLICE_LEN reads the length field as an i64. Any argument
+// that is not a slice after materialization stays unsupported.
+fn lower_code_mem_len(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let arg = try ast.child_at(args, 0);
+    let arg_eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !arg_eval.ok {
+        return code_eval_unsupported(arg_eval.next);
+    }
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, arg_eval.value_id, arg_eval.next);
+    let kind_slice = code_kind_slice();
+    let slice_kind = try kinds.get(slice_eval.value_id);
+    if slice_kind != kind_slice {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let result_value = slice_eval.next;
+    let op = code_op_slice_len();
+    try code.append(op);
+    try code.append(result_value);
+    try code.append(slice_eval.value_id);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
 }
