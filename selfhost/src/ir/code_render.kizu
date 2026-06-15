@@ -1431,6 +1431,10 @@ fn render_one_instruction(
     if op == slice_index {
         try render_slice_index(out, code, index);
     }
+    let slice_range = codegen::code_op_slice_range();
+    if op == slice_range {
+        try render_slice_range(out, code, index);
+    }
     let call = codegen::code_op_call();
     if op == call {
         try render_call(out, text, code, kinds, index);
@@ -4890,6 +4894,56 @@ fn render_slice_index(
     return;
 }
 
+// render_slice_range builds a sub-slice of a '%kizu.slice.u8' value over the i64
+// range '[start, end)': it extracts the source data pointer, offsets it by the
+// start value with a 'getelementptr i8', computes the new length as 'end - start',
+// and assembles a fresh '%kizu.slice.u8' aggregate '{ptr, len}' into '%v<dst>'.
+// The '%sr<index>_*' temporaries are keyed by the record position so they stay
+// unique. It mirrors render_slice_index's pointer extraction and render_str_slice's
+// insertvalue pair.
+fn render_slice_range(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slice_value = try code.get(index + 2);
+    let start_value = try code.get(index + 3);
+    let end_value = try code.get(index + 4);
+    try w(out, "  %sr");
+    try wi(out, index);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %v");
+    try wi(out, slice_value);
+    try wl(out, ", 0");
+    try w(out, "  %sr");
+    try wi(out, index);
+    try w(out, "_gep = getelementptr i8, ptr %sr");
+    try wi(out, index);
+    try w(out, "_ptr, i64 %v");
+    try wi(out, start_value);
+    try nl(out);
+    try w(out, "  %sr");
+    try wi(out, index);
+    try w(out, "_len = sub i64 %v");
+    try wi(out, end_value);
+    try w(out, ", %v");
+    try wi(out, start_value);
+    try nl(out);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %sr");
+    try wi(out, index);
+    try wl(out, "_gep, 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = insertvalue %kizu.slice.u8 %v");
+    try wi(out, dst);
+    try w(out, "_base, i64 %sr");
+    try wi(out, index);
+    try wl(out, "_len, 1");
+    return;
+}
+
 // render_str_slice materializes a CONST_STR global as a '%kizu.slice.u8' SSA
 // value: an insertvalue pair builds the slice from the '@.kizu.run.s<src>'
 // global pointer and its payload byte length.
@@ -5387,6 +5441,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let slice_index = codegen::code_op_slice_index();
     if op == slice_index {
         return index + 4;
+    }
+    let slice_range = codegen::code_op_slice_range();
+    if op == slice_range {
+        return index + 5;
     }
     let binary = codegen::code_op_binary();
     if op == binary {
