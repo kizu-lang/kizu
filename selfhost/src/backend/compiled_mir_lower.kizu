@@ -424,6 +424,7 @@ fn lower_multi_let_arena_add(
 // len() -> array_len builtin call (Ast.len), get(index) -> the checked element
 // accessor (Array<T>.get -> !T). Unsupported methods fail explicitly (tracker 961).
 pub fn lower_array_method_return(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -440,7 +441,7 @@ pub fn lower_array_method_return(
     );
     if std::mem::equal_bytes(method_name, "len") {
         return try lower_array_len_method_return(
-            ir_bytes, function_name, llvm_symbol, params_spec, call_node, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, params_spec, call_node, bs
         );
     }
     if std::mem::equal_bytes(method_name, "get") {
@@ -449,15 +450,15 @@ pub fn lower_array_method_return(
         // traps on an out-of-bounds index). Ast.get is the first Arena.get consumer.
         let module_prefix = compiled_util::module_prefix_of(function_name);
         let field_type = try method_receiver_field_type(
-            ir_bytes, function_name, module_prefix, params_spec, call_node, bs
+            ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec, call_node, bs
         );
         if std::mem::starts_with(field_type, "std::arena::Arena<") {
             return try lower_arena_get_method_return(
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, call_node, bs
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, call_node, bs
             );
         }
         return try lower_array_get_method_return(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, call_node, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, call_node, bs
         );
     }
     return error("compiled mir: unsupported array accessor method");
@@ -468,6 +469,7 @@ pub fn lower_array_method_return(
 // route an Array<T> receiver to the array accessor and an Arena<T> receiver to the
 // arena accessor without duplicating the full lowering.
 fn method_receiver_field_type(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
@@ -494,8 +496,8 @@ fn method_receiver_field_type(
         ir_bytes, module_prefix, var_name, params_spec
     );
     let lookup_type = compiled_mir_types::struct_lookup_kizu_type(struct_kizu_type);
-    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-        ir_bytes, module_prefix, lookup_type, field_name
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, lookup_type, field_name
     );
     if !field.found {
         return error("compiled mir: method receiver field not found");
@@ -511,6 +513,7 @@ fn method_receiver_field_type(
 // helper, and on success loads the AstNode element by value and returns it; an
 // out-of-bounds index traps (Arena.get panics rather than returning an error union).
 pub fn lower_arena_get_method_return(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -547,8 +550,8 @@ pub fn lower_arena_get_method_return(
         ir_bytes, module_prefix, var_name, params_spec
     );
     let lookup_type = compiled_mir_types::struct_lookup_kizu_type(struct_kizu_type);
-    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-        ir_bytes, module_prefix, lookup_type, field_name
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, lookup_type, field_name
     );
     if !field.found {
         return error("compiled mir: Arena.get receiver field not found");
@@ -586,8 +589,8 @@ pub fn lower_arena_get_method_return(
         ir_bytes, module_prefix, index_param_name, params_spec
     );
     let index_lookup_type = compiled_mir_types::struct_lookup_kizu_type(index_struct_kizu);
-    let index_field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-        ir_bytes, module_prefix, index_lookup_type, index_field_name
+    let index_field = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, index_lookup_type, index_field_name
     );
     if !index_field.found {
         return error("compiled mir: Arena.get index field not found");
@@ -665,6 +668,7 @@ pub fn is_match_union_function(
 // It deliberately models only the single matched variant payload struct, not the 44 union
 // variants, and never lowers an arm to 'unreachable'.
 pub fn lower_match_union_return_function(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -864,8 +868,8 @@ pub fn lower_match_union_return_function(
     let payload_llvm = try compiled_type_lower::kizu_type_to_llvm(
         ir_bytes, ir_bytes[0..0], payload_kizu
     );
-    let field0 = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-        ir_bytes, payload_module, payload_short, field0_name
+    let field0 = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, payload_module, payload_short, field0_name
     );
     if !field0.found {
         return error("compiled mir: match-union arm payload field not found");
@@ -873,8 +877,8 @@ pub fn lower_match_union_return_function(
     let field0_type_llvm = try compiled_type_lower::kizu_type_to_llvm(
         ir_bytes, payload_module, field0.field_type
     );
-    let field1 = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-        ir_bytes, payload_module, field0.field_type, field1_name
+    let field1 = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, payload_module, field0.field_type, field1_name
     );
     if !field1.found {
         return error("compiled mir: match-union arm payload subfield not found");
@@ -974,6 +978,7 @@ pub fn match_union_has_default_arm(
 // the count_* callee, and the forwarded payload-field args; a leaf arm carries the literal.
 // All arms return a real value through the exhaustive icmp/br chain the renderer emits.
 pub fn lower_traversal_match_function(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -1040,7 +1045,7 @@ pub fn lower_traversal_match_function(
             ir_bytes, function_name, match_node, "arm", index, bs
         );
         let arm = try build_traversal_arm(
-            ir_bytes, function_name, module_prefix, union_qualified, params_spec,
+            ir_lookup_index, ir_bytes, function_name, module_prefix, union_qualified, params_spec,
             llvm_return_type, arm_node, bs
         );
         try arms.append(arm);
@@ -1066,6 +1071,7 @@ pub fn lower_traversal_match_function(
 // carrying the discriminant tag, inline payload struct, count_* callee, and the forwarded
 // payload-field args resolved against the payload struct-field facts (tracker 961).
 fn build_traversal_arm(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
@@ -1124,8 +1130,8 @@ fn build_traversal_arm(
         let plain_callee = try ir_contract::body_call_callee_or_empty_from(
             ir_bytes, function_name, arm_expr, bs
         );
-        let plain_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-            ir_bytes, "function-signature-return ", module_prefix, plain_callee
+        let plain_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+            ir_lookup_index, ir_bytes, "function-signature-return ", module_prefix, plain_callee
         );
         if std::mem::len(plain_ret) == 0 {
             return error("compiled mir: traversal arm call return type not found");
@@ -1134,7 +1140,7 @@ fn build_traversal_arm(
             ir_bytes, module_prefix, plain_ret
         );
         let plain_args = try build_traversal_arm_args(
-            ir_bytes, function_name, params_spec, payload_module, payload_short,
+            ir_lookup_index, ir_bytes, function_name, params_spec, payload_module, payload_short,
             arm_expr, bs
         );
         let plain_payload_llvm = try traversal_arm_payload_llvm(
@@ -1160,7 +1166,7 @@ fn build_traversal_arm(
         ir_bytes, function_name, inner_call, bs
     );
     let args = try build_traversal_arm_args(
-        ir_bytes, function_name, params_spec, payload_module, payload_short,
+        ir_lookup_index, ir_bytes, function_name, params_spec, payload_module, payload_short,
         inner_call, bs
     );
     let payload_llvm = try traversal_arm_payload_llvm(ir_bytes, payload_kizu, &args);
@@ -1197,6 +1203,7 @@ fn traversal_arm_payload_llvm(
 // FieldExpr argument extracts the named field off the matched variant payload. Nothing
 // is implicit, so arms can mix forwarded parameters with payload fields in any order.
 fn build_traversal_arm_args(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     params_spec: []u8,
@@ -1237,8 +1244,8 @@ fn build_traversal_arm_args(
             let field_name = try ir_contract::body_field_expr_name_from(
                 ir_bytes, function_name, arg_node, "field", bs
             );
-            let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-                ir_bytes, payload_module, payload_short, field_name
+            let field = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+                ir_lookup_index, ir_bytes, payload_module, payload_short, field_name
             );
             if !field.found {
                 return error("compiled mir: traversal arm payload field not found");
@@ -1776,6 +1783,7 @@ pub fn lower_parser_span_predicate_function(
 // shapes are intentionally narrow: guard on left.next, bind ast.get(left.node), then classify the
 // bound node span through one of the compiled span predicates (tracker 961).
 pub fn lower_parser_postfix_start_function(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -1809,14 +1817,14 @@ pub fn lower_parser_postfix_start_function(
     let ast_node_span_field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
         ir_bytes, "std::kizu::ast::", "AstNode", "span"
     );
-    let token_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
-        ir_bytes, "std::kizu::lexer::", "Token"
+    let token_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, "std::kizu::lexer::", "Token"
     );
-    let ast_node_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
-        ir_bytes, "std::kizu::ast::", "AstNode"
+    let ast_node_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, "std::kizu::ast::", "AstNode"
     );
-    let span_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
-        ir_bytes, "std::kizu::ast::", "Span"
+    let span_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, "std::kizu::ast::", "Span"
     );
     let guard_symbol = try compiled_fact_lookup::lookup_stdlib_symbol(ir_bytes, guard_lookup);
     let span_symbol = try compiled_fact_lookup::lookup_stdlib_symbol(ir_bytes, span_lookup);
@@ -2204,6 +2212,7 @@ fn match_union_arm_expr(
 // (@kizu_array_len). It deliberately does NOT touch the AstNode/AstData union,
 // Arena.get, array_get, or error-union return; those remain blocked in tracker 961.
 pub fn lower_array_len_method_return(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -2260,8 +2269,8 @@ pub fn lower_array_len_method_return(
         ir_bytes, module_prefix, var_name, params_spec
     );
     let lookup_type = compiled_mir_types::struct_lookup_kizu_type(struct_kizu_type);
-    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-        ir_bytes, module_prefix, lookup_type, field_name
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, lookup_type, field_name
     );
     if !field.found {
         return error("compiled mir: Array.len receiver field not found");
@@ -2296,6 +2305,7 @@ pub fn lower_array_len_method_return(
 // forwards the runtime message as the error-union failure value. The error branch
 // is a real failure return, never 'unreachable'.
 pub fn lower_array_get_method_return(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -2357,8 +2367,8 @@ pub fn lower_array_get_method_return(
         ir_bytes, module_prefix, var_name, params_spec
     );
     let lookup_type = compiled_mir_types::struct_lookup_kizu_type(struct_kizu_type);
-    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix(
-        ir_bytes, module_prefix, lookup_type, field_name
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, lookup_type, field_name
     );
     if !field.found {
         return error("compiled mir: Array.get receiver field not found");
@@ -2370,8 +2380,8 @@ pub fn lower_array_get_method_return(
     // looked up by its own fully-qualified name (empty module prefix) so the lookup
     // is independent of which module the accessor lives in.
     let element_kizu_type = try array_element_kizu_type(field.field_type);
-    let element_llvm_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix(
-        ir_bytes, "", element_kizu_type
+    let element_llvm_type = try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, "", element_kizu_type
     );
     return compiled_mir_function::single_array_get_return_function(
         llvm_symbol,
