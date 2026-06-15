@@ -70,13 +70,7 @@ func runStage0BackendArtifactGate(t *testing.T) (string, int) {
 		)
 	}
 	if failures == 0 {
-		failures += runStage0BackendArtifactCommand(
-			t,
-			&report,
-			"stage0.stage",
-			[]string{"stage", "selfhost"},
-			bootstrapStageStdout(),
-		)
+		failures += runStage0SeedStageStep(t, &report)
 	}
 	if failures == 0 {
 		failures += appendSelfhostBackendArtifactReport(t, &report)
