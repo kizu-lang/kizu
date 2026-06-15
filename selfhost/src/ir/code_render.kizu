@@ -199,7 +199,10 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.handle = type { ptr, i64 }");
     try wl(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }");
+    try wl(out, "%kizu.error.bool = type { i1, i1, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
+    try wl(out, "%kizu.fs.metadata = type { i64, i1 }");
+    try wl(out, "%kizu.error.metadata = type { i1, %kizu.fs.metadata, %kizu.slice.u8 }");
     try wl(out, "%kizu.run.union = type { i64, i64, %kizu.slice.u8 }");
     try wl(out, "%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }");
     try wl(out, "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
@@ -211,6 +214,9 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.bool @kizu_rt_fs_exists(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.metadata @kizu_rt_fs_metadata(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare %kizu.error.void @kizu_rt_fs_create_dir(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.owned @kizu_rt_string_new(%kizu.owned)");
     try wl(out, "declare %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned, i8)");
@@ -1564,6 +1570,22 @@ fn render_one_instruction(
     let try_fs_read = codegen::code_op_try_fs_read();
     if op == try_fs_read {
         try render_try_fs_read(out, code, index, abi);
+    }
+    let fs_exists = codegen::code_op_fs_exists();
+    if op == fs_exists {
+        try render_fs_exists(out, code, index, abi);
+    }
+    let fs_metadata = codegen::code_op_fs_metadata();
+    if op == fs_metadata {
+        try render_fs_metadata(out, code, index, abi);
+    }
+    let fs_metadata_field = codegen::code_op_fs_metadata_field();
+    if op == fs_metadata_field {
+        try render_fs_metadata_field(out, code, index);
+    }
+    let fs_create_dir = codegen::code_op_fs_create_dir();
+    if op == fs_create_dir {
+        try render_fs_create_dir(out, code, index, abi);
     }
     let try_io_write = codegen::code_op_try_io_write();
     if op == try_io_write {
@@ -4506,6 +4528,162 @@ fn render_try_io_write(
     return;
 }
 
+// render_fs_exists emits 'try std::fs::exists(io, path)': call the runtime stat,
+// extract the ok flag, and branch into a fail block that propagates the error or a
+// cont block that extracts the i1 result into the result value. The '%fr' temp
+// prefix matches TRY_FS_READ's so render_fs_read_propagate serves both records.
+fn render_fs_exists(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let io_value = try code.get(index + 2);
+    let path_value = try code.get(index + 3);
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, " = call %kizu.error.bool @kizu_rt_fs_exists(%kizu.owned %v");
+    try wi(out, io_value);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, path_value);
+    try wl(out, ")");
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, "_ok = extractvalue %kizu.error.bool %fr");
+    try wi(out, dst);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %fr");
+    try wi(out, dst);
+    try w(out, "_ok, label %fr");
+    try wi(out, dst);
+    try w(out, "_cont, label %fr");
+    try wi(out, dst);
+    try wl(out, "_fail");
+    try w(out, "fr");
+    try wi(out, dst);
+    try wl(out, "_fail:");
+    try render_fs_read_propagate(out, dst, abi);
+    try w(out, "fr");
+    try wi(out, dst);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.bool %fr");
+    try wi(out, dst);
+    try wl(out, ", 1");
+    return;
+}
+
+// render_fs_metadata emits 'try std::fs::metadata(io, path)': it mirrors
+// render_fs_exists but the runtime returns a '%kizu.error.metadata' union and the
+// cont block extracts the '%kizu.fs.metadata' aggregate into the result value (a
+// later FS_METADATA_FIELD reads its size / is_dir fields).
+fn render_fs_metadata(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let io_value = try code.get(index + 2);
+    let path_value = try code.get(index + 3);
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, " = call %kizu.error.metadata @kizu_rt_fs_metadata(%kizu.owned %v");
+    try wi(out, io_value);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, path_value);
+    try wl(out, ")");
+    try w(out, "  %fr");
+    try wi(out, dst);
+    try w(out, "_ok = extractvalue %kizu.error.metadata %fr");
+    try wi(out, dst);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %fr");
+    try wi(out, dst);
+    try w(out, "_ok, label %fr");
+    try wi(out, dst);
+    try w(out, "_cont, label %fr");
+    try wi(out, dst);
+    try wl(out, "_fail");
+    try w(out, "fr");
+    try wi(out, dst);
+    try wl(out, "_fail:");
+    try render_fs_read_propagate(out, dst, abi);
+    try w(out, "fr");
+    try wi(out, dst);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.metadata %fr");
+    try wi(out, dst);
+    try wl(out, ", 1");
+    return;
+}
+
+// render_fs_metadata_field reads one field of a '%kizu.fs.metadata' value into the
+// result value: field 0 (size) is an i64, field 1 (is_dir) an i1, both straight
+// out of the aggregate SSA value.
+fn render_fs_metadata_field(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let src = try code.get(index + 2);
+    let field_index = try code.get(index + 3);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.fs.metadata %v");
+    try wi(out, src);
+    try w(out, ", ");
+    try wi(out, field_index);
+    try nl(out);
+    return;
+}
+
+// render_fs_create_dir emits 'try std::fs::create_dir(io, path)' as a statement:
+// call the runtime create, extract the ok flag, and branch into a fail block that
+// propagates the error by the surrounding ABI or a cont block that resumes the
+// body. The '%tc' temp prefix matches TRY_CALL's so render_try_propagate serves it.
+fn render_fs_create_dir(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let io_value = try code.get(index + 1);
+    let path_value = try code.get(index + 2);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_rt_fs_create_dir(%kizu.owned %v");
+    try wi(out, io_value);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, path_value);
+    try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try render_try_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    return;
+}
+
 fn render_mem_page_allocator(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
@@ -7210,6 +7388,22 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let try_fs_read = codegen::code_op_try_fs_read();
     if op == try_fs_read {
         return index + 4;
+    }
+    let fs_exists = codegen::code_op_fs_exists();
+    if op == fs_exists {
+        return index + 4;
+    }
+    let fs_metadata = codegen::code_op_fs_metadata();
+    if op == fs_metadata {
+        return index + 4;
+    }
+    let fs_metadata_field = codegen::code_op_fs_metadata_field();
+    if op == fs_metadata_field {
+        return index + 4;
+    }
+    let fs_create_dir = codegen::code_op_fs_create_dir();
+    if op == fs_create_dir {
+        return index + 3;
     }
     let print_op = codegen::code_op_print();
     if op == print_op {
