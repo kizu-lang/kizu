@@ -1681,7 +1681,7 @@ fn render_one_instruction(
     }
     let try_map_insert = codegen::code_op_try_map_insert_i64();
     if op == try_map_insert {
-        try render_try_map_insert_i64(out, code, index, abi);
+        try render_try_map_insert_i64(out, code, kinds, index, abi);
     }
     let map_contains = codegen::code_op_map_contains();
     if op == map_contains {
@@ -1693,7 +1693,7 @@ fn render_one_instruction(
     }
     let try_map_get = codegen::code_op_try_map_get_i64();
     if op == try_map_get {
-        try render_try_map_get_i64(out, code, index, abi);
+        try render_try_map_get_i64(out, code, kinds, index, abi);
     }
     let arena_add = codegen::code_op_arena_add_slice_struct();
     if op == arena_add {
@@ -5587,20 +5587,40 @@ fn render_array_pop_load(out: &var std::string::String, value_id: i64, index: i6
 fn render_try_map_insert_i64(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
     index: i64,
     abi: i64
 ) -> !void {
     let receiver = try code.get(index + 1);
     let key = try code.get(index + 2);
     let value = try code.get(index + 3);
+    // A Map<[]u8, bool> stores its value in the same i64 slot as the i64 map, so
+    // zero-extend the i1 value to i64 before the insert call (0/1); the i64 map
+    // passes its value through unchanged.
+    let value_kind = try kinds.get(value);
+    let value_is_bool = value_kind == codegen::code_kind_bool();
+    if value_is_bool {
+        try w(out, "  %mi");
+        try wi(out, index);
+        try w(out, "_v = zext i1 %v");
+        try wi(out, value);
+        try wl(out, " to i64");
+    }
     try w(out, "  %tc");
     try wi(out, index);
     try w(out, " = call %kizu.error.void @kizu_rt_map_insert(%kizu.owned %v");
     try wi(out, receiver);
     try w(out, ", %kizu.slice.u8 %v");
     try wi(out, key);
-    try w(out, ", i64 %v");
-    try wi(out, value);
+    if value_is_bool {
+        try w(out, ", i64 %mi");
+        try wi(out, index);
+        try w(out, "_v");
+    }
+    if !value_is_bool {
+        try w(out, ", i64 %v");
+        try wi(out, value);
+    }
     try wl(out, ")");
     try render_try_void_result(out, index, abi);
     return;
@@ -5652,12 +5672,15 @@ fn render_map_len(
 fn render_try_map_get_i64(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
     index: i64,
     abi: i64
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
     let key = try code.get(index + 3);
+    let dst_kind = try kinds.get(dst);
+    let dst_is_bool = dst_kind == codegen::code_kind_bool();
     try w(out, "  %tc");
     try wi(out, index);
     try w(out, " = call %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned %v");
@@ -5684,11 +5707,30 @@ fn render_try_map_get_i64(
     try w(out, "tc");
     try wi(out, index);
     try wl(out, "_cont:");
-    try w(out, "  %v");
-    try wi(out, dst);
-    try w(out, " = extractvalue %kizu.error.i64 %tc");
-    try wi(out, index);
-    try wl(out, ", 1");
+    // A bool map packs 0/1 into the i64 slot; narrow the extracted i64 back to an
+    // i1 (icmp ne 0) so downstream bool consumers see the right type. The i64 map
+    // binds the extracted i64 directly. Mutually exclusive then-body guards fall
+    // through to a single return (the shape the compiled-MIR void if-lowering
+    // accepts; an early 'return;' inside a then-body is rejected).
+    if dst_is_bool {
+        try w(out, "  %mg");
+        try wi(out, index);
+        try w(out, "_raw = extractvalue %kizu.error.i64 %tc");
+        try wi(out, index);
+        try wl(out, ", 1");
+        try w(out, "  %v");
+        try wi(out, dst);
+        try w(out, " = icmp ne i64 %mg");
+        try wi(out, index);
+        try wl(out, "_raw, 0");
+    }
+    if !dst_is_bool {
+        try w(out, "  %v");
+        try wi(out, dst);
+        try w(out, " = extractvalue %kizu.error.i64 %tc");
+        try wi(out, index);
+        try wl(out, ", 1");
+    }
     return;
 }
 
