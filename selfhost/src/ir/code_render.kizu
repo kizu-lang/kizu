@@ -214,6 +214,11 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try render_bool_print_global(out, "@.kizu.run.bool_true = private unnamed_addr constant [5 x i8] c", "true");
     try render_bool_print_global(out, "@.kizu.run.bool_false = private unnamed_addr constant [6 x i8] c", "false");
     try render_expect_fail_global(out);
+    try w(out, "@.kizu.run.string_truncate_oob = private unnamed_addr constant [36 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try w(out, "String.truncate length out of bounds");
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
     try nl(out);
     try render_i64_decimal_helper(out);
     try render_string_format_helpers(out);
@@ -1552,6 +1557,10 @@ fn render_one_instruction(
     let storage_capacity = codegen::code_op_storage_capacity();
     if op == storage_capacity {
         try render_storage_capacity(out, code, kinds, index);
+    }
+    let try_string_truncate = codegen::code_op_try_string_truncate();
+    if op == try_string_truncate {
+        try render_try_string_truncate(out, code, index, abi);
     }
     let try_array_append = codegen::code_op_try_array_append_i64();
     if op == try_array_append {
@@ -3522,6 +3531,88 @@ fn render_storage_capacity(
         try wi(out, index);
         try wl(out, "_field");
     }
+    return;
+}
+
+fn render_try_string_truncate(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let length = try code.get(index + 2);
+    try w(out, "  %st");
+    try wi(out, index);
+    try w(out, "_raw = extractvalue %kizu.owned %v");
+    try wi(out, receiver);
+    try wl(out, ", 0");
+    try w(out, "  %st");
+    try wi(out, index);
+    try w(out, "_len_field = getelementptr inbounds %kizu.rt.string, ptr %st");
+    try wi(out, index);
+    try wl(out, "_raw, i32 0, i32 2");
+    try w(out, "  %st");
+    try wi(out, index);
+    try w(out, "_current = load i64, ptr %st");
+    try wi(out, index);
+    try wl(out, "_len_field");
+    try w(out, "  %st");
+    try wi(out, index);
+    try w(out, "_nonnegative = icmp sge i64 %v");
+    try wi(out, length);
+    try wl(out, ", 0");
+    try w(out, "  %st");
+    try wi(out, index);
+    try w(out, "_in_bounds = icmp sle i64 %v");
+    try wi(out, length);
+    try w(out, ", %st");
+    try wi(out, index);
+    try wl(out, "_current");
+    try w(out, "  %st");
+    try wi(out, index);
+    try w(out, "_ok = and i1 %st");
+    try wi(out, index);
+    try w(out, "_nonnegative, %st");
+    try wi(out, index);
+    try wl(out, "_in_bounds");
+    try w(out, "  br i1 %st");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try wl(out, "_msg_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.string_truncate_oob, 0");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_msg = insertvalue %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_msg_base, i64 36, 1");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try wl(out, "_fail_base = insertvalue %kizu.error.void poison, i1 false, 0");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = insertvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try w(out, "_fail_base, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_msg, 1");
+    try render_try_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  store i64 %v");
+    try wi(out, length);
+    try w(out, ", ptr %st");
+    try wi(out, index);
+    try wl(out, "_len_field");
     return;
 }
 
@@ -5626,6 +5717,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let storage_capacity = codegen::code_op_storage_capacity();
     if op == storage_capacity {
+        return index + 3;
+    }
+    let try_string_truncate = codegen::code_op_try_string_truncate();
+    if op == try_string_truncate {
         return index + 3;
     }
     let try_array_append = codegen::code_op_try_array_append_i64();
