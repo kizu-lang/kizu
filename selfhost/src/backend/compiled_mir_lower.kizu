@@ -9110,6 +9110,25 @@ fn lower_multi_while_statement(
         );
         try latch_stmts.append(latch_stmt);
     } else {
+        if std::mem::equal_bytes(increment_value_kind, "Call") {
+            // 'token = synth_next_token(token);' advances the induction variable through a
+            // token-carried call result rather than a numeric add: the loop variable is
+            // reseated from a free function returning i64, whose result feeds the loop-head
+            // phi (%<var>_next). Unlike the try-call latch this call propagates no error, so
+            // it ends in loopN_latch with no fail/cont block (issue 1157 PR-P4).
+            let latch_stmt = try lower_while_latch_call(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                induction_var,
+                increment_value,
+                body_string_counter,
+                bs,
+                ir_lookup_index, call_arg_type_cache
+            );
+            try latch_stmts.append(latch_stmt);
+        } else {
         if std::mem::equal_bytes(increment_value_kind, "Var") {
             // 'index = previous' copies a body-local back into the induction variable. The local
             // must be bound earlier in this loop body by 'let previous = index - <int>', a
@@ -9127,6 +9146,7 @@ fn lower_multi_while_statement(
             step = try parse_induction_step(
                 ir_bytes, function_name, increment_stmt, induction_var, bs
             );
+        }
         }
     }
     // The increments before the primary latch (body_boundary .. body_count - 2) are the
@@ -10979,6 +10999,47 @@ fn lower_while_latch_try_call(
     return compiled_mir::let_try_call_stmt(
         induction_var, called_error_union, success_type, llvm_return_type,
         callee_module_prefix, callee_name, string_counter, try_index, args
+    );
+}
+
+// lower_while_latch_call lowers a token-carried 'token = synth_next_token(token);' latch
+// update into a LetCall statement whose bound name is the induction variable (issue 1157
+// PR-P4). The latch renderer suffixes the bind name with "_next", so the call result binds
+// to %<induction_var>_next which the loop-head phi consumes on the latch edge. The callee
+// must be a free function returning i64; a field-mode method or non-i64 result is rejected.
+fn lower_while_latch_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    induction_var: []u8,
+    call_node: i64,
+    string_counter: i64,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !compiled_mir::MirStmt {
+    if try callee_is_field_expr(ir_bytes, function_name, call_node, bs) {
+        return error("compiled mir: token-carried latch call must be a free function");
+    }
+    let call_type = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    if !std::mem::equal_bytes(call_type, "i64") {
+        return error("compiled mir: token-carried latch call must return an i64");
+    }
+    let callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let args = try compiled_mir_lower_call::lower_call_args_cached(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, bs,
+        ir_lookup_index, call_arg_type_cache
+    );
+    return compiled_mir::let_call_stmt(
+        induction_var, call_type, string_counter, callee_module_prefix, callee_name, args
     );
 }
 

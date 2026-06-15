@@ -5109,17 +5109,28 @@ fn append_multi_while(
     try out.append_byte(cast<u8>(10));
     let latch_stmts = &stmt.latch_stmts;
     if latch_stmts.len() > 0 {
-        // A 'index = try <callee>(.., index);' loop-carried latch update: the success value
-        // binds to %<induction_var>_next (consumed by the loop-head phi) and a failure
-        // propagates as this function's own error union. The call-arg setup prefix is past the
-        // body statement prefixes so its SSA names never collide with the body (issue 1165).
+        // A loop-carried latch update binds the induction variable's next value to
+        // %<induction_var>_next (consumed by the loop-head phi). A try-call latch
+        // ('index = try f(.., index)') propagates a failure as this function's own error
+        // union; a token-carried plain-call latch ('token = synth_next_token(token)')
+        // returns i64 directly with no fail/cont block (issue 1157 PR-P4). The call-arg setup
+        // prefix is past the body statement prefixes so its SSA names never collide.
         let latch_stmt = try latch_stmts.at(0);
-        try append_while_latch_try_call(
-            out,
-            function,
-            latch_stmt,
-            stmt.loop_index * 1000 + body_stmts.len() + 1
-        );
+        if try while_latch_statement_is_try_call(latch_stmt) {
+            try append_while_latch_try_call(
+                out,
+                function,
+                latch_stmt,
+                stmt.loop_index * 1000 + body_stmts.len() + 1
+            );
+        } else {
+            try append_while_latch_call(
+                out,
+                function,
+                latch_stmt,
+                stmt.loop_index * 1000 + body_stmts.len() + 1
+            );
+        }
     } else {
         // A copy-decrement latch ('index = previous') needs no primary add: the loop-head phi
         // already reads the body-local %<latch_copy_var> on the latch edge (issue 1165 / 1162).
@@ -5366,15 +5377,71 @@ fn append_while_latch_pred_label(
     let latch_stmts = &stmt.latch_stmts;
     if latch_stmts.len() > 0 {
         let latch_stmt = try latch_stmts.at(0);
-        let try_index = try while_latch_try_index(latch_stmt);
-        try out.append_bytes("%try");
-        try std::fmt::append_i64(out, try_index);
-        try out.append_bytes("_cont");
-        return;
+        // A try-call latch ends in its continuation block tryK_cont; a token-carried
+        // plain-call latch falls through from loopN_latch like a constant-step add (issue
+        // 1157 PR-P4).
+        if try while_latch_statement_is_try_call(latch_stmt) {
+            let try_index = try while_latch_try_index(latch_stmt);
+            try out.append_bytes("%try");
+            try std::fmt::append_i64(out, try_index);
+            try out.append_bytes("_cont");
+            return;
+        }
     }
     try out.append_bytes("%loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_latch");
+    return;
+}
+// while_latch_statement_is_try_call reports whether a while latch statement is a try-call
+// (LetTryCall) rather than a token-carried plain call (LetCall), so the latch renderer and
+// the phi latch-edge predecessor pick the right shape (issue 1157 PR-P4).
+fn while_latch_statement_is_try_call(latch_stmt: &compiled_mir::MirStmt) -> !bool {
+    return match latch_stmt {
+        LetTryCall(payload) => true,
+        _ => false,
+    };
+}
+// append_while_latch_call renders a token-carried 'token = synth_next_token(token);' latch
+// update: the LetCall is emitted with the bind name suffixed "_next" so the i64 result binds
+// to %<induction_var>_next that the loop-head phi reads on the latch edge (issue 1157 PR-P4).
+// It carries no error union, so it emits no fail/cont block and the latch falls through to
+// the loop head. A non-LetCall latch statement is a lowering bug.
+fn append_while_latch_call(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    latch_stmt: &compiled_mir::MirStmt,
+    local_prefix: i64
+) -> !void {
+    match latch_stmt {
+        LetCall(payload) => try append_while_latch_call_body(out, function.name, payload, local_prefix);,
+        _ => return error("compiled mir: while latch statement must be a let-call");,
+    }
+    return;
+}
+fn append_while_latch_call_body(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    payload: &compiled_mir::MirLetCallStmt,
+    local_prefix: i64
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, llvm_symbol, &payload.call_args, local_prefix
+    );
+    try out.append_bytes("  %");
+    try out.append_bytes(payload.name);
+    try out.append_bytes("_next = call ");
+    try out.append_bytes(payload.llvm_type);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, payload.call_module_prefix, payload.call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(
+        out, &payload.call_args, local_prefix
+    );
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
     return;
 }
 // while_latch_try_index returns the try index of a try-call latch statement, used both for
