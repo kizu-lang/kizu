@@ -11936,6 +11936,36 @@ fn lower_expr_into(
         ));
         return result_id;
     }
+    if std::mem::equal_bytes(kind, "StructLiteralExpr") {
+        // A single-field struct literal (e.g. ProgramNode{ declarations: range }) lowers its
+        // one field value to an SSA temp and materializes the struct via one insertvalue
+        // (issue 1157 PR-P3). It backs a struct-literal union-constructor payload; the union
+        // ctor lowering stores the resulting struct value into the union byte buffer.
+        let struct_type = try compiled_signature::resolve_struct_literal_type(
+            ir_bytes, function_name, module_prefix, expr_node, bs
+        );
+        let second_field = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, expr_node, "field", 1, bs
+        );
+        if second_field >= 0 {
+            return error("compiled mir: multi-field struct-literal payload is unsupported (issue 1157 PR-P3)");
+        }
+        let field_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "field", 0, bs
+        );
+        let field_value = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, field_node, "value", 0, bs
+        );
+        let field0_value = try lower_expr_into(
+            ir_bytes, function_name, module_prefix, params_spec, field_value,
+            string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
+        );
+        let struct_id = id_base + insts.len();
+        try insts.append(compiled_mir::struct_literal_expr_inst(
+            struct_id, struct_type, field0_value, 0
+        ));
+        return struct_id;
+    }
     if std::mem::equal_bytes(kind, "Call") {
         // A field-mode len() call on a value receiver reads a supported %kizu.owned
         // param/local (Array<T> or std::string::String) through its matching runtime helper.

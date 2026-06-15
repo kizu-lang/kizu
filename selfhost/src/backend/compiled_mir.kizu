@@ -161,6 +161,19 @@ pub struct MirUnionConstructExpr {
     pub payload_type: []u8,
 }
 
+// MirStructLiteralExpr materializes a single-field struct literal value (e.g.
+// ProgramNode{ declarations: range }) as an SSA temp via one 'insertvalue <llvm_type>
+// poison, <field type> <field value>, <field0_index>'. It lets a union constructor take a
+// struct-literal payload that is then stored into the union byte buffer (issue 1157 PR-P3).
+// Only the single-field shape is modelled here; multi-field struct-literal payloads are a
+// later step.
+pub struct MirStructLiteralExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub field0_value: i64,
+    pub field0_index: i64,
+}
+
 pub struct MirPrefixNotExpr {
     pub id: i64,
     pub llvm_type: []u8,
@@ -263,6 +276,7 @@ pub union MirExprInst {
     StringLen(MirStringLenExpr),
     IntCast(MirIntCastExpr),
     UnionConstruct(MirUnionConstructExpr),
+    StructLiteral(MirStructLiteralExpr),
 }
 
 pub enum MirIfThenKind {
@@ -1364,6 +1378,7 @@ impl MirExprInst {
             StringLen(payload) => return;,
             IntCast(payload) => return;,
             UnionConstruct(payload) => return;,
+            StructLiteral(payload) => return;,
         }
     }
 }
@@ -2426,6 +2441,20 @@ pub fn union_construct_payload_expr_inst(
     });
 }
 
+pub fn struct_literal_expr_inst(
+    id: i64,
+    llvm_type: []u8,
+    field0_value: i64,
+    field0_index: i64
+) -> MirExprInst {
+    return MirExprInst::StructLiteral(MirStructLiteralExpr {
+        id: id,
+        llvm_type: llvm_type,
+        field0_value: field0_value,
+        field0_index: field0_index
+    });
+}
+
 pub fn field_access_expr_inst(
     id: i64,
     field_type: []u8,
@@ -2553,6 +2582,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         StringLen(payload) => payload.id,
         IntCast(payload) => payload.id,
         UnionConstruct(payload) => payload.id,
+        StructLiteral(payload) => payload.id,
     };
 }
 
@@ -2573,6 +2603,7 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         StringLen(payload) => payload.llvm_type,
         IntCast(payload) => payload.llvm_type,
         UnionConstruct(payload) => payload.llvm_type,
+        StructLiteral(payload) => payload.llvm_type,
     };
 }
 
@@ -2696,6 +2727,12 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
             tag: payload.tag,
             payload_value: payload.payload_value,
             payload_type: payload.payload_type
+        }),
+        StructLiteral(payload) => MirExprInst::StructLiteral(MirStructLiteralExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            field0_value: payload.field0_value,
+            field0_index: payload.field0_index
         }),
     };
 }
