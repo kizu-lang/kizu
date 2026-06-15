@@ -142,15 +142,23 @@ pub struct MirConstEnumTagExpr {
     pub int_value: i64,
 }
 
-// MirUnionConstructExpr materializes a tagged-union variant value built from a
-// payload-less variant reference (e.g. AstData::Empty). Unlike ConstEnumTag, whose i64
-// tag is literal-propagated, a union value is the aggregate { i64 tag, <payload> } named
-// by llvm_type, so it is emitted as an SSA temp via 'insertvalue <llvm_type>
-// zeroinitializer, i64 <tag>, 0' (issue 1157 PR-P1, tag-only first form).
+// MirUnionConstructExpr materializes a tagged-union variant value. The union LLVM type
+// named by llvm_type is the byte-buffer aggregate { i64 tag, [N x i8] } (the payload slot
+// holds the widest variant), so the value is emitted as an SSA temp.
+//   - payload-less variant (payload_value < 0, e.g. AstData::Empty): a single
+//     'insertvalue <llvm_type> zeroinitializer, i64 <tag>, 0' (issue 1157 PR-P1).
+//   - single-payload variant (payload_value >= 0, e.g. AstData::Program(node)): a
+//     stack slot is zero-initialized, the discriminant is stored into field 0 and the
+//     payload SSA value (LLVM type payload_type) into the field-1 buffer, then the whole
+//     union is loaded back (issue 1157 PR-P2). This store-into-buffer mirror of the read
+//     side (append_match_union_block: gep field 1 + load payload_type) keeps the layout
+//     consistent, since the payload type is narrower than the [N x i8] field.
 pub struct MirUnionConstructExpr {
     pub id: i64,
     pub llvm_type: []u8,
     pub tag: i64,
+    pub payload_value: i64,
+    pub payload_type: []u8,
 }
 
 pub struct MirPrefixNotExpr {
@@ -2396,7 +2404,25 @@ pub fn union_construct_expr_inst(id: i64, llvm_type: []u8, tag: i64) -> MirExprI
     return MirExprInst::UnionConstruct(MirUnionConstructExpr {
         id: id,
         llvm_type: llvm_type,
-        tag: tag
+        tag: tag,
+        payload_value: 0 - 1,
+        payload_type: llvm_type[0..0]
+    });
+}
+
+pub fn union_construct_payload_expr_inst(
+    id: i64,
+    llvm_type: []u8,
+    tag: i64,
+    payload_value: i64,
+    payload_type: []u8
+) -> MirExprInst {
+    return MirExprInst::UnionConstruct(MirUnionConstructExpr {
+        id: id,
+        llvm_type: llvm_type,
+        tag: tag,
+        payload_value: payload_value,
+        payload_type: payload_type
     });
 }
 
@@ -2667,7 +2693,9 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
         UnionConstruct(payload) => MirExprInst::UnionConstruct(MirUnionConstructExpr {
             id: payload.id,
             llvm_type: payload.llvm_type,
-            tag: payload.tag
+            tag: payload.tag,
+            payload_value: payload.payload_value,
+            payload_type: payload.payload_type
         }),
     };
 }
