@@ -658,6 +658,13 @@ pub fn code_op_struct_field() -> i64 {
     return 119;
 }
 
+// SLICE_INDEX reads one byte from a '%kizu.slice.u8' value at an i64 index and
+// zero-extends it to i64: 'op dst slice_value index_value'. It backs the element
+// index expression 'b[i]' (slice == false); range slices stay unsupported.
+pub fn code_op_slice_index() -> i64 {
+    return 126;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -6459,6 +6466,7 @@ fn lower_code_expr(
         TryExpr(try_expr) => try lower_code_try_expr(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         If(if_node) => try lower_code_if_expr(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Match(match_node) => try lower_code_match_expr(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        IndexExpr(index_expr) => try lower_code_index(text, ast, decls, index_expr.target, index_expr.start, index_expr.slice, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -7831,6 +7839,75 @@ fn lower_code_binary(
         try kinds.append(kind_i64);
     }
     let result_value = right_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+// lower_code_index lowers an element index 'b[i]' (slice == false) on a
+// '%kizu.slice.u8' target: the target lowers to a slice value, the index lowers
+// to an i64-like value, then SLICE_INDEX reads the byte and yields an i64. Range
+// slices (slice == true) stay unsupported -- their result is a '[]u8' value the
+// run tape does not lower yet (a follow-up owns it).
+fn lower_code_index(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    target: std::kizu::ast::NodeId,
+    start: std::kizu::ast::NodeId,
+    slice: bool,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if slice {
+        return code_eval_unsupported(next_value);
+    }
+    let target_eval = try lower_code_expr(text, ast, decls, target, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !target_eval.ok {
+        return code_eval_unsupported(target_eval.next);
+    }
+    // A 'str'-kind literal has no materialized '%kizu.slice.u8' SSA temp, so it is
+    // lowered through STR_SLICE (the same boundary materialization a user-call
+    // argument uses); a value already of slice kind passes through unchanged. The
+    // value id and cursor bind to plain locals before the call (the shape the
+    // compiled call-arg lowering models).
+    let target_value = target_eval.value_id;
+    let target_next = target_eval.next;
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, target_value, target_next);
+    if !slice_eval.ok {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let target_kind = try kinds.get(slice_eval.value_id);
+    let kind_slice = code_kind_slice();
+    if target_kind != kind_slice {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let index_eval = try lower_code_expr(text, ast, decls, start, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slice_eval.next);
+    if !index_eval.ok {
+        return code_eval_unsupported(index_eval.next);
+    }
+    let index_kind = try kinds.get(index_eval.value_id);
+    let index_i64_like = try code_operand_is_i64_like(code, index_kind);
+    if !index_i64_like {
+        return code_eval_unsupported(index_eval.next);
+    }
+    // Emit SLICE_INDEX inline (matching the BINARY record shape): the result
+    // value id is the next free value, and the SSA byte read zero-extends to i64.
+    let slice_value = slice_eval.value_id;
+    let index_value = index_eval.value_id;
+    let result_value = index_eval.next;
+    let op_slice_index = code_op_slice_index();
+    try code.append(op_slice_index);
+    try code.append(result_value);
+    try code.append(slice_value);
+    try code.append(index_value);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
 }
