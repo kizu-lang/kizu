@@ -135,6 +135,14 @@ selfhost-run-parity-gate-from-scratch:
     just selfhost-bootstrap
     just selfhost-run-parity-gate
 
+# Run #1070 flip-path parity gate (KIZU_SELFHOST_RUN run_file_cli vs Go interp baseline).
+selfhost-run-flip-parity-gate:
+    KIZU_RUN_SELFHOST_FLIP_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunFlipParityGate$' -count=1 -v
+
+# Run one #1070 flip parity case by manifest name or fixture path.
+selfhost-run-flip-one case:
+    KIZU_RUN_SELFHOST_FLIP_PARITY=1 KIZU_RUN_SELFHOST_FLIP_PARITY_CASE='{{case}}' go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunFlipParityGate$' -count=1 -v
+
 # Run #1151 public `run` selfhost switch gate (KIZU_SELFHOST_RUN routing).
 selfhost-run-cli-switch-gate:
     KIZU_RUN_SELFHOST_RUN_CLI_SWITCH=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunCliSwitch' -count=1 -v
