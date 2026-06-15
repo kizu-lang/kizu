@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -78,6 +79,9 @@ func dispatch(cmd string, args []string) error {
 	case "parse":
 		return runSelfhostFrontendCommand("parse", args)
 	case "run":
+		if nativeRunEnabled() {
+			return runNativeSelfhostDelegate("run", args)
+		}
 		if selfhostRunEnabled() {
 			return runSelfhostFrontendCommand("run", args)
 		}
@@ -86,6 +90,9 @@ func dispatch(cmd string, args []string) error {
 	case "check":
 		return runSelfhostFrontendCommand("check", args)
 	case "test":
+		if nativeTestEnabled() {
+			return runNativeSelfhostDelegate("test", args)
+		}
 		if selfhostTestEnabled() {
 			return runSelfhostFrontendCommand("test", args)
 		}
@@ -109,6 +116,81 @@ func dispatch(cmd string, args []string) error {
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
 	}
+}
+
+const nativeSelfhostBinary = "target/selfhost/stage2/selfhost"
+
+// nativeRunEnvVar is a prototype switch for delegating `kizu run` to the stage2
+// native selfhost binary. It defaults off while native run coverage is incomplete.
+const nativeRunEnvVar = "KIZU_NATIVE_RUN"
+
+// nativeRunEnabled reports whether `run` should exec the stage2 native selfhost
+// binary instead of taking the Go-owned dispatch path.
+func nativeRunEnabled() bool {
+	return os.Getenv(nativeRunEnvVar) == "1"
+}
+
+// nativeTestEnvVar is a prototype switch for delegating `kizu test` to the
+// stage2 native selfhost binary. It defaults off while native test coverage is
+// incomplete.
+const nativeTestEnvVar = "KIZU_NATIVE_TEST"
+
+// nativeTestEnabled reports whether `test` should exec the stage2 native selfhost
+// binary instead of taking the Go-owned dispatch path.
+func nativeTestEnabled() bool {
+	return os.Getenv(nativeTestEnvVar) == "1"
+}
+
+// runNativeSelfhostDelegate delegates a public command to the existing stage2
+// native selfhost artifact, preserving argv, stdio, cwd, and the child exit code.
+func runNativeSelfhostDelegate(command string, args []string) error {
+	bin, err := nativeSelfhostBinaryPath()
+	if err != nil {
+		return err
+	}
+	processArgs := make([]string, 0, len(args)+1)
+	processArgs = append(processArgs, command)
+	processArgs = append(processArgs, args...)
+	cmd := exec.Command(bin, processArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = nativeSelfhostEnv(bin)
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exitStatus{code: exit.ExitCode()}
+		}
+		return err
+	}
+	return nil
+}
+
+func nativeSelfhostBinaryPath() (string, error) {
+	bin, err := findRepoFile(nativeSelfhostBinary)
+	if err != nil {
+		return "", fmt.Errorf(
+			"native selfhost delegate requires %s; run `just selfhost-production-from-scratch` to build it: %w",
+			nativeSelfhostBinary,
+			err,
+		)
+	}
+	info, err := os.Stat(bin)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("native selfhost delegate requires executable file %s, got directory", bin)
+	}
+	return filepath.Abs(bin)
+}
+
+func nativeSelfhostEnv(bin string) []string {
+	return append(os.Environ(), "KIZU_REPO_ROOT="+nativeSelfhostRepoRoot(bin))
+}
+
+func nativeSelfhostRepoRoot(bin string) string {
+	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(bin))))
 }
 
 // selfhostRunEnvVar is the rollback-friendly switch point for routing the public
