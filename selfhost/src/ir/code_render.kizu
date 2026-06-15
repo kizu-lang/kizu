@@ -5443,8 +5443,13 @@ fn render_union_pack(
     try wl(out, ", 0");
     let kind_slice = codegen::code_kind_slice();
     let has_payload = payload_value >= 0;
-    let is_slice = has_payload and payload_kind == kind_slice;
-    let is_word = has_payload and payload_kind != kind_slice;
+    let is_union = try payload_kind_is_union(code, payload_kind);
+    let is_box = has_payload and is_union;
+    let is_slice = has_payload and !is_union and payload_kind == kind_slice;
+    let is_word = has_payload and !is_union and payload_kind != kind_slice;
+    if is_box {
+        try render_union_pack_box(out, dst, payload_value);
+    }
     if is_slice {
         try render_union_pack_field(out, dst, payload_value, 2);
     }
@@ -5454,6 +5459,77 @@ fn render_union_pack(
     if !has_payload {
         try render_union_pack_empty(out, dst);
     }
+    return;
+}
+
+// payload_kind_is_union reports whether a UNION_PACK/UNION_PAYLOAD payload kind
+// names a declared union (record_base + UNION_DECL position). Such a payload is
+// boxed: the nested union value lives on the heap and the box pointer rides in
+// the i64 word field, rather than the scalar inline payload.
+fn payload_kind_is_union(
+    code: &std::array::Array<i64>,
+    payload_kind: i64
+) -> !bool {
+    let base = codegen::code_kind_struct_base();
+    if payload_kind < base {
+        return false;
+    }
+    let pos = payload_kind - base;
+    if pos >= code.len() {
+        return false;
+    }
+    let op = try code.get(pos);
+    return op == codegen::code_op_union_decl();
+}
+
+// render_union_pack_box heap-allocates a copy of the nested union payload and
+// stores its pointer (as the i64 word field) so the boxed value outlives the
+// packing function. A match arm later loads it back through render_union_payload_box.
+fn render_union_pack_box(
+    out: &var std::string::String,
+    dst: i64,
+    payload_value: i64
+) -> !void {
+    try w(out, "  %v");
+    try wi(out, dst);
+    try wl(out, "_balloc = call %kizu.owned @kizu_rt_mem_page_allocator()");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_ballocp = extractvalue %kizu.owned %v");
+    try wi(out, dst);
+    try wl(out, "_balloc, 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try wl(out, "_bsizep = getelementptr %kizu.run.union, ptr null, i64 1");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_bsize = ptrtoint ptr %v");
+    try wi(out, dst);
+    try wl(out, "_bsizep to i64");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_box = call ptr @kizu_rt_alloc(ptr %v");
+    try wi(out, dst);
+    try w(out, "_ballocp, i64 %v");
+    try wi(out, dst);
+    try wl(out, "_bsize)");
+    try w(out, "  store %kizu.run.union %v");
+    try wi(out, payload_value);
+    try w(out, ", ptr %v");
+    try wi(out, dst);
+    try wl(out, "_box");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_boxi = ptrtoint ptr %v");
+    try wi(out, dst);
+    try wl(out, "_box to i64");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = insertvalue %kizu.run.union %v");
+    try wi(out, dst);
+    try w(out, "_tag, i64 %v");
+    try wi(out, dst);
+    try wl(out, "_boxi, 1");
     return;
 }
 
@@ -5519,6 +5595,24 @@ fn render_union_payload(
     let dst = try code.get(index + 1);
     let src = try code.get(index + 2);
     let payload_kind = try code.get(index + 3);
+    let is_union = try payload_kind_is_union(code, payload_kind);
+    if is_union {
+        try render_union_payload_box(out, dst, src);
+    }
+    if !is_union {
+        try render_union_payload_scalar(out, dst, src, payload_kind);
+    }
+    return;
+}
+
+// render_union_payload_scalar extracts an inline payload field: field 1 carries
+// an i64 payload, field 2 a slice payload.
+fn render_union_payload_scalar(
+    out: &var std::string::String,
+    dst: i64,
+    src: i64,
+    payload_kind: i64
+) -> !void {
     let kind_slice = codegen::code_kind_slice();
     let field = union_payload_field(payload_kind, kind_slice);
     try w(out, "  %v");
@@ -5528,6 +5622,31 @@ fn render_union_payload(
     try w(out, ", ");
     try wi(out, field);
     try nl(out);
+    return;
+}
+
+// render_union_payload_box loads the boxed nested union back from the pointer
+// the matching UNION_PACK stored in the i64 word field.
+fn render_union_payload_box(
+    out: &var std::string::String,
+    dst: i64,
+    src: i64
+) -> !void {
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_boxi = extractvalue %kizu.run.union %v");
+    try wi(out, src);
+    try wl(out, ", 1");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, "_box = inttoptr i64 %v");
+    try wi(out, dst);
+    try wl(out, "_boxi to ptr");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load %kizu.run.union, ptr %v");
+    try wi(out, dst);
+    try wl(out, "_box");
     return;
 }
 
