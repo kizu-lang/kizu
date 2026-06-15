@@ -490,6 +490,26 @@ pub fn code_op_var_store_bool() -> i64 {
     return 59;
 }
 
+// Scalar '&var i64' write-back opcodes. VAR_ADDR materializes a caller var
+// slot's address as a 'ptr' value so it can be passed to a '&var i64'
+// parameter: 'op dst slot' renders '%v<dst> = getelementptr i64, ptr
+// %slot<slot>'. PTR_LOAD reads an i64 through such a ptr value ('op dst
+// ptr_value' -> '%v<dst> = load i64, ptr %v<ptr_value>') and PTR_STORE writes
+// one ('op ptr_value value' -> 'store i64 %v<value>, ptr %v<ptr_value>'). They
+// reuse the existing i64 load/store ABI; only the pointer source differs from a
+// VAR_LOAD/VAR_STORE alloca slot.
+pub fn code_op_var_addr() -> i64 {
+    return 63;
+}
+
+pub fn code_op_ptr_load() -> i64 {
+    return 64;
+}
+
+pub fn code_op_ptr_store() -> i64 {
+    return 65;
+}
+
 // While-loop opcodes frame a 'while <cond> { <body> }': WHILE_BEGIN opens the
 // condition block, WHILE_COND branches on the lowered i1 condition into the body
 // or past the loop, WHILE_END closes the body back to the condition block. Each
@@ -891,6 +911,20 @@ pub fn code_kind_fs_metadata() -> i64 {
 // fs_metadata), so it never collides with the i64/enum/borrow map kinds.
 pub fn code_kind_owned_map_bool() -> i64 {
     return 16;
+}
+
+// code_kind_mut_borrow_i64 marks a scalar '&var i64' parameter (and the
+// VAR_ADDR value a caller passes for one): unlike the value-model read borrow
+// '&i64', the mutable borrow flows as a 'ptr' to the caller's i64 var slot so a
+// callee 'n.*' read/write loads/stores through it and the mutation is observed
+// by the caller. It stays a small scalar kind below code_kind_struct_base; the
+// renderer maps it to 'ptr'.
+pub fn code_kind_mut_borrow_i64() -> i64 {
+    return 19;
+}
+
+pub fn code_kind_is_mut_borrow_scalar(kind: i64) -> bool {
+    return kind == code_kind_mut_borrow_i64();
 }
 
 fn code_kind_owned_map_enum_base() -> i64 {
@@ -2269,7 +2303,8 @@ fn append_code_defer_field_method_call(
     let type_start = try code.get(receiver_record_pos + 1);
     let type_end = try code.get(receiver_record_pos + 2);
     try scratch_put(args_scratch, scratch_base, receiver_eval.value_id);
-    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, arg_base, 0, receiver_eval.next);
+    let no_user_callee = code_no_user_callee();
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, arg_base, no_user_callee, no_user_callee, 0, receiver_eval.next);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
@@ -2766,7 +2801,7 @@ fn read_borrow_referent_kind(type_text: []u8) -> i64 {
     }
     let referent = type_text[1..length];
     if std::mem::starts_with(referent, "var ") {
-        return mut_borrow_map_referent_kind(referent);
+        return mut_borrow_referent_kind(referent);
     }
     if std::mem::equal_bytes(referent, "var") {
         return 0 - 1;
@@ -2803,6 +2838,29 @@ fn mut_borrow_map_referent_kind(referent: []u8) -> i64 {
     }
     if std::mem::equal_bytes(unwrapped, "std::map::Map <[]u8, i64>") {
         return code_kind_mut_borrowed_map_i64();
+    }
+    return 0 - 1;
+}
+
+// mut_borrow_referent_kind resolves a '&var T' referent ('var T'): a supported
+// Map handle keeps the interior-mutation handle ABI, while a scalar 'i64' takes
+// the new pointer write-back kind. Anything else stays -1 (unchanged).
+fn mut_borrow_referent_kind(referent: []u8) -> i64 {
+    let map_kind = mut_borrow_map_referent_kind(referent);
+    if map_kind >= 0 {
+        return map_kind;
+    }
+    return mut_borrow_scalar_referent_kind(referent);
+}
+
+// mut_borrow_scalar_referent_kind resolves a scalar '&var T' referent ('var T')
+// to its pointer write-back kind. Only 'i64' is supported in this PR; bool/slice
+// and other scalars stay -1 (unsupported, unchanged behaviour).
+fn mut_borrow_scalar_referent_kind(referent: []u8) -> i64 {
+    let referent_len = std::mem::len(referent);
+    let unwrapped = referent[4..referent_len];
+    if std::mem::equal_bytes(unwrapped, "i64") {
+        return code_kind_mut_borrow_i64();
     }
     return 0 - 1;
 }
@@ -4678,6 +4736,13 @@ fn lower_code_assign(
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
+    // '<receiver>.* = <expr>' over a mutable scalar borrow stores the i64 value
+    // through the pointer. The receiver must resolve to a '&var i64' value; any
+    // other deref target is not an owned write here.
+    let deref_ptr = try code_assign_deref_ptr(text, ast, target, kinds, local_starts, local_ends, local_values, locals_base);
+    if deref_ptr >= 0 {
+        return try lower_code_deref_store(deref_ptr, eval.value_id, code, kinds, eval.next);
+    }
     let field_entry = try code_assign_field_entry(text, ast, target, code, kinds, local_starts, local_ends, local_values, locals_base);
     if field_entry >= 0 {
         return try lower_code_field_assign(text, field_entry, eval.value_id, code, kinds, eval.next);
@@ -4697,6 +4762,24 @@ fn lower_code_assign(
     try code.append(slot);
     try code.append(eval.value_id);
     return code_eval_value(eval.value_id, eval.next);
+}
+
+// lower_code_deref_store emits the PTR_STORE for '<&var i64>.* = <i64>'. The
+// stored value must be i64 (a var slot's ABI); any other kind is not an owned
+// write and stays unsupported.
+fn lower_code_deref_store(
+    deref_ptr: i64,
+    value_id: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let kind_i64 = code_kind_i64();
+    let stored_kind = try kinds.get(value_id);
+    if stored_kind != kind_i64 {
+        return code_eval_unsupported(next_value);
+    }
+    return try emit_code_ptr_store(deref_ptr, value_id, code, next_value);
 }
 
 // code_assign_field_entry resolves an assignment target to its scalarized
@@ -4721,6 +4804,66 @@ fn code_assign_field_entry(
 
 fn code_assign_no_field() -> i64 {
     return 0 - 1;
+}
+
+// code_assign_deref_ptr resolves a '<receiver>.* = ...' assignment target to the
+// receiver's '&var i64' pointer value id (-1 when the target is not a deref of a
+// bare mutable scalar borrow). The receiver must be a bare var bound to a
+// code_kind_mut_borrow_i64 value (a '&var i64' parameter).
+fn code_assign_deref_ptr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64
+) -> !i64 {
+    let node = ast.get(target);
+    return match node.data {
+        DerefExpr(deref_expr) => try code_assign_deref_receiver_ptr(text, ast, deref_expr.receiver, kinds, local_starts, local_ends, local_values, locals_base),
+        _ => code_assign_no_field(),
+    };
+}
+
+fn code_assign_deref_receiver_ptr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64
+) -> !i64 {
+    let node = ast.get(receiver);
+    return match node.data {
+        Var(var_node) => try code_assign_deref_var_ptr(text, ast, receiver, kinds, local_starts, local_ends, local_values, locals_base),
+        _ => code_assign_no_field(),
+    };
+}
+
+fn code_assign_deref_var_ptr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64
+) -> !i64 {
+    let name_span = code_node_span(text, ast, receiver);
+    let bound = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, name_span.start, name_span.end);
+    if bound < 0 {
+        return 0 - 1;
+    }
+    let bound_kind = try kinds.get(bound);
+    if !code_kind_is_mut_borrow_scalar(bound_kind) {
+        return 0 - 1;
+    }
+    return bound;
 }
 
 // code_assign_field_expr_entry resolves a '<name>.<field>' assignment target:
@@ -6298,7 +6441,7 @@ fn emit_code_try_call_void(
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
-    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, 0, next_value);
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_span.start, callee_span.end, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
@@ -6333,7 +6476,7 @@ fn emit_code_try_call_i64(
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
-    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, 0, next_value);
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_span.start, callee_span.end, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
@@ -6875,16 +7018,43 @@ fn lower_code_expr(
         If(if_node) => try lower_code_if_expr(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Match(match_node) => try lower_code_match_expr(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         IndexExpr(index_expr) => try lower_code_index(text, ast, decls, index_expr.target, index_expr.start, index_expr.end, index_expr.slice, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
-        // A read deref '<expr>.*' evaluates to the same value (and kind) as the
-        // place it dereferences: in the tape's value model a read-only deref is an
-        // identity, the exact dual of the read borrow '&<expr>' arm in
-        // lower_code_prefix. The receiver lowers and its value flows through
-        // unchanged, so the arm forwards 'deref_expr.receiver' straight back into
-        // lower_code_expr. Write-back through '<expr>.* =' is an assignment target,
-        // not this read path, so it is not modelled here.
-        DerefExpr(deref_expr) => try lower_code_expr(text, ast, decls, deref_expr.receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        // A read deref '<expr>.*' over a value-model read borrow '&T' is an
+        // identity (the dual of the read borrow arm in lower_code_prefix). Over a
+        // mutable scalar borrow '&var i64' (a 'ptr' value), it instead loads the
+        // pointee i64. lower_code_deref_read picks the right form from the
+        // receiver's kind. Write-back through '<expr>.* =' is an assignment target,
+        // handled in lower_code_assign, not this read path.
+        DerefExpr(deref_expr) => try lower_code_deref_read(text, ast, decls, deref_expr.receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
+}
+
+// lower_code_deref_read lowers '<receiver>.*': the receiver lowers first, then a
+// mutable scalar borrow ('&var i64', a 'ptr' value) loads its pointee through
+// PTR_LOAD while every other kind keeps the value-model identity.
+fn lower_code_deref_read(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let eval = try lower_code_expr(text, ast, decls, receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let receiver_kind = try kinds.get(eval.value_id);
+    if code_kind_is_mut_borrow_scalar(receiver_kind) {
+        return try emit_code_ptr_load(eval.value_id, code, kinds, eval.next);
+    }
+    return code_eval_value(eval.value_id, eval.next);
 }
 
 fn lower_code_int(
@@ -7167,7 +7337,88 @@ fn lower_code_prefix(
     if op == std::kizu::ast::prefix_borrow() {
         return try lower_code_expr(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    // A mutable borrow '&var <var>' of a scalar i64 var passes the address of the
+    // caller's var slot (a 'ptr' value) so the callee writes back through it. Only
+    // a bare var that owns an alloca slot is addressable; anything else (a let, a
+    // temporary) stays unsupported and falls through to the diagnostic.
+    if op == std::kizu::ast::prefix_mut_borrow() {
+        return try lower_code_mut_borrow_scalar(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
+    }
     return code_eval_unsupported(next_value);
+}
+
+// lower_code_mut_borrow_scalar lowers '&var <var>' for a scalar i64 var: it
+// resolves the operand to its alloca slot and emits VAR_ADDR, yielding a 'ptr'
+// value (kind code_kind_mut_borrow_i64). A non-var operand has no slot and stays
+// unsupported, the same safe fallback the value model used before.
+fn lower_code_mut_borrow_scalar(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    right: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let slot = try code_var_slot_of(text, ast, right, local_starts, local_ends, local_values, locals_base);
+    if slot < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    return try emit_code_var_addr(slot, code, kinds, next_value);
+}
+
+// emit_code_var_addr appends a VAR_ADDR record producing the address of a var
+// slot as a 'ptr' value (kind code_kind_mut_borrow_i64).
+fn emit_code_var_addr(
+    slot: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let op_var_addr = code_op_var_addr();
+    try code.append(op_var_addr);
+    try code.append(next_value);
+    try code.append(slot);
+    let mut_borrow_kind = code_kind_mut_borrow_i64();
+    try kinds.append(mut_borrow_kind);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// emit_code_ptr_load appends a PTR_LOAD reading an i64 through a '&var i64'
+// pointer value, producing a fresh i64 value.
+fn emit_code_ptr_load(
+    ptr_value: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let op_ptr_load = code_op_ptr_load();
+    try code.append(op_ptr_load);
+    try code.append(next_value);
+    try code.append(ptr_value);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// emit_code_ptr_store appends a PTR_STORE writing an i64 value through a
+// '&var i64' pointer value. It yields no new SSA value (like VAR_STORE).
+fn emit_code_ptr_store(
+    ptr_value: i64,
+    value_id: i64,
+    code: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let op_ptr_store = code_op_ptr_store();
+    try code.append(op_ptr_store);
+    try code.append(ptr_value);
+    try code.append(value_id);
+    return code_eval_value(value_id, next_value);
 }
 
 // lower_code_not lowers '!<expr>': the operand lowers to an i1 value and the NOT
@@ -10705,7 +10956,7 @@ fn emit_code_user_call(
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
-    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, 0, next_value);
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_span.start, callee_span.end, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
@@ -10803,7 +11054,8 @@ fn emit_code_field_method_call(
         return code_eval_unsupported(receiver_eval.next);
     }
     try scratch_put(args_scratch, scratch_base, receiver_eval.value_id);
-    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, arg_base, 0, receiver_eval.next);
+    let no_user_callee = code_no_user_callee();
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, arg_base, no_user_callee, no_user_callee, 0, receiver_eval.next);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
@@ -11448,6 +11700,8 @@ fn lower_code_args(
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
     scratch_base: i64,
+    callee_name_start: i64,
+    callee_name_end: i64,
     index: i64,
     next_value: i64
 ) -> !CodeEval {
@@ -11458,6 +11712,14 @@ fn lower_code_args(
     let arg_slot = scratch_base + index;
     let next_free = arg_slot + 1;
     try args_scratch.set(0, next_free);
+    // A user call whose callee param at this index is a scalar '&var i64' takes
+    // the caller var's slot address (a 'ptr'), not a loaded i64 value, so the
+    // callee writes back through it. Both 'foo(x)' and 'foo(&var x)' marshal the
+    // same way here. callee_name_start < 0 (e.g. method calls) skips the probe.
+    let mut_param_kind = try code_arg_callee_param_kind(text, ast, decls, callee_name_start, callee_name_end, index);
+    if code_kind_is_mut_borrow_scalar(mut_param_kind) {
+        return try lower_code_mut_borrow_arg_chain(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_name_start, callee_name_end, arg, arg_slot, index, next_value);
+    }
     let eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !eval.ok {
         return code_eval_unsupported(eval.next);
@@ -11465,7 +11727,176 @@ fn lower_code_args(
     let arg_eval = try lower_code_arg_value(text, code, kinds, args_scratch, eval.value_id, eval.next);
     try scratch_put(args_scratch, arg_slot, arg_eval.value_id);
     let after = index + 1;
-    return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, after, arg_eval.next);
+    return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_name_start, callee_name_end, after, arg_eval.next);
+}
+
+// lower_code_mut_borrow_arg_chain marshals one scalar '&var i64' argument as a
+// caller-slot pointer, records it in the scratch row, and continues lowering the
+// remaining arguments. It is a single-statement tail of lower_code_args's
+// mut-borrow branch so each then-body stays a lone 'return try <call>'.
+fn lower_code_mut_borrow_arg_chain(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    scratch_base: i64,
+    callee_name_start: i64,
+    callee_name_end: i64,
+    arg: std::kizu::ast::NodeId,
+    arg_slot: i64,
+    index: i64,
+    next_value: i64
+) -> !CodeEval {
+    let mb_eval = try lower_code_mut_borrow_call_arg(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !mb_eval.ok {
+        return code_eval_unsupported(mb_eval.next);
+    }
+    try scratch_put(args_scratch, arg_slot, mb_eval.value_id);
+    let after_mut = index + 1;
+    return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_name_start, callee_name_end, after_mut, mb_eval.next);
+}
+
+// code_no_user_callee is the sentinel callee-name-start a method call passes to
+// lower_code_args so the '&var i64' caller-slot probe is skipped (method params
+// are out of this PR's scope). It is a call, not an inline '0 - 1', so the
+// argument the call site forwards stays a plain local (the compiled call-arg
+// lowering rejects a bare arithmetic literal as a positional argument).
+fn code_no_user_callee() -> i64 {
+    return 0 - 1;
+}
+
+// code_arg_callee_param_kind returns the tape kind of the callee's parameter at
+// param_index for a user call, or -1 when the callee is unknown (method calls
+// pass callee_name_start < 0) or the parameter is not resolvable. It is a pure
+// text probe over the declaration's parameter types (no tape side effects), used
+// only to detect scalar '&var i64' parameters for caller-slot pointer passing.
+fn code_arg_callee_param_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee_name_start: i64,
+    callee_name_end: i64,
+    param_index: i64
+) -> !i64 {
+    if callee_name_start < 0 {
+        return 0 - 1;
+    }
+    return try code_callee_param_kind(text, ast, decls, callee_name_start, callee_name_end, param_index, 0);
+}
+
+// lower_code_mut_borrow_call_arg marshals one '&var i64' argument: a bare var
+// takes its slot address (VAR_ADDR), and an explicit '&var <var>' prefix lowers
+// through the prefix arm (also VAR_ADDR). Anything else has no addressable slot
+// and stays unsupported.
+fn lower_code_mut_borrow_call_arg(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    arg: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(arg);
+    return match node.data {
+        Var(var_node) => try lower_code_mut_borrow_scalar(text, ast, arg, code, kinds, local_starts, local_ends, local_values, locals_base, next_value),
+        Prefix(prefix_node) => try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+// code_callee_param_kind scans the program declarations for the named function
+// and returns the read-borrow kind text of its parameter at param_index (the
+// dual of code_callee_return_kind for parameters). -2 from a declaration means
+// "not this function, keep scanning"; -1 means resolved but not a borrow kind.
+fn code_callee_param_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    name_start: i64,
+    name_end: i64,
+    param_index: i64,
+    index: i64
+) -> !i64 {
+    if index >= decls.len {
+        return 0 - 1;
+    }
+    let child = try ast.child_at(decls, index);
+    let kind = try code_decl_param_kind(text, ast, child, name_start, name_end, param_index);
+    let after = index + 1;
+    if kind > 0 - 2 {
+        return kind;
+    }
+    return try code_callee_param_kind(text, ast, decls, name_start, name_end, param_index, after);
+}
+
+fn code_decl_param_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    child: std::kizu::ast::NodeId,
+    name_start: i64,
+    name_end: i64,
+    param_index: i64
+) -> !i64 {
+    let node = ast.get(child);
+    return match node.data {
+        FnDecl(fn_decl) => try code_fn_decl_param_kind(text, ast, fn_decl.name, fn_decl.params, name_start, name_end, param_index),
+        _ => code_decl_kind_skip(),
+    };
+}
+
+fn code_fn_decl_param_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    params: std::kizu::ast::ChildRange,
+    name_start: i64,
+    name_end: i64,
+    param_index: i64
+) -> !i64 {
+    let decl_name = ast_node_text(text, ast, name);
+    let callee_name = text[name_start..name_end];
+    if !std::mem::equal_bytes(decl_name, callee_name) {
+        return 0 - 2;
+    }
+    if param_index >= params.len {
+        return 0 - 1;
+    }
+    let param_child = try ast.child_at(params, param_index);
+    return try code_param_node_borrow_kind(text, ast, param_child);
+}
+
+fn code_param_node_borrow_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    param_child: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(param_child);
+    return match node.data {
+        Param(param) => code_param_borrow_text_kind(text, ast, param.type_node),
+        _ => code_unbound_slot(),
+    };
+}
+
+fn code_param_borrow_text_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> i64 {
+    let type_text = ast_node_text(text, ast, type_node);
+    return read_borrow_referent_kind(type_text);
 }
 
 // lower_code_arg_value materializes values that cross a user-call boundary:
