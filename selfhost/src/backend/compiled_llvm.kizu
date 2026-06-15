@@ -105,8 +105,13 @@ pub fn append_compiled_function_params_indexed(
         let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
         // Parser TokenKind predicates can be written as a statement match with return-bool arms
         // (the common exhaustive helper form) or as a compact return-match expression. Both lower
-        // through the same semantic predicate MIR instead of a source-shape scanner.
-        if std::mem::equal_bytes(kind, "Match") or std::mem::equal_bytes(kind, "ExprStmt") {
+        // through the same semantic predicate MIR instead of a source-shape scanner. The fast path
+        // is guarded so only a genuine bool predicate (every arm returns a bool literal) is
+        // specialized; a non-bool dispatch match ('match token.kind { ... return ParseNode/error }')
+        // falls through to the general lowering instead of failing the bool-arm precondition
+        // (issue 1157 PR-PD / B2).
+        if (std::mem::equal_bytes(kind, "Match") or std::mem::equal_bytes(kind, "ExprStmt")) and
+            (try compiled_mir_lower::function_is_bool_token_kind_predicate(ir_bytes, function_name, bs)) {
             let predicate_mir = try compiled_mir_lower::lower_token_kind_predicate_function(
                 ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
             );
@@ -124,7 +129,11 @@ pub fn append_compiled_function_params_indexed(
         // 'return match token.kind { <Variant> => true, _ => false };' is a parser single-variant
         // token predicate (e.g. is_left_brace_token): a match over an enum field returning bool,
         // which the generic expression path does not model (tracker 961, scope 4 prerequisite).
-        if std::mem::equal_bytes(value_kind, "Match") {
+        // The same bool-arm guard keeps a non-bool return-match ('return match k { ... => 0 };')
+        // out of the predicate fast path so it falls through to the general lowering below
+        // (issue 1157 PR-PD / B2).
+        if std::mem::equal_bytes(value_kind, "Match") and
+            (try compiled_mir_lower::function_is_bool_token_kind_predicate(ir_bytes, function_name, bs)) {
             let predicate_mir = try compiled_mir_lower::lower_token_kind_predicate_function(
                 ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
             );

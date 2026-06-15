@@ -1665,6 +1665,83 @@ fn token_kind_predicate_arm_bool(
     return std::mem::equal_bytes(token, "true");
 }
 
+// function_is_bool_token_kind_predicate reports whether a single-statement function is a
+// genuine bool TokenKind predicate: a 'match <scrutinee>.kind { ... }' (compact return-match
+// or exhaustive statement match) whose scrutinee is a field access and whose every arm body
+// returns a bool literal. It is non-erroring, so a non-bool dispatch match (whose arms return
+// a ParseNode / an error union / any non-bool value) is reported false and falls through to
+// the general lowering instead of being mis-specialized as a bool predicate (issue 1157
+// PR-PD / B2). The narrow only removes false-positive specialization; every real bool
+// predicate (bool and !bool return) still matches and keeps the fast path.
+pub fn function_is_bool_token_kind_predicate(
+    ir_bytes: []u8,
+    function_name: []u8,
+    bs: i64
+) -> !bool {
+    let statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let statement_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, statement, bs
+    );
+    var match_node = 0 - 1;
+    if std::mem::equal_bytes(statement_kind, "Match") {
+        match_node = statement;
+    } else {
+        if std::mem::equal_bytes(statement_kind, "ExprStmt") {
+            let expr = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "expr", 0, bs
+            );
+            let expr_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr, bs);
+            if std::mem::equal_bytes(expr_kind, "Match") {
+                match_node = expr;
+            }
+        } else {
+            if std::mem::equal_bytes(statement_kind, "Return") {
+                let value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "value", 0, bs
+                );
+                let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+                if std::mem::equal_bytes(value_kind, "Match") {
+                    match_node = value;
+                }
+            }
+        }
+    }
+    if match_node < 0 {
+        return false;
+    }
+    let scrutinee = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_node, "value", 0, bs
+    );
+    let scrutinee_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, scrutinee, bs);
+    if !std::mem::equal_bytes(scrutinee_kind, "FieldExpr") {
+        return false;
+    }
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, match_node, "arm", bs
+    );
+    if arm_count == 0 {
+        return false;
+    }
+    var arm_index = 0;
+    while arm_index < arm_count {
+        let arm = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, match_node, "arm", arm_index, bs
+        );
+        let arm_body = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arm, "body", 0, bs
+        );
+        let value = try token_kind_predicate_arm_value(ir_bytes, function_name, arm_body, bs);
+        let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+        if !std::mem::equal_bytes(value_kind, "Bool") {
+            return false;
+        }
+        arm_index = arm_index + 1;
+    }
+    return true;
+}
+
 // lower_token_kind_predicate_function lowers parser TokenKind predicates into a single
 // TokenKindPredicate statement (tracker 961, scope 4 prerequisite). It reads the Token.kind
 // scrutinee and records every arm whose body returns true; the renderer emits an i1 compare/OR
