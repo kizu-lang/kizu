@@ -1571,6 +1571,10 @@ fn render_one_instruction(
     if op == array_get_value {
         try render_array_get(out, code, index);
     }
+    let try_array_set = codegen::code_op_try_array_set();
+    if op == try_array_set {
+        try render_try_array_set(out, code, index, abi);
+    }
     let try_map_insert = codegen::code_op_try_map_insert_i64();
     if op == try_map_insert {
         try render_try_map_insert_i64(out, code, index, abi);
@@ -3866,6 +3870,97 @@ fn render_array_get_propagate(out: &var std::string::String, index: i64, abi: i6
     return;
 }
 
+// render_try_array_set emits ARRAY_SET: bounds-check the index through
+// 'kizu_rt_array_at' (propagating its error the same way Array.get does), then
+// store the value into the returned element pointer. It yields void.
+fn render_try_array_set(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let item_index = try code.get(index + 2);
+    let value = try code.get(index + 3);
+    let element_kind = try code.get(index + 4);
+    try w(out, "  %as");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", i64 %v");
+    try wi(out, item_index);
+    try wl(out, ")");
+    try w(out, "  %as");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %as");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %as");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.slice.u8 %as");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try render_array_get_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %as");
+    try wi(out, index);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %as");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %as");
+    try wi(out, index);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %as");
+    try wi(out, index);
+    try wl(out, "_slice, 0");
+    try render_array_set_store(out, index, value, element_kind);
+    return;
+}
+
+// render_array_set_store stores '%v<value>' into the element pointer
+// '%as<index>_ptr' for i64, bool, and []u8 element kinds, mirroring the slot
+// stores the append lowering emits.
+fn render_array_set_store(out: &var std::string::String, index: i64, value: i64, element_kind: i64) -> !void {
+    if element_kind == codegen::code_kind_bool() {
+        try w(out, "  %as");
+        try wi(out, index);
+        try w(out, "_byte = zext i1 %v");
+        try wi(out, value);
+        try wl(out, " to i8");
+        try w(out, "  store i8 %as");
+        try wi(out, index);
+        try w(out, "_byte, ptr %as");
+        try wi(out, index);
+        try wl(out, "_ptr");
+    }
+    if element_kind == codegen::code_kind_i64() {
+        try w(out, "  store i64 %v");
+        try wi(out, value);
+        try w(out, ", ptr %as");
+        try wi(out, index);
+        try wl(out, "_ptr");
+    }
+    if element_kind == codegen::code_kind_slice() {
+        try w(out, "  store %kizu.slice.u8 %v");
+        try wi(out, value);
+        try w(out, ", ptr %as");
+        try wi(out, index);
+        try wl(out, "_ptr");
+    }
+    return;
+}
+
 fn render_try_map_insert_i64(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
@@ -5382,6 +5477,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let array_get_value = codegen::code_op_array_get();
     if op == array_get_value {
+        return index + 5;
+    }
+    let try_array_set = codegen::code_op_try_array_set();
+    if op == try_array_set {
         return index + 5;
     }
     let try_map_insert = codegen::code_op_try_map_insert_i64();
