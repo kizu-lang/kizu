@@ -108,6 +108,17 @@ pub fn kizu_type_to_llvm(
         if std::mem::equal_bytes(inner, "std::kizu::ast::ParseResult") {
             return "%kizu.error.parse_result";
         }
+        // !std::kizu::parser::ParseNode backs the recursive-descent parser helper cluster
+        // (parse_top_level_decl / parse_decl_with_visibility / parse_fn_decl / parse_statement /
+        // parse_expr / parse_binary_expr / parse_primary / ... , issue 1157): each helper returns
+        // the ParseNode cursor { node, next } by value in an error union. ParseNode lowers to the
+        // %kizu.kizu.parser.parse_node value type the parser facts already declare, so its error
+        // union follows the canonical { i1 ok, <value>, %kizu.slice.u8 message } shape RelatedSpan /
+        // NodeId / ParseResult already use: %kizu.error.parse_node. The closure spells the return
+        // type fully qualified, so only the qualified spelling reaches here.
+        if std::mem::equal_bytes(inner, "std::kizu::parser::ParseNode") {
+            return "%kizu.error.parse_node";
+        }
         return error("compiled function: unsupported error type");
     }
     if std::mem::equal_bytes(kizu_type, "i64") {
@@ -156,6 +167,15 @@ pub fn kizu_type_to_llvm(
     // a per-closure type-llvm fact (the strict ABI mapper assigns the same type).
     if std::mem::equal_bytes(kizu_type, "std::kizu::ast::SourceFile") {
         return "%kizu.kizu.ast.source_file";
+    }
+    // std::kizu::parser::ParseNode is the recursive-descent parser cursor record { node: NodeId,
+    // next: Token } the parser helper cluster threads and returns by value (issue 1157). It lowers
+    // to the %kizu.kizu.parser.parse_node value type the parser facts already declare, so a
+    // ParseNode local and its field reads (e.g. 'declaration.next' / 'body.node') resolve here when
+    // spelled fully qualified, matching the unqualified 'ParseNode' ABI mapping compiled_abi_params
+    // already assigns. No new runtime ABI is invented; only the existing value type is reused.
+    if std::mem::equal_bytes(kizu_type, "std::kizu::parser::ParseNode") {
+        return "%kizu.kizu.parser.parse_node";
     }
     // CommentFormatState is the comment-preservation driver's loop-carried scalar state value
     // { last: u8, at_line_start: bool, after_comment: bool } -> { i8, i1, i1 }, constructed by
