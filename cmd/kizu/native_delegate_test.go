@@ -8,6 +8,8 @@ import (
 	"testing"
 )
 
+// TestNativeDelegateEnvGate pins that the native run/test delegates only enable
+// on the documented opt-in value of their env vars.
 func TestNativeDelegateEnvGate(t *testing.T) {
 	t.Setenv(nativeRunEnvVar, "")
 	if nativeRunEnabled() {
@@ -36,6 +38,8 @@ func TestNativeDelegateEnvGate(t *testing.T) {
 	}
 }
 
+// TestNativeDelegateEnvOffKeepsGoPaths verifies run and test stay on the Go-owned
+// paths when every delegate gate is off.
 func TestNativeDelegateEnvOffKeepsGoPaths(t *testing.T) {
 	root := t.TempDir()
 	writeFakeNativeSelfhost(t, root)
@@ -58,7 +62,8 @@ func TestNativeDelegateEnvOffKeepsGoPaths(t *testing.T) {
 	}
 
 	testPath := filepath.Join(t.TempDir(), "test.kizu")
-	if err := os.WriteFile(testPath, []byte("test \"ok\" { std::testing::expect(true); }\n"), 0o644); err != nil {
+	testSource := []byte("test \"ok\" { std::testing::expect(true); }\n")
+	if err := os.WriteFile(testPath, testSource, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	stdout, stderr, err = runDispatchCaptureOutput(t, "test", []string{testPath})
@@ -70,6 +75,8 @@ func TestNativeDelegateEnvOffKeepsGoPaths(t *testing.T) {
 	}
 }
 
+// TestNativeDelegateExecsStage2WithTransparentArgs verifies the enabled delegate
+// execs the stage2 binary, forwarding argv transparently and propagating its exit code.
 func TestNativeDelegateExecsStage2WithTransparentArgs(t *testing.T) {
 	root := t.TempDir()
 	writeFakeNativeSelfhost(t, root)
@@ -121,6 +128,8 @@ func TestNativeDelegateExecsStage2WithTransparentArgs(t *testing.T) {
 	}
 }
 
+// TestNativeDelegateRejectsDirectoryArtifact verifies a directory at the binary
+// path is rejected with an explicit diagnostic and no child output.
 func TestNativeDelegateRejectsDirectoryArtifact(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, nativeSelfhostBinary), 0o755); err != nil {
@@ -142,6 +151,8 @@ func TestNativeDelegateRejectsDirectoryArtifact(t *testing.T) {
 	}
 }
 
+// writeFakeNativeSelfhost installs a stub stage2 binary that echoes its argv and
+// exits with KIZU_FAKE_NATIVE_EXIT, standing in for the real native artifact.
 func writeFakeNativeSelfhost(t *testing.T, root string) string {
 	t.Helper()
 	bin := filepath.Join(root, nativeSelfhostBinary)

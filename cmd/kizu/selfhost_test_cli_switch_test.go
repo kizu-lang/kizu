@@ -181,15 +181,15 @@ func writeTestCliSwitchReport(supported, unsupported, diagnostic string) error {
 	return os.WriteFile(filepath.Join(dir, "test-cli-switch.txt"), []byte(b.String()), 0o644)
 }
 
-// testCliSwitchDispatchSlice extracts the `test` dispatch case body from main.go so
+// testCliSwitchDispatchSlice extracts the dispatchTest helper body from main.go so
 // the env-gate guard can assert its shape without runtime dependencies.
 func testCliSwitchDispatchSlice(source string) string {
-	start := strings.Index(source, "case \"test\":")
+	start := strings.Index(source, "func dispatchTest(")
 	if start < 0 {
 		return ""
 	}
 	rest := source[start:]
-	end := strings.Index(rest, "case \"fmt\":")
+	end := strings.Index(rest, "\nfunc ")
 	if end < 0 {
 		return ""
 	}

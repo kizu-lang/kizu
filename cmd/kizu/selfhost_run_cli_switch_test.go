@@ -181,15 +181,15 @@ func writeRunCliSwitchReport(supported, unsupported, diagnostic string) error {
 	return os.WriteFile(filepath.Join(dir, "run-cli-switch.txt"), []byte(b.String()), 0o644)
 }
 
-// runCliSwitchDispatchSlice extracts the `run` dispatch case body from main.go so
+// runCliSwitchDispatchSlice extracts the dispatchRun helper body from main.go so
 // the env-gate guard can assert its shape without runtime dependencies.
 func runCliSwitchDispatchSlice(source string) string {
-	start := strings.Index(source, "case \"run\":")
+	start := strings.Index(source, "func dispatchRun(")
 	if start < 0 {
 		return ""
 	}
 	rest := source[start:]
-	end := strings.Index(rest, "case \"check\":")
+	end := strings.Index(rest, "\nfunc ")
 	if end < 0 {
 		return ""
 	}

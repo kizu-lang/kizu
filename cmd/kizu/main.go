@@ -79,25 +79,11 @@ func dispatch(cmd string, args []string) error {
 	case "parse":
 		return runSelfhostFrontendCommand("parse", args)
 	case "run":
-		if nativeRunEnabled() {
-			return runNativeSelfhostDelegate("run", args)
-		}
-		if selfhostRunEnabled() {
-			return runSelfhostFrontendCommand("run", args)
-		}
-		path, programArgs := splitProgramArgs(args)
-		return runFile(path, programArgs)
+		return dispatchRun(args)
 	case "check":
 		return runSelfhostFrontendCommand("check", args)
 	case "test":
-		if nativeTestEnabled() {
-			return runNativeSelfhostDelegate("test", args)
-		}
-		if selfhostTestEnabled() {
-			return runSelfhostFrontendCommand("test", args)
-		}
-		path, programArgs := splitProgramArgs(args)
-		return testFile(path, programArgs)
+		return dispatchTest(args)
 	case "fmt":
 		return fmtCommand(args)
 	case "init":
@@ -116,6 +102,32 @@ func dispatch(cmd string, args []string) error {
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
 	}
+}
+
+// dispatchRun routes `kizu run` through the native, selfhost, or Go-owned path,
+// preserving the nativeRun → selfhostRun → runFile priority order.
+func dispatchRun(args []string) error {
+	if nativeRunEnabled() {
+		return runNativeSelfhostDelegate("run", args)
+	}
+	if selfhostRunEnabled() {
+		return runSelfhostFrontendCommand("run", args)
+	}
+	path, programArgs := splitProgramArgs(args)
+	return runFile(path, programArgs)
+}
+
+// dispatchTest routes `kizu test` through the native, selfhost, or Go-owned path,
+// preserving the nativeTest → selfhostTest → testFile priority order.
+func dispatchTest(args []string) error {
+	if nativeTestEnabled() {
+		return runNativeSelfhostDelegate("test", args)
+	}
+	if selfhostTestEnabled() {
+		return runSelfhostFrontendCommand("test", args)
+	}
+	path, programArgs := splitProgramArgs(args)
+	return testFile(path, programArgs)
 }
 
 const nativeSelfhostBinary = "target/selfhost/stage2/selfhost"
@@ -166,11 +178,13 @@ func runNativeSelfhostDelegate(command string, args []string) error {
 	return nil
 }
 
+// nativeSelfhostBinaryPath resolves the stage2 native selfhost executable path.
 func nativeSelfhostBinaryPath() (string, error) {
 	bin, err := findRepoFile(nativeSelfhostBinary)
 	if err != nil {
 		return "", fmt.Errorf(
-			"native selfhost delegate requires %s; run `just selfhost-production-from-scratch` to build it: %w",
+			"native selfhost delegate requires %s; "+
+				"run `just selfhost-production-from-scratch` to build it: %w",
 			nativeSelfhostBinary,
 			err,
 		)
@@ -185,10 +199,14 @@ func nativeSelfhostBinaryPath() (string, error) {
 	return filepath.Abs(bin)
 }
 
+// nativeSelfhostEnv augments the current environment with the repo root the
+// native selfhost binary expects.
 func nativeSelfhostEnv(bin string) []string {
 	return append(os.Environ(), "KIZU_REPO_ROOT="+nativeSelfhostRepoRoot(bin))
 }
 
+// nativeSelfhostRepoRoot derives the repo root from the stage2 binary path,
+// which lives at target/selfhost/stage2/selfhost.
 func nativeSelfhostRepoRoot(bin string) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(bin))))
 }
