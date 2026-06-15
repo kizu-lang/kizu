@@ -4164,6 +4164,24 @@ fn expr_inst_var_name_by_id(
     return "";
 }
 
+// expr_inst_llvm_type_by_id resolves the LLVM type of the expr inst that produced
+// result_id, so a struct-literal build can spell its field value's type in the insertvalue
+// it emits (issue 1157 PR-P3).
+fn expr_inst_llvm_type_by_id(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> ![]u8 {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            return compiled_mir::expr_inst_llvm_type(inst);
+        }
+        index = index + 1;
+    }
+    return error("compiled mir llvm: struct-literal field value not found");
+}
+
 fn expr_inst_is_int_literal_by_id(
     insts: &std::array::Array<compiled_mir::MirExprInst>,
     result_id: i64
@@ -5617,6 +5635,7 @@ fn append_expr_inst(
         StringLen(payload) => try append_string_len_expr(out, payload);,
         IntCast(payload) => try append_int_cast_expr(out, payload, insts);,
         UnionConstruct(payload) => try append_union_construct_expr(out, payload, insts);,
+        StructLiteral(payload) => try append_struct_literal_expr(out, payload, insts);,
     }
     return;
 }
@@ -6054,6 +6073,28 @@ fn append_union_construct_store_payload(
     try out.append_bytes(", ptr %t");
     try std::fmt::append_i64(out, inst.id);
     try out.append_bytes("_payloadptr, align 8");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_struct_literal_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirStructLiteralExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    // Materialize a single-field struct literal value with one insertvalue into a poison
+    // aggregate (issue 1157 PR-P3). The field value's LLVM type is resolved from the inst
+    // that produced it so the insertvalue operand type matches.
+    let field_type = try expr_inst_llvm_type_by_id(insts, inst.field0_value);
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(inst.llvm_type);
+    try out.append_bytes(" poison, ");
+    try out.append_bytes(field_type);
+    try out.append_byte(cast<u8>(32));
+    try append_expr_value_ref(out, insts, inst.field0_value);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, inst.field0_index);
     try out.append_byte(cast<u8>(10));
     return;
 }
