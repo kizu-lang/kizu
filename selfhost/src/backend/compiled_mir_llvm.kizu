@@ -5616,7 +5616,7 @@ fn append_expr_inst(
         ArrayLen(payload) => try append_array_len_expr(out, payload);,
         StringLen(payload) => try append_string_len_expr(out, payload);,
         IntCast(payload) => try append_int_cast_expr(out, payload, insts);,
-        UnionConstruct(payload) => try append_union_construct_expr(out, payload);,
+        UnionConstruct(payload) => try append_union_construct_expr(out, payload, insts);,
     }
     return;
 }
@@ -5956,19 +5956,104 @@ fn append_const_int_expr(
 }
 fn append_union_construct_expr(
     out: &var std::string::String,
-    inst: &compiled_mir::MirUnionConstructExpr
+    inst: &compiled_mir::MirUnionConstructExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
-    // A payload-less tagged-union variant value is the aggregate { i64 tag, <payload> }.
-    // Build it by inserting the discriminant into a zeroinitialized union of inst.llvm_type;
-    // the payload slot stays zero for a tag-only variant (issue 1157 PR-P1). The read side
-    // (append_match_union_block) reads the discriminant from field 0, matching this layout.
+    if inst.payload_value < 0 {
+        // A payload-less tagged-union variant value is the aggregate { i64 tag, [N x i8] }.
+        // Build it by inserting the discriminant into a zeroinitialized union of
+        // inst.llvm_type; the payload slot stays zero for a tag-only variant (issue 1157
+        // PR-P1). The read side (append_match_union_block) reads the discriminant from
+        // field 0, matching this layout.
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = insertvalue ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_bytes(" zeroinitializer, i64 ");
+        try std::fmt::append_i64(out, inst.tag);
+        try out.append_bytes(", 0");
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    // A single-payload variant value stores the discriminant into field 0 and the payload
+    // value into the field-1 byte buffer of a zero-initialized stack slot, then loads the
+    // whole union back (issue 1157 PR-P2). The payload type is narrower than the [N x i8]
+    // field, so it is written through the buffer pointer exactly as the read side
+    // (append_match_union_block) reads it back: gep field 1 + load payload_type.
+    try append_union_construct_alloca(out, inst.id, inst.llvm_type);
+    try append_union_construct_store_tag(out, inst.id, inst.llvm_type, inst.tag);
+    try append_union_construct_store_payload(out, inst, insts);
     try out.append_bytes("  %t");
     try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(" = load ");
     try out.append_bytes(inst.llvm_type);
-    try out.append_bytes(" zeroinitializer, i64 ");
-    try std::fmt::append_i64(out, inst.tag);
-    try out.append_bytes(", 0");
+    try out.append_bytes(", ptr %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_slot, align 8");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_union_construct_alloca(
+    out: &var std::string::String,
+    id: i64,
+    llvm_type: []u8
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, id);
+    try out.append_bytes("_slot = alloca ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(", align 8");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  store ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(" zeroinitializer, ptr %t");
+    try std::fmt::append_i64(out, id);
+    try out.append_bytes("_slot, align 8");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_union_construct_store_tag(
+    out: &var std::string::String,
+    id: i64,
+    llvm_type: []u8,
+    tag: i64
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, id);
+    try out.append_bytes("_tagptr = getelementptr ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(", ptr %t");
+    try std::fmt::append_i64(out, id);
+    try out.append_bytes("_slot, i32 0, i32 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  store i64 ");
+    try std::fmt::append_i64(out, tag);
+    try out.append_bytes(", ptr %t");
+    try std::fmt::append_i64(out, id);
+    try out.append_bytes("_tagptr, align 8");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_union_construct_store_payload(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirUnionConstructExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_payloadptr = getelementptr ");
+    try out.append_bytes(inst.llvm_type);
+    try out.append_bytes(", ptr %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_slot, i32 0, i32 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  store ");
+    try out.append_bytes(inst.payload_type);
+    try out.append_byte(cast<u8>(32));
+    try append_expr_value_ref(out, insts, inst.payload_value);
+    try out.append_bytes(", ptr %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_payloadptr, align 8");
     try out.append_byte(cast<u8>(10));
     return;
 }

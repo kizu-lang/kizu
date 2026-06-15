@@ -11945,6 +11945,18 @@ fn lower_expr_into(
                 ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
             );
         }
+        // A namespaced FieldExpr callee whose receiver names a tagged-union type is a
+        // single-payload union constructor (Union::Variant(payload), issue 1157 PR-P2).
+        // Field-mode callees (.len()) were handled above; enum and free/namespaced function
+        // calls fall through to the regular call path below.
+        if try callee_is_namespace_union_ctor(
+            ir_bytes, function_name, module_prefix, expr_node, bs, ir_lookup_index
+        ) {
+            return try lower_expr_union_ctor_call(
+                ir_bytes, function_name, module_prefix, params_spec, expr_node,
+                string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
+            );
+        }
         // A call whose argument list contains a nested call (equal_bytes(token_text(...),
         // expected)) or a single-element byte index load (is_line_break(source[index])) lowers
         // each such argument into a preceding expr temp and references it through a Temp call
@@ -11979,6 +11991,102 @@ fn lower_expr_into(
         return id;
     }
     return error("compiled mir: unsupported expression kind");
+}
+
+// callee_is_namespace_union_ctor reports whether a Call's callee is a namespace-mode
+// FieldExpr (Union::Variant) whose receiver names a tagged-union type, i.e. a union
+// constructor. It is non-erroring on a non-union receiver so enum/function namespaced
+// calls fall through to the regular call path (issue 1157 PR-P2).
+fn callee_is_namespace_union_ctor(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    call_node: i64,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
+) -> !bool {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let callee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, callee_node, bs
+    );
+    if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        return false;
+    }
+    let callee_mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, bs
+    );
+    if !std::mem::equal_bytes(callee_mode, "namespace") {
+        return false;
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_token = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    return compiled_fact_lookup::is_union_type_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, receiver_token
+    );
+}
+
+// lower_expr_union_ctor_call lowers Union::Variant(payload) into a UnionConstruct that
+// stores the discriminant + the single lowered payload value into the union byte buffer
+// (issue 1157 PR-P2). The payload's LLVM type comes from the variant fact's payload_kizu,
+// so it matches the read side's gep-field-1 + load layout.
+fn lower_expr_union_ctor_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !i64 {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let variant_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "namespace", bs
+    );
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_token = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    if arg_count != 1 {
+        return error("compiled mir: union constructor takes one payload argument");
+    }
+    let arg_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "arg", 0, bs
+    );
+    let payload_value = try lower_expr_into(
+        ir_bytes, function_name, module_prefix, params_spec, arg_node,
+        string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
+    );
+    let union_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, module_prefix, receiver_token
+    );
+    let variant = try compiled_fact_lookup::lookup_union_variant_by_prefix(
+        ir_bytes, module_prefix, receiver_token, variant_name
+    );
+    let payload_type = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, module_prefix, variant.payload_kizu
+    );
+    let id = id_base + insts.len();
+    try insts.append(compiled_mir::union_construct_payload_expr_inst(
+        id, union_llvm, variant.tag, payload_value, payload_type
+    ));
+    return id;
 }
 
 fn lower_expr_field(
