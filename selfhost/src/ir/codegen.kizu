@@ -510,6 +510,27 @@ pub fn code_op_ptr_store() -> i64 {
     return 65;
 }
 
+// Slice '&var []u8' write-back opcodes mirror the scalar ptr trio for
+// '%kizu.slice.u8' slots. VAR_ADDR_SLICE materializes a caller slice slot's
+// address as a 'ptr' value ('op dst slot' -> '%v<dst> = getelementptr
+// %kizu.slice.u8, ptr %sslot<slot>, i64 0'). PTR_LOAD_SLICE reads a slice value
+// through such a ptr ('op dst ptr_value' -> '%v<dst> = load %kizu.slice.u8, ptr
+// %v<ptr_value>') and PTR_STORE_SLICE writes one ('op ptr_value value' ->
+// 'store %kizu.slice.u8 %v<value>, ptr %v<ptr_value>'). They reuse the existing
+// slice load/store ABI; only the pointer source differs from a
+// VAR_LOAD_SLICE/VAR_STORE_SLICE alloca slot.
+pub fn code_op_var_addr_slice() -> i64 {
+    return 66;
+}
+
+pub fn code_op_ptr_load_slice() -> i64 {
+    return 67;
+}
+
+pub fn code_op_ptr_store_slice() -> i64 {
+    return 68;
+}
+
 // While-loop opcodes frame a 'while <cond> { <body> }': WHILE_BEGIN opens the
 // condition block, WHILE_COND branches on the lowered i1 condition into the body
 // or past the loop, WHILE_END closes the body back to the condition block. Each
@@ -814,6 +835,25 @@ pub fn code_var_slot_base() -> i64 {
     return 1000000000;
 }
 
+// code_slice_var_slot_base offsets a '[]u8' 'var' local's stored value so a
+// locals lookup tells a slice var slot ('%sslot', VAR_*_SLICE) from an i64 var
+// slot (code_var_slot_base) and a let. A slice var stores slice_base + slot;
+// reads at or above it resolve to slice slot = value - slice_base, while i64 var
+// slots and let values stay below it. It sits between the i64 var slot space and
+// the loop-label base so the three spaces never overlap.
+pub fn code_slice_var_slot_base() -> i64 {
+    return 1500000000;
+}
+
+// code_local_is_slice_slot reports whether a resolved local value is a slice var
+// slot (at or above the slice slot base, below the loop-label base).
+pub fn code_local_is_slice_slot(bound: i64) -> bool {
+    if bound < code_slice_var_slot_base() {
+        return false;
+    }
+    return bound < code_loop_label_base();
+}
+
 // code_loop_label_base offsets a loop label's stored value so a locals lookup can
 // tell a label from a let value or a var slot: a label stores
 // base + loop_begin * 2 + loop_kind, far above the var slot space.
@@ -925,6 +965,28 @@ pub fn code_kind_mut_borrow_i64() -> i64 {
 
 pub fn code_kind_is_mut_borrow_scalar(kind: i64) -> bool {
     return kind == code_kind_mut_borrow_i64();
+}
+
+// code_kind_mut_borrow_slice marks a '&var []u8' parameter (and the
+// VAR_ADDR_SLICE value a caller passes for one): like the scalar mutable borrow
+// it flows as a 'ptr' to the caller's slice var slot so a callee 's.*' read/write
+// loads/stores the '%kizu.slice.u8' value through it and the mutation is observed
+// by the caller. The renderer maps it to 'ptr'.
+pub fn code_kind_mut_borrow_slice() -> i64 {
+    return 20;
+}
+
+pub fn code_kind_is_mut_borrow_slice(kind: i64) -> bool {
+    return kind == code_kind_mut_borrow_slice();
+}
+
+// code_kind_is_mut_borrow_ptr reports any '&var' pointer kind (scalar i64 or
+// slice []u8): both flow as a 'ptr' to a caller var slot and render identically.
+pub fn code_kind_is_mut_borrow_ptr(kind: i64) -> bool {
+    if code_kind_is_mut_borrow_scalar(kind) {
+        return true;
+    }
+    return code_kind_is_mut_borrow_slice(kind);
 }
 
 fn code_kind_owned_map_enum_base() -> i64 {
@@ -2850,12 +2912,28 @@ fn mut_borrow_referent_kind(referent: []u8) -> i64 {
     if map_kind >= 0 {
         return map_kind;
     }
+    let slice_kind = mut_borrow_slice_referent_kind(referent);
+    if slice_kind >= 0 {
+        return slice_kind;
+    }
     return mut_borrow_scalar_referent_kind(referent);
 }
 
+// mut_borrow_slice_referent_kind resolves a '&var []u8' referent ('var []u8') to
+// the slice pointer write-back kind. Any other referent stays -1 (unchanged).
+fn mut_borrow_slice_referent_kind(referent: []u8) -> i64 {
+    let referent_len = std::mem::len(referent);
+    let unwrapped = referent[4..referent_len];
+    if std::mem::equal_bytes(unwrapped, "[]u8") {
+        return code_kind_mut_borrow_slice();
+    }
+    return 0 - 1;
+}
+
 // mut_borrow_scalar_referent_kind resolves a scalar '&var T' referent ('var T')
-// to its pointer write-back kind. Only 'i64' is supported in this PR; bool/slice
-// and other scalars stay -1 (unsupported, unchanged behaviour).
+// to its pointer write-back kind. Only 'i64' is a scalar slot here ('[]u8' is
+// resolved earlier by mut_borrow_slice_referent_kind); bool and other scalars
+// stay -1 (unsupported, unchanged behaviour).
 fn mut_borrow_scalar_referent_kind(referent: []u8) -> i64 {
     let referent_len = std::mem::len(referent);
     let unwrapped = referent[4..referent_len];
@@ -4452,6 +4530,11 @@ fn lower_code_var_binding(
     if init_kind == kind_i64 {
         return try bind_code_var(text, name_start, name_end, init_value_id, code, local_starts, local_ends, local_values, next_value);
     }
+    let kind_slice = code_kind_slice();
+    let kind_str = code_kind_str();
+    if init_kind == kind_slice or init_kind == kind_str {
+        return try bind_code_slice_var(text, name_start, name_end, init_value_id, code, kinds, local_starts, local_ends, local_values, next_value);
+    }
     let kind_owned = code_kind_owned();
     if init_kind == kind_owned or code_kind_is_owned_resource(init_kind) {
         return try bind_code_owned_var(name_start, name_end, init_value_id, local_starts, local_ends, local_values, next_value);
@@ -4714,6 +4797,39 @@ fn bind_code_var(
     return code_eval_value(init_value_id, next_value);
 }
 
+// bind_code_slice_var binds a '[]u8' 'var' local to a '%sslot' slice slot: the
+// init value materializes to a slice (a 'str' literal through STR_SLICE, an
+// existing slice value unchanged) and a VAR_DECL_SLICE stores it. The slot id is
+// the local's index, stored offset by code_slice_var_slot_base so a locals lookup
+// resolves it as a slice slot (distinct from the i64 var slot space).
+fn bind_code_slice_var(
+    text: []u8,
+    name_start: i64,
+    name_end: i64,
+    init_value_id: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, init_value_id, next_value);
+    if !slice_eval.ok {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let slot = local_starts.len();
+    let op_var_decl_slice = code_op_var_decl_slice();
+    try code.append(op_var_decl_slice);
+    try code.append(slot);
+    try code.append(slice_eval.value_id);
+    let stored = code_slice_var_slot_base() + slot;
+    try local_starts.append(name_start);
+    try local_ends.append(name_end);
+    try local_values.append(stored);
+    return code_eval_value(slice_eval.value_id, slice_eval.next);
+}
+
 // lower_code_assign lowers 'name = <expr>' for a var local: the value lowers to a
 // tape value and a VAR_STORE writes it into the var's slot. The target must be a
 // bare var name already bound as a var (a let or unknown name is not owned here).
@@ -4736,16 +4852,23 @@ fn lower_code_assign(
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
-    // '<receiver>.* = <expr>' over a mutable scalar borrow stores the i64 value
-    // through the pointer. The receiver must resolve to a '&var i64' value; any
-    // other deref target is not an owned write here.
+    // '<receiver>.* = <expr>' over a mutable borrow stores through the pointer.
+    // The receiver must resolve to a '&var i64' or '&var []u8' value; the store
+    // form follows the pointer's kind. Any other deref target is not an owned
+    // write here.
     let deref_ptr = try code_assign_deref_ptr(text, ast, target, kinds, local_starts, local_ends, local_values, locals_base);
     if deref_ptr >= 0 {
-        return try lower_code_deref_store(deref_ptr, eval.value_id, code, kinds, eval.next);
+        return try lower_code_deref_store_any(text, deref_ptr, eval.value_id, code, kinds, eval.next);
     }
     let field_entry = try code_assign_field_entry(text, ast, target, code, kinds, local_starts, local_ends, local_values, locals_base);
     if field_entry >= 0 {
         return try lower_code_field_assign(text, field_entry, eval.value_id, code, kinds, eval.next);
+    }
+    // 'name = <expr>' over a '[]u8' var reassigns its slice slot: the value
+    // materializes to a slice and a VAR_STORE_SLICE writes it.
+    let slice_slot = try code_assign_slice_slot(text, ast, target, local_starts, local_ends, local_values, locals_base);
+    if slice_slot >= 0 {
+        return try lower_code_slice_var_store(text, slice_slot, eval.value_id, code, kinds, eval.next);
     }
     let slot = try code_assign_target_slot(text, ast, target, local_starts, local_ends, local_values, locals_base);
     if slot < 0 {
@@ -4764,6 +4887,24 @@ fn lower_code_assign(
     return code_eval_value(eval.value_id, eval.next);
 }
 
+// lower_code_deref_store_any dispatches a '<&var T>.* = <expr>' store on the
+// pointer's kind: a '&var []u8' slice pointer takes the slice store, every other
+// (scalar i64) pointer the i64 store.
+fn lower_code_deref_store_any(
+    text: []u8,
+    deref_ptr: i64,
+    value_id: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let ptr_kind = try kinds.get(deref_ptr);
+    if code_kind_is_mut_borrow_slice(ptr_kind) {
+        return try lower_code_deref_store_slice(text, deref_ptr, value_id, code, kinds, next_value);
+    }
+    return try lower_code_deref_store(deref_ptr, value_id, code, kinds, next_value);
+}
+
 // lower_code_deref_store emits the PTR_STORE for '<&var i64>.* = <i64>'. The
 // stored value must be i64 (a var slot's ABI); any other kind is not an owned
 // write and stays unsupported.
@@ -4780,6 +4921,55 @@ fn lower_code_deref_store(
         return code_eval_unsupported(next_value);
     }
     return try emit_code_ptr_store(deref_ptr, value_id, code, next_value);
+}
+
+// lower_code_deref_store_slice emits the PTR_STORE_SLICE for '<&var []u8>.* =
+// <expr>'. The value materializes to a slice (a 'str' literal through STR_SLICE,
+// an existing slice unchanged); a non-slice value is not an owned write.
+fn lower_code_deref_store_slice(
+    text: []u8,
+    deref_ptr: i64,
+    value_id: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    if !slice_eval.ok {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let stored_kind = try kinds.get(slice_eval.value_id);
+    let kind_slice = code_kind_slice();
+    if stored_kind != kind_slice {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    return try emit_code_ptr_store_slice(deref_ptr, slice_eval.value_id, code, slice_eval.next);
+}
+
+// lower_code_slice_var_store materializes the assigned value to a slice and emits
+// VAR_STORE_SLICE into a '[]u8' var's slice slot. A non-slice value is not owned.
+fn lower_code_slice_var_store(
+    text: []u8,
+    slot: i64,
+    value_id: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    if !slice_eval.ok {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let stored_kind = try kinds.get(slice_eval.value_id);
+    let kind_slice = code_kind_slice();
+    if stored_kind != kind_slice {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let op_var_store_slice = code_op_var_store_slice();
+    try code.append(op_var_store_slice);
+    try code.append(slot);
+    try code.append(slice_eval.value_id);
+    return code_eval_value(slice_eval.value_id, slice_eval.next);
 }
 
 // code_assign_field_entry resolves an assignment target to its scalarized
@@ -4807,9 +4997,10 @@ fn code_assign_no_field() -> i64 {
 }
 
 // code_assign_deref_ptr resolves a '<receiver>.* = ...' assignment target to the
-// receiver's '&var i64' pointer value id (-1 when the target is not a deref of a
-// bare mutable scalar borrow). The receiver must be a bare var bound to a
-// code_kind_mut_borrow_i64 value (a '&var i64' parameter).
+// receiver's mutable borrow pointer value id (-1 when the target is not a deref
+// of a bare mutable borrow). The receiver must be a bare var bound to a
+// code_kind_mut_borrow_i64 or code_kind_mut_borrow_slice value (a '&var i64' or
+// '&var []u8' parameter); the caller picks the store form from the pointer kind.
 fn code_assign_deref_ptr(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -4860,7 +5051,7 @@ fn code_assign_deref_var_ptr(
         return 0 - 1;
     }
     let bound_kind = try kinds.get(bound);
-    if !code_kind_is_mut_borrow_scalar(bound_kind) {
+    if !code_kind_is_mut_borrow_ptr(bound_kind) {
         return 0 - 1;
     }
     return bound;
@@ -5156,8 +5347,9 @@ fn code_unbound_slot() -> i64 {
     return 0 - 1;
 }
 
-// code_var_slot_of returns the var slot bound to a Var-node name, or -1 when the
-// name is unbound or bound as a let (a non-var value below the slot base).
+// code_var_slot_of returns the i64 var slot bound to a Var-node name, or -1 when
+// the name is unbound, a let (below the slot base), or a slice var slot (resolved
+// by code_slice_var_slot_of instead).
 fn code_var_slot_of(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -5169,11 +5361,51 @@ fn code_var_slot_of(
 ) -> !i64 {
     let name_span = code_node_span(text, ast, node_id);
     let bound = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, name_span.start, name_span.end);
+    if code_local_is_slice_slot(bound) {
+        return 0 - 1;
+    }
     let base = code_var_slot_base();
     if bound < base {
         return 0 - 1;
     }
     return bound - base;
+}
+
+// code_slice_var_slot_of returns the slice var slot bound to a Var-node name, or
+// -1 when the name is unbound, a let, or an i64 var slot.
+fn code_slice_var_slot_of(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64
+) -> !i64 {
+    let name_span = code_node_span(text, ast, node_id);
+    let bound = try code_local_lookup(text, local_starts, local_ends, local_values, locals_base, name_span.start, name_span.end);
+    if !code_local_is_slice_slot(bound) {
+        return 0 - 1;
+    }
+    return bound - code_slice_var_slot_base();
+}
+
+// code_assign_slice_slot resolves an assignment target to its slice var slot
+// ('%sslot'), or -1 when the target is not a bare var bound as a slice var.
+fn code_assign_slice_slot(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64
+) -> !i64 {
+    let node = ast.get(target);
+    return match node.data {
+        Var(var_node) => try code_slice_var_slot_of(text, ast, target, local_starts, local_ends, local_values, locals_base),
+        _ => code_unbound_slot(),
+    };
 }
 
 // lower_code_while lowers 'while <cond> { <body> }' onto the tape: WHILE_BEGIN
@@ -7031,7 +7263,8 @@ fn lower_code_expr(
 
 // lower_code_deref_read lowers '<receiver>.*': the receiver lowers first, then a
 // mutable scalar borrow ('&var i64', a 'ptr' value) loads its pointee through
-// PTR_LOAD while every other kind keeps the value-model identity.
+// PTR_LOAD, a mutable slice borrow ('&var []u8') through PTR_LOAD_SLICE, while
+// every other kind keeps the value-model identity.
 fn lower_code_deref_read(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -7053,6 +7286,9 @@ fn lower_code_deref_read(
     let receiver_kind = try kinds.get(eval.value_id);
     if code_kind_is_mut_borrow_scalar(receiver_kind) {
         return try emit_code_ptr_load(eval.value_id, code, kinds, eval.next);
+    }
+    if code_kind_is_mut_borrow_slice(receiver_kind) {
+        return try emit_code_ptr_load_slice(eval.value_id, code, kinds, eval.next);
     }
     return code_eval_value(eval.value_id, eval.next);
 }
@@ -7337,20 +7573,21 @@ fn lower_code_prefix(
     if op == std::kizu::ast::prefix_borrow() {
         return try lower_code_expr(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
-    // A mutable borrow '&var <var>' of a scalar i64 var passes the address of the
-    // caller's var slot (a 'ptr' value) so the callee writes back through it. Only
-    // a bare var that owns an alloca slot is addressable; anything else (a let, a
-    // temporary) stays unsupported and falls through to the diagnostic.
+    // A mutable borrow '&var <var>' of an i64 or '[]u8' var passes the address of
+    // the caller's var slot (a 'ptr' value) so the callee writes back through it.
+    // Only a bare var that owns an alloca slot is addressable; anything else (a
+    // let, a temporary) stays unsupported and falls through to the diagnostic.
     if op == std::kizu::ast::prefix_mut_borrow() {
         return try lower_code_mut_borrow_scalar(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
 }
 
-// lower_code_mut_borrow_scalar lowers '&var <var>' for a scalar i64 var: it
-// resolves the operand to its alloca slot and emits VAR_ADDR, yielding a 'ptr'
-// value (kind code_kind_mut_borrow_i64). A non-var operand has no slot and stays
-// unsupported, the same safe fallback the value model used before.
+// lower_code_mut_borrow_scalar lowers '&var <var>' for an i64 or '[]u8' var: it
+// resolves the operand to its alloca slot and emits VAR_ADDR (i64 slot, kind
+// code_kind_mut_borrow_i64) or VAR_ADDR_SLICE (slice slot, kind
+// code_kind_mut_borrow_slice), yielding a 'ptr' value. A non-var operand has no
+// slot and stays unsupported, the same safe fallback the value model used before.
 fn lower_code_mut_borrow_scalar(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -7363,6 +7600,10 @@ fn lower_code_mut_borrow_scalar(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let slice_slot = try code_slice_var_slot_of(text, ast, right, local_starts, local_ends, local_values, locals_base);
+    if slice_slot >= 0 {
+        return try emit_code_var_addr_slice(slice_slot, code, kinds, next_value);
+    }
     let slot = try code_var_slot_of(text, ast, right, local_starts, local_ends, local_values, locals_base);
     if slot < 0 {
         return code_eval_unsupported(next_value);
@@ -7421,6 +7662,58 @@ fn emit_code_ptr_store(
     return code_eval_value(value_id, next_value);
 }
 
+// emit_code_var_addr_slice appends a VAR_ADDR_SLICE record producing the address
+// of a slice var slot as a 'ptr' value (kind code_kind_mut_borrow_slice).
+fn emit_code_var_addr_slice(
+    slot: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let op_var_addr_slice = code_op_var_addr_slice();
+    try code.append(op_var_addr_slice);
+    try code.append(next_value);
+    try code.append(slot);
+    let mut_borrow_kind = code_kind_mut_borrow_slice();
+    try kinds.append(mut_borrow_kind);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// emit_code_ptr_load_slice appends a PTR_LOAD_SLICE reading a '%kizu.slice.u8'
+// value through a '&var []u8' pointer value, producing a fresh slice value.
+fn emit_code_ptr_load_slice(
+    ptr_value: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let op_ptr_load_slice = code_op_ptr_load_slice();
+    try code.append(op_ptr_load_slice);
+    try code.append(next_value);
+    try code.append(ptr_value);
+    let kind_slice = code_kind_slice();
+    try kinds.append(kind_slice);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// emit_code_ptr_store_slice appends a PTR_STORE_SLICE writing a slice value
+// through a '&var []u8' pointer value. It yields no new SSA value (like
+// VAR_STORE_SLICE).
+fn emit_code_ptr_store_slice(
+    ptr_value: i64,
+    value_id: i64,
+    code: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let op_ptr_store_slice = code_op_ptr_store_slice();
+    try code.append(op_ptr_store_slice);
+    try code.append(ptr_value);
+    try code.append(value_id);
+    return code_eval_value(value_id, next_value);
+}
+
 // lower_code_not lowers '!<expr>': the operand lowers to an i1 value and the NOT
 // record produces its negation in a fresh value (kind bool).
 fn lower_code_not(
@@ -7473,12 +7766,18 @@ fn lower_code_var(
     if bound < 0 {
         return code_eval_unsupported(next_value);
     }
-    let base = code_var_slot_base();
     // A var local lives in an alloca slot: emit a VAR_LOAD into a fresh value so
-    // each read observes the latest stored value. The slot is computed before the
-    // guard (binding the subtraction to a local) and the emission is its own
-    // helper, so this guard stays a single-statement 'return try <call>' whose arg
-    // is a plain local -- the shape the compiled call-arg lowering models.
+    // each read observes the latest stored value. A slice var slot loads through
+    // VAR_LOAD_SLICE instead. Both slots are computed before their guard (binding
+    // the subtraction to a local) and each emission is its own helper, so every
+    // guard stays a single-statement 'return try <call>' whose arg is a plain
+    // local -- the shape the compiled call-arg lowering models.
+    let slice_base = code_slice_var_slot_base();
+    let slice_slot = bound - slice_base;
+    if code_local_is_slice_slot(bound) {
+        return try emit_code_var_load_slice(slice_slot, code, kinds, next_value);
+    }
+    let base = code_var_slot_base();
     let slot = bound - base;
     if bound >= base {
         return try emit_code_var_load(slot, code, kinds, next_value);
@@ -8443,6 +8742,24 @@ fn emit_code_var_load(
     try code.append(slot);
     let kind_i64 = code_kind_i64();
     try kinds.append(kind_i64);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+// emit_code_var_load_slice appends a VAR_LOAD_SLICE record reading a slice var
+// slot into a fresh '%kizu.slice.u8' value (kind slice) and returns that value.
+fn emit_code_var_load_slice(
+    slot: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    let op_var_load_slice = code_op_var_load_slice();
+    try code.append(op_var_load_slice);
+    try code.append(next_value);
+    try code.append(slot);
+    let kind_slice = code_kind_slice();
+    try kinds.append(kind_slice);
     let after_value = next_value + 1;
     return code_eval_value(next_value, after_value);
 }
@@ -11712,12 +12029,12 @@ fn lower_code_args(
     let arg_slot = scratch_base + index;
     let next_free = arg_slot + 1;
     try args_scratch.set(0, next_free);
-    // A user call whose callee param at this index is a scalar '&var i64' takes
-    // the caller var's slot address (a 'ptr'), not a loaded i64 value, so the
+    // A user call whose callee param at this index is a '&var i64' or '&var []u8'
+    // takes the caller var's slot address (a 'ptr'), not a loaded value, so the
     // callee writes back through it. Both 'foo(x)' and 'foo(&var x)' marshal the
     // same way here. callee_name_start < 0 (e.g. method calls) skips the probe.
     let mut_param_kind = try code_arg_callee_param_kind(text, ast, decls, callee_name_start, callee_name_end, index);
-    if code_kind_is_mut_borrow_scalar(mut_param_kind) {
+    if code_kind_is_mut_borrow_ptr(mut_param_kind) {
         return try lower_code_mut_borrow_arg_chain(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_name_start, callee_name_end, arg, arg_slot, index, next_value);
     }
     let eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
