@@ -174,6 +174,8 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }");
     try wl(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
     try wl(out, "%kizu.run.union = type { i64, i64, %kizu.slice.u8 }");
+    try wl(out, "%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }");
+    try wl(out, "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
     try wl(out, "%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
@@ -1546,6 +1548,10 @@ fn render_one_instruction(
     let array_len = codegen::code_op_array_len();
     if op == array_len {
         try render_array_len(out, code, index);
+    }
+    let storage_capacity = codegen::code_op_storage_capacity();
+    if op == storage_capacity {
+        try render_storage_capacity(out, code, kinds, index);
     }
     let try_array_append = codegen::code_op_try_array_append_i64();
     if op == try_array_append {
@@ -3468,6 +3474,54 @@ fn render_array_len(
     try w(out, " = call i64 @kizu_rt_array_len(%kizu.owned %v");
     try wi(out, receiver);
     try wl(out, ")");
+    return;
+}
+
+fn render_storage_capacity(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    let kind = try kinds.get(receiver);
+    let string_kind = codegen::code_kind_owned_string();
+    let is_array = codegen::code_kind_is_owned_array(kind);
+    if kind == string_kind {
+        try w(out, "  %cap");
+        try wi(out, index);
+        try w(out, "_raw = extractvalue %kizu.owned %v");
+        try wi(out, receiver);
+        try wl(out, ", 0");
+        try w(out, "  %cap");
+        try wi(out, index);
+        try w(out, "_field = getelementptr inbounds %kizu.rt.string, ptr %cap");
+        try wi(out, index);
+        try wl(out, "_raw, i32 0, i32 3");
+        try w(out, "  %v");
+        try wi(out, dst);
+        try w(out, " = load i64, ptr %cap");
+        try wi(out, index);
+        try wl(out, "_field");
+    }
+    if is_array {
+        try w(out, "  %cap");
+        try wi(out, index);
+        try w(out, "_raw = extractvalue %kizu.owned %v");
+        try wi(out, receiver);
+        try wl(out, ", 0");
+        try w(out, "  %cap");
+        try wi(out, index);
+        try w(out, "_field = getelementptr inbounds %kizu.rt.array, ptr %cap");
+        try wi(out, index);
+        try wl(out, "_raw, i32 0, i32 3");
+        try w(out, "  %v");
+        try wi(out, dst);
+        try w(out, " = load i64, ptr %cap");
+        try wi(out, index);
+        try wl(out, "_field");
+    }
     return;
 }
 
@@ -5568,6 +5622,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let array_len = codegen::code_op_array_len();
     if op == array_len {
+        return index + 3;
+    }
+    let storage_capacity = codegen::code_op_storage_capacity();
+    if op == storage_capacity {
         return index + 3;
     }
     let try_array_append = codegen::code_op_try_array_append_i64();
