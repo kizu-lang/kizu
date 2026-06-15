@@ -660,7 +660,7 @@ pub fn code_op_struct_field() -> i64 {
 
 // SLICE_INDEX reads one byte from a '%kizu.slice.u8' value at an i64 index and
 // zero-extends it to i64: 'op dst slice_value index_value'. It backs the element
-// index expression 'b[i]' (slice == false); range slices stay unsupported.
+// index expression 'b[i]' (slice == false).
 pub fn code_op_slice_index() -> i64 {
     return 126;
 }
@@ -670,6 +670,15 @@ pub fn code_op_slice_index() -> i64 {
 // the length is already i64, so no extension is needed.
 pub fn code_op_slice_len() -> i64 {
     return 127;
+}
+
+// SLICE_RANGE builds a sub-slice of a '%kizu.slice.u8' value over the i64 range
+// '[start, end)': 'op dst slice_value start_value end_value'. It offsets the
+// source data pointer by 'start' and sets the new length to 'end - start',
+// backing the range slice expression 'b[i..j]' (slice == true). Its result is a
+// '%kizu.slice.u8' value (kind code_kind_slice()), not an i64 like SLICE_INDEX.
+pub fn code_op_slice_range() -> i64 {
+    return 128;
 }
 
 fn code_defer_runtime_deinit_tag() -> i64 {
@@ -6473,7 +6482,7 @@ fn lower_code_expr(
         TryExpr(try_expr) => try lower_code_try_expr(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         If(if_node) => try lower_code_if_expr(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Match(match_node) => try lower_code_match_expr(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
-        IndexExpr(index_expr) => try lower_code_index(text, ast, decls, index_expr.target, index_expr.start, index_expr.slice, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        IndexExpr(index_expr) => try lower_code_index(text, ast, decls, index_expr.target, index_expr.start, index_expr.end, index_expr.slice, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -7852,15 +7861,16 @@ fn lower_code_binary(
 
 // lower_code_index lowers an element index 'b[i]' (slice == false) on a
 // '%kizu.slice.u8' target: the target lowers to a slice value, the index lowers
-// to an i64-like value, then SLICE_INDEX reads the byte and yields an i64. Range
-// slices (slice == true) stay unsupported -- their result is a '[]u8' value the
-// run tape does not lower yet (a follow-up owns it).
+// to an i64-like value, then SLICE_INDEX reads the byte and yields an i64. A range
+// slice 'b[i..j]' (slice == true) routes to lower_code_index_range, which yields a
+// '%kizu.slice.u8' sub-slice value instead.
 fn lower_code_index(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
     target: std::kizu::ast::NodeId,
     start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
     slice: bool,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -7872,7 +7882,7 @@ fn lower_code_index(
     next_value: i64
 ) -> !CodeEval {
     if slice {
-        return code_eval_unsupported(next_value);
+        return try lower_code_index_range(text, ast, decls, target, start, end, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     let target_eval = try lower_code_expr(text, ast, decls, target, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !target_eval.ok {
@@ -7915,6 +7925,82 @@ fn lower_code_index(
     try code.append(index_value);
     let kind_i64 = code_kind_i64();
     try kinds.append(kind_i64);
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+// lower_code_index_range lowers a range slice 'b[i..j]' (slice == true) on a
+// '%kizu.slice.u8' target: the target lowers to a slice value, both bounds lower
+// to i64-like values, then SLICE_RANGE offsets the data pointer by 'start' and
+// sets the new length to 'end - start'. Its result is a '%kizu.slice.u8' value
+// (kind slice), so an immutable 'let' binds it as an SSA slice and print() / a
+// VAR_DECL_SLICE slot consume it the same way a std::fs::read_file slice flows.
+fn lower_code_index_range(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    target: std::kizu::ast::NodeId,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let target_eval = try lower_code_expr(text, ast, decls, target, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !target_eval.ok {
+        return code_eval_unsupported(target_eval.next);
+    }
+    // A 'str'-kind literal materializes through STR_SLICE (the same boundary a
+    // user-call argument or an element index 'b[i]' uses); a value already of
+    // slice kind passes through unchanged.
+    let target_value = target_eval.value_id;
+    let target_next = target_eval.next;
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, target_value, target_next);
+    if !slice_eval.ok {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let target_kind = try kinds.get(slice_eval.value_id);
+    let kind_slice = code_kind_slice();
+    if target_kind != kind_slice {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let start_eval = try lower_code_expr(text, ast, decls, start, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slice_eval.next);
+    if !start_eval.ok {
+        return code_eval_unsupported(start_eval.next);
+    }
+    let start_kind = try kinds.get(start_eval.value_id);
+    let start_i64_like = try code_operand_is_i64_like(code, start_kind);
+    if !start_i64_like {
+        return code_eval_unsupported(start_eval.next);
+    }
+    let end_eval = try lower_code_expr(text, ast, decls, end, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, start_eval.next);
+    if !end_eval.ok {
+        return code_eval_unsupported(end_eval.next);
+    }
+    let end_kind = try kinds.get(end_eval.value_id);
+    let end_i64_like = try code_operand_is_i64_like(code, end_kind);
+    if !end_i64_like {
+        return code_eval_unsupported(end_eval.next);
+    }
+    // Emit SLICE_RANGE inline: 'op dst slice_value start_value end_value'. The
+    // result value id is the next free value and its kind is slice.
+    let slice_value = slice_eval.value_id;
+    let start_value = start_eval.value_id;
+    let end_value = end_eval.value_id;
+    let result_value = end_eval.next;
+    let op_slice_range = code_op_slice_range();
+    try code.append(op_slice_range);
+    try code.append(result_value);
+    try code.append(slice_value);
+    try code.append(start_value);
+    try code.append(end_value);
+    let kind_slice_result = code_kind_slice();
+    try kinds.append(kind_slice_result);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
 }
