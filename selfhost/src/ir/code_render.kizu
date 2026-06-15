@@ -1427,6 +1427,10 @@ fn render_one_instruction(
     if op == struct_field {
         try render_struct_field(out, code, index);
     }
+    let slice_index = codegen::code_op_slice_index();
+    if op == slice_index {
+        try render_slice_index(out, code, index);
+    }
     let call = codegen::code_op_call();
     if op == call {
         try render_call(out, text, code, kinds, index);
@@ -4849,6 +4853,43 @@ fn render_struct_field(
     return;
 }
 
+// render_slice_index reads one byte from a '%kizu.slice.u8' value: it extracts
+// the slice's data pointer, indexes it with the i64 index value, loads the i8,
+// and zero-extends the byte into the i64 result '%v<dst>'. The '%si<index>_*'
+// temporaries are keyed by the record position so they stay unique.
+fn render_slice_index(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let slice_value = try code.get(index + 2);
+    let index_value = try code.get(index + 3);
+    try w(out, "  %si");
+    try wi(out, index);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %v");
+    try wi(out, slice_value);
+    try wl(out, ", 0");
+    try w(out, "  %si");
+    try wi(out, index);
+    try w(out, "_gep = getelementptr i8, ptr %si");
+    try wi(out, index);
+    try w(out, "_ptr, i64 %v");
+    try wi(out, index_value);
+    try nl(out);
+    try w(out, "  %si");
+    try wi(out, index);
+    try w(out, "_byte = load i8, ptr %si");
+    try wi(out, index);
+    try wl(out, "_gep");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = zext i8 %si");
+    try wi(out, index);
+    try wl(out, "_byte to i64");
+    return;
+}
+
 // render_str_slice materializes a CONST_STR global as a '%kizu.slice.u8' SSA
 // value: an insertvalue pair builds the slice from the '@.kizu.run.s<src>'
 // global pointer and its payload byte length.
@@ -5342,6 +5383,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let struct_field = codegen::code_op_struct_field();
     if op == struct_field {
         return index + 5;
+    }
+    let slice_index = codegen::code_op_slice_index();
+    if op == slice_index {
+        return index + 4;
     }
     let binary = codegen::code_op_binary();
     if op == binary {
