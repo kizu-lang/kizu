@@ -823,6 +823,14 @@ pub fn code_kind_owned_map_i64() -> i64 {
     return 9;
 }
 
+pub fn code_kind_borrowed_map_i64() -> i64 {
+    return 13;
+}
+
+pub fn code_kind_mut_borrowed_map_i64() -> i64 {
+    return 14;
+}
+
 fn code_kind_owned_map_enum_base() -> i64 {
     return 0 - 600000000;
 }
@@ -847,6 +855,27 @@ pub fn code_kind_is_owned_map(kind: i64) -> bool {
         return true;
     }
     return code_kind_is_owned_map_enum(kind);
+}
+
+pub fn code_kind_is_borrowed_map(kind: i64) -> bool {
+    if kind == code_kind_borrowed_map_i64() {
+        return true;
+    }
+    return kind == code_kind_mut_borrowed_map_i64();
+}
+
+fn code_kind_is_map_handle(kind: i64) -> bool {
+    if code_kind_is_owned_map(kind) {
+        return true;
+    }
+    return code_kind_is_borrowed_map(kind);
+}
+
+fn code_kind_is_mutable_map_handle(kind: i64) -> bool {
+    if code_kind_is_owned_map(kind) {
+        return true;
+    }
+    return kind == code_kind_mut_borrowed_map_i64();
 }
 
 pub fn code_kind_arena() -> i64 {
@@ -1001,6 +1030,9 @@ fn code_array_get_result_kind(receiver_kind: i64) -> i64 {
 
 fn code_map_value_kind(map_kind: i64) -> i64 {
     if map_kind == code_kind_owned_map_i64() {
+        return code_kind_i64();
+    }
+    if code_kind_is_borrowed_map(map_kind) {
         return code_kind_i64();
     }
     if code_kind_is_owned_map_enum(map_kind) {
@@ -2579,10 +2611,11 @@ fn union_decl_variant_index(
     return index;
 }
 
-// code_param_kind classifies a parameter's declared type for the tape: scalar
-// and slice parameters render directly, unions reference their UNION_DECL
-// record, and single-field struct parameters reference a STRUCT_PARAM record so
-// field reads resolve from type metadata instead of source identifier spelling.
+// code_param_kind classifies a parameter's declared type for the tape: scalar,
+// slice, and supported borrowed map parameters render directly, unions reference
+// their UNION_DECL record, and single-field struct parameters reference a
+// STRUCT_PARAM record so field reads resolve from type metadata instead of
+// source identifier spelling.
 fn code_param_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -2600,10 +2633,9 @@ fn code_param_kind(
     if std::mem::equal_bytes(type_text, "[]u8") {
         return code_kind_slice();
     }
-    // A read borrow '&T' parameter flows on the value tape as its referent 'T':
-    // the tape is a value model, so a read-only borrow carries the same kind as
-    // the value it borrows. The mutable borrow '&var T' (write-back semantics)
-    // is excluded and left to fall through to the unsupported path.
+    // A supported borrow parameter flows on the value tape as its referent
+    // handle/value kind. General '&var T' write-back semantics are still
+    // unsupported; only the map handle case below is unwrapped for interior ops.
     let borrow_kind = read_borrow_referent_kind(type_text);
     if borrow_kind >= 0 {
         return borrow_kind;
@@ -2627,13 +2659,11 @@ fn code_param_kind(
 }
 
 // read_borrow_referent_kind resolves a read borrow '&T' parameter to the tape
-// kind of its referent 'T' for the scalar/slice kinds that resolve by type
-// text alone (i64, bool, []u8). The leading '&' is skipped with a byte compare
-// (the same convention as union_param_name_start), and the referent slice is
-// matched in place rather than returned from a helper. It returns -1 when the
-// type is not a read borrow (so non-borrow types fall through to the existing
-// resolution path), when it is the mutable borrow '&var T' (write-back borrows
-// stay unsupported), or when the referent is not a text-resolvable kind.
+// kind of its referent 'T' for the scalar/slice kinds that resolve by type text
+// alone (i64, bool, []u8). It also resolves &Map/&var Map<i64> parameters to
+// borrowed map handle kinds with the same runtime ABI as owned maps: shared
+// borrows can read, mutable borrows can perform interior mutation, and neither
+// kind is an owned resource for deinit.
 fn read_borrow_referent_kind(type_text: []u8) -> i64 {
     let length = std::mem::len(type_text);
     if length < 2 {
@@ -2645,10 +2675,19 @@ fn read_borrow_referent_kind(type_text: []u8) -> i64 {
     }
     let referent = type_text[1..length];
     if std::mem::starts_with(referent, "var ") {
-        return 0 - 1;
+        return mut_borrow_map_referent_kind(referent);
     }
     if std::mem::equal_bytes(referent, "var") {
         return 0 - 1;
+    }
+    if std::mem::equal_bytes(referent, "std::map::Map<[]u8, i64>") {
+        return code_kind_borrowed_map_i64();
+    }
+    if std::mem::equal_bytes(referent, "std::map::Map<[]u8,i64>") {
+        return code_kind_borrowed_map_i64();
+    }
+    if std::mem::equal_bytes(referent, "std::map::Map <[]u8, i64>") {
+        return code_kind_borrowed_map_i64();
     }
     if std::mem::equal_bytes(referent, "i64") {
         return code_kind_i64();
@@ -2658,6 +2697,21 @@ fn read_borrow_referent_kind(type_text: []u8) -> i64 {
     }
     if std::mem::equal_bytes(referent, "[]u8") {
         return code_kind_slice();
+    }
+    return 0 - 1;
+}
+
+fn mut_borrow_map_referent_kind(referent: []u8) -> i64 {
+    let referent_len = std::mem::len(referent);
+    let unwrapped = referent[4..referent_len];
+    if std::mem::equal_bytes(unwrapped, "std::map::Map<[]u8, i64>") {
+        return code_kind_mut_borrowed_map_i64();
+    }
+    if std::mem::equal_bytes(unwrapped, "std::map::Map<[]u8,i64>") {
+        return code_kind_mut_borrowed_map_i64();
+    }
+    if std::mem::equal_bytes(unwrapped, "std::map::Map <[]u8, i64>") {
+        return code_kind_mut_borrowed_map_i64();
     }
     return 0 - 1;
 }
@@ -5730,7 +5784,7 @@ fn lower_code_try_runtime_field_call(
     if code_kind_is_owned_array(receiver_kind) {
         return try lower_code_try_array_method(text, ast, decls, method, receiver_eval.value_id, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
-    if code_kind_is_owned_map(receiver_kind) {
+    if code_kind_is_mutable_map_handle(receiver_kind) {
         return try lower_code_try_map_method(text, ast, decls, method, receiver_eval.value_id, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
     return code_eval_unsupported(receiver_eval.next);
@@ -9345,7 +9399,7 @@ fn lower_code_runtime_field_expr_method(
     if code_kind_is_owned_array(receiver_kind) {
         return try lower_code_array_expr_method(text, ast, decls, method, receiver_eval.value_id, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
-    if code_kind_is_owned_map(receiver_kind) {
+    if code_kind_is_map_handle(receiver_kind) {
         return try lower_code_map_i64_expr_method(text, ast, decls, method, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
     if code_kind_is_arena(receiver_kind) {
@@ -10774,7 +10828,7 @@ fn lower_code_try_runtime_field_expr_call(
     if method_is_pop or method_is_at {
         return code_eval_unsupported(receiver_eval.next);
     }
-    if !code_kind_is_owned_map(receiver_kind) {
+    if !code_kind_is_map_handle(receiver_kind) {
         return code_eval_unsupported(receiver_eval.next);
     }
     return try lower_code_try_map_get_i64(text, ast, decls, receiver_eval.value_id, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
