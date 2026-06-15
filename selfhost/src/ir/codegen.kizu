@@ -5755,6 +5755,9 @@ fn lower_code_try_string_method(
     if std::mem::equal_bytes(method, "truncate") {
         return try lower_code_try_string_truncate(text, ast, decls, receiver_value, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if std::mem::equal_bytes(method, "reserve") {
+        return try lower_code_try_string_reserve(text, ast, decls, receiver_value, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     if !std::mem::equal_bytes(method, "append_bytes") {
         return code_eval_unsupported(next_value);
     }
@@ -5811,6 +5814,42 @@ fn lower_code_try_string_truncate(
     try code.append(op);
     try code.append(receiver_value);
     try code.append(arg_eval.value_id);
+    return code_eval_value(0, arg_eval.next);
+}
+
+// String.reserve(additional) is a capacity hint that never changes the string's
+// length or bytes, so the lowering is a semantic no-op: it lowers and type-checks
+// the i64 argument (preserving any evaluation it implies) but emits no run-codegen
+// op. A reserve-free artifact renders byte-identical, so skipping the op keeps
+// flip parity without a runtime call.
+fn lower_code_try_string_reserve(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver_value: i64,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let arg = try ast.child_at(args, 0);
+    let arg_eval = try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !arg_eval.ok {
+        return code_eval_unsupported(arg_eval.next);
+    }
+    let kind_i64 = code_kind_i64();
+    let actual_kind = try kinds.get(arg_eval.value_id);
+    if actual_kind != kind_i64 {
+        return code_eval_unsupported(arg_eval.next);
+    }
     return code_eval_value(0, arg_eval.next);
 }
 
