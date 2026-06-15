@@ -8029,7 +8029,11 @@ fn lower_code_index(
 // lower_code_index_range lowers a range slice 'b[i..j]' (slice == true) on a
 // '%kizu.slice.u8' target: the target lowers to a slice value, both bounds lower
 // to i64-like values, then SLICE_RANGE offsets the data pointer by 'start' and
-// sets the new length to 'end - start'. Its result is a '%kizu.slice.u8' value
+// sets the new length to 'end - start'. Open-ended forms reuse the same path: a
+// missing start 'b[..j]' synthesizes CONST_INT 0 and a missing end 'b[i..]'
+// synthesizes SLICE_LEN of the slice (its full length). ('b[..]' with both bounds
+// omitted is rejected earlier by the parser, so it never reaches here.) Its
+// result is a '%kizu.slice.u8' value
 // (kind slice), so an immutable 'let' binds it as an SSA slice and print() / a
 // VAR_DECL_SLICE slot consume it the same way a std::fs::read_file slice flows.
 fn lower_code_index_range(
@@ -8066,7 +8070,10 @@ fn lower_code_index_range(
     if target_kind != kind_slice {
         return code_eval_unsupported(slice_eval.next);
     }
-    let start_eval = try lower_code_expr(text, ast, decls, start, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slice_eval.next);
+    // An open-low slice 'b[..j]' leaves 'start' an Empty node; lower_code_range_start
+    // synthesizes CONST_INT 0 there. An explicit start lowers as before. The
+    // synthesized 0 is i64 by construction, so the i64-like check below still passes.
+    let start_eval = try lower_code_range_start(text, ast, decls, start, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, slice_eval.next);
     if !start_eval.ok {
         return code_eval_unsupported(start_eval.next);
     }
@@ -8075,7 +8082,10 @@ fn lower_code_index_range(
     if !start_i64_like {
         return code_eval_unsupported(start_eval.next);
     }
-    let end_eval = try lower_code_expr(text, ast, decls, end, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, start_eval.next);
+    // An open-high slice 'b[i..]' leaves 'end' an Empty node; lower_code_range_end
+    // synthesizes SLICE_LEN of the materialized slice (its full length) there. An
+    // explicit end lowers as before; the synthesized length is i64 by construction.
+    let end_eval = try lower_code_range_end(text, ast, decls, end, slice_eval.value_id, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, start_eval.next);
     if !end_eval.ok {
         return code_eval_unsupported(end_eval.next);
     }
@@ -8100,6 +8110,67 @@ fn lower_code_index_range(
     try kinds.append(kind_slice_result);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
+}
+
+// lower_code_range_start resolves the start bound of a range slice. A present
+// 'start' lowers as an explicit expr (the closed 'b[i..j]' path, unchanged); an
+// Empty 'start' (open-low 'b[..j]') synthesizes a CONST_INT 0 so SLICE_RANGE
+// begins the sub-slice at the slice head. The synthesized result is kind i64.
+fn lower_code_range_start(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    start: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if !is_empty_node(ast, start) {
+        return try lower_code_expr(text, ast, decls, start, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    let op_const = code_op_const_int();
+    try code.append(op_const);
+    try code.append(next_value);
+    try code.append(0);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    return code_eval_value(next_value, next_value + 1);
+}
+
+// lower_code_range_end resolves the end bound of a range slice. A present 'end'
+// lowers as an explicit expr (the closed 'b[i..j]' path, unchanged); an Empty
+// 'end' (open-high 'b[i..]') synthesizes SLICE_LEN of the materialized slice so
+// SLICE_RANGE runs the sub-slice to the tail. The synthesized result is kind i64.
+fn lower_code_range_end(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    end: std::kizu::ast::NodeId,
+    slice_value: i64,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if !is_empty_node(ast, end) {
+        return try lower_code_expr(text, ast, decls, end, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    let op_len = code_op_slice_len();
+    try code.append(op_len);
+    try code.append(next_value);
+    try code.append(slice_value);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    return code_eval_value(next_value, next_value + 1);
 }
 
 // code_operand_is_i64_like accepts an i64 operand or an ENUM_CONST-backed value
