@@ -260,8 +260,9 @@ pub fn code_op_union_const() -> i64 {
 // UNION_DECL records one union declaration's runtime layout at the head of the
 // tape (the declaration pass emits every union before any function): the record
 // is 'op name_start name_end variant_count [vname_start vname_end payload_kind]
-// per variant' where payload_kind is 0 (none), kind i64, or kind slice. A
-// runtime union value's kinds entry stores record_base + <UNION_DECL position>,
+// per variant' where payload_kind is 0 (none), kind i64, kind slice, or
+// record_base + <payload union's UNION_DECL position> for a union-typed payload.
+// A runtime union value's kinds entry stores record_base + <UNION_DECL position>,
 // so parameters and match arms resolve variants against it.
 pub fn code_op_union_decl() -> i64 {
     return 13;
@@ -270,14 +271,17 @@ pub fn code_op_union_decl() -> i64 {
 // UNION_PACK materializes a compile-time UNION_CONST value as a runtime
 // '%kizu.run.union' aggregate when it crosses a function boundary: the record
 // is 'op dst tag_value payload_value payload_kind' (payload_value -1 when the
-// variant carries none). The dst's kinds entry references the UNION_DECL.
+// variant carries none). A union-typed payload_kind boxes the nested union on
+// the heap and stores the box pointer in the i64 word field. The dst's kinds
+// entry references the UNION_DECL.
 pub fn code_op_union_pack() -> i64 {
     return 14;
 }
 
 // UNION_TAG reads a runtime union value's tag ('op dst src'); UNION_PAYLOAD
 // extracts its payload field ('op dst src payload_kind', field 1 for i64 and
-// field 2 for slice payloads).
+// field 2 for slice payloads; a union-typed payload_kind loads the boxed nested
+// union through the pointer stored in the i64 word field).
 pub fn code_op_union_tag() -> i64 {
     return 15;
 }
@@ -1297,7 +1301,7 @@ fn append_union_variant_entry(
     let name_span = code_node_span(text, ast, name);
     try code.append(name_span.start);
     try code.append(name_span.end);
-    let payload_kind = try union_payload_kind(text, ast, payload);
+    let payload_kind = try union_payload_kind(text, ast, code, payload);
     try code.append(payload_kind);
     return code_eval_value(0, 0);
 }
@@ -1528,20 +1532,22 @@ fn code_struct_decl_field_type_kind(
 fn union_payload_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    code: &var std::array::Array<i64>,
     payload: std::kizu::ast::NodeId
 ) -> !i64 {
     let node = ast.get(payload);
     return match node.data {
         Empty => 0,
-        _ => union_payload_type_kind(text, ast, payload),
+        _ => try union_payload_type_kind(text, ast, code, payload),
     };
 }
 
 fn union_payload_type_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    code: &var std::array::Array<i64>,
     payload: std::kizu::ast::NodeId
-) -> i64 {
+) -> !i64 {
     let type_text = ast_node_text(text, ast, payload);
     if std::mem::equal_bytes(type_text, "i64") {
         return code_kind_i64();
@@ -1549,7 +1555,28 @@ fn union_payload_type_kind(
     if std::mem::equal_bytes(type_text, "[]u8") {
         return code_kind_slice();
     }
-    return 0 - 1;
+    return try union_payload_union_kind(text, ast, code, payload);
+}
+
+// union_payload_union_kind classifies a union-typed variant payload: when the
+// payload type names a union already emitted on the tape, the layout entry
+// stores record_base + <its UNION_DECL position>, the same kind a runtime union
+// value of that type carries. UNION_PACK then boxes the nested union on the heap
+// and UNION_PAYLOAD loads it back, while a match arm binds the inner union value
+// with that kind so its own variants resolve. Any other payload type stays
+// unclassified (-1), keeping the enclosing union unsupported when it is read.
+fn union_payload_union_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    code: &var std::array::Array<i64>,
+    payload: std::kizu::ast::NodeId
+) -> !i64 {
+    let span = code_node_span(text, ast, payload);
+    let decl_pos = try union_decl_pos_by_span(text, code, span.start, span.end, 0);
+    if decl_pos < 0 {
+        return 0 - 1;
+    }
+    return code_kind_struct_base() + decl_pos;
 }
 
 fn lower_code_declarations(
@@ -3443,6 +3470,10 @@ fn lower_code_match_body(
         ExprStmt(expr_stmt) => try lower_code_expr_statement(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Call(call_node) => try lower_code_statement_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         TryExpr(try_expr) => try lower_code_try_statement(text, ast, decls, try_expr.value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        // A bare 'match' arm body lowers as a nested match (the same dispatch a
+        // statement-position match takes), so an outer union arm can fan out into
+        // a match over its bound payload (e.g. a union-typed error payload).
+        Match(match_node) => try lower_code_match(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, loop_begin, loop_kind, next_value),
         Block(block) => try lower_code_nested_statements(text, ast, decls, block.statements, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, loop_begin, loop_kind, next_value),
         _ => code_eval_unsupported(next_value),
     };

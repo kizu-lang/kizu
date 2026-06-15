@@ -1,0 +1,48 @@
+// issue 1070 union-typed payload regression: a union stored as another union's
+// variant payload (ConfigRead::Err(ConfigError)). The layout pass classifies the
+// nested union payload (record_base + UNION_DECL position), UNION_PACK boxes it
+// on the heap, and a nested match arm unpacks it through UNION_PAYLOAD. Exercises
+// every inner variant (slice payload, i64 payload, payload-less) plus the outer
+// Ok path so the boxed nested-union round-trip is covered end to end.
+union ConfigError {
+    NotFound([]u8),
+    InvalidPort(i64),
+    PermissionDenied,
+}
+
+union ConfigRead {
+    Ok(i64),
+    Err(ConfigError),
+}
+
+fn read_port(which: i64) -> ConfigRead {
+    if which == 0 {
+        return ConfigRead::Ok(8080);
+    }
+    if which == 1 {
+        return ConfigRead::Err(ConfigError::NotFound("missing.cfg"));
+    }
+    if which == 2 {
+        return ConfigRead::Err(ConfigError::InvalidPort(99));
+    }
+    return ConfigRead::Err(ConfigError::PermissionDenied);
+}
+
+fn show(which: i64) {
+    let result = read_port(which);
+    match result {
+        Ok(port) => print(port),
+        Err(err) => match err {
+            NotFound(path) => print(path),
+            InvalidPort(port) => print(port),
+            PermissionDenied => print("permission denied"),
+        },
+    }
+}
+
+fn main() {
+    show(0);
+    show(1);
+    show(2);
+    show(3);
+}
