@@ -10170,7 +10170,12 @@ fn lower_code_try_runtime_field_expr_call(
     let method = ast_node_text(text, ast, name);
     let method_is_get = std::mem::equal_bytes(method, "get");
     let method_is_pop = std::mem::equal_bytes(method, "pop");
-    let method_supported = method_is_get or method_is_pop;
+    // 'xs.at(i)' returns '!&T borrows self', but in the tape's value model a
+    // read borrow followed by the identity read deref '.*' yields the element
+    // value itself, so a read-use 'at' lowers exactly like 'get' (the write-use
+    // 'r.* = v' path is out of scope and never reaches this element lowering).
+    let method_is_at = std::mem::equal_bytes(method, "at");
+    let method_supported = method_is_get or method_is_pop or method_is_at;
     if !method_supported {
         return code_eval_unsupported(next_value);
     }
@@ -10182,7 +10187,7 @@ fn lower_code_try_runtime_field_expr_call(
     if code_kind_is_owned_array(receiver_kind) {
         return try lower_code_try_array_get_or_pop(text, ast, decls, receiver_eval.value_id, receiver_kind, method_is_pop, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
-    if method_is_pop {
+    if method_is_pop or method_is_at {
         return code_eval_unsupported(receiver_eval.next);
     }
     if receiver_kind != code_kind_owned_map_i64() {
