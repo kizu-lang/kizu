@@ -2684,18 +2684,19 @@ struct ValueLoopInit {
 fn signature_return_kizu(
     ir_bytes: []u8,
     module_prefix: []u8,
-    callee: []u8
+    callee: []u8,
+    ir_lookup_index: &ir_index::IrIndex
 ) -> ![]u8 {
-    let direct = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, "function-signature-return ", module_prefix, callee
+    let direct = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+        ir_lookup_index, ir_bytes, "function-signature-return ", module_prefix, callee
     );
     if std::mem::len(direct) > 0 {
         return direct;
     }
     if std::mem::starts_with(callee, module_prefix) {
         let short = callee[std::mem::len(module_prefix)..std::mem::len(callee)];
-        let stripped = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-            ir_bytes, "function-signature-return ", module_prefix, short
+        let stripped = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+            ir_lookup_index, ir_bytes, "function-signature-return ", module_prefix, short
         );
         if std::mem::len(stripped) > 0 {
             return stripped;
@@ -2847,7 +2848,8 @@ fn find_value_loop_init(
     loop_var: []u8,
     source_name: []u8,
     statement_count: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
 ) -> !ValueLoopInit {
     var index = 0;
     while index < statement_count {
@@ -2883,7 +2885,7 @@ fn find_value_loop_init(
                     ir_bytes, function_name, value, bs
                 );
                 let element_kizu = try signature_return_kizu(
-                    ir_bytes, module_prefix, init_callee_qualified
+                    ir_bytes, module_prefix, init_callee_qualified, ir_lookup_index
                 );
                 return ValueLoopInit {
                     callee_qualified: init_callee_qualified,
@@ -3074,7 +3076,8 @@ pub fn lower_value_array_loop(
     // kizu type then yields the LLVM element type and the compared field's struct index. The seed let
     // also pins 'var <loop_var> = <init>(<source>)'.
     let init = try find_value_loop_init(
-        ir_bytes, function_name, module_prefix, loop_var, source_name, statement_count, bs
+        ir_bytes, function_name, module_prefix, loop_var, source_name, statement_count, bs,
+        ir_lookup_index
     );
     let element_kizu = init.element_kizu;
     let element_type = try compiled_type_lower::kizu_type_to_llvm(
@@ -4087,7 +4090,7 @@ fn lower_void_free_try_call_statement(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiExprLowerResult {
     let success_type = try try_call_success_type(
-        ir_bytes, function_name, module_prefix, call_node, bs
+        ir_bytes, function_name, module_prefix, call_node, bs, ir_lookup_index
     );
     if !std::mem::equal_bytes(success_type, "void") {
         return error("compiled mir: void try-call statement callee must return an error-union void");
@@ -4497,7 +4500,7 @@ fn lower_multi_let_try_call(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
     let success_type = try try_call_success_type(
-        ir_bytes, function_name, module_prefix, call_node, bs
+        ir_bytes, function_name, module_prefix, call_node, bs, ir_lookup_index
     );
     let callee_name = try compiled_mir_types::lower_call_callee_name(
         ir_bytes, function_name, module_prefix, call_node, bs
@@ -4747,7 +4750,8 @@ fn try_call_success_type(
     function_name: []u8,
     module_prefix: []u8,
     call_node: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
 ) -> ![]u8 {
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
@@ -4765,8 +4769,8 @@ fn try_call_success_type(
         lookup_prefix = ir_bytes[0..0];
         lookup_name = qualified;
     }
-    let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, "function-signature-return ", lookup_prefix, lookup_name
+    let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+        ir_lookup_index, ir_bytes, "function-signature-return ", lookup_prefix, lookup_name
     );
     if std::mem::len(ret_kizu) == 0 {
         return error("compiled mir: try-call callee return type not found");
@@ -4790,7 +4794,8 @@ fn prefix_not_try_call_inner_or_minus_one(
     function_name: []u8,
     module_prefix: []u8,
     node: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
 ) -> !i64 {
     let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
     if !std::mem::equal_bytes(kind, "Prefix") {
@@ -4820,7 +4825,7 @@ fn prefix_not_try_call_inner_or_minus_one(
         return -1;
     }
     let success_type = try try_call_success_type(
-        ir_bytes, function_name, module_prefix, inner, bs
+        ir_bytes, function_name, module_prefix, inner, bs, ir_lookup_index
     );
     if !std::mem::equal_bytes(success_type, "i1") {
         return -1;
@@ -4838,7 +4843,8 @@ fn positive_try_call_condition_inner_or_minus_one(
     function_name: []u8,
     module_prefix: []u8,
     node: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
 ) -> !i64 {
     let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
     if !std::mem::equal_bytes(kind, "TryExpr") {
@@ -4855,7 +4861,7 @@ fn positive_try_call_condition_inner_or_minus_one(
         return error("compiled mir: positive try-call condition must be a free function");
     }
     let success_type = try try_call_success_type(
-        ir_bytes, function_name, module_prefix, inner, bs
+        ir_bytes, function_name, module_prefix, inner, bs, ir_lookup_index
     );
     if !std::mem::equal_bytes(success_type, "i1") {
         return error("compiled mir: positive try-call condition callee must return !bool");
@@ -5088,7 +5094,7 @@ fn lower_multi_return_statement(
     // call, propagates a failure as this function's own error union, and negates the unwrapped bool
     // success before wrapping it as the error-union success (issue 1165 / 1162).
     let return_not_try = try prefix_not_try_call_inner_or_minus_one(
-        ir_bytes, function_name, module_prefix, value, bs
+        ir_bytes, function_name, module_prefix, value, bs, ir_lookup_index
     );
     if return_not_try >= 0 {
         let called_error_union = try compiled_mir_types::lower_call_return_type(
@@ -6322,7 +6328,7 @@ fn lower_multi_if_statement(
     // try-call if lowering with inverted branch polarity, so failure propagation and alias merging
     // stay on the same path.
     let guard_not_try = try prefix_not_try_call_inner_or_minus_one(
-        ir_bytes, function_name, module_prefix, cond_node, bs
+        ir_bytes, function_name, module_prefix, cond_node, bs, ir_lookup_index
     );
     if guard_not_try >= 0 {
         let guard_then_extra = try ir_contract::body_child_sequence_or_minus_one_from(
@@ -6400,7 +6406,7 @@ fn lower_multi_if_statement(
         );
     }
     let positive_try = try positive_try_call_condition_inner_or_minus_one(
-        ir_bytes, function_name, module_prefix, cond_node, bs
+        ir_bytes, function_name, module_prefix, cond_node, bs, ir_lookup_index
     );
     if positive_try >= 0 {
         return try lower_try_call_void_if(
@@ -10942,7 +10948,7 @@ fn lower_while_latch_try_call(
         ir_bytes, function_name, module_prefix, inner, bs
     );
     let success_type = try try_call_success_type(
-        ir_bytes, function_name, module_prefix, inner, bs
+        ir_bytes, function_name, module_prefix, inner, bs, ir_lookup_index
     );
     if !std::mem::equal_bytes(success_type, "i64") {
         return error("compiled mir: induction latch try-call must return an i64");
