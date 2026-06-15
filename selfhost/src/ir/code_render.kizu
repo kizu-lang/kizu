@@ -1575,6 +1575,10 @@ fn render_one_instruction(
     if op == try_array_set {
         try render_try_array_set(out, code, index, abi);
     }
+    let try_array_pop = codegen::code_op_try_array_pop();
+    if op == try_array_pop {
+        try render_try_array_pop(out, code, index, abi);
+    }
     let try_map_insert = codegen::code_op_try_map_insert_i64();
     if op == try_map_insert {
         try render_try_map_insert_i64(out, code, index, abi);
@@ -3961,6 +3965,117 @@ fn render_array_set_store(out: &var std::string::String, index: i64, value: i64,
     return;
 }
 
+// render_try_array_pop emits ARRAY_POP: read Array.len, check len-1 through
+// array_at, load the element value, then decrement len in the runtime array header.
+fn render_try_array_pop(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    let element_kind = try code.get(index + 3);
+    try w(out, "  %ap");
+    try wi(out, index);
+    try w(out, "_len = call i64 @kizu_rt_array_len(%kizu.owned %v");
+    try wi(out, receiver);
+    try wl(out, ")");
+    try w(out, "  %ap");
+    try wi(out, index);
+    try w(out, "_last = sub i64 %ap");
+    try wi(out, index);
+    try wl(out, "_len, 1");
+    try w(out, "  %ap");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", i64 %ap");
+    try wi(out, index);
+    try wl(out, "_last)");
+    try w(out, "  %ap");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %ap");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %ap");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.slice.u8 %ap");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try render_array_get_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %ap");
+    try wi(out, index);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %ap");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %ap");
+    try wi(out, index);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %ap");
+    try wi(out, index);
+    try wl(out, "_slice, 0");
+    try render_array_pop_load(out, dst, index, element_kind);
+    try w(out, "  %ap");
+    try wi(out, index);
+    try w(out, "_raw = extractvalue %kizu.owned %v");
+    try wi(out, receiver);
+    try wl(out, ", 0");
+    try w(out, "  %ap");
+    try wi(out, index);
+    try w(out, "_len_field = getelementptr inbounds { ptr, ptr, i64, i64, i64 }, ptr %ap");
+    try wi(out, index);
+    try wl(out, "_raw, i32 0, i32 2");
+    try w(out, "  store i64 %ap");
+    try wi(out, index);
+    try w(out, "_last, ptr %ap");
+    try wi(out, index);
+    try wl(out, "_len_field");
+    return;
+}
+
+fn render_array_pop_load(out: &var std::string::String, value_id: i64, index: i64, element_kind: i64) -> !void {
+    if element_kind == codegen::code_kind_bool() {
+        try w(out, "  %ap");
+        try wi(out, index);
+        try w(out, "_byte = load i8, ptr %ap");
+        try wi(out, index);
+        try wl(out, "_ptr");
+        try w(out, "  %v");
+        try wi(out, value_id);
+        try w(out, " = icmp ne i8 %ap");
+        try wi(out, index);
+        try wl(out, "_byte, 0");
+    }
+    if element_kind == codegen::code_kind_i64() {
+        try w(out, "  %v");
+        try wi(out, value_id);
+        try w(out, " = load i64, ptr %ap");
+        try wi(out, index);
+        try wl(out, "_ptr");
+    }
+    if element_kind == codegen::code_kind_slice() {
+        try w(out, "  %v");
+        try wi(out, value_id);
+        try w(out, " = load %kizu.slice.u8, ptr %ap");
+        try wi(out, index);
+        try wl(out, "_ptr");
+    }
+    return;
+}
+
 fn render_try_map_insert_i64(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
@@ -5482,6 +5597,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let try_array_set = codegen::code_op_try_array_set();
     if op == try_array_set {
         return index + 5;
+    }
+    let try_array_pop = codegen::code_op_try_array_pop();
+    if op == try_array_pop {
+        return index + 4;
     }
     let try_map_insert = codegen::code_op_try_map_insert_i64();
     if op == try_map_insert {
