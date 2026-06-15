@@ -750,6 +750,33 @@ pub fn code_op_path_extension() -> i64 {
     return 137;
 }
 
+// FS_EXISTS / FS_METADATA / FS_CREATE_DIR lower the I/O-bearing fs core helpers
+// onto their existing runtime symbols. FS_EXISTS ('op dst io path') and
+// FS_METADATA ('op dst io path') yield a result value (a bool, kind bool; a
+// '%kizu.fs.metadata' aggregate, kind fs_metadata) by extracting the success arm
+// of the runtime error union and propagating its error arm; FS_CREATE_DIR
+// ('op io path') is a statement that yields no value (it propagates on error and
+// continues otherwise). All three build the path slice via lower_code_arg_slice,
+// so the path may be a string literal or a runtime '[]u8' value.
+pub fn code_op_fs_exists() -> i64 {
+    return 138;
+}
+
+pub fn code_op_fs_metadata() -> i64 {
+    return 139;
+}
+
+pub fn code_op_fs_create_dir() -> i64 {
+    return 140;
+}
+
+// FS_METADATA_FIELD reads a field of a '%kizu.fs.metadata' value: 'op dst src
+// field_index', where field 0 is 'size' (i64) and field 1 is 'is_dir' (i1/bool).
+// The renderer extracts the field straight out of the aggregate SSA value.
+pub fn code_op_fs_metadata_field() -> i64 {
+    return 141;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -852,6 +879,14 @@ pub fn code_kind_borrowed_map_i64() -> i64 {
 
 pub fn code_kind_mut_borrowed_map_i64() -> i64 {
     return 14;
+}
+
+// code_kind_fs_metadata marks a '%kizu.fs.metadata' aggregate value (the success
+// arm of 'try std::fs::metadata(...)'). It stays a scalar kind below
+// code_kind_struct_base so a field read dispatches to FS_METADATA_FIELD instead of
+// the record-backed struct path.
+pub fn code_kind_fs_metadata() -> i64 {
+    return 15;
 }
 
 fn code_kind_owned_map_enum_base() -> i64 {
@@ -5584,6 +5619,9 @@ fn lower_code_try_call(
     if std::mem::equal_bytes(callee_text, "std::io::write_stderr") {
         return try lower_code_try_io_write_stderr(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if std::mem::equal_bytes(callee_text, "std::fs::create_dir") {
+        return try lower_code_fs_create_dir(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     let runtime_eval = try lower_code_try_runtime_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if runtime_eval.ok {
         return runtime_eval;
@@ -7385,6 +7423,9 @@ fn lower_code_field_expr(
     let base_kind = try kinds.get(base_eval.value_id);
     if base_kind == code_kind_slice() {
         return code_eval_value(base_eval.value_id, base_eval.next);
+    }
+    if base_kind == code_kind_fs_metadata() {
+        return try lower_code_fs_metadata_field(text, ast, name, code, kinds, base_eval.value_id, base_eval.next);
     }
     let struct_base = code_kind_struct_base();
     if base_kind < struct_base {
@@ -10904,6 +10945,12 @@ fn lower_code_try_call_expr(
     if std::mem::equal_bytes(callee_text, "std::fs::read_file") {
         return try lower_code_try_fs_read(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if std::mem::equal_bytes(callee_text, "std::fs::exists") {
+        return try lower_code_fs_exists(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if std::mem::equal_bytes(callee_text, "std::fs::metadata") {
+        return try lower_code_fs_metadata(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     if std::mem::equal_bytes(callee_text, "std::mem::byte_at") {
         return try lower_code_mem_byte_at(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
@@ -11176,6 +11223,197 @@ fn lower_code_try_fs_read(
     try kinds.append(kind_slice);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
+}
+
+// lower_code_fs_exists / lower_code_fs_metadata are thin wrappers that bind the op
+// and result kind in a 'let' before the shared stat-call lowering (a compiled-MIR
+// call cannot take a function-call result directly as an argument, so the op id
+// must come from a local).
+fn lower_code_fs_exists(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = code_op_fs_exists();
+    let result_kind = code_kind_bool();
+    return try lower_code_fs_stat_call(op, result_kind, text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+fn lower_code_fs_metadata(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = code_op_fs_metadata();
+    let result_kind = code_kind_fs_metadata();
+    return try lower_code_fs_stat_call(op, result_kind, text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+// lower_code_fs_stat_call lowers the shared 'try std::fs::exists/metadata(io,
+// path)' shape: the io handle lowers to a kind-owned value, the path materializes
+// to a kind-slice value, and the record carries '<op> dst io path' with the
+// caller's result kind appended for the extracted success value.
+fn lower_code_fs_stat_call(
+    op: i64,
+    result_kind: i64,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 2 {
+        return code_eval_unsupported(next_value);
+    }
+    let io_arg = try ast.child_at(args, 0);
+    let io_eval = try lower_code_expr(text, ast, decls, io_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !io_eval.ok {
+        return code_eval_unsupported(io_eval.next);
+    }
+    let io_kind = try kinds.get(io_eval.value_id);
+    let owned_kind = code_kind_owned();
+    if io_kind != owned_kind {
+        return code_eval_unsupported(io_eval.next);
+    }
+    let path_arg = try ast.child_at(args, 1);
+    let path_eval = try lower_code_expr(text, ast, decls, path_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, io_eval.next);
+    if !path_eval.ok {
+        return code_eval_unsupported(path_eval.next);
+    }
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, path_eval.value_id, path_eval.next);
+    let path_kind = try kinds.get(slice_eval.value_id);
+    let slice_kind = code_kind_slice();
+    if path_kind != slice_kind {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let result_value = slice_eval.next;
+    try code.append(op);
+    try code.append(result_value);
+    try code.append(io_eval.value_id);
+    try code.append(slice_eval.value_id);
+    try kinds.append(result_kind);
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+// lower_code_fs_create_dir lowers 'try std::fs::create_dir(io, path)' as a
+// statement: like the stat calls it lowers a kind-owned io handle and a kind-slice
+// path, but the record carries only '<op> io path' (no result value) because
+// create_dir yields '!void'.
+fn lower_code_fs_create_dir(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 2 {
+        return code_eval_unsupported(next_value);
+    }
+    let io_arg = try ast.child_at(args, 0);
+    let io_eval = try lower_code_expr(text, ast, decls, io_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !io_eval.ok {
+        return code_eval_unsupported(io_eval.next);
+    }
+    let io_kind = try kinds.get(io_eval.value_id);
+    let owned_kind = code_kind_owned();
+    if io_kind != owned_kind {
+        return code_eval_unsupported(io_eval.next);
+    }
+    let path_arg = try ast.child_at(args, 1);
+    let path_eval = try lower_code_expr(text, ast, decls, path_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, io_eval.next);
+    if !path_eval.ok {
+        return code_eval_unsupported(path_eval.next);
+    }
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, path_eval.value_id, path_eval.next);
+    let path_kind = try kinds.get(slice_eval.value_id);
+    let slice_kind = code_kind_slice();
+    if path_kind != slice_kind {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    let op = code_op_fs_create_dir();
+    try code.append(op);
+    try code.append(io_eval.value_id);
+    try code.append(slice_eval.value_id);
+    return code_eval_value(0, slice_eval.next);
+}
+
+// lower_code_fs_metadata_field resolves a '.size' / '.is_dir' read on a
+// '%kizu.fs.metadata' value into an FS_METADATA_FIELD record carrying the field
+// index (0 = size, 1 = is_dir); the result kind is i64 for size and bool for
+// is_dir.
+fn lower_code_fs_metadata_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    src_value: i64,
+    next_value: i64
+) -> !CodeEval {
+    let field_name = ast_node_text(text, ast, name);
+    let field_index = fs_metadata_field_index(field_name);
+    if field_index < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let op = code_op_fs_metadata_field();
+    try code.append(op);
+    try code.append(next_value);
+    try code.append(src_value);
+    try code.append(field_index);
+    let field_kind = fs_metadata_field_kind(field_index);
+    try kinds.append(field_kind);
+    let after_value = next_value + 1;
+    return code_eval_value(next_value, after_value);
+}
+
+fn fs_metadata_field_index(field_name: []u8) -> i64 {
+    if std::mem::equal_bytes(field_name, "size") {
+        return 0;
+    }
+    if std::mem::equal_bytes(field_name, "is_dir") {
+        return 1;
+    }
+    return 0 - 1;
+}
+
+fn fs_metadata_field_kind(field_index: i64) -> i64 {
+    if field_index == 0 {
+        return code_kind_i64();
+    }
+    return code_kind_bool();
 }
 
 // lower_code_args lowers each call argument into its caller's scratch frame
