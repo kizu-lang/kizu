@@ -3459,7 +3459,30 @@ pub fn lower_multi_statement_function(
                         string_counter = expr_result.string_counter;
                         try_counter = expr_result.try_counter;
                     } else {
+                    if std::mem::equal_bytes(stmt_kind, "Match") {
+                        // A non-bool enum-dispatch match statement ('match <scrutinee> { Variant
+                        // => return <expr>, _ => return <expr> }') lowers to a branch-control-flow
+                        // EnumDispatch stmt: the scrutinee becomes an i64 discriminant and each
+                        // arm body reuses the shared return lowering (issue 1157 PR-PH / B3). Every
+                        // arm returns, so the dispatch is terminal -- like a Return, it threads no
+                        // updated counters back into the loop.
+                        try stmts.append(try lower_multi_match_statement(
+                            ir_bytes,
+                            function_name,
+                            module_prefix,
+                            llvm_return_type,
+                            locals_spec,
+                            statement,
+                            string_counter,
+                            temp_counter,
+                            &var aliases,
+                            bs,
+                            ir_lookup_index,
+                            &var call_arg_type_cache
+                        ));
+                    } else {
                         return error("compiled mir: unsupported statement kind");
+                    }
                     }
                 }
             }
@@ -5355,6 +5378,204 @@ fn lower_multi_return_statement(
         ir_lookup_index, call_arg_type_cache
     );
     return compiled_mir::return_expr_stmt(string_counter, result_id, insts);
+}
+// lower_multi_match_statement lowers a non-bool enum-dispatch match statement
+// ('match <scrutinee> { Variant => return <expr>, _ => return <expr> }') into an EnumDispatch
+// stmt (issue 1157 PR-PH / B3). The scrutinee lowers to an i64 discriminant through
+// lower_expr_into (a bare enum Var or a 'token.kind' field access); each arm's variant tag is
+// resolved from the enum-variant facts and its 'return <expr>' body reuses the shared
+// lower_multi_return_statement path. The renderer currently arm-scopes the value-return
+// ('return <int/var>') and error-return ('return error(..)') wraps; other return shapes (call /
+// struct success wraps) surface an explicit blocker at emit time until they are arm-scoped too.
+// The trailing '_' default (or the final variant of an exhaustive match) carries no tag and
+// renders as the unconditional fallthrough arm. Every arm returns, so the statement is terminal.
+// Each arm reserves a private temp/string SSA window (arm_index * ARM_SSA_STRIDE off the
+// scrutinee end) so the per-arm '%t<id>' temps and string globals never collide across the arm
+// blocks of the same function -- the same fixed-stride namespacing the if-renderer applies to
+// its then/else block labels (if_index * 1000).
+fn lower_multi_match_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !compiled_mir::MirStmt {
+    let arm_ssa_stride = 1000;
+    // The scrutinee lowers to an i64 discriminant. A bare enum Var resolves its enum type from
+    // the parameter/local kizu type; a 'receiver.field' access resolves it from the struct
+    // field's kizu type. Both reach the same enum-variant tag facts.
+    let scrutinee = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    let scrutinee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, scrutinee, bs
+    );
+    let enum_kizu = try resolve_dispatch_enum_kizu_type(
+        ir_bytes, function_name, module_prefix, locals_spec, scrutinee, scrutinee_kind, bs,
+        ir_lookup_index
+    );
+    var scrutinee_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let scrutinee_result_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        scrutinee,
+        string_counter,
+        temp_counter,
+        &var scrutinee_insts,
+        bs,
+        ir_lookup_index, call_arg_type_cache
+    );
+    let scrutinee_temps = scrutinee_insts.len();
+    let scrutinee_strings = try count_strings_in_insts(&scrutinee_insts);
+    let arm_temp_base = temp_counter + scrutinee_temps;
+    let arm_string_base = string_counter + scrutinee_strings;
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, statement, "arm", bs
+    );
+    if arm_count < 1 {
+        return error("compiled mir: enum-dispatch match requires at least one arm");
+    }
+    var arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    var index = 0;
+    while index < arm_count {
+        let arm_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, statement, "arm", index, bs
+        );
+        let pattern = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arm_node, "pattern", 0, bs
+        );
+        let variant_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, pattern, bs
+        );
+        let is_default = std::mem::equal_bytes(variant_name, "_");
+        var tag = 0 - 1;
+        if !is_default {
+            tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+                ir_lookup_index, ir_bytes, ir_bytes[0..0], enum_kizu, variant_name
+            );
+        }
+        // Each arm body is a single 'return <expr>'. Reuse lower_multi_return_statement off the
+        // arm's private SSA window so its temps/strings stay disjoint from the other arms.
+        let arm_body = try dispatch_arm_return_statement(
+            ir_bytes, function_name, arm_node, bs
+        );
+        let arm_temp = arm_temp_base + index * arm_ssa_stride;
+        let arm_string = arm_string_base + index * arm_ssa_stride;
+        let return_stmt = try lower_multi_return_statement(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            arm_body,
+            arm_string,
+            arm_temp,
+            aliases,
+            bs,
+            ir_lookup_index, call_arg_type_cache
+        );
+        var arm_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+        try arm_stmts.append(return_stmt);
+        try arms.append(compiled_mir::enum_dispatch_arm(tag, is_default, arm_stmts));
+        index = index + 1;
+    }
+    return compiled_mir::enum_dispatch_stmt(scrutinee_insts, scrutinee_result_id, arms);
+}
+// resolve_dispatch_enum_kizu_type resolves the fully-qualified enum kizu type of an
+// enum-dispatch match scrutinee: a bare Var reads its parameter/local kizu type, a
+// 'receiver.field' FieldExpr reads the struct field's kizu type (issue 1157 PR-PH / B3).
+fn resolve_dispatch_enum_kizu_type(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    scrutinee: i64,
+    scrutinee_kind: []u8,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
+) -> ![]u8 {
+    if std::mem::equal_bytes(scrutinee_kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, scrutinee, bs
+        );
+        let kizu = try compiled_mir_types::resolve_value_kizu_type(
+            ir_bytes, function_name, module_prefix, locals_spec, var_name, bs
+        );
+        return compiled_mir_types::struct_lookup_kizu_type(kizu);
+    }
+    if std::mem::equal_bytes(scrutinee_kind, "FieldExpr") {
+        let field_name = try ir_contract::body_field_expr_name_from(
+            ir_bytes, function_name, scrutinee, "field", bs
+        );
+        let receiver = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, scrutinee, "receiver", 0, bs
+        );
+        let receiver_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, receiver, bs
+        );
+        if !std::mem::equal_bytes(receiver_kind, "Var") {
+            return error("compiled mir: enum-dispatch field scrutinee receiver must be a variable");
+        }
+        let receiver_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, receiver, bs
+        );
+        let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
+            ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs
+        );
+        let lookup_type = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
+        let field = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+            ir_lookup_index, ir_bytes, ir_bytes[0..0], lookup_type, field_name
+        );
+        if !field.found {
+            return error("compiled mir: enum-dispatch field scrutinee field not found");
+        }
+        return compiled_mir_types::struct_lookup_kizu_type(field.field_type);
+    }
+    return error("compiled mir: enum-dispatch scrutinee must be a variable or field access");
+}
+// dispatch_arm_return_statement returns the 'return <expr>' statement node backing one
+// enum-dispatch arm body. An arm body is either the Return node directly or a single-statement
+// block wrapping it; any other shape (an expression statement, multi-statement body) is not a
+// dispatch return and surfaces as an explicit blocker (issue 1157 PR-PH / B3).
+fn dispatch_arm_return_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arm_node: i64,
+    bs: i64
+) -> !i64 {
+    let body = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arm_node, "body", 0, bs
+    );
+    let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body, bs);
+    if std::mem::equal_bytes(body_kind, "Return") {
+        return body;
+    }
+    if std::mem::equal_bytes(body_kind, "Block") {
+        let extra = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, body, "statement", 1, bs
+        );
+        if extra >= 0 {
+            return error("compiled mir: enum-dispatch arm body must be a single return");
+        }
+        let inner = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body, "statement", 0, bs
+        );
+        let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+        if !std::mem::equal_bytes(inner_kind, "Return") {
+            return error("compiled mir: enum-dispatch arm body must return");
+        }
+        return inner;
+    }
+    return error("compiled mir: enum-dispatch arm body must be a return statement");
 }
 // lower_multi_return_array_get lowers a multi-statement
 // 'return self.<field>.get(<expr>);' (Array<T>.get -> !T, tracker 961). It lowers the

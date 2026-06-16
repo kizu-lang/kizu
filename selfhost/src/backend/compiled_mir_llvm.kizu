@@ -446,6 +446,7 @@ fn append_multi_stmt(
         If(payload) => try append_multi_if(out, function, payload, local_prefix);,
         While(payload) => try append_multi_while(out, function, payload);,
         MatchTraversal(payload) => try append_multi_match_traversal(out, payload);,
+        EnumDispatch(payload) => try append_multi_enum_dispatch(out, function, payload, local_prefix);,
     }
     return;
 }
@@ -3477,6 +3478,186 @@ fn append_traversal_arm_block(
     return;
 }
 
+// append_multi_enum_dispatch renders a non-bool enum-dispatch match statement (issue 1157
+// PR-PH / B3): it emits the scrutinee discriminant instructions, then an exhaustive icmp/br
+// dispatch chain over the arms, and one block per arm whose lowered 'return <expr>' statements
+// emit a real value (no 'unreachable'). The last arm is the unconditional fallthrough. The
+// block labels are namespaced by the render-time statement index (local_prefix) so several
+// dispatch matches in one function never collide.
+fn append_multi_enum_dispatch(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirEnumDispatchStmt,
+    local_prefix: i64
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.scrutinee_insts);
+    let arms = &stmt.arms;
+    let arm_count = arms.len();
+    // Phase 1: the icmp/br dispatch chain. The last arm is the exhaustive fallthrough.
+    var index = 0;
+    while index < arm_count {
+        if index > 0 {
+            try append_dispatch_label(out, local_prefix, "check_", index);
+            try append_ll_line(out, ":");
+        }
+        if index == arm_count - 1 {
+            try out.append_bytes("  br label %");
+            try append_dispatch_label(out, local_prefix, "arm_", index);
+            try out.append_byte(cast<u8>(10));
+        } else {
+            let arm = try arms.at(index);
+            try out.append_bytes("  %");
+            try append_dispatch_label(out, local_prefix, "is_", index);
+            try out.append_bytes(" = icmp eq i64 ");
+            try append_expr_value_ref(out, &stmt.scrutinee_insts, stmt.scrutinee_result_id);
+            try out.append_bytes(", ");
+            try std::fmt::append_i64(out, arm.tag);
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  br i1 %");
+            try append_dispatch_label(out, local_prefix, "is_", index);
+            try out.append_bytes(", label %");
+            try append_dispatch_label(out, local_prefix, "arm_", index);
+            try out.append_bytes(", label %");
+            try append_dispatch_label(out, local_prefix, "check_", index + 1);
+            try out.append_byte(cast<u8>(10));
+        }
+        index = index + 1;
+    }
+    // Phase 2: the arm blocks, each rendering its lowered return through the dispatch-scoped
+    // return renderer so the per-arm value-wrap SSA names never collide across arm blocks.
+    var arm_index = 0;
+    while arm_index < arm_count {
+        let arm = try arms.at(arm_index);
+        try append_dispatch_label(out, local_prefix, "arm_", arm_index);
+        try append_ll_line(out, ":");
+        let arm_stmts = &arm.arm_stmts;
+        var stmt_index = 0;
+        while stmt_index < arm_stmts.len() {
+            let arm_stmt = try arm_stmts.at(stmt_index);
+            try append_dispatch_arm_return(
+                out,
+                function,
+                arm_stmt,
+                local_prefix * 1000 + arm_index
+            );
+            stmt_index = stmt_index + 1;
+        }
+        arm_index = arm_index + 1;
+    }
+    return;
+}
+
+// append_dispatch_arm_return renders one enum-dispatch arm's lowered 'return <expr>'. A value
+// return wraps through the dispatch-scoped wrap (arm_scope-suffixed SSA names so the arm blocks
+// never collide); an error return reuses append_multi_return_error, whose %errfail<id> temps are
+// already keyed off the unique per-arm message temp id. Other return shapes (call / struct
+// success wraps spell fixed SSA names) are not yet arm-scoped, so they surface as an explicit
+// blocker rather than emitting colliding SSA names (issue 1157 PR-PH / B3).
+fn append_dispatch_arm_return(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirStmt,
+    arm_scope: i64
+) -> !void {
+    match stmt {
+        ReturnExpr(payload) => try append_dispatch_return_expr(out, function, payload, arm_scope);,
+        ReturnError(payload) => try append_multi_return_error(out, function, payload);,
+        _ => return error("compiled mir llvm: enum-dispatch arm return shape not yet supported");,
+    }
+    return;
+}
+
+// append_dispatch_return_expr mirrors append_multi_if_return_expr's value-return wrap but scopes
+// the wrap SSA names by arm_scope ('dispatchret<arm_scope>_ok/_val') so several enum-dispatch arm
+// blocks in one function never collide with each other or with the trailing %retwrap return
+// (issue 1157 PR-PH / B3).
+fn append_dispatch_return_expr(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirReturnExprStmt,
+    arm_scope: i64
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    let return_type = function.return_type.llvm_name;
+    let value_type = try expr_inst_type_by_id(&stmt.expr_insts, stmt.expr_result_id);
+    let needs_wrap = is_error_union_type(return_type) and
+        std::mem::len(value_type) > 0 and
+        !std::mem::equal_bytes(value_type, return_type);
+    if !needs_wrap {
+        try out.append_bytes("  ret ");
+        try out.append_bytes(return_type);
+        try out.append_bytes(" ");
+        try append_expr_value_ref(out, &stmt.expr_insts, stmt.expr_result_id);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    try out.append_bytes("  %dispatchret");
+    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes("_ok = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" zeroinitializer, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %dispatchret");
+    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes("_val = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %dispatchret");
+    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes("_ok, ");
+    try out.append_bytes(value_type);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, &stmt.expr_insts, stmt.expr_result_id);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %dispatchret");
+    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes("_val");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_dispatch_label emits a 'dispatch<local_prefix>_<suffix><n>' block-label spelling
+// shared by the dispatch chain and the per-arm blocks (issue 1157 PR-PH / B3).
+fn append_dispatch_label(
+    out: &var std::string::String,
+    local_prefix: i64,
+    suffix: []u8,
+    n: i64
+) -> !void {
+    try out.append_bytes("dispatch");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes("_");
+    try out.append_bytes(suffix);
+    try std::fmt::append_i64(out, n);
+    return;
+}
+
+// append_enum_dispatch_globals emits the string-literal globals referenced by the scrutinee
+// instructions and each arm's lowered return statements (issue 1157 PR-PH / B3).
+fn append_enum_dispatch_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirEnumDispatchStmt
+) -> !void {
+    try append_expr_globals(out, llvm_symbol, &stmt.scrutinee_insts);
+    let arms = &stmt.arms;
+    var arm_index = 0;
+    while arm_index < arms.len() {
+        let arm = try arms.at(arm_index);
+        let arm_stmts = &arm.arm_stmts;
+        var stmt_index = 0;
+        while stmt_index < arm_stmts.len() {
+            let arm_stmt = try arm_stmts.at(stmt_index);
+            try append_stmt_globals(out, llvm_symbol, arm_stmt);
+            stmt_index = stmt_index + 1;
+        }
+        arm_index = arm_index + 1;
+    }
+    return;
+}
+
 // append_traversal_literal_text renders a literal arm's value: bool literals print
 // true/false, integer literals their decimal value.
 fn append_traversal_literal_text(
@@ -3960,6 +4141,7 @@ fn append_stmt_globals(
         If(payload) => try append_if_globals(out, llvm_symbol, payload);,
         While(payload) => try append_while_globals(out, llvm_symbol, payload);,
         MatchTraversal(payload) => try append_match_traversal_globals(payload);,
+        EnumDispatch(payload) => try append_enum_dispatch_globals(out, llvm_symbol, payload);,
     }
     return;
 }
