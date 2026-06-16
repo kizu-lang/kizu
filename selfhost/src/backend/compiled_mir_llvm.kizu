@@ -4281,8 +4281,47 @@ fn append_expr_value_ref(
         try std::fmt::append_i64(out, int_value);
         return;
     }
+    if try append_struct_literal_expr_ref_by_id(out, insts, result_id) {
+        return;
+    }
     try append_temp_ref(out, result_id);
     return;
+}
+
+fn append_struct_literal_expr_ref_by_id(
+    out: &var std::string::String,
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> !bool {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            match inst {
+                StructLiteral(payload) => return try append_struct_literal_expr_ref(out, payload);,
+                _ => return false;,
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn append_struct_literal_expr_ref(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirStructLiteralExpr
+) -> !bool {
+    let fields = &inst.struct_fields;
+    if fields.len() == 0 {
+        try out.append_bytes("poison");
+        return true;
+    }
+    let last = try fields.at(fields.len() - 1);
+    try out.append_bytes("%v");
+    try std::fmt::append_i64(out, expr_struct_prefix(inst.id));
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, last.index);
+    return true;
 }
 
 fn append_named_ref(out: &var std::string::String, name: []u8) -> !void {
@@ -5941,7 +5980,7 @@ fn append_expr_inst(
         StringLen(payload) => try append_string_len_expr(out, payload);,
         IntCast(payload) => try append_int_cast_expr(out, payload, insts);,
         UnionConstruct(payload) => try append_union_construct_expr(out, payload, insts);,
-        StructLiteral(payload) => try append_struct_literal_expr(out, payload, insts);,
+        StructLiteral(payload) => try append_struct_literal_expr(out, llvm_symbol, payload, insts);,
     }
     return;
 }
@@ -6384,25 +6423,20 @@ fn append_union_construct_store_payload(
 }
 fn append_struct_literal_expr(
     out: &var std::string::String,
+    llvm_symbol: []u8,
     inst: &compiled_mir::MirStructLiteralExpr,
     insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
-    // Materialize a single-field struct literal value with one insertvalue into a poison
-    // aggregate (issue 1157 PR-P3). The field value's LLVM type is resolved from the inst
-    // that produced it so the insertvalue operand type matches.
-    let field_type = try expr_inst_llvm_type_by_id(insts, inst.field0_value);
-    try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes(" = insertvalue ");
-    try out.append_bytes(inst.llvm_type);
-    try out.append_bytes(" poison, ");
-    try out.append_bytes(field_type);
-    try out.append_byte(cast<u8>(32));
-    try append_expr_value_ref(out, insts, inst.field0_value);
-    try out.append_bytes(", ");
-    try std::fmt::append_i64(out, inst.field0_index);
-    try out.append_byte(cast<u8>(10));
+    // Reuse the statement-level struct renderer for expression payloads. The
+    // expression value reference points at the final %v<expr-prefix>_<field> aggregate.
+    try append_struct_body_at(
+        out, llvm_symbol, inst.llvm_type, &inst.struct_fields, expr_struct_prefix(inst.id)
+    );
     return;
+}
+
+fn expr_struct_prefix(id: i64) -> i64 {
+    return 1000000 + id;
 }
 fn append_prefix_not_expr(
     out: &var std::string::String,
@@ -6483,6 +6517,9 @@ fn append_expr_inst_globals(
         ConstString(payload) => try append_const_string_global(out, llvm_symbol, payload);,
         Call(payload) => try compiled_mir_llvm_call::append_call_string_globals(
             out, llvm_symbol, &payload.call_args
+        );,
+        StructLiteral(payload) => try append_struct_globals_at(
+            out, llvm_symbol, &payload.struct_fields, expr_struct_prefix(payload.id)
         );,
         _ => return;,
     }

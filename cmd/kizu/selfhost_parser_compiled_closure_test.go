@@ -33,6 +33,9 @@ func parserCompiledClosureSeeds() []string {
 		"parse_bool",
 		"parse_int",
 		"parse_string",
+		// issue 1157 C2 real parser consumer: exercises ast.add_var_with_doc from the
+		// compiled parser path without pulling the full declaration parser.
+		"name_node_with_doc",
 		// issue 1157 PJ synthetic fixture: a '-> !ParseNode' helper seeded (in-degree
 		// zero) to exercise the site-955 cursor-constructor call, the ParseNode
 		// error-union return, and the ParseNode value type on the compiled parser path.
