@@ -27,6 +27,9 @@ var parserClosureSeeds = []string{
 	"is_double_token_byte",
 	"is_type_apply_start",
 	"is_struct_literal_start",
+	// issue 1157 PR-PE synthetic fixture: a '-> !ParseNode' helper seeded to exercise the
+	// ParseNode error-union return + ParseNode value type on the parser closure path.
+	"synth_parse_node_sig",
 }
 
 var parserClosurePrivateHelpers = []string{
