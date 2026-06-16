@@ -38,9 +38,12 @@ var parserClosureSeeds = []string{
 	"synth_parse_node_sig",
 	// issue 1157 worker-3 grammar-loop fixture: synth_postfix_loop carries the parse_postfix_expr
 	// 'while true' value-loop CFG (reassigning through the lowered synth_parse_node_sig leaf), so it
-	// exercises the GrammarLoop lowering ahead of the full parse_primary chain. expect_ident
-	// exercises !Token ok-wrap and error arms.
+	// exercises the GrammarLoop lowering ahead of the real parse_primary consumer.
 	"synth_postfix_loop",
+	// issue 1157 worker-2 real parser consumer: parse_primary passes parse_int / parse_string call
+	// results into parse_postfix_expr, pinning let-try nested Call argument hoisting.
+	"parse_primary",
+	// expect_ident exercises !Token ok-wrap and error arms.
 	"expect_ident",
 }
 
