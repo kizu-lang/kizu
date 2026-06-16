@@ -1011,6 +1011,18 @@ pub fn append_functions(
         "kizu_kizu__ast_ast_add_var_with_doc",
         "%kizu.kizu.ast.ast self;%kizu.kizu.ast.span span_value;%kizu.kizu.ast.symbol_id name;%kizu.kizu.ast.span doc"
     );
+    // issue 1157 worker-3 NEW-A child-arena open mutator: begin_children opens the AST child arena
+    // ('return self.children.len();'). The compiled root lowers its body through the Array self-field
+    // len accessor so synth_child_assembly's ast.begin_children call resolves and links. add_call
+    // (cross-module ChildRange struct literal + C2 payload), finish_children (computed-binary struct
+    // field), and add_child (Array append-on-self-field) are deferred to follow-up slices.
+    try compiled_llvm::append_compiled_function_auto_indexed(
+        lookup_index,
+        out, ir_bytes,
+        "std::kizu::ast::ast_begin_children",
+        "kizu_kizu__ast_ast_begin_children",
+        "%kizu.kizu.ast.ast self"
+    );
     try compiled_llvm::append_compiled_function_auto_indexed(
         lookup_index,
         out, ir_bytes,
@@ -1937,10 +1949,15 @@ fn append_kizu_parser_reachable_compiled_functions(
     // bool-predicate-call guarded arms each reassigning through a free !ParseNode try-call, and a
     // terminal carried-value return) but reassigns through the already-lowered synth_parse_node_sig
     // leaf rather than the not-yet-lowered grammar helpers. Seeding it exercises the GrammarLoop
-    // lowering on the native compiled path ahead of the full parse_primary chain (which also needs
-    // parse_type_apply_expr / parse_one_postfix / parse_struct_literal_expr and the rest of
-    // parse_primary's frontier lowered).
+    // lowering on the native compiled path ahead of the real parse_primary consumer.
     try pending.append("synth_postfix_loop");
+    // synth_child_assembly is the issue 1157 worker-3 NEW-A fixture: it calls ast.begin_children(),
+    // the first child-array assembly mutator the real parse_call_with_args tail uses. Seeding it
+    // exercises the begin_children method-call lowering + body in isolation, replacing the
+    // parse_primary seed which pulls the whole recursive expression SCC (and its dozens of
+    // not-yet-lowered mutators). finish_children / add_child / add_call / the i64 drain / the
+    // value-carried parse_expr append loop are deferred to follow-up slices.
+    try pending.append("synth_child_assembly");
     // expect_ident is the smallest real !Token enum-dispatch consumer: the Ident arm ok-wraps the
     // matched token and every other arm returns error("expected identifier").
     try pending.append("expect_ident");

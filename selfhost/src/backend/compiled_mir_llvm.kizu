@@ -512,6 +512,7 @@ fn append_try_call_body(
     bind_suffix: []u8,
     local_prefix: i64
 ) -> !void {
+    try append_expr_insts(out, llvm_symbol, &stmt.arg_insts);
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
         out, llvm_symbol, &stmt.call_args, local_prefix
     );
@@ -3826,8 +3827,8 @@ fn append_enum_dispatch_globals(
 }
 
 // append_grammar_loop_globals emits the string-constant globals each grammar-loop branch needs:
-// the predicate condition's expression-instruction globals and the reassignment try-call's
-// call-argument string globals (issue 1157).
+// the predicate condition's expression-instruction globals and the reassignment try-call globals
+// (issue 1157).
 fn append_grammar_loop_globals(
     out: &var std::string::String,
     llvm_symbol: []u8,
@@ -3839,7 +3840,7 @@ fn append_grammar_loop_globals(
         let branch = try branches.at(index);
         let reassign = &branch.reassign;
         try append_expr_globals(out, llvm_symbol, &branch.cond_insts);
-        try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &reassign.call_args);
+        try append_let_try_call_globals(out, llvm_symbol, reassign);
         index = index + 1;
     }
     return;
@@ -4290,7 +4291,7 @@ fn append_stmt_globals(
         LetExpr(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         AliasAssign(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         ScalarSelectAssign(payload) => try append_scalar_select_assign_globals(out, llvm_symbol, payload);,
-        LetTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        LetTryCall(payload) => try append_let_try_call_globals(out, llvm_symbol, payload);,
         ReturnTryBinary(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ReturnNotTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         IfNotTryCallReturnBool(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
@@ -5918,6 +5919,15 @@ fn while_latch_try_index(latch_stmt: &compiled_mir::MirStmt) -> !i64 {
         LetTryCall(payload) => return payload.try_index;,
         _ => return error("compiled mir: while latch statement must be a try-call");,
     }
+}
+fn append_let_try_call_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirLetTryCallStmt
+) -> !void {
+    try append_expr_globals(out, llvm_symbol, &stmt.arg_insts);
+    try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &stmt.call_args);
+    return;
 }
 // append_while_latch_try_call renders a loop-carried 'index = try <callee>(.., index);' latch
 // update. The latch statement is a LetTryCall bound to the induction variable; the shared
