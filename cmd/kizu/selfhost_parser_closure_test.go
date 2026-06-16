@@ -40,9 +40,12 @@ var parserClosureSeeds = []string{
 	// 'while true' value-loop CFG (reassigning through the lowered synth_parse_node_sig leaf), so it
 	// exercises the GrammarLoop lowering ahead of the real parse_primary consumer.
 	"synth_postfix_loop",
-	// issue 1157 worker-2 real parser consumer: parse_primary passes parse_int / parse_string call
-	// results into parse_postfix_expr, pinning let-try nested Call argument hoisting.
-	"parse_primary",
+	// issue 1157 worker-3 NEW-A fixture: synth_child_assembly calls ast.begin_children(), the first
+	// child-array assembly mutator the real parse_call_with_args tail uses. It lowers the
+	// begin_children method call + body in isolation, replacing the parse_primary seed, which pulled
+	// the whole recursive expression SCC. finish_children / add_child / add_call / the i64 drain /
+	// the value-carried append loop are deferred to follow-up slices.
+	"synth_child_assembly",
 	// expect_ident exercises !Token ok-wrap and error arms.
 	"expect_ident",
 }
