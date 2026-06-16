@@ -30,6 +30,7 @@ func parserCompiledClosureSeeds() []string {
 		"is_double_token_byte",
 		"is_type_apply_start",
 		"is_struct_literal_start",
+		"parse_bool",
 		// issue 1157 PJ synthetic fixture: a '-> !ParseNode' helper seeded (in-degree
 		// zero) to exercise the site-955 cursor-constructor call, the ParseNode
 		// error-union return, and the ParseNode value type on the compiled parser path.
