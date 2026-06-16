@@ -1173,6 +1173,33 @@ pub struct MirMatchTraversalStmt {
     pub arms: std::array::Array<MirTraversalArm>,
 }
 
+// MirEnumDispatchArm is one arm of a non-bool enum-dispatch match statement ('match
+// <scrutinee> { Variant => return <expr>, _ => return <expr> }', issue 1157 PR-PH / B3).
+// tag is the matched variant's discriminant; is_default marks the trailing '_' fallthrough
+// (which carries no tag). arm_stmts holds the arm body lowered through the shared
+// lower_multi_return_statement path -- a 0-or-more element Array<MirStmt> referencing MirStmt
+// through a heap-backed Array exactly like MirWhileStmt.body_stmts, so the union stays
+// fixed-size. Every arm body returns (the renderer emits a real value per arm, never
+// 'unreachable'), so the dispatch statement is terminal.
+pub struct MirEnumDispatchArm {
+    pub tag: i64,
+    pub is_default: bool,
+    pub arm_stmts: std::array::Array<MirStmt>,
+}
+
+// MirEnumDispatchStmt backs a non-bool enum-dispatch match statement lowered to branch
+// control flow (issue 1157 PR-PH / B3): the scrutinee lowers to an i64 discriminant in
+// scrutinee_insts (the value read through scrutinee_result_id), then the renderer emits an
+// exhaustive icmp/br dispatch chain over the arms -- one block per arm, each returning a
+// real value. The last arm is the unconditional exhaustive fallthrough (a '_' default or,
+// for an exhaustive enum match, the final variant). It owns the scrutinee inst Array and the
+// arm Array.
+pub struct MirEnumDispatchStmt {
+    pub scrutinee_insts: std::array::Array<MirExprInst>,
+    pub scrutinee_result_id: i64,
+    pub arms: std::array::Array<MirEnumDispatchArm>,
+}
+
 // MirVoidReturnSuccessStmt backs a bare 'return;' statement: a plain void function
 // rets void, and an error-union void function returns the wrapped success value.
 pub struct MirVoidReturnSuccessStmt {
@@ -1224,6 +1251,7 @@ pub union MirStmt {
     If(MirIfStmt),
     While(MirWhileStmt),
     MatchTraversal(MirMatchTraversalStmt),
+    EnumDispatch(MirEnumDispatchStmt),
 }
 
 // Only the Call instruction reads a result value and callee symbol; the scalar
@@ -1659,6 +1687,21 @@ impl MirMatchTraversalStmt {
     }
 }
 
+impl MirEnumDispatchArm {
+    fn deinit(self: MirEnumDispatchArm) -> void {
+        self.arm_stmts.deinit();
+        return;
+    }
+}
+
+impl MirEnumDispatchStmt {
+    fn deinit(self: MirEnumDispatchStmt) -> void {
+        self.scrutinee_insts.deinit();
+        self.arms.deinit();
+        return;
+    }
+}
+
 impl MirReturnErrorStmt {
     fn deinit(self: MirReturnErrorStmt) -> void {
         self.expr_insts.deinit();
@@ -1763,6 +1806,7 @@ impl MirStmt {
             If(payload) => payload.deinit(),
             While(payload) => payload.deinit(),
             MatchTraversal(payload) => payload.deinit(),
+            EnumDispatch(payload) => payload.deinit(),
         }
     }
 }
@@ -3609,6 +3653,30 @@ pub fn match_traversal_stmt(
         index_name: index_name,
         data_field_index: data_field_index,
         own_error_union: own_error_union,
+        arms: arms
+    });
+}
+
+pub fn enum_dispatch_arm(
+    tag: i64,
+    is_default: bool,
+    arm_stmts: std::array::Array<MirStmt>
+) -> MirEnumDispatchArm {
+    return MirEnumDispatchArm {
+        tag: tag,
+        is_default: is_default,
+        arm_stmts: arm_stmts
+    };
+}
+
+pub fn enum_dispatch_stmt(
+    scrutinee_insts: std::array::Array<MirExprInst>,
+    scrutinee_result_id: i64,
+    arms: std::array::Array<MirEnumDispatchArm>
+) -> MirStmt {
+    return MirStmt::EnumDispatch(MirEnumDispatchStmt {
+        scrutinee_insts: scrutinee_insts,
+        scrutinee_result_id: scrutinee_result_id,
         arms: arms
     });
 }
