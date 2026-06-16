@@ -46,6 +46,12 @@ var parserClosureSeeds = []string{
 	// the whole recursive expression SCC. finish_children / add_child / add_call / the i64 drain /
 	// the value-carried append loop are deferred to follow-up slices.
 	"synth_child_assembly",
+	// issue 1157 worker-3 NEW-A fixture: synth_append_loop carries the parse_call_with_args
+	// argument-loop CFG (a Token cursor through a value-cursor loop-head phi, a prefix-not
+	// bool-predicate-call header, a borrowed '&var Array<NodeId>' append, and a free !Token try-call
+	// value-cursor latch), parsing each argument through the lowered synth_parse_node_sig leaf. It
+	// exercises the ValueCursorWhile lowering ahead of the real parse_call_with_args consumer.
+	"synth_append_loop",
 	// expect_ident exercises !Token ok-wrap and error arms.
 	"expect_ident",
 }

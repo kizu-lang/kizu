@@ -3740,6 +3740,362 @@ fn lower_grammar_postfix_loop(
     );
 }
 
+// value_cursor_cond_is_prefix_not_call reports whether a while condition is '!<free bool-pred
+// call>(..)' -- a Prefix 'not' whose operand is a plain Call (not a TryExpr) on a free function
+// (issue 1157 NEW-A). This is the append-while header shape ('while !is_call_close_token(close)').
+// It is structurally distinct from the i64-induction While (a Binary comparison), the value-array
+// loop (a Binary not-eq of field accesses) and the grammar loop (a Bool literal 'true'), so a true
+// result never overlaps any of those headers.
+fn value_cursor_cond_is_prefix_not_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    cond_node: i64,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, cond_node, "Prefix", bs)) {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-prefix ", function_name, cond_node, bs
+    );
+    if !std::mem::equal_bytes(op, "not") {
+        return false;
+    }
+    let right = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "right", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, right, "Call", bs)) {
+        return false;
+    }
+    return !(try callee_is_field_expr(ir_bytes, function_name, right, bs));
+}
+
+// value_cursor_statement_is_array_append reports whether a body statement is a 'try
+// <array>.append(<x>);' void try-call -- an ExprStmt wrapping a try-call of the 'append' method on
+// a local/param Array receiver (issue 1157 NEW-A). It is the append-while's accumulation step; the
+// argument is not constrained here because the body lowering re-validates it through the shared
+// void-try-call path. A near-miss (wrong method, non-local receiver) returns false.
+fn value_cursor_statement_is_array_append(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "ExprStmt", bs)) {
+        return false;
+    }
+    let expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "expr", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, expr, "TryExpr", bs)) {
+        return false;
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, inner, "Call", bs)) {
+        return false;
+    }
+    if !(try callee_is_field_expr(ir_bytes, function_name, inner, bs)) {
+        return false;
+    }
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, inner, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "append") {
+        return false;
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    return try node_kind_is(ir_bytes, function_name, receiver_node, "Var", bs);
+}
+
+// value_cursor_latch_is_try_call reports whether a body statement is a '<cursor> = try
+// <free-call>(..);' value-cursor latch -- an Assign whose target is the carried cursor Var and
+// whose value is a TryExpr wrapping a free-function call (issue 1157 NEW-A). The latch reassigns
+// the cursor through an error-union try-call (next_call_arg_token), so the loop-head phi reads its
+// success on the back-edge. A field-mode method call is rejected so only free helpers latch.
+fn value_cursor_latch_is_try_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    cursor_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Assign", bs)) {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs), cursor_var
+    ) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "TryExpr", bs)) {
+        return false;
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, inner, "Call", bs)) {
+        return false;
+    }
+    return !(try callee_is_field_expr(ir_bytes, function_name, inner, bs));
+}
+
+// is_value_cursor_append_loop_shape reports whether this multi-statement function is the
+// value-carried append-while loop NEW-A targets (issue 1157): exactly 'var <cursor> = <var>; while
+// !<pred>(<cursor>) { <body incl. try <arr>.append(x)>; <cursor> = try <latch>(..); }; return
+// <cursor>;'. The prefix-not bool-predicate-call header, the array-append body step and the
+// free-try-call value-cursor latch are jointly distinct from the i64-induction While, the
+// value-array loop and the grammar loop, so detecting it here diverts none of them.
+// lower_value_cursor_append_loop re-walks and commits on a true result.
+fn is_value_cursor_append_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 3 {
+        return false;
+    }
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_stmt, "Let", bs)) {
+        return false;
+    }
+    let init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_value, "Var", bs)) {
+        return false;
+    }
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    let cursor_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, while_statement, "While", bs)) {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    if !(try value_cursor_cond_is_prefix_not_call(ir_bytes, function_name, cond_node, bs)) {
+        return false;
+    }
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 2, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, return_stmt, "Return", bs)) {
+        return false;
+    }
+    let return_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, return_value, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, return_value, bs), cursor_var
+    ) {
+        return false;
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 2 {
+        return false;
+    }
+    // The last body statement is the value-cursor latch; at least one earlier statement is the
+    // borrowed-array append. Both must hold for the append-while CFG to be well-formed.
+    let latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    if !(try value_cursor_latch_is_try_call(ir_bytes, function_name, latch_stmt, cursor_var, bs)) {
+        return false;
+    }
+    var body_index = 0;
+    while body_index < body_count - 1 {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        if try value_cursor_statement_is_array_append(ir_bytes, function_name, body_stmt, bs) {
+            return true;
+        }
+        body_index = body_index + 1;
+    }
+    return false;
+}
+
+// lower_value_cursor_append_loop lowers the value-carried append-while loop (issue 1157 NEW-A) into
+// a single ValueCursorWhile statement. It derives every parameter from the IR: the cursor variable
+// and its preheader seed from the init copy let, the loop-continue predicate (lowered through the
+// shared expression path, so the prefix-not bool-predicate call reuses the generic machinery), the
+// body statements (lowered through the same per-statement let/if/expr machinery the top level and
+// the induction While body use, so a borrowed '&var Array' append lowers as a void try-call) and
+// the free-try-call value-cursor latch. The carried type is the latch try-call's success type, so
+// no struct width or symbol is hardcoded. The body try-calls take try indices below the latch's, so
+// the renderer's fail/cont blocks never collide.
+fn lower_value_cursor_append_loop(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    // The init copy 'var <cursor> = <init_name>' supplies the loop-head phi's preheader seed; the
+    // copied local/param is an existing SSA value, so the let itself is elided (the phi subsumes it).
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    let cursor_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+    let init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    let init_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, init_value, bs);
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes, function_name, module_prefix, params_spec, cond_node, 0, 0, &var cond_insts, bs,
+        ir_lookup_index, &var call_arg_type_cache
+    );
+    var body_string_counter = try count_strings_in_insts(&cond_insts);
+    var body_temp_counter = cond_insts.len();
+    var body_try_counter = 0;
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    let body_boundary = body_count - 1;
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer body_aliases.deinit();
+    var body_alias_counter = 0;
+    var body_index = 0;
+    while body_index < body_boundary {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes, function_name, module_prefix, llvm_return_type, params_spec, body_stmt,
+                body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+                &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
+            );
+            body_string_counter = let_result.string_counter;
+            body_temp_counter = let_result.temp_counter;
+            body_try_counter = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(body_kind, "If") {
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, params_spec, body_stmt,
+                    body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
+                    body_index + 1, &var body_aliases, &var body_stmts, bs, ir_lookup_index,
+                    &var call_arg_type_cache
+                );
+                body_temp_counter = if_result.temp_counter;
+                body_string_counter = if_result.string_counter;
+                body_try_counter = if_result.try_counter;
+                body_alias_counter = if_result.alias_counter;
+            } else {
+                if std::mem::equal_bytes(body_kind, "ExprStmt") {
+                    let expr_result = try lower_multi_expr_statement(
+                        ir_bytes, function_name, module_prefix, llvm_return_type, params_spec,
+                        body_stmt, body_string_counter, body_try_counter, &body_aliases,
+                        &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
+                    );
+                    body_string_counter = expr_result.string_counter;
+                    body_try_counter = expr_result.try_counter;
+                } else {
+                    return error("compiled mir: unsupported append-while body statement");
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    // The last body statement is the value-cursor latch '<cursor> = try <free-call>(..);'. It binds
+    // the cursor's next value through a let-position try-call; the renderer suffixes the bound name
+    // with "_next" so the loop-head phi reads it on the latch's tryK_cont back-edge. A failure
+    // propagates as this function's own error union. The latch try-call's success type is the
+    // carried (cursor) type -- a struct value, not the i64 the shared induction latch requires.
+    let latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let latch_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, latch_stmt, "value", 0, bs
+    );
+    let latch_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, latch_value, "value", 0, bs
+    );
+    let latch_called_error_union = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, latch_call, bs
+    );
+    let cursor_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, latch_call, bs, ir_lookup_index
+    );
+    let latch_callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, latch_call, bs
+    );
+    let latch_callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, latch_call, bs
+    );
+    let latch_args = try compiled_mir_lower_call::lower_call_args_cached(
+        ir_bytes, function_name, module_prefix, params_spec, latch_call, body_string_counter, bs,
+        ir_lookup_index, &var call_arg_type_cache
+    );
+    let latch = compiled_mir::MirLetTryCallStmt {
+        name: cursor_var,
+        called_error_union: latch_called_error_union,
+        success_type: cursor_type,
+        own_error_union: llvm_return_type,
+        call_module_prefix: latch_callee_module_prefix,
+        call_callee_name: latch_callee_name,
+        string_index: body_string_counter,
+        try_index: body_try_counter,
+        arg_insts: std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        call_args: latch_args
+    };
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::value_cursor_while_stmt(
+        cursor_var, cursor_type, init_name, llvm_return_type, cond_insts, cond_result, body_stmts,
+        latch, "vcw"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 pub fn lower_multi_statement_function(
     ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
@@ -3769,6 +4125,16 @@ pub fn lower_multi_statement_function(
     // (issue 1157).
     if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
         return try lower_grammar_postfix_loop(
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+    }
+    // A value-carried append-while loop (the parse_call_with_args argument loop: a value cursor
+    // threaded through a loop-head phi, a borrowed '&var Array' append in the body, and a
+    // free-try-call latch that reassigns the cursor with a struct success value) lowers through the
+    // dedicated ValueCursorWhile CFG rather than the i64-induction While machinery, whose latch
+    // try-call requires an i64 success value this shape has no analogue for (issue 1157 NEW-A).
+    if try is_value_cursor_append_loop_shape(ir_bytes, function_name, statement_count, bs) {
+        return try lower_value_cursor_append_loop(
             ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
     }

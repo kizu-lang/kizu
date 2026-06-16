@@ -947,6 +947,32 @@ pub struct MirGrammarLoopStmt {
     pub label_base: []u8,
 }
 
+// MirValueCursorWhileStmt backs a value-carried append-while loop (the parse_call_with_args
+// argument loop, issue 1157 NEW-A): 'var <cursor> = <init>; while !<pred>(<cursor>) { <body
+// incl. try <arr>.append(x)>; <cursor> = try <latch>(..); }; return <cursor>;'. It is
+// structurally distinct from the i64-induction While (whose condition compares a counter), the
+// value-array loop (whose condition is a struct-field sentinel) and the grammar loop (whose
+// condition is the bool literal 'true'): the condition is a prefix-not over a free bool-predicate
+// call and the latch reassigns the cursor through a free error-union try-call whose success value
+// is a struct, not an i64, so detecting it never diverts any of those. The renderer emits a
+// head/body/latch/exit CFG: the head holds one loop-carried phi for the value cursor (named
+// <cursor_var> so plain Var reads in the condition, body and latch resolve to it) seeded from
+// init_name on the entry edge and from the latch try-call's success on its tryK_cont back-edge;
+// the body statements lower through the same per-statement machinery the top level uses (so a
+// borrowed '&var Array' append lowers as a void try-call), and the terminal exit wraps the cursor
+// into own_error_union and returns it. It owns the cond insts, body stmts and the latch try-call.
+pub struct MirValueCursorWhileStmt {
+    pub cursor_var: []u8,
+    pub cursor_type: []u8,
+    pub init_name: []u8,
+    pub own_error_union: []u8,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub latch: MirLetTryCallStmt,
+    pub label_base: []u8,
+}
+
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
 // (tracker 961, scope 4 prerequisite). The renderer builds the (1, 1) start Position then returns
 // token_at at offset 0. Its nested call argument (position(1, 1)) the generic path does not model,
@@ -1270,6 +1296,7 @@ pub union MirStmt {
     ArrayNew(MirArrayNewStmt),
     ValueWhile(MirValueWhileStmt),
     GrammarLoop(MirGrammarLoopStmt),
+    ValueCursorWhile(MirValueCursorWhileStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
     ParserPostfixStart(MirParserPostfixStartStmt),
@@ -1698,6 +1725,15 @@ impl MirGrammarLoopStmt {
     }
 }
 
+impl MirValueCursorWhileStmt {
+    fn deinit(self: MirValueCursorWhileStmt) -> void {
+        self.cond_insts.deinit();
+        self.body_stmts.deinit();
+        self.latch.deinit();
+        return;
+    }
+}
+
 impl MirTokenKindPredicateStmt {
     fn deinit(self: MirTokenKindPredicateStmt) -> void {
         self.variant_tags.deinit();
@@ -1848,6 +1884,7 @@ impl MirStmt {
             ArrayNew(payload) => payload.deinit(),
             ValueWhile(payload) => payload.deinit(),
             GrammarLoop(payload) => payload.deinit(),
+            ValueCursorWhile(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
             ParserPostfixStart(payload) => payload.deinit(),
@@ -3442,6 +3479,30 @@ pub fn grammar_loop_stmt(
         init_name: init_name,
         own_error_union: own_error_union,
         branches: branches,
+        label_base: label_base
+    });
+}
+
+pub fn value_cursor_while_stmt(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    init_name: []u8,
+    own_error_union: []u8,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    latch: MirLetTryCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::ValueCursorWhile(MirValueCursorWhileStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        init_name: init_name,
+        own_error_union: own_error_union,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        latch: latch,
         label_base: label_base
     });
 }

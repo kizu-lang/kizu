@@ -432,6 +432,7 @@ fn append_multi_stmt(
         ArrayNew(payload) => try append_array_new(out, payload);,
         ValueWhile(payload) => try append_value_while(out, payload);,
         GrammarLoop(payload) => try append_grammar_loop(out, function, payload);,
+        ValueCursorWhile(payload) => try append_value_cursor_while(out, function, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
         ParserSpanPredicate(payload) => try append_multi_parser_span_predicate(out, payload);,
         ParserPostfixStart(payload) => try append_multi_parser_postfix_start(out, payload);,
@@ -2820,6 +2821,89 @@ fn append_grammar_loop(
     return;
 }
 
+// append_value_cursor_while renders a value-carried append-while loop (issue 1157 NEW-A) into a
+// head/body/latch/exit CFG. The head holds one loop-carried phi for the value cursor, named
+// %<cursor_var> so plain Var reads in the condition, body and latch resolve to it. The phi seeds
+// from %<init_name> on the entry edge and from the latch try-call's success on its tryK_cont
+// back-edge. The condition (the prefix-not bool-predicate call, cond_insts) is evaluated in the
+// head and branches to the body when true (loop continues) or to the exit when false. The body
+// statements lower through the same per-statement renderer the top level uses, so a borrowed '&var
+// Array' append renders as a void try-call; control falls through to the latch block, which
+// reassigns the cursor through the free error-union try-call (reused append_try_call_body, bound to
+// %<cursor>_next so the phi reads it on the back-edge) then branches back to the head. A failure
+// propagates as the function's own error union. The terminal exit wraps the cursor into
+// own_error_union and returns it, subsuming the source's trailing 'return <cursor>'.
+fn append_value_cursor_while(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirValueCursorWhileStmt
+) -> !void {
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    // One loop-carried phi for the value cursor: %<init_name> on the entry edge, %<cursor>_next on
+    // the latch try-call's tryK_cont back-edge.
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.cursor_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(stmt.init_name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes("_next, %try");
+    try std::fmt::append_i64(out, stmt.latch.try_index);
+    try append_ll_line(out, "_cont ]");
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_body, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 1);
+        body_index = body_index + 1;
+    }
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch:");
+    // The latch try-call binds the cursor's next value to %<cursor>_next (consumed by the loop-head
+    // phi) and ends in its tryK_cont block; a failure returns this function's own error union. Its
+    // call-arg setup prefix is past the body statement prefixes so its SSA names never collide.
+    try append_try_call_body(out, function.name, &stmt.latch, "_next", body_stmts.len() + 1);
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    // Terminal exit: return the cursor wrapped into the function's own error union.
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit:");
+    try out.append_bytes("  %retwrap_ok = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %retwrap_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %retwrap_ok, ");
+    try out.append_bytes(stmt.cursor_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.cursor_var);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %retwrap_val");
+    return;
+}
+
 // append_token_kind_predicate_globals: the predicate forwards only its Token value, so it emits no
 // string-constant globals (tracker 961).
 fn append_token_kind_predicate_globals(stmt: &compiled_mir::MirTokenKindPredicateStmt) -> !void {
@@ -3846,6 +3930,26 @@ fn append_grammar_loop_globals(
     return;
 }
 
+// append_value_cursor_while_globals emits the string-constant globals an append-while loop needs:
+// the condition's expression-instruction globals, each body statement's globals, and the latch
+// try-call's globals (issue 1157 NEW-A).
+fn append_value_cursor_while_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirValueCursorWhileStmt
+) -> !void {
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    let body_stmts = &stmt.body_stmts;
+    var index = 0;
+    while index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        index = index + 1;
+    }
+    try append_let_try_call_globals(out, llvm_symbol, &stmt.latch);
+    return;
+}
+
 // append_traversal_literal_text renders a literal arm's value: bool literals print
 // true/false, integer literals their decimal value.
 fn append_traversal_literal_text(
@@ -4315,6 +4419,7 @@ fn append_stmt_globals(
         ArrayNew(payload) => try append_array_new_globals(payload);,
         ValueWhile(payload) => try append_value_while_globals(payload);,
         GrammarLoop(payload) => try append_grammar_loop_globals(out, llvm_symbol, payload);,
+        ValueCursorWhile(payload) => try append_value_cursor_while_globals(out, llvm_symbol, payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,
         ParserSpanPredicate(payload) => try append_parser_span_predicate_globals(payload);,
         ParserPostfixStart(payload) => try append_parser_postfix_start_globals(payload);,
