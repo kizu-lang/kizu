@@ -40,6 +40,10 @@ func parserCompiledClosureSeeds() []string {
 		// zero) to exercise the site-955 cursor-constructor call, the ParseNode
 		// error-union return, and the ParseNode value type on the compiled parser path.
 		"synth_parse_node_sig",
+		// issue 1157 synthetic fixture: a '-> !std::kizu::lexer::Token' helper seeded
+		// (in-degree zero) to exercise the !Token error-union return and the Token value
+		// type on the compiled parser path.
+		"synth_token_sig",
 	}
 }
 
