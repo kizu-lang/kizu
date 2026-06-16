@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// parserCompiledClosureSeeds lists the in-degree-zero cluster roots the parser
-// compiled closure seeds its BFS with: the standalone TokenKind predicates and
-// is_double_token_byte (none of which call another cluster member) plus the two
-// postfix roots is_type_apply_start / is_struct_literal_start.
+// parserCompiledClosureSeeds lists the roots the parser compiled closure seeds its BFS with: the
+// standalone TokenKind predicates, postfix roots, and the real parser consumers currently pinned
+// on the native compiled path.
 func parserCompiledClosureSeeds() []string {
 	return []string{
 		"is_double_colon",
@@ -40,10 +39,12 @@ func parserCompiledClosureSeeds() []string {
 		// zero) to exercise the site-955 cursor-constructor call, the ParseNode
 		// error-union return, and the ParseNode value type on the compiled parser path.
 		"synth_parse_node_sig",
-		// issue 1157 synthetic fixture: a '-> !std::kizu::lexer::Token' helper seeded
-		// (in-degree zero) to exercise the !Token error-union return and the Token value
-		// type on the compiled parser path.
-		"synth_token_sig",
+		// issue 1157 worker-3 grammar-loop fixture: synth_postfix_loop carries the
+		// parse_postfix_expr 'while true' value-loop CFG (reassigning through the lowered
+		// synth_parse_node_sig leaf), exercising the GrammarLoop lowering ahead of the full
+		// parse_primary chain. expect_ident exercises !Token ok-wrap/error arms.
+		"synth_postfix_loop",
+		"expect_ident",
 	}
 }
 

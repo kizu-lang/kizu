@@ -912,6 +912,40 @@ pub struct MirValueWhileStmt {
     pub label_base: []u8,
 }
 
+// MirGrammarBranch is one guarded arm of a value-carried grammar loop (issue 1157): a
+// boolean predicate condition (cond_insts evaluate to the i1 read through cond_result_id)
+// that, when true, reassigns the carried value through a free error-union-returning call
+// (reassign) and branches back to the loop head. The reassign is a let-position try-call
+// bound to the carried variable under a per-branch SSA suffix, so the loop-head phi reads
+// its success value (field 1) on the branch's back-edge and a failure propagates as the
+// function's own error union. It owns the cond inst Array and the reassign's call_args.
+pub struct MirGrammarBranch {
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub reassign: MirLetTryCallStmt,
+}
+
+// MirGrammarLoopStmt backs a 'while true' value-accumulation grammar loop (issue 1157):
+// 'var <carried> = <init>; while true { if <pred0> { <carried> = try <leaf0>(..) } else {
+// if <pred1> { ... } else { return <carried>; } } }'. It is structurally distinct from the
+// i64-induction While (whose condition compares a counter) and the value-array loop (whose
+// condition is a struct-field sentinel), so detecting it never diverts either: the condition
+// is a bool literal 'true' and the body is a nested if/else chain whose non-final arms each
+// reassign the carried value through a try-call and whose final else returns it. The renderer
+// emits a preheader/head/branch CFG: the head holds one loop-carried phi for the carried value
+// (named <carried_var> so plain Var reads resolve to it) seeded from init_name on the entry
+// edge and from each branch's try-call success on its back-edge; each branch evaluates its
+// predicate, and the terminal else wraps the carried value into own_error_union and returns it.
+// It owns the branch Array (each branch owns its cond insts and reassign call_args).
+pub struct MirGrammarLoopStmt {
+    pub carried_var: []u8,
+    pub carried_type: []u8,
+    pub init_name: []u8,
+    pub own_error_union: []u8,
+    pub branches: std::array::Array<MirGrammarBranch>,
+    pub label_base: []u8,
+}
+
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
 // (tracker 961, scope 4 prerequisite). The renderer builds the (1, 1) start Position then returns
 // token_at at offset 0. Its nested call argument (position(1, 1)) the generic path does not model,
@@ -1234,6 +1268,7 @@ pub union MirStmt {
     NextToken(MirNextTokenStmt),
     ArrayNew(MirArrayNewStmt),
     ValueWhile(MirValueWhileStmt),
+    GrammarLoop(MirGrammarLoopStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
     ParserPostfixStart(MirParserPostfixStartStmt),
@@ -1646,6 +1681,21 @@ impl MirValueWhileStmt {
     }
 }
 
+impl MirGrammarBranch {
+    fn deinit(self: MirGrammarBranch) -> void {
+        self.cond_insts.deinit();
+        self.reassign.deinit();
+        return;
+    }
+}
+
+impl MirGrammarLoopStmt {
+    fn deinit(self: MirGrammarLoopStmt) -> void {
+        self.branches.deinit();
+        return;
+    }
+}
+
 impl MirTokenKindPredicateStmt {
     fn deinit(self: MirTokenKindPredicateStmt) -> void {
         self.variant_tags.deinit();
@@ -1795,6 +1845,7 @@ impl MirStmt {
             NextToken(payload) => payload.deinit(),
             ArrayNew(payload) => payload.deinit(),
             ValueWhile(payload) => payload.deinit(),
+            GrammarLoop(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
             ParserPostfixStart(payload) => payload.deinit(),
@@ -3357,6 +3408,36 @@ pub fn value_while_stmt(
         array_append_symbol: array_append_symbol,
         field_index: field_index,
         eof_tag: eof_tag,
+        label_base: label_base
+    });
+}
+
+pub fn grammar_branch(
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    reassign: MirLetTryCallStmt
+) -> MirGrammarBranch {
+    return MirGrammarBranch {
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        reassign: reassign
+    };
+}
+
+pub fn grammar_loop_stmt(
+    carried_var: []u8,
+    carried_type: []u8,
+    init_name: []u8,
+    own_error_union: []u8,
+    branches: std::array::Array<MirGrammarBranch>,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::GrammarLoop(MirGrammarLoopStmt {
+        carried_var: carried_var,
+        carried_type: carried_type,
+        init_name: init_name,
+        own_error_union: own_error_union,
+        branches: branches,
         label_base: label_base
     });
 }

@@ -7025,20 +7025,34 @@ fn synth_parse_node_sig(prev: ParseNode) -> !ParseNode {
     return rebuilt;
 }
 
-// synth_token_sig is the issue 1157 synthetic fixture for the !Token error-union return type:
-// it exercises the !Token error-union ok-wrap and the Token value type on the native executable
-// path in isolation, ahead of wiring the real expect_* token helpers parse_type_name threads
-// (each takes a 'std::kizu::lexer::Token' and returns '-> !std::kizu::lexer::Token'). It is
-// spelled exactly like those helpers (fully-qualified 'std::kizu::lexer::Token' param + return,
-// the only spelling Token takes here since it lives in the sibling lexer module), so
-// compiled_type_lower lowers the return to %kizu.error.token over the %kizu.kizu.lexer.token
-// value type. It binds the Token parameter to a let (exercising the Token value-type local
-// binding) and returns it as the error union's ok value (exercising the !Token ok-wrap), staying
-// minimal -- no struct construction (worker-2 C2 payload territory), no cross-module call, no
-// control flow -- so it reuses only the signature / value-type / error-union ABI, never the
-// parser's token-kind dispatch or grammar-loop shapes. It is in-degree 0 in the real parser, so
-// seeding it pulls in no real helper bodies.
-fn synth_token_sig(prev: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
-    let rebuilt = prev;
-    return rebuilt;
+// synth_postfix_loop is the issue 1157 synthetic fixture for the value-carried 'while true' grammar
+// loop control-flow (worker-3). It is spelled with the exact CFG of parse_postfix_expr -- a carried
+// ParseNode threaded through a 'while true' loop, reassigned in each guarded arm of a nested
+// if/else chain and returned from the terminal else -- but its three arms reassign through the
+// already-lowered leaf synth_parse_node_sig instead of the not-yet-lowered grammar helpers
+// (parse_type_apply_expr / parse_one_postfix / parse_struct_literal_expr). The three predicates are
+// the real, already-lowered parser predicates (is_type_apply_start / is_postfix_start /
+// is_struct_literal_start), so the fixture exercises the GrammarLoop lowering -- the loop-head phi,
+// the bool-predicate-call conditions with a field-access argument (left.next), the free
+// error-union try-call reassignments, and the carried-value error-union return -- end to end on the
+// native compiled path, ahead of seeding the real parse_primary chain (which additionally needs the
+// three grammar helpers lowered). parse_postfix_expr lowers identically; only its callees differ.
+fn synth_postfix_loop(ast: std::kizu::ast::Ast, text: []u8, first: ParseNode) -> !ParseNode {
+    var left = first;
+    while true {
+        if std::kizu::parser::is_type_apply_start(ast, text, left) {
+            left = try std::kizu::parser::synth_parse_node_sig(left);
+        } else {
+            if std::kizu::parser::is_postfix_start(left.next) {
+                left = try std::kizu::parser::synth_parse_node_sig(left);
+            } else {
+                if std::kizu::parser::is_struct_literal_start(ast, text, left) {
+                    left = try std::kizu::parser::synth_parse_node_sig(left);
+                } else {
+                    return left;
+                }
+            }
+        }
+    }
+    return left;
 }

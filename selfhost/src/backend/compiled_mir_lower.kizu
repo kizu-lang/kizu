@@ -3401,6 +3401,344 @@ pub fn lower_value_array_loop(
     );
 }
 
+// grammar_branch_carried_name builds the owned SSA name a grammar-loop branch binds its carried
+// value into ('<carried>_b<index>', issue 1157). Each branch reassigns the same carried variable in
+// a distinct block, so the bound names must be distinct for valid SSA; the loop-head phi reads each
+// on its back-edge. A direct String.as_bytes() view cannot escape into the MIR, so the name is
+// copied through a Map insertion (the same byte-copy boundary void_then_alias_name uses).
+fn grammar_branch_carried_name(carried_var: []u8, index: i64) -> ![]u8 {
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes(carried_var);
+    try out.append_bytes("_b");
+    try std::fmt::append_i64(&var out, index);
+    let name = out.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(name, name);
+    return try copied.get(name);
+}
+
+// grammar_postfix_reassign_block_matches reports whether an if then-block is a single
+// '<carried_var> = try <free-call>(...)' carried-value reassignment (issue 1157). A field-mode
+// method call is rejected so only free error-union helpers carry the loop value.
+fn grammar_postfix_reassign_block_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    then_node: i64,
+    carried_var: []u8,
+    bs: i64
+) -> !bool {
+    if (try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, then_node, "statement", 1, bs
+    )) >= 0 {
+        return false;
+    }
+    let stmt = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    if stmt < 0 {
+        return false;
+    }
+    if !(try node_kind_is(ir_bytes, function_name, stmt, "Assign", bs)) {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(ir_bytes, function_name, stmt, "target", 0, bs);
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs), carried_var
+    ) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, stmt, "value", 0, bs);
+    if !(try node_kind_is(ir_bytes, function_name, value, "TryExpr", bs)) {
+        return false;
+    }
+    let inner = try ir_contract::body_child_sequence_from(ir_bytes, function_name, value, "value", 0, bs);
+    if !(try node_kind_is(ir_bytes, function_name, inner, "Call", bs)) {
+        return false;
+    }
+    return !(try callee_is_field_expr(ir_bytes, function_name, inner, bs));
+}
+
+// grammar_postfix_body_matches reports whether a 'while true' body is a nested if/else chain whose
+// non-final arms each reassign the carried value through a free try-call and whose final else
+// returns the carried value (issue 1157). The chain is the parse_postfix_expr value-loop body; a
+// true result commits lower_grammar_postfix_loop to that path.
+fn grammar_postfix_body_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_statement: i64,
+    carried_var: []u8,
+    bs: i64
+) -> !bool {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    if (try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, body_node, "statement", 1, bs
+    )) >= 0 {
+        return false;
+    }
+    var node = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    if node < 0 {
+        return false;
+    }
+    while true {
+        if !(try node_kind_is(ir_bytes, function_name, node, "If", bs)) {
+            return false;
+        }
+        if (try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, node, "condition", 0, bs
+        )) < 0 {
+            return false;
+        }
+        let then_node = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, node, "then", 0, bs
+        );
+        if then_node < 0 {
+            return false;
+        }
+        if !(try grammar_postfix_reassign_block_matches(
+            ir_bytes, function_name, then_node, carried_var, bs
+        )) {
+            return false;
+        }
+        let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, node, "else", 0, bs
+        );
+        if else_node < 0 {
+            return false;
+        }
+        if (try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, else_node, "statement", 1, bs
+        )) >= 0 {
+            return false;
+        }
+        let else_stmt = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, else_node, "statement", 0, bs
+        );
+        if else_stmt < 0 {
+            return false;
+        }
+        if try node_kind_is(ir_bytes, function_name, else_stmt, "If", bs) {
+            node = else_stmt;
+            continue;
+        }
+        if !(try node_kind_is(ir_bytes, function_name, else_stmt, "Return", bs)) {
+            return false;
+        }
+        let ret_value = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, else_stmt, "value", 0, bs
+        );
+        if !(try node_kind_is(ir_bytes, function_name, ret_value, "Var", bs)) {
+            return false;
+        }
+        return std::mem::equal_bytes(
+            try ir_contract::body_token_or_empty_from(ir_bytes, function_name, ret_value, bs),
+            carried_var
+        );
+    }
+    return false;
+}
+
+// is_grammar_postfix_loop_shape reports whether this multi-statement function is the value-carried
+// 'while true' grammar loop (the parse_postfix_expr shape, issue 1157): exactly 'var <cv> =
+// <param>; while true { <nested if/else reassign chain ending in 'return <cv>'> }; return <cv>;'.
+// The literal 'true' condition is structurally distinct from the i64-induction While (whose
+// condition compares a counter) and the value-array loop (whose condition is a struct-field
+// sentinel), so detecting it here never diverts either. lower_grammar_postfix_loop re-walks and
+// commits on a true result.
+fn is_grammar_postfix_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 3 {
+        return false;
+    }
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_stmt, "Let", bs)) {
+        return false;
+    }
+    let init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_value, "Var", bs)) {
+        return false;
+    }
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    let carried_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, while_statement, "While", bs)) {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, cond_node, "Bool", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, cond_node, bs), "true"
+    ) {
+        return false;
+    }
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 2, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, return_stmt, "Return", bs)) {
+        return false;
+    }
+    return try grammar_postfix_body_matches(
+        ir_bytes, function_name, while_statement, carried_var, bs
+    );
+}
+
+// lower_grammar_postfix_loop lowers the value-carried 'while true' grammar loop (issue 1157) into a
+// single GrammarLoop statement. It derives every parameter from the IR: the carried variable and
+// its preheader seed from the init let, each branch's predicate condition (lowered through the
+// shared expression path, so bool-predicate calls and field-access arguments reuse the generic
+// machinery) and its free error-union reassignment try-call from the nested if/else chain. The
+// terminal else returns the carried value, so the loop never falls through. Per-branch SSA names
+// are namespaced by a unique try index and temp/string offset so the renderer's loop-head phi and
+// try-call blocks never collide.
+fn lower_grammar_postfix_loop(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    let carried_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+    let init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    let init_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, init_value, bs);
+    let carried_type = try compiled_mir_types::resolve_value_llvm_type(
+        ir_bytes, function_name, module_prefix, params_spec, carried_var, bs
+    );
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    var branches = std::array::Array<compiled_mir::MirGrammarBranch>(std::mem::page_allocator());
+    var aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer aliases.deinit();
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    var string_counter = 0;
+    var temp_counter = 0;
+    var try_index = 0;
+    var node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    while true {
+        let cond_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "condition", 0, bs
+        );
+        var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+        let cond_result = try lower_expr_with_local_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            cond_node,
+            string_counter,
+            temp_counter,
+            &var cond_insts,
+            &aliases,
+            bs,
+            ir_lookup_index, &var call_arg_type_cache
+        );
+        let cond_strings = try count_strings_in_insts(&cond_insts);
+        let cond_inst_count = cond_insts.len();
+        let then_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "then", 0, bs
+        );
+        let then_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, then_node, "statement", 0, bs
+        );
+        let try_expr = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, then_stmt, "value", 0, bs
+        );
+        let call_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, try_expr, "value", 0, bs
+        );
+        let called_error_union = try compiled_mir_types::lower_call_return_type(
+            ir_bytes, function_name, module_prefix, call_node, bs
+        );
+        let success_type = try try_call_success_type(
+            ir_bytes, function_name, module_prefix, call_node, bs, ir_lookup_index
+        );
+        let callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, call_node, bs
+        );
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, call_node, bs
+        );
+        let reassign_string_index = string_counter + cond_strings;
+        let args = try compiled_mir_lower_call::lower_call_args_cached(
+            ir_bytes, function_name, module_prefix, params_spec, call_node, reassign_string_index, bs,
+            ir_lookup_index, &var call_arg_type_cache
+        );
+        let arg_strings = try compiled_mir_lower_call::count_string_args(&args);
+        let bound_name = try grammar_branch_carried_name(carried_var, try_index);
+        let reassign = compiled_mir::MirLetTryCallStmt {
+            name: bound_name,
+            called_error_union: called_error_union,
+            success_type: success_type,
+            own_error_union: llvm_return_type,
+            call_module_prefix: callee_module_prefix,
+            call_callee_name: callee_name,
+            string_index: reassign_string_index,
+            try_index: try_index,
+            call_args: args
+        };
+        try branches.append(compiled_mir::grammar_branch(cond_insts, cond_result, reassign));
+        string_counter = reassign_string_index + arg_strings;
+        temp_counter = temp_counter + cond_inst_count;
+        try_index = try_index + 1;
+        let else_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "else", 0, bs
+        );
+        let else_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, else_node, "statement", 0, bs
+        );
+        if !(try node_kind_is(ir_bytes, function_name, else_stmt, "If", bs)) {
+            break;
+        }
+        node = else_stmt;
+    }
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::grammar_loop_stmt(
+        carried_var, carried_type, init_name, llvm_return_type, branches, "gloop"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 pub fn lower_multi_statement_function(
     ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
@@ -3421,6 +3759,16 @@ pub fn lower_multi_statement_function(
         return try lower_value_array_loop(
             ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, statement_count, bs,
             ir_lookup_index
+        );
+    }
+    // A value-carried 'while true' grammar loop (the parse_postfix_expr shape: a struct value
+    // threaded through a loop-head phi, reassigned through a free try-call in each guarded arm, and
+    // returned from the terminal else) lowers through the GrammarLoop CFG rather than the
+    // i64-induction While machinery, whose trailing-increment latch this shape has no analogue for
+    // (issue 1157).
+    if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
+        return try lower_grammar_postfix_loop(
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
     }
     let module_prefix = compiled_util::module_prefix_of(function_name);
@@ -3606,6 +3954,44 @@ pub fn lower_multi_statement_function(
         }
         stmt_index = stmt_index + 1;
     }
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        stmts
+    );
+}
+
+pub fn lower_single_match_statement_function(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    statement: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer aliases.deinit();
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(try lower_multi_match_statement(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        llvm_return_type,
+        params_spec,
+        statement,
+        0,
+        0,
+        &var aliases,
+        bs,
+        ir_lookup_index,
+        &var call_arg_type_cache
+    ));
     return compiled_mir_function::multi_statement_function(
         llvm_symbol,
         llvm_return_type,
