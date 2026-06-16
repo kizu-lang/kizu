@@ -1,4 +1,5 @@
 import selfhost::parser;
+import selfhost::backend::compiled_signature;
 import selfhost::ir::component_function_catalog;
 import selfhost::ir::executable_body;
 import selfhost::ir::function_signature;
@@ -1262,6 +1263,9 @@ pub fn append_ast_function_facts(
         "%kizu.owned",
         "%kizu.kizu.ast.source_file"
     );
+    // Call-resolution facts only: these declarations let the next parser/mutator
+    // slices resolve AST helper and leaf mutator calls without seeding their bodies.
+    try append_ast_call_resolution_facts(out, file.text, parsed.ast, parsed.root);
     try append_selected_impl_method_body(
         out,
         file.text,
@@ -1438,6 +1442,97 @@ pub fn append_ast_function_facts(
         "synth_dispatch_match",
         "std::kizu::ast::synth_dispatch_match",
         "checked-ast-constructor"
+    );
+    return;
+}
+
+fn append_ast_call_resolution_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    try append_ast_helper_call_resolution_facts(out, text, ast, root);
+    try append_ast_leaf_mutator_call_resolution_facts(out, text, ast, root);
+    return;
+}
+
+fn append_ast_helper_call_resolution_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    try append_selected_function_signature(
+        out, text, ast, root,
+        "span",
+        "std::kizu::ast::span"
+    );
+    try append_derived_stdlib_symbol_fact_args2(
+        out, "std::kizu::ast::span", "std::kizu::ast::Span", "i64", "i64"
+    );
+    try append_selected_function_signature(
+        out, text, ast, root,
+        "empty_span",
+        "std::kizu::ast::empty_span"
+    );
+    try append_derived_stdlib_symbol_fact_arg(
+        out, "std::kizu::ast::empty_span", "std::kizu::ast::Span", "i64"
+    );
+    try append_selected_function_signature(
+        out, text, ast, root,
+        "symbol_id",
+        "std::kizu::ast::symbol_id"
+    );
+    try append_derived_stdlib_symbol_fact_arg(
+        out, "std::kizu::ast::symbol_id", "std::kizu::ast::SymbolId", "i64"
+    );
+    try append_selected_function_signature(
+        out, text, ast, root,
+        "token_id",
+        "std::kizu::ast::token_id"
+    );
+    try append_derived_stdlib_symbol_fact_arg(
+        out, "std::kizu::ast::token_id", "std::kizu::ast::TokenId", "i64"
+    );
+    try append_selected_function_signature(
+        out, text, ast, root,
+        "prefix_neg",
+        "std::kizu::ast::prefix_neg"
+    );
+    try append_derived_stdlib_symbol_fact_no_args(
+        out, "std::kizu::ast::prefix_neg", "std::kizu::ast::PrefixOp"
+    );
+    return;
+}
+
+fn append_ast_leaf_mutator_call_resolution_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    try append_selected_impl_method_signature(
+        out, text, ast, root,
+        "Ast",
+        "add_bool",
+        "std::kizu::ast::ast_add_bool"
+    );
+    try append_derived_stdlib_symbol_fact_args3(
+        out,
+        "std::kizu::ast::ast_add_bool",
+        "std::kizu::ast::NodeId",
+        "%kizu.kizu.ast.ast",
+        "%kizu.kizu.ast.span",
+        "i1"
+    );
+    try append_derived_stdlib_symbol_fact_args3(
+        out,
+        "std::kizu::ast::ast_add_node",
+        "std::kizu::ast::NodeId",
+        "%kizu.kizu.ast.ast",
+        "%kizu.kizu.ast.span",
+        "%kizu.kizu.ast.ast_data"
     );
     return;
 }
@@ -1939,6 +2034,20 @@ fn append_selected_function_signature(
 ) -> !void {
     let function_node_id = try function_node(text, ast, root, local_name);
     try function_signature::append(out, text, ast, function_node_id, qualified_name);
+    return;
+}
+
+fn append_selected_impl_method_signature(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    type_name: []u8,
+    method_name: []u8,
+    qualified_name: []u8
+) -> !void {
+    let method_node_id = try impl_method_node(text, ast, root, type_name, method_name);
+    try function_signature::append(out, text, ast, method_node_id, qualified_name);
     return;
 }
 
@@ -3457,6 +3566,80 @@ fn append_stdlib_symbol_fact_arg(
     try out.append_bytes(return_type);
     try out.append_byte(cast<u8>(32));
     try out.append_bytes(arg_llvm_type);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_derived_stdlib_symbol_prefix(
+    out: &var std::string::String,
+    qualified_name: []u8
+) -> !void {
+    try out.append_bytes("stdlib-symbol ");
+    try out.append_bytes(qualified_name);
+    try out.append_byte(cast<u8>(32));
+    try compiled_signature::append_function_llvm_symbol(out, qualified_name);
+    try out.append_byte(cast<u8>(32));
+    return;
+}
+
+fn append_derived_stdlib_symbol_fact_no_args(
+    out: &var std::string::String,
+    qualified_name: []u8,
+    return_type: []u8
+) -> !void {
+    try append_derived_stdlib_symbol_prefix(out, qualified_name);
+    try out.append_bytes(return_type);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_derived_stdlib_symbol_fact_arg(
+    out: &var std::string::String,
+    qualified_name: []u8,
+    return_type: []u8,
+    arg_llvm_type: []u8
+) -> !void {
+    try append_derived_stdlib_symbol_prefix(out, qualified_name);
+    try out.append_bytes(return_type);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(arg_llvm_type);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_derived_stdlib_symbol_fact_args2(
+    out: &var std::string::String,
+    qualified_name: []u8,
+    return_type: []u8,
+    arg0_llvm_type: []u8,
+    arg1_llvm_type: []u8
+) -> !void {
+    try append_derived_stdlib_symbol_prefix(out, qualified_name);
+    try out.append_bytes(return_type);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(arg0_llvm_type);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(arg1_llvm_type);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_derived_stdlib_symbol_fact_args3(
+    out: &var std::string::String,
+    qualified_name: []u8,
+    return_type: []u8,
+    arg0_llvm_type: []u8,
+    arg1_llvm_type: []u8,
+    arg2_llvm_type: []u8
+) -> !void {
+    try append_derived_stdlib_symbol_prefix(out, qualified_name);
+    try out.append_bytes(return_type);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(arg0_llvm_type);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(arg1_llvm_type);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(arg2_llvm_type);
     try out.append_byte(cast<u8>(10));
     return;
 }
