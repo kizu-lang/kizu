@@ -11588,8 +11588,29 @@ fn count_strings_in_inst(
     match inst {
         ConstString(payload) => return 1;,
         Call(payload) => return try compiled_mir_lower_call::count_string_args(&payload.call_args);,
+        StructLiteral(payload) => return try count_strings_in_struct_fields(&payload.struct_fields);,
         _ => return 0;,
     }
+}
+fn count_strings_in_struct_fields(
+    fields: &std::array::Array<compiled_mir::MirStructField>
+) -> !i64 {
+    var count = 0;
+    var index = 0;
+    while index < fields.len() {
+        let field = try fields.at(index);
+        if field.kind == compiled_mir::MirStructFieldKind::ConstString {
+            count = count + 1;
+        }
+        if field.kind == compiled_mir::MirStructFieldKind::Call {
+            count = count + try compiled_mir_lower_call::count_string_args(&field.call_args);
+        }
+        if field.kind == compiled_mir::MirStructFieldKind::StructLiteral {
+            count = count + try count_strings_in_struct_fields(&field.nested_fields);
+        }
+        index = index + 1;
+    }
+    return count;
 }
 // expr_inst_llvm_type_by_id returns the LLVM type of the lowered expression instruction whose id is
 // result_id, so an assignment lowering can compare its value's type against the reassignment
@@ -12427,6 +12448,19 @@ fn lower_expr_into_local_aliases(
         ));
         return result_id;
     }
+    if std::mem::equal_bytes(kind, "StructLiteralExpr") {
+        let struct_type = try compiled_signature::resolve_struct_literal_type(
+            ir_bytes, function_name, module_prefix, expr_node, bs
+        );
+        let fields = try compiled_mir_lower_struct::lower_struct_fields(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+        );
+        let struct_id = id_base + insts.len();
+        try insts.append(compiled_mir::struct_literal_expr_inst(
+            struct_id, struct_type, fields
+        ));
+        return struct_id;
+    }
     if std::mem::equal_bytes(kind, "Call") {
         return try lower_expr_call_with_local_aliases(
             ir_bytes,
@@ -12699,32 +12733,19 @@ fn lower_expr_into(
         return result_id;
     }
     if std::mem::equal_bytes(kind, "StructLiteralExpr") {
-        // A single-field struct literal (e.g. ProgramNode{ declarations: range }) lowers its
-        // one field value to an SSA temp and materializes the struct via one insertvalue
-        // (issue 1157 PR-P3). It backs a struct-literal union-constructor payload; the union
-        // ctor lowering stores the resulting struct value into the union byte buffer.
+        // A struct-literal expression uses the same field descriptor lowering as
+        // statement-level struct literals, then materializes the aggregate as an
+        // expression value. This covers multi-field tagged-union payload structs such
+        // as VarNode { name, doc } without naming the payload type here (issue 1157 C2).
         let struct_type = try compiled_signature::resolve_struct_literal_type(
             ir_bytes, function_name, module_prefix, expr_node, bs
         );
-        let second_field = try ir_contract::body_child_sequence_or_minus_one_from(
-            ir_bytes, function_name, expr_node, "field", 1, bs
-        );
-        if second_field >= 0 {
-            return error("compiled mir: multi-field struct-literal payload is unsupported (issue 1157 PR-P3)");
-        }
-        let field_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "field", 0, bs
-        );
-        let field_value = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, field_node, "value", 0, bs
-        );
-        let field0_value = try lower_expr_into(
-            ir_bytes, function_name, module_prefix, params_spec, field_value,
-            string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
+        let fields = try compiled_mir_lower_struct::lower_struct_fields(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
         );
         let struct_id = id_base + insts.len();
         try insts.append(compiled_mir::struct_literal_expr_inst(
-            struct_id, struct_type, field0_value, 0
+            struct_id, struct_type, fields
         ));
         return struct_id;
     }

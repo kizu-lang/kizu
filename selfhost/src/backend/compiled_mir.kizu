@@ -161,17 +161,14 @@ pub struct MirUnionConstructExpr {
     pub payload_type: []u8,
 }
 
-// MirStructLiteralExpr materializes a single-field struct literal value (e.g.
-// ProgramNode{ declarations: range }) as an SSA temp via one 'insertvalue <llvm_type>
-// poison, <field type> <field value>, <field0_index>'. It lets a union constructor take a
-// struct-literal payload that is then stored into the union byte buffer (issue 1157 PR-P3).
-// Only the single-field shape is modelled here; multi-field struct-literal payloads are a
-// later step.
+// MirStructLiteralExpr materializes a struct literal value as an expression temp.
+// It owns the same field descriptors used by LetStruct / ReturnStruct, so expression
+// payloads and statement-level struct literals share field-value and nested-struct
+// lowering (issue 1157 C2).
 pub struct MirStructLiteralExpr {
     pub id: i64,
     pub llvm_type: []u8,
-    pub field0_value: i64,
-    pub field0_index: i64,
+    pub struct_fields: std::array::Array<MirStructField>,
 }
 
 pub struct MirPrefixNotExpr {
@@ -1388,6 +1385,13 @@ impl MirCallExpr {
     }
 }
 
+impl MirStructLiteralExpr {
+    fn deinit(self: MirStructLiteralExpr) -> void {
+        self.struct_fields.deinit();
+        return;
+    }
+}
+
 impl MirExprInst {
     fn deinit(self: MirExprInst) -> void {
         match self {
@@ -1406,7 +1410,7 @@ impl MirExprInst {
             StringLen(payload) => return;,
             IntCast(payload) => return;,
             UnionConstruct(payload) => return;,
-            StructLiteral(payload) => return;,
+            StructLiteral(payload) => payload.deinit(),
         }
     }
 }
@@ -2488,14 +2492,12 @@ pub fn union_construct_payload_expr_inst(
 pub fn struct_literal_expr_inst(
     id: i64,
     llvm_type: []u8,
-    field0_value: i64,
-    field0_index: i64
+    fields: std::array::Array<MirStructField>
 ) -> MirExprInst {
     return MirExprInst::StructLiteral(MirStructLiteralExpr {
         id: id,
         llvm_type: llvm_type,
-        field0_value: field0_value,
-        field0_index: field0_index
+        struct_fields: fields
     });
 }
 
@@ -2681,6 +2683,37 @@ pub fn copy_call_args(args: &std::array::Array<MirCallArg>) -> !std::array::Arra
     return copied;
 }
 
+pub fn copy_struct_field(field: &MirStructField) -> !MirStructField {
+    return MirStructField {
+        index: field.index,
+        kind: field.kind,
+        llvm_type: field.llvm_type,
+        value: field.value,
+        int_value: field.int_value,
+        bool_value: field.bool_value,
+        source_type: field.source_type,
+        source_field_index: field.source_field_index,
+        nested_source_type: field.nested_source_type,
+        call_module_prefix: field.call_module_prefix,
+        call_callee_name: field.call_callee_name,
+        call_args: try copy_call_args(&field.call_args),
+        nested_fields: try copy_struct_fields(&field.nested_fields)
+    };
+}
+
+pub fn copy_struct_fields(
+    fields: &std::array::Array<MirStructField>
+) -> !std::array::Array<MirStructField> {
+    var copied = std::array::Array<MirStructField>(std::mem::page_allocator());
+    var index = 0;
+    while index < fields.len() {
+        let field = try fields.at(index);
+        try copied.append(try copy_struct_field(field));
+        index = index + 1;
+    }
+    return copied;
+}
+
 pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
     return match inst {
         Var(payload) => MirExprInst::Var(MirVarExpr {
@@ -2775,8 +2808,7 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
         StructLiteral(payload) => MirExprInst::StructLiteral(MirStructLiteralExpr {
             id: payload.id,
             llvm_type: payload.llvm_type,
-            field0_value: payload.field0_value,
-            field0_index: payload.field0_index
+            struct_fields: try copy_struct_fields(&payload.struct_fields)
         }),
     };
 }

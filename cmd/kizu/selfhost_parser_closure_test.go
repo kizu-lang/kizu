@@ -30,6 +30,9 @@ var parserClosureSeeds = []string{
 	"parse_bool",
 	"parse_int",
 	"parse_string",
+	// issue 1157 C2 real parser consumer: exercises ast.add_var_with_doc without
+	// pulling the full declaration parser.
+	"name_node_with_doc",
 	// issue 1157 PR-PE synthetic fixture: a '-> !ParseNode' helper seeded to exercise the
 	// ParseNode error-union return + ParseNode value type on the parser closure path.
 	"synth_parse_node_sig",
