@@ -529,6 +529,19 @@ pub fn resolve_field_receiver_kizu_type(
         let callee = try ir_contract::body_call_callee_or_empty_from(
             ir_bytes, function_name, receiver_node, bs
         );
+        // A same-component 'std::kizu::*' receiver call carries its own signature fact, so
+        // resolve it through the cross-module signature path before the stdlib-symbol
+        // short-circuit, matching site 955 and lower_call_return_type (issue 1157 PJ site
+        // 532). This branch has no other cross-module fallback, so the pre-empt is added.
+        let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee);
+        if std::mem::len(qualified) > 0 {
+            let cross_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+                ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified
+            );
+            if std::mem::len(cross_ret) > 0 {
+                return cross_ret;
+            }
+        }
         if compiled_fact_lookup::is_stdlib_callee(callee) {
             return try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, callee);
         }
@@ -953,7 +966,18 @@ fn resolve_let_value_kizu_type(
             ir_bytes, function_name, value, bs
         );
         if compiled_fact_lookup::is_stdlib_callee(callee_name) {
-            return try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, callee_name);
+            // A 'std::kizu::*' callee that carries its own function-signature-return fact
+            // is a same-component compiled function (e.g. a parser helper returning a
+            // ParseNode), not a runtime intrinsic: skip the stdlib-symbol short-circuit so
+            // the cross-module 'qualified' path below resolves its real return type (issue
+            // 1157 PJ site 955). Genuine runtime intrinsics carry no signature fact, so
+            // cross_module_callee_qualified_name_or_empty returns "" and they still take
+            // the stdlib-symbol table here.
+            if std::mem::len(
+                cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name)
+            ) == 0 {
+                return try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, callee_name);
+            }
         }
         // A Call whose callee is a field-mode method binds by the method: Ast.get
         // binds the AstNode element by value; .len() and Arena<T>.add bind an i64
