@@ -11660,6 +11660,22 @@ fn arg_is_single_element_index(
     return std::mem::equal_bytes(end_kind, "Empty");
 }
 
+fn arg_is_namespace_field_expr(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arg_node: i64,
+    bs: i64
+) -> !bool {
+    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+    if !std::mem::equal_bytes(arg_kind, "FieldExpr") {
+        return false;
+    }
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, arg_node, bs
+    );
+    return std::mem::equal_bytes(mode, "namespace");
+}
+
 fn call_arg_must_hoist(
     ir_bytes: []u8,
     function_name: []u8,
@@ -11673,13 +11689,17 @@ fn call_arg_must_hoist(
     if std::mem::equal_bytes(arg_kind, "StructLiteralExpr") {
         return true;
     }
+    if try arg_is_namespace_field_expr(ir_bytes, function_name, arg_node, bs) {
+        return true;
+    }
     return try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs);
 }
 
 // call_has_hoisted_arg reports whether a call carries an argument that has no inline
-// MirCallArg descriptor and must be lowered into a preceding expr temp: a nested call, or a
-// single-element byte index load. Both are referenced through a Temp call arg once
-// materialized (issue 1165 / 1162).
+// MirCallArg descriptor and must be lowered into a preceding expr temp: a nested call, a
+// struct literal, a namespace field value (enum tag / payload-less union variant), or a
+// single-element byte index load. Each is referenced through a Temp call arg once
+// materialized (issue 1165 / 1162 / 1157).
 pub fn call_has_hoisted_arg(
     ir_bytes: []u8,
     function_name: []u8,
@@ -11761,12 +11781,12 @@ fn lower_expr_value_len(
 }
 
 // lower_expr_call_with_nested_args lowers a Call whose argument list contains an argument
-// with no inline descriptor -- a nested call (equal_bytes(token_text(...), expected)) or a
-// single-element byte index load (is_line_break(source[index])) (issue 1165 / 1162). Each
-// such argument is lowered into a preceding expr temp (a call inst, or a checked index-load
-// inst) and referenced through a Temp call arg; scalar and two-bound-slice arguments use the
-// shared single-arg descriptor. The outer call inst is appended once every argument temp is
-// materialized so the temps dominate the call.
+// with no inline descriptor -- a nested call (equal_bytes(token_text(...), expected)), a
+// namespace field value (AstData::Empty), or a single-element byte index load
+// (is_line_break(source[index])) (issue 1165 / 1162 / 1157). Each such argument is lowered
+// into a preceding expr temp and referenced through a Temp call arg; scalar and
+// two-bound-slice arguments use the shared single-arg descriptor. The outer call inst is
+// appended once every argument temp is materialized so the temps dominate the call.
 fn lower_expr_call_with_nested_args(
     ir_bytes: []u8,
     function_name: []u8,
