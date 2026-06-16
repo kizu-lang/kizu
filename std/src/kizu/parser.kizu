@@ -7005,20 +7005,22 @@ fn expect_fat_arrow(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token 
     }
 }
 
-// synth_parse_node_sig is the issue 1157 PR-PE synthetic fixture: it exercises the
-// !ParseNode error-union return type and the ParseNode cursor value type on the native
-// executable path in isolation, ahead of wiring the full recursive-descent parser helper
-// bodies (worker-3 control-flow). It is spelled exactly like the real parser helpers (bare
-// 'ParseNode' param + '-> !ParseNode' return), so the closure resolution qualifies the
-// ParseNode spellings to std::kizu::parser::ParseNode the same way it does for them. It reads
-// the 'node' and 'next' fields off a ParseNode parameter (exercising the new ParseNode
-// value-type field-access lowering) and rebuilds a ParseNode struct literal, returning it as
-// the error union's ok value (exercising the new !ParseNode error-union lowering). The body
-// stays minimal -- no control-flow -- so it reuses only signature/value-type ABI, never the
-// parser's loop / dispatch / cleanup shapes.
+// synth_parse_node_sig is the issue 1157 PJ synthetic fixture: it exercises the !ParseNode
+// error-union return type, the ParseNode cursor value type, and the same-component cursor
+// constructor call on the native executable path in isolation, ahead of wiring the full
+// recursive-descent parser helper bodies (worker-3 control-flow). It is spelled exactly like
+// the real parser helpers (bare 'ParseNode' param + '-> !ParseNode' return), so the closure
+// resolution qualifies the ParseNode spellings to std::kizu::parser::ParseNode the same way it
+// does for them. It reads the 'node' and 'next' fields off a ParseNode parameter (exercising
+// the ParseNode value-type field-access lowering) and binds the result of the same-component
+// constructor 'std::kizu::parser::parse_node(...)' to a let (exercising the site-955 stdlib
+// short-circuit guard: the 'std::kizu::*' callee carries its own signature fact, so its
+// ParseNode return type resolves through the cross-module path, not the stdlib-symbol table),
+// then returns that ParseNode as the error union's ok value (exercising the !ParseNode
+// error-union lowering). The BFS closure pulls in the real leaf parse_node through this call.
+// The body stays minimal -- no control-flow -- so it reuses only signature/value-type ABI,
+// never the parser's loop / dispatch / cleanup shapes.
 fn synth_parse_node_sig(prev: ParseNode) -> !ParseNode {
-    return ParseNode {
-        node: prev.node,
-        next: prev.next
-    };
+    let rebuilt = std::kizu::parser::parse_node(prev.node, prev.next);
+    return rebuilt;
 }
