@@ -1516,16 +1516,12 @@ fn collect_component_compiled_callee(
     return error("compiled closure: unsupported callee");
 }
 
-// compiled_external_accessor_allowed reports whether a method-call callee names one
-// of the std::kizu::ast read accessors that are compiled separately and linked into
-// selfhost.ll on their own. The policy is prefix-limited exact match so nothing is
-// admitted by fallback: under the std::kizu::parser:: prefix only ast.get
-// (kizu_kizu__ast_ast_get) is allowed, called by the postfix predicates that bind a
-// tree: std::kizu::ast::Ast parameter; under the selfhost::ast:: prefix only the
-// traversal accessors tree.get (kizu_kizu__ast_ast_get) and tree.child_at
-// (kizu_kizu__ast_ast_child_at) are allowed. In each case the BFS must not re-emit
-// the external accessor and must not try to walk it as a component-local helper, and
-// every other cross-component callee under either prefix stays an explicit error.
+// compiled_external_accessor_allowed reports whether a compiled closure callee names an
+// external function already emitted elsewhere in selfhost.ll. The policy is prefix-limited
+// exact match so nothing is admitted by fallback. Under std::kizu::parser:: the accepted
+// names are the issue 1157 parser AST/lexer connection list from std/src/kizu/parser.kizu;
+// under selfhost::ast:: only tree.get and tree.child_at are accepted. Every other
+// cross-component callee stays an explicit error.
 fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
     if std::mem::equal_bytes(prefix, "selfhost::parser::format::") {
         // The formatter token-array predicates call lexer::is_eof (std::kizu::lexer Token
@@ -1541,7 +1537,7 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         if std::mem::equal_bytes(callee, "ast.get") {
             return true;
         }
-        return false;
+        return compiled_parser_external_callee_allowed(callee);
     }
     if std::mem::equal_bytes(prefix, "selfhost::ir::code_render::") {
         // render_run_artifact reaches the tape lowering through codegen::lower_code_module,
@@ -1610,6 +1606,107 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         return true;
     }
     return false;
+}
+
+// compiled_parser_external_callee_allowed mirrors the IR fact-side parser closure policy:
+// exact AST constructors/helpers, Ast mutators, and lexer token cursors called by
+// std/src/kizu/parser.kizu. It deliberately uses no std::kizu::ast::* or ast.add_* fallback;
+// when the compiled parser owns these boundaries, remove individual entries.
+fn compiled_parser_external_callee_allowed(callee: []u8) -> bool {
+    return compiled_parser_ast_helper_callee_allowed(callee) or
+        compiled_parser_ast_mutator_callee_allowed(callee) or
+        compiled_parser_lexer_callee_allowed(callee);
+}
+
+fn compiled_parser_ast_helper_callee_allowed(callee: []u8) -> bool {
+    return std::mem::equal_bytes(callee, "std::kizu::ast::Ast") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::span") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::empty_span") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::symbol_id") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::token_id") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::parse_result") or
+        compiled_parser_ast_binary_op_callee_allowed(callee) or
+        compiled_parser_ast_prefix_op_callee_allowed(callee);
+}
+
+fn compiled_parser_ast_binary_op_callee_allowed(callee: []u8) -> bool {
+    return std::mem::equal_bytes(callee, "std::kizu::ast::binary_add") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_sub") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_mul") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_div") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_mod") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_eq") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_not_eq") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_lt") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_lte") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_gt") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_gte") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_and") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::binary_or");
+}
+
+fn compiled_parser_ast_prefix_op_callee_allowed(callee: []u8) -> bool {
+    return std::mem::equal_bytes(callee, "std::kizu::ast::prefix_borrow") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::prefix_mut_borrow") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::prefix_neg") or
+        std::mem::equal_bytes(callee, "std::kizu::ast::prefix_not");
+}
+
+fn compiled_parser_ast_mutator_callee_allowed(callee: []u8) -> bool {
+    return std::mem::equal_bytes(callee, "ast.get") or
+        std::mem::equal_bytes(callee, "ast.begin_children") or
+        std::mem::equal_bytes(callee, "ast.add_child") or
+        std::mem::equal_bytes(callee, "ast.finish_children") or
+        std::mem::equal_bytes(callee, "ast.add_assign") or
+        std::mem::equal_bytes(callee, "ast.add_binary") or
+        std::mem::equal_bytes(callee, "ast.add_block") or
+        std::mem::equal_bytes(callee, "ast.add_bool") or
+        std::mem::equal_bytes(callee, "ast.add_break") or
+        std::mem::equal_bytes(callee, "ast.add_call") or
+        std::mem::equal_bytes(callee, "ast.add_cast_expr") or
+        std::mem::equal_bytes(callee, "ast.add_comptime_expr") or
+        std::mem::equal_bytes(callee, "ast.add_comptime_if") or
+        std::mem::equal_bytes(callee, "ast.add_continue") or
+        std::mem::equal_bytes(callee, "ast.add_defer") or
+        std::mem::equal_bytes(callee, "ast.add_deref_expr") or
+        std::mem::equal_bytes(callee, "ast.add_empty") or
+        std::mem::equal_bytes(callee, "ast.add_enum_decl_with_doc") or
+        std::mem::equal_bytes(callee, "ast.add_err_defer") or
+        std::mem::equal_bytes(callee, "ast.add_expr_stmt") or
+        std::mem::equal_bytes(callee, "ast.add_field_expr") or
+        std::mem::equal_bytes(callee, "ast.add_field_with_doc") or
+        std::mem::equal_bytes(callee, "ast.add_fn_decl_with_doc") or
+        std::mem::equal_bytes(callee, "ast.add_for") or
+        std::mem::equal_bytes(callee, "ast.add_if") or
+        std::mem::equal_bytes(callee, "ast.add_impl_decl") or
+        std::mem::equal_bytes(callee, "ast.add_import_decl") or
+        std::mem::equal_bytes(callee, "ast.add_index_expr") or
+        std::mem::equal_bytes(callee, "ast.add_int") or
+        std::mem::equal_bytes(callee, "ast.add_let") or
+        std::mem::equal_bytes(callee, "ast.add_match") or
+        std::mem::equal_bytes(callee, "ast.add_match_arm") or
+        std::mem::equal_bytes(callee, "ast.add_param") or
+        std::mem::equal_bytes(callee, "ast.add_prefix") or
+        std::mem::equal_bytes(callee, "ast.add_program") or
+        std::mem::equal_bytes(callee, "ast.add_return") or
+        std::mem::equal_bytes(callee, "ast.add_string") or
+        std::mem::equal_bytes(callee, "ast.add_struct_decl_with_doc") or
+        std::mem::equal_bytes(callee, "ast.add_struct_field_init") or
+        std::mem::equal_bytes(callee, "ast.add_struct_literal_expr") or
+        std::mem::equal_bytes(callee, "ast.add_try_expr") or
+        std::mem::equal_bytes(callee, "ast.add_type_apply_expr") or
+        std::mem::equal_bytes(callee, "ast.add_type_name") or
+        std::mem::equal_bytes(callee, "ast.add_union_decl_with_doc") or
+        std::mem::equal_bytes(callee, "ast.add_union_variant_with_doc") or
+        std::mem::equal_bytes(callee, "ast.add_unsafe") or
+        std::mem::equal_bytes(callee, "ast.add_var") or
+        std::mem::equal_bytes(callee, "ast.add_var_with_doc") or
+        std::mem::equal_bytes(callee, "ast.add_while");
+}
+
+fn compiled_parser_lexer_callee_allowed(callee: []u8) -> bool {
+    return std::mem::equal_bytes(callee, "std::kizu::lexer::first_token") or
+        std::mem::equal_bytes(callee, "std::kizu::lexer::next_token");
 }
 
 // compiled_callee_has_namespace reports whether a name still carries a "::"
