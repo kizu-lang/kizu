@@ -279,7 +279,7 @@ fn lower_multi_let_ast_get(
 }
 
 // call_method_name_is reports whether a field-mode call's method name matches name.
-fn call_method_name_is(
+pub fn call_method_name_is(
     ir_bytes: []u8,
     function_name: []u8,
     call_node: i64,
@@ -293,6 +293,122 @@ fn call_method_name_is(
         ir_bytes, function_name, callee_node, "field", bs
     );
     return std::mem::equal_bytes(method_name, name);
+}
+
+fn call_method_receiver_is_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64
+) -> !bool {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    return std::mem::equal_bytes(receiver_kind, "Var");
+}
+
+struct MethodCallInfo {
+    receiver_name: []u8,
+    receiver_llvm_type: []u8,
+    return_llvm_type: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+}
+
+fn append_lower_snake_type_name(out: &var std::string::String, name: []u8) -> !void {
+    var index = 0;
+    while index < std::mem::len(name) {
+        let byte = name[index];
+        if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+            if index > 0 {
+                try out.append_byte(cast<u8>(95));
+            }
+            try out.append_byte(byte + cast<u8>(32));
+        } else {
+            try out.append_byte(byte);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn method_call_info(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    bs: i64
+) -> !MethodCallInfo {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, bs
+    );
+    if !std::mem::equal_bytes(mode, "field") {
+        return error("compiled mir: method call callee must be field-mode");
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: method call receiver must be a local or parameter");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
+        ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
+    );
+    let receiver_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, module_prefix, receiver_kizu
+    );
+    let lookup_type = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
+    let type_prefix = compiled_util::module_prefix_of(lookup_type);
+    var impl_prefix = type_prefix;
+    if std::mem::len(impl_prefix) == 0 {
+        impl_prefix = module_prefix;
+    }
+    let type_name = lookup_type[std::mem::len(type_prefix)..std::mem::len(lookup_type)];
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    var qualified = std::string::String(std::mem::page_allocator());
+    try qualified.append_bytes(impl_prefix);
+    try append_lower_snake_type_name(&var qualified, type_name);
+    try qualified.append_byte(cast<u8>(95));
+    try qualified.append_bytes(method_name);
+    let qualified_name_view = qualified.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(qualified_name_view, qualified_name_view);
+    let qualified_name = try copied.get(qualified_name_view);
+    let return_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+        ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified_name
+    );
+    if std::mem::len(return_kizu) == 0 {
+        return error("compiled mir: method call signature not found");
+    }
+    let return_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, impl_prefix, return_kizu
+    );
+    let callee_prefix = compiled_util::module_prefix_of(qualified_name);
+    return MethodCallInfo {
+        receiver_name: receiver_name,
+        receiver_llvm_type: receiver_llvm,
+        return_llvm_type: return_llvm,
+        module_prefix: callee_prefix,
+        callee_name: qualified_name[std::mem::len(callee_prefix)..std::mem::len(qualified_name)]
+    };
 }
 
 // arena_element_kizu_type strips the std::arena::Arena<...> wrapper off a recorded
@@ -4421,6 +4537,37 @@ fn lower_multi_let_statement(
                     try_counter: try_counter
                 };
             }
+            // A value-receiver method with a real signature (for example
+            // ast.add_bool(...)) lowers as a normal call expression with the receiver
+            // passed as arg 0. Field receivers such as self.nodes.add(...) stay on the
+            // Arena.add lowering below.
+            if try call_method_receiver_is_var(ir_bytes, function_name, let_value, bs) {
+                var method_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+                let method_result_id = try lower_expr_with_local_aliases(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    let_value,
+                    string_counter,
+                    temp_counter,
+                    &var method_insts,
+                    aliases,
+                    bs,
+                    ir_lookup_index, call_arg_type_cache
+                );
+                let method_strings = try count_strings_in_insts(&method_insts);
+                let method_inst_count = method_insts.len();
+                try stmts.append(compiled_mir::let_expr_stmt(
+                    let_name, string_counter, method_result_id, method_insts
+                ));
+                return MultiLowerResult {
+                    locals_spec: locals_spec,
+                    string_counter: string_counter + method_strings,
+                    temp_counter: temp_counter + method_inst_count,
+                    try_counter: try_counter
+                };
+            }
             return try lower_multi_let_arena_add(
                 ir_bytes, function_name, module_prefix, locals_spec,
                 let_name, let_value, string_counter, temp_counter, try_counter, stmts, bs,
@@ -5269,10 +5416,28 @@ fn lower_multi_return_statement(
             );
             return compiled_mir::return_expr_stmt(string_counter, len_result_id, len_insts);
         }
-        // A Call whose callee is a FieldExpr is a struct-field method call. The only
-        // supported multi-statement method return is the checked Array<T>.get
-        // accessor (self.<field>.get(<expr>) -> !T), backing Ast.child_at (tracker 961).
+        // A field-receiver get() return is the checked Array<T>.get accessor
+        // (self.<field>.get(<expr>) -> !T), backing Ast.child_at (tracker 961).
+        // Other value-receiver methods with real signatures lower through the generic
+        // expression path, which passes the receiver as arg 0 and can hoist computed args.
         if try callee_is_field_expr(ir_bytes, function_name, value, bs) {
+            if !(try call_method_name_is(ir_bytes, function_name, value, "get", bs)) {
+                var method_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+                let method_result_id = try lower_expr_with_local_aliases(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    value,
+                    string_counter,
+                    temp_counter,
+                    &var method_insts,
+                    aliases,
+                    bs,
+                    ir_lookup_index, call_arg_type_cache
+                );
+                return compiled_mir::return_expr_stmt(string_counter, method_result_id, method_insts);
+            }
                 return try lower_multi_return_array_get(
                     ir_bytes, function_name, module_prefix, llvm_return_type,
                     locals_spec, value, string_counter, temp_counter, aliases, bs,
@@ -11495,6 +11660,22 @@ fn arg_is_single_element_index(
     return std::mem::equal_bytes(end_kind, "Empty");
 }
 
+fn call_arg_must_hoist(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arg_node: i64,
+    bs: i64
+) -> !bool {
+    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+    if std::mem::equal_bytes(arg_kind, "Call") {
+        return true;
+    }
+    if std::mem::equal_bytes(arg_kind, "StructLiteralExpr") {
+        return true;
+    }
+    return try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs);
+}
+
 // call_has_hoisted_arg reports whether a call carries an argument that has no inline
 // MirCallArg descriptor and must be lowered into a preceding expr temp: a nested call, or a
 // single-element byte index load. Both are referenced through a Temp call arg once
@@ -11513,11 +11694,7 @@ pub fn call_has_hoisted_arg(
         let arg_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, call_node, "arg", index, bs
         );
-        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
-        if std::mem::equal_bytes(arg_kind, "Call") {
-            return true;
-        }
-        if try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs) {
+        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
             return true;
         }
         index = index + 1;
@@ -11629,10 +11806,8 @@ fn lower_expr_call_with_nested_args(
         let arg_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, call_node, "arg", arg_index, bs
         );
-        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
         let arg_type = try arg_types.get(arg_index);
-        let hoist_arg = std::mem::equal_bytes(arg_kind, "Call") or
-            (try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs));
+        let hoist_arg = try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs);
         if hoist_arg {
             let before = insts.len();
             let temp_id = try lower_expr_into(
@@ -11714,10 +11889,8 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
         let arg_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, call_node, "arg", arg_index, bs
         );
-        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
         let arg_type = try arg_types.get(arg_index);
-        let hoist_arg = std::mem::equal_bytes(arg_kind, "Call") or
-            (try arg_is_single_element_index(ir_bytes, function_name, arg_node, bs));
+        let hoist_arg = try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs);
         if hoist_arg {
             let before = insts.len();
             let temp_id = try lower_expr_with_local_aliases(
@@ -11754,6 +11927,152 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
     return id;
 }
 
+fn lower_expr_method_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !i64 {
+    let info = try method_call_info(
+        ir_bytes, function_name, module_prefix, params_spec, call_node, bs
+    );
+    let explicit_arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var arg_types = try compiled_mir_types::lower_call_arg_types(
+        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
+    );
+    defer arg_types.deinit();
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    try args.append(compiled_mir::var_call_arg(
+        try arg_types.get(0), info.receiver_name
+    ));
+    var arg_index = 0;
+    var string_idx = string_index;
+    while arg_index < explicit_arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", arg_index, bs
+        );
+        let arg_type = try arg_types.get(arg_index + 1);
+        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+            let before = insts.len();
+            let temp_id = try lower_expr_into(
+                ir_bytes, function_name, module_prefix, params_spec, arg_node,
+                string_idx, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
+            );
+            string_idx = string_idx + try count_strings_in_insts_from(insts, before);
+            try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+        } else {
+            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg(
+                ir_bytes, function_name, module_prefix, params_spec, arg_type,
+                arg_node, string_idx, bs
+            );
+            let is_string_arg = scalar_arg.kind == compiled_mir::MirCallArgKind::String;
+            try args.append(scalar_arg);
+            if is_string_arg {
+                string_idx = string_idx + 1;
+            }
+        }
+        arg_index = arg_index + 1;
+    }
+    let id = id_base + insts.len();
+    try insts.append(compiled_mir::call_expr_inst(
+        id, info.return_llvm_type, info.module_prefix, info.callee_name, args
+    ));
+    return id;
+}
+
+fn lower_expr_method_call_with_local_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !i64 {
+    let info = try method_call_info(
+        ir_bytes, function_name, module_prefix, params_spec, call_node, bs
+    );
+    let explicit_arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var arg_types = try compiled_mir_types::lower_call_arg_types(
+        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
+    );
+    defer arg_types.deinit();
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    var alias_index = 0;
+    while alias_index < aliases.len() {
+        let state = try aliases.at(alias_index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try alias_sources.append(state.source_name);
+            try alias_currents.append(state.current_name);
+        }
+        alias_index = alias_index + 1;
+    }
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    try args.append(compiled_mir::var_call_arg(
+        try arg_types.get(0), try local_alias_current_name(aliases, info.receiver_name)
+    ));
+    var arg_index = 0;
+    var string_idx = string_index;
+    while arg_index < explicit_arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", arg_index, bs
+        );
+        let arg_type = try arg_types.get(arg_index + 1);
+        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+            let before = insts.len();
+            let temp_id = try lower_expr_with_local_aliases(
+                ir_bytes, function_name, module_prefix, params_spec, arg_node,
+                string_idx, id_base, insts, aliases, bs, ir_lookup_index, call_arg_type_cache
+            );
+            string_idx = string_idx + try count_strings_in_insts_from(insts, before);
+            try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+        } else {
+            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                params_spec,
+                arg_type,
+                arg_node,
+                string_idx,
+                &alias_sources,
+                &alias_currents,
+                bs
+            );
+            let is_string_arg = scalar_arg.kind == compiled_mir::MirCallArgKind::String;
+            try args.append(scalar_arg);
+            if is_string_arg {
+                string_idx = string_idx + 1;
+            }
+        }
+        arg_index = arg_index + 1;
+    }
+    let id = id_base + insts.len();
+    try insts.append(compiled_mir::call_expr_inst(
+        id, info.return_llvm_type, info.module_prefix, info.callee_name, args
+    ));
+    return id;
+}
+
 fn lower_expr_call_with_local_aliases(
     ir_bytes: []u8,
     function_name: []u8,
@@ -11770,11 +12089,17 @@ fn lower_expr_call_with_local_aliases(
 ) -> !i64 {
     let id = id_base + insts.len();
     if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
-        let result = try lower_expr_value_len(
-            ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+        if try call_method_name_is(ir_bytes, function_name, expr_node, "len", bs) {
+            let result = try lower_expr_value_len(
+                ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+            );
+            try rename_local_aliases_in_insts(insts, aliases);
+            return result;
+        }
+        return try lower_expr_method_call_with_local_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node,
+            string_index, id_base, insts, aliases, bs, ir_lookup_index, call_arg_type_cache
         );
-        try rename_local_aliases_in_insts(insts, aliases);
-        return result;
     }
     if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, bs) {
         return try lower_expr_call_with_nested_args_with_local_aliases(
@@ -12388,8 +12713,14 @@ fn lower_expr_into(
         // param/local (Array<T> or std::string::String) through its matching runtime helper.
         // get() returns !T and only appears in let-try position, so it is rejected here.
         if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
-            return try lower_expr_value_len(
-                ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+            if try call_method_name_is(ir_bytes, function_name, expr_node, "len", bs) {
+                return try lower_expr_value_len(
+                    ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+                );
+            }
+            return try lower_expr_method_call(
+                ir_bytes, function_name, module_prefix, params_spec, expr_node,
+                string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
             );
         }
         // A namespaced FieldExpr callee whose receiver names a tagged-union type is a
