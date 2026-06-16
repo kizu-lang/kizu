@@ -7024,3 +7024,35 @@ fn synth_parse_node_sig(prev: ParseNode) -> !ParseNode {
     let rebuilt = std::kizu::parser::parse_node(prev.node, prev.next);
     return rebuilt;
 }
+
+// synth_postfix_loop is the issue 1157 synthetic fixture for the value-carried 'while true' grammar
+// loop control-flow (worker-3). It is spelled with the exact CFG of parse_postfix_expr -- a carried
+// ParseNode threaded through a 'while true' loop, reassigned in each guarded arm of a nested
+// if/else chain and returned from the terminal else -- but its three arms reassign through the
+// already-lowered leaf synth_parse_node_sig instead of the not-yet-lowered grammar helpers
+// (parse_type_apply_expr / parse_one_postfix / parse_struct_literal_expr). The three predicates are
+// the real, already-lowered parser predicates (is_type_apply_start / is_postfix_start /
+// is_struct_literal_start), so the fixture exercises the GrammarLoop lowering -- the loop-head phi,
+// the bool-predicate-call conditions with a field-access argument (left.next), the free
+// error-union try-call reassignments, and the carried-value error-union return -- end to end on the
+// native compiled path, ahead of seeding the real parse_primary chain (which additionally needs the
+// three grammar helpers lowered). parse_postfix_expr lowers identically; only its callees differ.
+fn synth_postfix_loop(ast: std::kizu::ast::Ast, text: []u8, first: ParseNode) -> !ParseNode {
+    var left = first;
+    while true {
+        if std::kizu::parser::is_type_apply_start(ast, text, left) {
+            left = try std::kizu::parser::synth_parse_node_sig(left);
+        } else {
+            if std::kizu::parser::is_postfix_start(left.next) {
+                left = try std::kizu::parser::synth_parse_node_sig(left);
+            } else {
+                if std::kizu::parser::is_struct_literal_start(ast, text, left) {
+                    left = try std::kizu::parser::synth_parse_node_sig(left);
+                } else {
+                    return left;
+                }
+            }
+        }
+    }
+    return left;
+}

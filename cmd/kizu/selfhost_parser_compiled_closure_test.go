@@ -39,9 +39,11 @@ func parserCompiledClosureSeeds() []string {
 		// zero) to exercise the site-955 cursor-constructor call, the ParseNode
 		// error-union return, and the ParseNode value type on the compiled parser path.
 		"synth_parse_node_sig",
-		// issue 1157 B3 real enum-dispatch consumers: parse_primary exercises
-		// !ParseNode parser-call/error arms; expect_ident exercises !Token ok-wrap/error arms.
-		"parse_primary",
+		// issue 1157 worker-3 grammar-loop fixture: synth_postfix_loop carries the
+		// parse_postfix_expr 'while true' value-loop CFG (reassigning through the lowered
+		// synth_parse_node_sig leaf), exercising the GrammarLoop lowering ahead of the full
+		// parse_primary chain. expect_ident exercises !Token ok-wrap/error arms.
+		"synth_postfix_loop",
 		"expect_ident",
 	}
 }

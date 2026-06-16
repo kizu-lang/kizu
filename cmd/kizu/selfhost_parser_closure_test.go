@@ -36,9 +36,11 @@ var parserClosureSeeds = []string{
 	// issue 1157 PR-PE synthetic fixture: a '-> !ParseNode' helper seeded to exercise the
 	// ParseNode error-union return + ParseNode value type on the parser closure path.
 	"synth_parse_node_sig",
-	// issue 1157 B3 real enum-dispatch consumers: parse_primary exercises !ParseNode parser-call
-	// and error arms; expect_ident exercises !Token ok-wrap and error arms.
-	"parse_primary",
+	// issue 1157 worker-3 grammar-loop fixture: synth_postfix_loop carries the parse_postfix_expr
+	// 'while true' value-loop CFG (reassigning through the lowered synth_parse_node_sig leaf), so it
+	// exercises the GrammarLoop lowering ahead of the full parse_primary chain. expect_ident
+	// exercises !Token ok-wrap and error arms.
+	"synth_postfix_loop",
 	"expect_ident",
 }
 

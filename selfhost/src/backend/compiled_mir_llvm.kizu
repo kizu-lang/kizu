@@ -431,6 +431,7 @@ fn append_multi_stmt(
         NextToken(payload) => try append_multi_next_token(out, payload);,
         ArrayNew(payload) => try append_array_new(out, payload);,
         ValueWhile(payload) => try append_value_while(out, payload);,
+        GrammarLoop(payload) => try append_grammar_loop(out, function, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
         ParserSpanPredicate(payload) => try append_multi_parser_span_predicate(out, payload);,
         ParserPostfixStart(payload) => try append_multi_parser_postfix_start(out, payload);,
@@ -2711,6 +2712,113 @@ fn append_value_while(out: &var std::string::String, stmt: &compiled_mir::MirVal
     return;
 }
 
+// append_grammar_loop renders a 'while true' value-accumulation grammar loop (issue 1157) into a
+// preheader/head/branch CFG. The head holds one loop-carried phi for the carried struct value,
+// named %<carried_var> so plain Var reads in the conditions and branch calls resolve to it. The
+// phi seeds from %<init_name> on the entry edge and from each branch's try-call success on its
+// back-edge. Each branch evaluates its boolean predicate (cond_insts) in the head (branch 0) or in
+// a guarded <base>_c<i> block, branching to <base>_b<i> when true or to the next predicate /
+// <base>_exit when false. A <base>_b<i> body reassigns the carried value through the branch's
+// free error-union try-call (reused append_try_call_body, bound to %<carried_var>_b<i> so the phi
+// reads it on the try<N>_cont back-edge) then branches back to the head; a failure propagates as
+// the function's own error union. The terminal <base>_exit wraps the carried value into
+// own_error_union and returns it.
+fn append_grammar_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirGrammarLoopStmt
+) -> !void {
+    let branches = &stmt.branches;
+    let branch_count = branches.len();
+    if branch_count == 0 {
+        return error("compiled mir llvm: grammar loop requires at least one branch");
+    }
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    // One loop-carried phi for the carried value: %<init> on the entry edge, %<carried>_b<i> on
+    // each branch's try<N>_cont back-edge.
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.carried_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.carried_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(stmt.init_name);
+    try out.append_bytes(", %entry ]");
+    var phi_index = 0;
+    while phi_index < branch_count {
+        let phi_branch = try branches.at(phi_index);
+        let phi_reassign = &phi_branch.reassign;
+        try out.append_bytes(", [ %");
+        try out.append_bytes(phi_reassign.name);
+        try out.append_bytes(", %try");
+        try std::fmt::append_i64(out, phi_reassign.try_index);
+        try out.append_bytes("_cont ]");
+        phi_index = phi_index + 1;
+    }
+    try out.append_byte(cast<u8>(10));
+    // Each branch: evaluate the predicate in the currently-open block, branch to the body or to the
+    // next predicate / exit, then render the body try-call and back-edge.
+    var index = 0;
+    while index < branch_count {
+        let branch = try branches.at(index);
+        try append_expr_insts(out, function.name, &branch.cond_insts);
+        try out.append_bytes("  br i1 ");
+        try append_expr_value_ref(out, &branch.cond_insts, branch.cond_result_id);
+        try out.append_bytes(", label %");
+        try out.append_bytes(stmt.label_base);
+        try out.append_bytes("_b");
+        try std::fmt::append_i64(out, index);
+        try out.append_bytes(", label %");
+        try out.append_bytes(stmt.label_base);
+        if index + 1 < branch_count {
+            try out.append_bytes("_c");
+            try std::fmt::append_i64(out, index + 1);
+        } else {
+            try out.append_bytes("_exit");
+        }
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes(stmt.label_base);
+        try out.append_bytes("_b");
+        try std::fmt::append_i64(out, index);
+        try append_ll_line(out, ":");
+        // The reassignment binds the carried value into %<reassign.name> (baked per branch in the
+        // lowering as <carried>_b<i>), which the loop-head phi reads on this branch's try<N>_cont
+        // back-edge. An empty bind suffix keeps the bound name exactly reassign.name.
+        let reassign = &branch.reassign;
+        try append_try_call_body(out, function.name, reassign, "", index + 1);
+        try out.append_bytes("  br label %");
+        try out.append_bytes(stmt.label_base);
+        try append_ll_line(out, "_head");
+        if index + 1 < branch_count {
+            try out.append_bytes(stmt.label_base);
+            try out.append_bytes("_c");
+            try std::fmt::append_i64(out, index + 1);
+            try append_ll_line(out, ":");
+        }
+        index = index + 1;
+    }
+    // Terminal else: return the carried value wrapped into the function's own error union.
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit:");
+    try out.append_bytes("  %retwrap_ok = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %retwrap_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %retwrap_ok, ");
+    try out.append_bytes(stmt.carried_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.carried_var);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %retwrap_val");
+    return;
+}
+
 // append_token_kind_predicate_globals: the predicate forwards only its Token value, so it emits no
 // string-constant globals (tracker 961).
 fn append_token_kind_predicate_globals(stmt: &compiled_mir::MirTokenKindPredicateStmt) -> !void {
@@ -3717,6 +3825,26 @@ fn append_enum_dispatch_globals(
     return;
 }
 
+// append_grammar_loop_globals emits the string-constant globals each grammar-loop branch needs:
+// the predicate condition's expression-instruction globals and the reassignment try-call's
+// call-argument string globals (issue 1157).
+fn append_grammar_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirGrammarLoopStmt
+) -> !void {
+    let branches = &stmt.branches;
+    var index = 0;
+    while index < branches.len() {
+        let branch = try branches.at(index);
+        let reassign = &branch.reassign;
+        try append_expr_globals(out, llvm_symbol, &branch.cond_insts);
+        try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &reassign.call_args);
+        index = index + 1;
+    }
+    return;
+}
+
 // append_traversal_literal_text renders a literal arm's value: bool literals print
 // true/false, integer literals their decimal value.
 fn append_traversal_literal_text(
@@ -4185,6 +4313,7 @@ fn append_stmt_globals(
         NextToken(payload) => try append_next_token_globals(payload);,
         ArrayNew(payload) => try append_array_new_globals(payload);,
         ValueWhile(payload) => try append_value_while_globals(payload);,
+        GrammarLoop(payload) => try append_grammar_loop_globals(out, llvm_symbol, payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,
         ParserSpanPredicate(payload) => try append_parser_span_predicate_globals(payload);,
         ParserPostfixStart(payload) => try append_parser_postfix_start_globals(payload);,
