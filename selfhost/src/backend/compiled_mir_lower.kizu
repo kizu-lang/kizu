@@ -9206,6 +9206,26 @@ fn lower_multi_while_statement(
             );
             try latch_stmts.append(latch_stmt);
         } else {
+        if std::mem::equal_bytes(increment_value_kind, "FieldExpr") {
+            // 'token = declaration.next;' advances the induction variable from a struct field
+            // of a body-local (a field-access latch) rather than a numeric add or a call result.
+            // The loop body binds the struct earlier ('let declaration = ...;') and this reads its
+            // i64 field into the loop-head phi (%<var>_next). Like the plain-call latch it carries
+            // no control flow, so it ends in loopN_latch with no fail/cont block. This is the
+            // shape parse_program_with_declarations / parse_block_with_statements need (issue 1157
+            // PR-PF).
+            let latch_stmt = try lower_while_latch_field_access(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                induction_var,
+                increment_value,
+                body_string_counter,
+                bs
+            );
+            try latch_stmts.append(latch_stmt);
+        } else {
         if std::mem::equal_bytes(increment_value_kind, "Var") {
             // 'index = previous' copies a body-local back into the induction variable. The local
             // must be bound earlier in this loop body by 'let previous = index - <int>', a
@@ -9223,6 +9243,7 @@ fn lower_multi_while_statement(
             step = try parse_induction_step(
                 ir_bytes, function_name, increment_stmt, induction_var, bs
             );
+        }
         }
         }
     }
@@ -11118,6 +11139,43 @@ fn lower_while_latch_call(
     return compiled_mir::let_call_stmt(
         induction_var, call_type, string_counter, callee_module_prefix, callee_name, args
     );
+}
+
+// lower_while_latch_field_access lowers a field-access 'token = declaration.next;' latch into
+// a LetExpr statement holding the field access bound to the induction variable (issue 1157
+// PR-PF). The latch renderer suffixes the bind name with "_next", so the loaded i64 field
+// binds to %<induction_var>_next which the loop-head phi consumes on the latch edge. The
+// receiver must be a local var (the loop body's struct binding) and the field must be an i64;
+// it carries no control flow, so the phi reads it on the loopN_latch edge like a plain call.
+fn lower_while_latch_field_access(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    induction_var: []u8,
+    field_expr_node: i64,
+    string_counter: i64,
+    bs: i64
+) -> !compiled_mir::MirStmt {
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_expr_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, receiver, bs);
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: field-access latch receiver must be a local var");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, receiver, bs);
+    let info = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, locals_spec, field_expr_node, bs
+    );
+    if !std::mem::equal_bytes(info.field_llvm_type, "i64") {
+        return error("compiled mir: field-access latch field must be an i64");
+    }
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try insts.append(compiled_mir::field_access_expr_inst(
+        0, info.field_llvm_type, receiver_name, info.receiver_llvm_type, info.field_index
+    ));
+    return compiled_mir::let_expr_stmt(induction_var, string_counter, 0, insts);
 }
 
 fn count_strings_in_insts(

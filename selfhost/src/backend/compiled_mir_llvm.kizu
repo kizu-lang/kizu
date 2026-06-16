@@ -5124,12 +5124,18 @@ fn append_multi_while(
                 stmt.loop_index * 1000 + body_stmts.len() + 1
             );
         } else {
-            try append_while_latch_call(
-                out,
-                function,
-                latch_stmt,
-                stmt.loop_index * 1000 + body_stmts.len() + 1
-            );
+            if try while_latch_statement_is_let_call(latch_stmt) {
+                try append_while_latch_call(
+                    out,
+                    function,
+                    latch_stmt,
+                    stmt.loop_index * 1000 + body_stmts.len() + 1
+                );
+            } else {
+                // A field-access latch ('token = declaration.next;') is a LetExpr holding the
+                // struct field read; it binds %<var>_next with no control flow (issue 1157 PR-PF).
+                try append_while_latch_field_access(out, latch_stmt);
+            }
         }
     } else {
         // A copy-decrement latch ('index = previous') needs no primary add: the loop-head phi
@@ -5401,6 +5407,57 @@ fn while_latch_statement_is_try_call(latch_stmt: &compiled_mir::MirStmt) -> !boo
         LetTryCall(payload) => true,
         _ => false,
     };
+}
+// while_latch_statement_is_let_call reports whether a while latch statement is a token-carried
+// plain call (LetCall) rather than a field-access latch (LetExpr), so the renderer picks the
+// call body vs the field-access extractvalue (issue 1157 PR-PF).
+fn while_latch_statement_is_let_call(latch_stmt: &compiled_mir::MirStmt) -> !bool {
+    return match latch_stmt {
+        LetCall(payload) => true,
+        _ => false,
+    };
+}
+// append_while_latch_field_access renders a field-access 'token = declaration.next;' latch: the
+// LetExpr holds a single FieldAccess over a local struct, and the loaded i64 field binds to
+// %<induction_var>_next that the loop-head phi reads on the latch edge (issue 1157 PR-PF). It
+// carries no error union and no control flow, so it falls through to the loop head.
+fn append_while_latch_field_access(
+    out: &var std::string::String,
+    latch_stmt: &compiled_mir::MirStmt
+) -> !void {
+    match latch_stmt {
+        LetExpr(payload) => try append_while_latch_field_access_let(out, payload);,
+        _ => return error("compiled mir: while latch statement must be a field-access let-expr");,
+    }
+    return;
+}
+fn append_while_latch_field_access_let(
+    out: &var std::string::String,
+    payload: &compiled_mir::MirLetExprStmt
+) -> !void {
+    let exprs = &payload.expr_insts;
+    let inst = try exprs.at(0);
+    match inst {
+        FieldAccess(field) => try append_while_latch_field_access_body(out, payload.name, field);,
+        _ => return error("compiled mir: field-access latch must hold a field access");,
+    }
+    return;
+}
+fn append_while_latch_field_access_body(
+    out: &var std::string::String,
+    induction_var: []u8,
+    field: &compiled_mir::MirFieldAccessExpr
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(induction_var);
+    try out.append_bytes("_next = extractvalue ");
+    try out.append_bytes(field.source_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(field.value);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.source_field_index);
+    try out.append_byte(cast<u8>(10));
+    return;
 }
 // append_while_latch_call renders a token-carried 'token = synth_next_token(token);' latch
 // update: the LetCall is emitted with the bind name suffixed "_next" so the i64 result binds
