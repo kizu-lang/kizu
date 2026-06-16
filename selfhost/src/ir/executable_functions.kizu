@@ -1224,7 +1224,26 @@ pub fn append_ast_function_facts(
         "Span",
         "std::kizu::ast::Span"
     );
+    try append_ast_struct_type_fact(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "TokenId",
+        "std::kizu::ast::TokenId",
+        "%kizu.kizu.ast.token_id"
+    );
+    try append_ast_struct_type_fact(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "SymbolId",
+        "std::kizu::ast::SymbolId",
+        "%kizu.kizu.ast.symbol_id"
+    );
     try append_type_llvm_fact(out, "std::kizu::ast::Span", "%kizu.kizu.ast.span");
+    try append_type_llvm_fact(out, "std::kizu::ast::ChildRange", "%kizu.kizu.ast.child_range");
     try append_type_llvm_fact(out, "std::kizu::ast::AstData", "%kizu.kizu.ast.ast_data");
     try append_type_llvm_fact(out, "std::kizu::ast::AstNode", "%kizu.kizu.ast.ast_node");
     try append_type_llvm_fact(out, "std::kizu::ast::ParseResult", "%kizu.kizu.ast.parse_result");
@@ -1379,14 +1398,13 @@ pub fn append_ast_function_facts(
         "std::kizu::ast::ast_get",
         "checked-ast-readonly"
     );
-    // The AstData variant payload structs backing the read-only match-over-AstData AST
-    // accessors compiled into stage2 (selfhost::ast::declaration_count and the node_count
-    // traversal cluster, tracker 961). append_ast_node_variant_facts walks the AstData
-    // union in declaration order and emits, for every variant, a union-variant fact whose
-    // discriminant tag is the real declaration index (never hardcoded); for each variant
-    // whose payload struct an accessor reads by value, it also emits the struct's type-llvm
-    // mapping and struct-field facts. The five leaf variants and the payload-less Empty are
-    // recorded as union-variant facts only: their arms return the literal 1.
+    // The five leaf AstData payload structs were previously union-variant only; parser
+    // construction needs their source-derived type-llvm + struct-field facts as well.
+    try append_ast_leaf_payload_struct_type_facts(out, file.text, parsed.ast, parsed.root);
+    // The nonleaf AstData payload structs backing the read-only match-over-AstData AST
+    // accessors compiled into stage2 already have source-derived type-llvm + field facts
+    // emitted by append_ast_node_variant_facts. Its union-variant tags remain the single
+    // source-derived tag emission for all variants.
     try append_ast_node_variant_facts(out, file.text, parsed.ast, parsed.root);
     // issue 1157 PR-PA synthetic fixture: lower the two std::kizu::parser::parse_program
     // signature types on the executable path in isolation. synth_parse_sig takes a
@@ -1419,6 +1437,49 @@ pub fn append_ast_function_facts(
         "std::kizu::ast::synth_dispatch_match",
         "checked-ast-constructor"
     );
+    return;
+}
+
+fn append_ast_leaf_payload_struct_type_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    try append_ast_struct_type_fact(
+        out, text, ast, root,
+        "IntNode", "std::kizu::ast::IntNode", "%kizu.kizu.ast.int_node"
+    );
+    try append_ast_struct_type_fact(
+        out, text, ast, root,
+        "StringNode", "std::kizu::ast::StringNode", "%kizu.kizu.ast.string_node"
+    );
+    try append_ast_struct_type_fact(
+        out, text, ast, root,
+        "TypeNameNode", "std::kizu::ast::TypeNameNode", "%kizu.kizu.ast.type_name_node"
+    );
+    try append_ast_struct_type_fact(
+        out, text, ast, root,
+        "VarNode", "std::kizu::ast::VarNode", "%kizu.kizu.ast.var_node"
+    );
+    try append_ast_struct_type_fact(
+        out, text, ast, root,
+        "BoolNode", "std::kizu::ast::BoolNode", "%kizu.kizu.ast.bool_node"
+    );
+    return;
+}
+
+fn append_ast_struct_type_fact(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    local_name: []u8,
+    qualified_name: []u8,
+    llvm_type: []u8
+) -> !void {
+    try append_selected_struct_field_facts(out, text, ast, root, local_name, qualified_name);
+    try append_type_llvm_fact(out, qualified_name, llvm_type);
     return;
 }
 
@@ -2996,10 +3057,9 @@ pub fn append_codegen_function_facts(
         "selfhost::ir::codegen::PayloadSpan"
     );
     // IntEnv carries the program's top-level declarations as a real
-    // std::kizu::ast::ChildRange (tracker 961). Emitting its struct fields plus
-    // the ChildRange type-llvm mapping is the first read-only AST value type
-    // pulled into stage2: empty_int_env forwards the ChildRange parameter into the
-    // IntEnv aggregate without touching the AstNode/AstData union.
+    // std::kizu::ast::ChildRange (tracker 961). The ChildRange type mapping is owned by
+    // append_ast_function_facts; empty_int_env forwards the parameter into the IntEnv
+    // aggregate without touching the AstNode/AstData union.
     try append_selected_struct_field_facts(
         out,
         file.text,
@@ -3019,7 +3079,6 @@ pub fn append_codegen_function_facts(
         "selfhost::ir::codegen::CodeEval"
     );
     try append_type_llvm_fact(out, "selfhost::ir::codegen::PayloadSpan", "%kizu.selfhost.codegen.payload_span");
-    try append_type_llvm_fact(out, "std::kizu::ast::ChildRange", "%kizu.kizu.ast.child_range");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::IntEnv", "%kizu.selfhost.codegen.int_env");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::CodeEval", "%kizu.selfhost.codegen.code_eval");
     try append_runtime_stdlib_symbol_preamble(out);
