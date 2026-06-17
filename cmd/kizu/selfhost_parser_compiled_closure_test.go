@@ -62,6 +62,8 @@ func parserCompiledClosureSeeds() []string {
 		"synth_collection_build",
 		// expect_ident exercises !Token ok-wrap/error arms.
 		"expect_ident",
+		// issue 1157 NEW-B fixture: isolates match left.next.kind depth-2 enum dispatch.
+		"synth_depth2_dispatch_match",
 	}
 }
 
