@@ -83,6 +83,50 @@ pub fn resolve_value_kizu_type(
     return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
 }
 
+// resolve_value_llvm_type_indexed mirrors resolve_value_llvm_type but routes the type-llvm
+// lowering through the sorted index. The params_spec and local (resolve_local_kizu_type)
+// lookups are unchanged: the former scans the small caller-threaded spec string and the
+// latter scans only the current function's body block, neither of which the index covers;
+// only kizu_type_to_llvm's whole-IR type/enum scan becomes a binary search.
+pub fn resolve_value_llvm_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    name: []u8,
+    bs: i64
+) -> ![]u8 {
+    let param_type = find_spec_llvm_type_or_empty(params_spec, name);
+    if std::mem::len(param_type) > 0 {
+        return param_type;
+    }
+    let kizu_type = try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
+    return try compiled_type_lower::kizu_type_to_llvm_indexed(index, ir_bytes, module_prefix, kizu_type);
+}
+
+pub fn resolve_value_kizu_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    name: []u8,
+    bs: i64
+) -> ![]u8 {
+    let param_type = find_spec_llvm_type_or_empty(params_spec, name);
+    if std::mem::len(param_type) > 0 {
+        return try find_function_param_kizu_type_indexed(index, ir_bytes, function_name, name);
+    }
+    let fact_param = try find_function_param_kizu_type_or_empty_indexed(
+        index, ir_bytes, function_name, name
+    );
+    if std::mem::len(fact_param) > 0 {
+        return fact_param;
+    }
+    return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
+}
+
 pub fn struct_lookup_kizu_type(kizu_type: []u8) -> []u8 {
     let len = std::mem::len(kizu_type);
     if len > 0 and kizu_type[0] == cast<u8>(33) {
@@ -185,6 +229,47 @@ pub fn lower_call_return_type(
     }
     return try compiled_signature::resolve_call_return_type(
         ir_bytes, function_name, module_prefix, call_node, bs
+    );
+}
+
+// lower_call_return_type_indexed mirrors lower_call_return_type, routing every whole-IR
+// signature/type scan it performs through the sorted index. cross_module_callee_qualified_name_or_empty
+// stays on its linear path: it only does whole-IR work for alias-qualified cross-module
+// callees (a name carrying '::' that is not a stdlib call), which are rare relative to the
+// per-node same-module and stdlib calls this fixes.
+pub fn lower_call_return_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    call_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
+    );
+    let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee_name);
+    if std::mem::len(qualified) > 0 {
+        let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+            index, ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified
+        );
+        if std::mem::len(ret_kizu) == 0 {
+            return error("compiled mir: cross-module callee return type not found");
+        }
+        return try compiled_type_lower::kizu_type_to_llvm_indexed(
+            index, ir_bytes, compiled_util::module_prefix_of(qualified), ret_kizu
+        );
+    }
+    if compiled_fact_lookup::is_stdlib_callee(callee_name) {
+        let stdlib_ret = try compiled_fact_lookup::lookup_stdlib_return_indexed(
+            index, ir_bytes, callee_name
+        );
+        return try compiled_type_lower::kizu_type_to_llvm_indexed(
+            index, ir_bytes, module_prefix, stdlib_ret
+        );
+    }
+    return try compiled_signature::resolve_call_return_type_indexed(
+        index, ir_bytes, function_name, module_prefix, call_node, bs
     );
 }
 
@@ -598,6 +683,56 @@ pub fn resolve_field_expr_index(
     return info.field_index;
 }
 
+// resolve_field_expr_indexed mirrors resolve_field_expr, routing its two kizu_type_to_llvm
+// lowerings and the struct-field lookup through the sorted index. The body-fact reads
+// (mode/field-name/receiver) stay on their per-function _from scans, and the receiver type
+// resolution keeps its existing path; only the whole-IR type/struct scans are indexed.
+pub fn resolve_field_expr_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    bs: i64
+) -> !FieldAccessInfo {
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, expr_node, bs
+    );
+    if !std::mem::equal_bytes(mode, "field") {
+        return error("compiled mir: namespace field has no struct type");
+    }
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, expr_node, "field", bs
+    );
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr_node, "receiver", 0, bs
+    );
+    let receiver_kizu_type = try resolve_field_receiver_kizu_type(
+        ir_bytes, function_name, module_prefix, params_spec, receiver, bs
+    );
+    let receiver_llvm_type = try compiled_type_lower::kizu_type_to_llvm_indexed(
+        index, ir_bytes, module_prefix, receiver_kizu_type
+    );
+    let lookup_type = struct_lookup_kizu_type(receiver_kizu_type);
+    let field = try compiled_fact_lookup::lookup_struct_field_by_prefix_indexed(
+        index, ir_bytes, module_prefix, lookup_type, field_name
+    );
+    if !field.found {
+        return error("compiled function: struct field not found");
+    }
+    let field_llvm_type = try compiled_type_lower::kizu_type_to_llvm_indexed(
+        index, ir_bytes, module_prefix, field.field_type
+    );
+    return FieldAccessInfo {
+        receiver_kizu_type: receiver_kizu_type,
+        receiver_llvm_type: receiver_llvm_type,
+        field_index: field.index,
+        field_kizu_type: field.field_type,
+        field_llvm_type: field_llvm_type
+    };
+}
+
 pub fn resolve_field_expr(
     ir_bytes: []u8,
     function_name: []u8,
@@ -745,6 +880,52 @@ pub fn resolve_receiver_value_kizu_type(
         return param;
     }
     return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
+}
+
+// find_function_param_kizu_type_or_empty_indexed mirrors find_function_param_kizu_type_or_empty
+// but walks only the sorted index entries whose first two tokens are
+// 'function-signature-param <function_name>' instead of rescanning every IR line. The
+// param facts for one function share that two-token key, so the index groups them
+// contiguously in ascending line_start (file) order: iterating from first_matching_entry
+// while entry_matches_query holds visits exactly the same lines, in the same order, that
+// the linear scan's prefix+name+space test admits. Each entry's line begins with the
+// prefix, so the line_start + prefix_len + fn_len offset lands on the trailing space the
+// linear scan checks, and extract_param_kizu_type_from_line then parses identically.
+fn find_function_param_kizu_type_or_empty_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    name: []u8
+) -> ![]u8 {
+    let prefix = "function-signature-param ";
+    let prefix_len = std::mem::len(prefix);
+    let fn_len = std::mem::len(function_name);
+    var entry = ir_index::first_matching_entry(index, ir_bytes, prefix, ir_bytes[0..0], function_name);
+    while entry >= 0 and
+        ir_index::entry_matches_query(index, ir_bytes, entry, prefix, ir_bytes[0..0], function_name) {
+        let fn_end = ir_index::entry_line_start(index, entry) + prefix_len + fn_len;
+        let kizu_type = extract_param_kizu_type_from_line(ir_bytes, fn_end + 1, name);
+        if std::mem::len(kizu_type) > 0 {
+            return kizu_type;
+        }
+        entry = entry + 1;
+    }
+    return "";
+}
+
+fn find_function_param_kizu_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    name: []u8
+) -> ![]u8 {
+    let found = try find_function_param_kizu_type_or_empty_indexed(
+        index, ir_bytes, function_name, name
+    );
+    if std::mem::len(found) > 0 {
+        return found;
+    }
+    return error("compiled mir: param kizu type not found");
 }
 
 fn find_function_param_kizu_type_or_empty(
