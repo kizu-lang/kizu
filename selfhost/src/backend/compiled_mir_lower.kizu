@@ -4032,7 +4032,8 @@ fn lower_value_cursor_append_loop(
                 if std::mem::equal_bytes(body_kind, "ExprStmt") {
                     let expr_result = try lower_multi_expr_statement(
                         ir_bytes, function_name, module_prefix, llvm_return_type, params_spec,
-                        body_stmt, body_string_counter, body_try_counter, &body_aliases,
+                        body_stmt, body_string_counter, body_temp_counter, body_try_counter,
+                        &body_aliases,
                         &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
                     );
                     body_string_counter = expr_result.string_counter;
@@ -4238,7 +4239,8 @@ fn lower_embedded_value_cursor_append_loop(
                 if std::mem::equal_bytes(body_kind, "ExprStmt") {
                     let expr_result = try lower_multi_expr_statement(
                         ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-                        body_stmt, body_string_counter, body_try_counter, &body_aliases,
+                        body_stmt, body_string_counter, body_temp_counter, body_try_counter,
+                        &body_aliases,
                         &var body_stmts, bs, ir_lookup_index, call_arg_type_cache
                     );
                     body_string_counter = expr_result.string_counter;
@@ -4508,6 +4510,7 @@ pub fn lower_multi_statement_function(
                             locals_spec,
                             statement,
                             string_counter,
+                            temp_counter,
                             try_counter,
                             &aliases,
                             &var stmts,
@@ -5099,6 +5102,7 @@ fn lower_multi_expr_statement(
     locals_spec: []u8,
     statement: i64,
     string_counter: i64,
+    temp_counter: i64,
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
@@ -5262,10 +5266,13 @@ fn lower_multi_expr_statement(
                 locals_spec,
                 inner,
                 string_counter,
+                temp_counter,
                 try_counter,
                 aliases,
                 stmts,
-                bs
+                bs,
+                ir_lookup_index,
+                call_arg_type_cache
             );
         }
     }
@@ -5413,6 +5420,24 @@ fn lower_void_free_try_call_statement(
     };
 }
 
+// hoisted_try_arg_name builds the durable SSA name a hoisted 'try <call>' method-call argument
+// binds its unwrapped success into ('__try_arg<slot>', issue 1157 NEW-A). The 'try
+// ast.add_child(try declarations.get(index));' child-drain shape -- pervasive across parse_program /
+// parse_struct_decl / parse_call_with_args -- carries an inner 'try <call>' argument with no inline
+// MirCallArg descriptor, so it lowers into a preceding LetArrayGet/LetTryCall binding referenced by
+// a Var call arg. slot is the inner try-call's try index, unique per function, so the synthesized
+// names never collide. A direct String.as_bytes() view cannot escape into the MIR, so the name is
+// copied through a Map insertion (the same byte-copy boundary grammar_branch_carried_name uses).
+fn hoisted_try_arg_name(slot: i64) -> ![]u8 {
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes("__try_arg");
+    try std::fmt::append_i64(&var out, slot);
+    let name = out.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(name, name);
+    return try copied.get(name);
+}
+
 fn lower_void_method_try_call_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -5421,10 +5446,13 @@ fn lower_void_method_try_call_statement(
     locals_spec: []u8,
     call_node: i64,
     string_counter: i64,
+    temp_counter: i64,
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiExprLowerResult {
     let info = try method_call_info(
         ir_bytes, function_name, module_prefix, locals_spec, call_node, bs
@@ -5456,40 +5484,89 @@ fn lower_void_method_try_call_statement(
     try args.append(compiled_mir::var_call_arg(
         try arg_types.get(0), try local_alias_current_name(aliases, info.receiver_name)
     ));
+    // A 'try <call>' method argument (e.g. 'try ast.add_child(try declarations.get(index));', the
+    // child-drain loop body shared by parse_program / parse_struct_decl / parse_call_with_args) has
+    // no inline call-arg descriptor: its inner try-call propagates a failure of its own. Lower each
+    // such argument into a preceding LetArrayGet/LetTryCall statement that binds the unwrapped
+    // success into a synthesized %__try_arg<slot> local, then pass that local by Var. The hoisted
+    // let consumes the inner try index; the void call takes the next try index so their fail/cont
+    // block labels never collide.
+    var cur_string = string_counter;
+    var cur_temp = temp_counter;
+    var cur_try = try_counter;
+    var cur_locals = locals_spec;
     var arg_index = 0;
-    var consumed_strings = 0;
     while arg_index < explicit_arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, call_node, "arg", arg_index, bs
         );
-        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
-            return error("compiled mir: method try-call statement arg must be inline");
+        let arg_type = try arg_types.get(arg_index + 1);
+        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        if std::mem::equal_bytes(arg_kind, "TryExpr") {
+            let inner = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, arg_node, "value", 0, bs
+            );
+            let inner_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, inner, bs
+            );
+            if !std::mem::equal_bytes(inner_kind, "Call") {
+                return error("compiled mir: method try-call statement try arg must wrap a call");
+            }
+            let hoist_name = try hoisted_try_arg_name(cur_try);
+            var hoist_result = MultiLowerResult {
+                locals_spec: cur_locals,
+                string_counter: cur_string,
+                temp_counter: cur_temp,
+                try_counter: cur_try
+            };
+            if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+                hoist_result = try lower_multi_let_array_get(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, cur_locals,
+                    hoist_name, inner, cur_string, cur_temp, cur_try, aliases, stmts, bs,
+                    ir_lookup_index, call_arg_type_cache
+                );
+            } else {
+                hoist_result = try lower_multi_let_try_call(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, cur_locals,
+                    hoist_name, inner, cur_string, cur_temp, cur_try, aliases, stmts, bs,
+                    ir_lookup_index, call_arg_type_cache
+                );
+            }
+            cur_locals = hoist_result.locals_spec;
+            cur_string = hoist_result.string_counter;
+            cur_temp = hoist_result.temp_counter;
+            cur_try = hoist_result.try_counter;
+            try args.append(compiled_mir::var_call_arg(arg_type, hoist_name));
+        } else {
+            if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+                return error("compiled mir: method try-call statement arg must be inline");
+            }
+            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                cur_locals,
+                arg_type,
+                arg_node,
+                cur_string,
+                &alias_sources,
+                &alias_currents,
+                bs
+            );
+            if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
+                cur_string = cur_string + 1;
+            }
+            try args.append(scalar_arg);
         }
-        let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
-            ir_bytes,
-            function_name,
-            module_prefix,
-            locals_spec,
-            try arg_types.get(arg_index + 1),
-            arg_node,
-            string_counter + consumed_strings,
-            &alias_sources,
-            &alias_currents,
-            bs
-        );
-        if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
-            consumed_strings = consumed_strings + 1;
-        }
-        try args.append(scalar_arg);
         arg_index = arg_index + 1;
     }
     try stmts.append(compiled_mir::void_try_call_stmt(
         llvm_return_type, info.module_prefix, info.callee_name,
-        string_counter, try_counter, args
+        cur_string, cur_try, args
     ));
     return MultiExprLowerResult {
-        string_counter: string_counter + consumed_strings,
-        try_counter: try_counter + 1
+        string_counter: cur_string,
+        try_counter: cur_try + 1
     };
 }
 
@@ -7591,6 +7668,7 @@ fn lower_void_then_body(
                         body_locals,
                         statement,
                         body_strings,
+                        body_temps,
                         body_tries,
                         aliases,
                         then_body_stmts,
@@ -9831,6 +9909,7 @@ fn lower_branch_merge_block_prefix(
                         body_locals,
                         statement,
                         body_strings,
+                        body_temps,
                         body_tries,
                         aliases,
                         stmts,
@@ -10762,6 +10841,7 @@ fn lower_multi_while_statement(
                         locals_spec,
                         body_stmt,
                         body_string_counter,
+                        body_temp_counter,
                         body_try_counter,
                         &body_aliases,
                         &var body_stmts,

@@ -937,6 +937,97 @@ fn resolve_local_in_block_or_empty(
     }
     return "";
 }
+fn append_lower_snake_type_name(out: &var std::string::String, name: []u8) -> !void {
+    var index = 0;
+    while index < std::mem::len(name) {
+        let byte = name[index];
+        if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+            if index > 0 {
+                try out.append_byte(cast<u8>(95));
+            }
+            try out.append_byte(byte + cast<u8>(32));
+        } else {
+            try out.append_byte(byte);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// value_receiver_method_return_kizu_or_empty resolves the return kizu type of a value-receiver
+// method bound to a let ('let range = ast.finish_children(start);'), so a later field read on the
+// binding ('range.start') resolves the struct's fields. It derives the method symbol the same way
+// method_call_info does -- <impl-prefix><lower-snake receiver type>_<method> -- and reads the
+// function-signature-return fact. A bare named-type result (e.g. 'ChildRange') carries a type-llvm
+// fact only under its owning module, so it is requalified against the receiver type's module; the
+// suffix-matching struct-field lookup then resolves it cross-module. A primitive ('i64') has no
+// such fact and an already-qualified spelling needs none, so both are returned verbatim. "" means
+// the signature fact is absent, so the caller keeps its existing i64 fallback. This subsumes the
+// old i64 hardcode that mistyped every struct-returning value-receiver mutator (issue 1157 NEW-A:
+// finish_children -> ChildRange backs the child-range drain that feeds ast.add_call).
+fn value_receiver_method_return_kizu_or_empty(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    callee_node: i64,
+    method_name: []u8,
+    bs: i64
+) -> ![]u8 {
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, receiver, bs);
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return ir_bytes[0..0];
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    let receiver_kizu = try resolve_receiver_value_kizu_type(
+        ir_bytes, function_name, module_prefix, receiver_name, bs
+    );
+    let lookup_type = struct_lookup_kizu_type(receiver_kizu);
+    let type_prefix = compiled_util::module_prefix_of(lookup_type);
+    var impl_prefix = type_prefix;
+    if std::mem::len(impl_prefix) == 0 {
+        impl_prefix = module_prefix;
+    }
+    let type_name = lookup_type[std::mem::len(type_prefix)..std::mem::len(lookup_type)];
+    var qualified = std::string::String(std::mem::page_allocator());
+    try qualified.append_bytes(impl_prefix);
+    try append_lower_snake_type_name(&var qualified, type_name);
+    try qualified.append_byte(cast<u8>(95));
+    try qualified.append_bytes(method_name);
+    let qualified_view = qualified.as_bytes();
+    var copied_qualified = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied_qualified.insert(qualified_view, qualified_view);
+    let qualified_name = try copied_qualified.get(qualified_view);
+    let return_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+        ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified_name
+    );
+    if std::mem::len(return_kizu) == 0 {
+        return ir_bytes[0..0];
+    }
+    let colon = compiled_util::find_byte(return_kizu, cast<u8>(58), 0);
+    if colon < std::mem::len(return_kizu) {
+        return return_kizu;
+    }
+    var requalified = std::string::String(std::mem::page_allocator());
+    try requalified.append_bytes(impl_prefix);
+    try requalified.append_bytes(return_kizu);
+    let requalified_view = requalified.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(requalified_view, requalified_view);
+    let requalified_name = try copied.get(requalified_view);
+    let type_llvm = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+        ir_bytes, "type-llvm ", ir_bytes[0..0], requalified_name
+    );
+    if std::mem::len(type_llvm) == 0 {
+        return return_kizu;
+    }
+    return requalified_name;
+}
+
 // resolve_let_value_kizu_type resolves the declared kizu type of a let binding from
 // its initializer node.
 fn resolve_let_value_kizu_type(
@@ -1024,6 +1115,15 @@ fn resolve_let_value_kizu_type(
                         return "std::kizu::ast::AstNode";
                     }
                 }
+            }
+            // Other value-receiver methods (e.g. ast.finish_children -> ChildRange) resolve their
+            // real return type from the signature facts so a later field read on the binding
+            // resolves; only an absent fact falls back to the historical i64 (.len()/Arena.add).
+            let method_ret = try value_receiver_method_return_kizu_or_empty(
+                ir_bytes, function_name, module_prefix, callee_node, method_name, bs
+            );
+            if std::mem::len(method_ret) > 0 {
+                return method_ret;
             }
             return "i64";
         }
