@@ -6861,6 +6861,27 @@ fn lower_multi_return_statement(
         let try_inner_kind = try ir_contract::body_node_kind_from(
             ir_bytes, function_name, try_inner, bs
         );
+        if std::mem::equal_bytes(try_inner_kind, "Var") {
+            var var_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+            let var_result_id = try lower_expr_with_local_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                try_inner,
+                string_counter,
+                temp_counter,
+                &var var_insts,
+                aliases,
+                bs,
+                ir_lookup_index, call_arg_type_cache
+            );
+            let var_type = try return_try_expr_inst_llvm_type_by_id(&var_insts, var_result_id);
+            if !std::mem::equal_bytes(var_type, llvm_return_type) {
+                return error("compiled mir: return try variable must share the function's error union");
+            }
+            return compiled_mir::return_expr_stmt(string_counter, var_result_id, var_insts);
+        }
         if !std::mem::equal_bytes(try_inner_kind, "Call") {
             return error("compiled mir: return try must wrap a call");
         }
@@ -12987,6 +13008,21 @@ fn expr_inst_llvm_type_by_id(
         index = index + 1;
     }
     return error("compiled mir: assignment value expression result not found");
+}
+
+fn return_try_expr_inst_llvm_type_by_id(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    result_id: i64
+) -> ![]u8 {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == result_id {
+            return compiled_mir::expr_inst_llvm_type(inst);
+        }
+        index = index + 1;
+    }
+    return error("compiled mir: return try expression result not found");
 }
 
 // call_has_call_arg reports whether any argument of a Call node is itself a Call.
