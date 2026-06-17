@@ -184,6 +184,17 @@ fn lower_struct_field(
             bs
         );
     }
+    if std::mem::equal_bytes(field_value_kind, "Binary") {
+        return try lower_struct_field_computed_binary(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            field_index,
+            field_value,
+            bs
+        );
+    }
     if std::mem::equal_bytes(field_value_kind, "StructLiteralExpr") {
         return try lower_struct_field_struct(
             ir_bytes,
@@ -239,6 +250,95 @@ fn lower_struct_field_call(
         callee_module_prefix,
         callee_name,
         args
+    );
+}
+
+fn lower_struct_field_computed_binary(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    field_index: i64,
+    field_value: i64,
+    bs: i64
+) -> !compiled_mir::MirStructField {
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, field_value, bs
+    );
+    if !std::mem::equal_bytes(op, "sub") {
+        return error("compiled mir: unsupported computed struct field op");
+    }
+    let left = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_value, "left", 0, bs
+    );
+    let right = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_value, "right", 0, bs
+    );
+    let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right, bs);
+    if !std::mem::equal_bytes(right_kind, "Var") {
+        return error("compiled mir: computed struct field rhs must be Var");
+    }
+    let right_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, right, bs
+    );
+    let right_type = try compiled_mir_types::resolve_value_llvm_type(
+        ir_bytes, function_name, module_prefix, params_spec, right_name, bs
+    );
+    if !std::mem::equal_bytes(right_type, "i64") {
+        return error("compiled mir: computed struct field rhs must be i64");
+    }
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left, bs);
+    if !std::mem::equal_bytes(left_kind, "Call") {
+        return error("compiled mir: computed struct field lhs must be a call");
+    }
+    let callee = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, left, "callee", 0, bs
+    );
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee, "field", bs
+    );
+    if !std::mem::equal_bytes(method_name, "len") {
+        return error("compiled mir: computed struct field lhs call must be len");
+    }
+    let arg_count = try compiled_mir_types::count_call_args(ir_bytes, function_name, left, bs);
+    if arg_count != 0 {
+        return error("compiled mir: computed struct field len takes no arguments");
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    if !std::mem::equal_bytes(receiver_kind, "FieldExpr") {
+        return error("compiled mir: computed struct field len receiver must be a field access");
+    }
+    let root = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, receiver, "receiver", 0, bs
+    );
+    let root_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, root, bs);
+    if !std::mem::equal_bytes(root_kind, "Var") {
+        return error("compiled mir: computed struct field receiver must start with Var");
+    }
+    let root_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, root, bs
+    );
+    let field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, receiver, bs
+    );
+    let element_type = compiled_mir_types::array_value_element_kizu_type_or_empty(
+        compiled_mir_types::struct_lookup_kizu_type(field.field_kizu_type)
+    );
+    if std::mem::len(element_type) == 0 {
+        return error("compiled mir: computed struct field len receiver is not an Array");
+    }
+    return compiled_mir::computed_binary_struct_field(
+        field_index,
+        "i64",
+        root_name,
+        field.receiver_llvm_type,
+        field.field_index,
+        right_name
     );
 }
 

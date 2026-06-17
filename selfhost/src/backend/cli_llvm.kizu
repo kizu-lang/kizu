@@ -1011,17 +1011,30 @@ pub fn append_functions(
         "kizu_kizu__ast_ast_add_var_with_doc",
         "%kizu.kizu.ast.ast self;%kizu.kizu.ast.span span_value;%kizu.kizu.ast.symbol_id name;%kizu.kizu.ast.span doc"
     );
-    // issue 1157 worker-3 NEW-A child-arena open mutator: begin_children opens the AST child arena
-    // ('return self.children.len();'). The compiled root lowers its body through the Array self-field
-    // len accessor so synth_child_assembly's ast.begin_children call resolves and links. add_call
-    // (cross-module ChildRange struct literal + C2 payload), finish_children (computed-binary struct
-    // field), and add_child (Array append-on-self-field) are deferred to follow-up slices.
+    // issue 1157 NEW-A child-array mutators: begin_children opens the range, add_child appends a
+    // NodeId through the self.children Array field, and finish_children closes the range with a
+    // computed ChildRange.len. These compiled roots keep synth_child_assembly on the real method
+    // bodies; add_call, the i64 drain, and the value-carried append loop remain deferred.
     try compiled_llvm::append_compiled_function_auto_indexed(
         lookup_index,
         out, ir_bytes,
         "std::kizu::ast::ast_begin_children",
         "kizu_kizu__ast_ast_begin_children",
         "%kizu.kizu.ast.ast self"
+    );
+    try compiled_llvm::append_compiled_function_auto_indexed(
+        lookup_index,
+        out, ir_bytes,
+        "std::kizu::ast::ast_add_child",
+        "kizu_kizu__ast_ast_add_child",
+        "%kizu.kizu.ast.ast self;%kizu.kizu.ast.node_id child"
+    );
+    try compiled_llvm::append_compiled_function_auto_indexed(
+        lookup_index,
+        out, ir_bytes,
+        "std::kizu::ast::ast_finish_children",
+        "kizu_kizu__ast_ast_finish_children",
+        "%kizu.kizu.ast.ast self;i64 start"
     );
     try compiled_llvm::append_compiled_function_auto_indexed(
         lookup_index,
@@ -1951,12 +1964,11 @@ fn append_kizu_parser_reachable_compiled_functions(
     // leaf rather than the not-yet-lowered grammar helpers. Seeding it exercises the GrammarLoop
     // lowering on the native compiled path ahead of the real parse_primary consumer.
     try pending.append("synth_postfix_loop");
-    // synth_child_assembly is the issue 1157 worker-3 NEW-A fixture: it calls ast.begin_children(),
-    // the first child-array assembly mutator the real parse_call_with_args tail uses. Seeding it
-    // exercises the begin_children method-call lowering + body in isolation, replacing the
-    // parse_primary seed which pulls the whole recursive expression SCC (and its dozens of
-    // not-yet-lowered mutators). finish_children / add_child / add_call / the i64 drain / the
-    // value-carried parse_expr append loop are deferred to follow-up slices.
+    // synth_child_assembly is the issue 1157 NEW-A fixture: it opens a child range, appends one
+    // NodeId with ast.add_child, and closes it with ast.finish_children. Seeding it exercises the
+    // child-array mutator method-call lowering + bodies in isolation, replacing the parse_primary
+    // seed which pulls the whole recursive expression SCC. add_call, the i64 drain, and the
+    // value-carried parse_expr append loop are deferred.
     try pending.append("synth_child_assembly");
     // synth_append_loop is the issue 1157 worker-3 NEW-A fixture: it carries the parse_call_with_args
     // argument-loop CFG (a Token cursor through a value-cursor loop-head phi, a 'while

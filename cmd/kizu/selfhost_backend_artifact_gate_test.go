@@ -420,6 +420,7 @@ func requiredLLVMExecutableFragments() []string {
 	}
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMAstAccessorFragments()...)
+	fragments = append(fragments, requiredLLVMAstChildAssemblyFragments()...)
 	fragments = append(fragments, requiredLLVMArrayGetFragments()...)
 	fragments = append(fragments, requiredLLVMChildAtFragments()...)
 	fragments = append(fragments, requiredLLVMUnionAbiFragments()...)
@@ -623,6 +624,31 @@ func requiredLLVMAstAccessorFragments() []string {
 		"%result = call i64 @kizu_rt_array_len(%kizu.owned %arg0_0_ex)",
 		"define i64 @kizu_rt_array_len(%kizu.owned %array)",
 		"%len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2",
+	}
+}
+
+// requiredLLVMAstChildAssemblyFragments locks the issue-1157 NEW-A child-array
+// mutator body primitives compiled into stage2: a field-receiver Array.append,
+// ChildRange { len: self.children.len() - start }, and a synthetic caller that
+// threads begin/add/finish without a backend name-special-case.
+func requiredLLVMAstChildAssemblyFragments() []string {
+	return []string{
+		"define i64 @kizu_kizu__ast_ast_begin_children",
+		"define %kizu.error.void @kizu_kizu__ast_ast_add_child",
+		"%append0_receiver = extractvalue %kizu.kizu.ast.ast %self, 1",
+		"%append0_call = call %kizu.error.void @kizu_rt_array_append(" +
+			"%kizu.owned %append0_receiver, %kizu.slice.u8 %append0_eslice)",
+		"define %kizu.kizu.ast.child_range @kizu_kizu__ast_ast_finish_children",
+		"%fc0_1_receiver = extractvalue %kizu.kizu.ast.ast %self, 1",
+		"%fc0_1_left = call i64 @kizu_rt_array_len(%kizu.owned %fc0_1_receiver)",
+		"%fc0_1_value = sub i64 %fc0_1_left, %start",
+		"%v0_1 = insertvalue %kizu.kizu.ast.child_range %v0_0, i64 %fc0_1_value, 1",
+		"define %kizu.error.void @kizu_kizu__parser_synth_child_assembly",
+		"%t0 = call i64 @kizu_kizu__ast_ast_begin_children(%kizu.kizu.ast.ast %ast)",
+		"%voidtry0_call = call %kizu.error.void @kizu_kizu__ast_ast_add_child(" +
+			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %child)",
+		"%t1 = call %kizu.kizu.ast.child_range @kizu_kizu__ast_ast_finish_children(" +
+			"%kizu.kizu.ast.ast %ast, i64 %start)",
 	}
 }
 
