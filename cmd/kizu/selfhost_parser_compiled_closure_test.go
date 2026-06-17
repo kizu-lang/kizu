@@ -57,6 +57,9 @@ func parserCompiledClosureSeeds() []string {
 		// synth_parse_node_sig leaf, exercising the ValueCursorWhile lowering ahead of the real
 		// parse_call_with_args consumer.
 		"synth_append_loop",
+		// issue 1157 NEW-A integration fixture: combines append-loop, drain,
+		// begin/add/finish, and ast.add_call C2 with parse_expr replaced by synth_parse_node_sig.
+		"synth_collection_build",
 		// expect_ident exercises !Token ok-wrap/error arms.
 		"expect_ident",
 	}

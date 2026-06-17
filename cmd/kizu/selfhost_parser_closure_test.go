@@ -51,6 +51,9 @@ var parserClosureSeeds = []string{
 	// value-cursor latch), parsing each argument through the lowered synth_parse_node_sig leaf. It
 	// exercises the ValueCursorWhile lowering ahead of the real parse_call_with_args consumer.
 	"synth_append_loop",
+	// issue 1157 NEW-A integration fixture: combines append-loop, drain,
+	// begin/add/finish, and ast.add_call C2 with parse_expr replaced by synth_parse_node_sig.
+	"synth_collection_build",
 	// expect_ident exercises !Token ok-wrap and error arms.
 	"expect_ident",
 }

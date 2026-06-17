@@ -4089,11 +4089,215 @@ fn lower_value_cursor_append_loop(
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::value_cursor_while_stmt(
         cursor_var, cursor_type, init_name, llvm_return_type, cond_insts, cond_result, body_stmts,
-        latch, "vcw"
+        latch, "vcw", true
     ));
     return compiled_mir_function::multi_statement_function(
         llvm_symbol, llvm_return_type, params_spec, stmts
     );
+}
+
+fn value_cursor_previous_call_init_name_or_empty(
+    ir_bytes: []u8,
+    function_name: []u8,
+    stmt_index: i64,
+    bs: i64
+) -> ![]u8 {
+    if stmt_index == 0 {
+        return ir_bytes[0..0];
+    }
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", stmt_index - 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_stmt, "Let", bs)) {
+        return ir_bytes[0..0];
+    }
+    let init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_value, "Call", bs)) {
+        return ir_bytes[0..0];
+    }
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+}
+
+fn is_embedded_value_cursor_append_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    stmt_index: i64,
+    while_statement: i64,
+    bs: i64
+) -> !bool {
+    let cursor_var = try value_cursor_previous_call_init_name_or_empty(
+        ir_bytes, function_name, stmt_index, bs
+    );
+    if std::mem::len(cursor_var) == 0 {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    if !(try value_cursor_cond_is_prefix_not_call(ir_bytes, function_name, cond_node, bs)) {
+        return false;
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 2 {
+        return false;
+    }
+    let latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    if !(try value_cursor_latch_is_try_call(ir_bytes, function_name, latch_stmt, cursor_var, bs)) {
+        return false;
+    }
+    var body_index = 0;
+    while body_index < body_count - 1 {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        if try value_cursor_statement_is_array_append(ir_bytes, function_name, body_stmt, bs) {
+            return true;
+        }
+        body_index = body_index + 1;
+    }
+    return false;
+}
+
+fn lower_embedded_value_cursor_append_loop(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    while_statement: i64,
+    stmt_index: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiLowerResult {
+    let cursor_var = try value_cursor_previous_call_init_name_or_empty(
+        ir_bytes, function_name, stmt_index, bs
+    );
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes, function_name, module_prefix, locals_spec, cond_node,
+        string_counter, temp_counter, &var cond_insts, bs, ir_lookup_index, call_arg_type_cache
+    );
+    var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
+    var body_temp_counter = temp_counter + cond_insts.len();
+    var body_try_counter = try_counter;
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    let body_boundary = body_count - 1;
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer body_aliases.deinit();
+    var body_alias_counter = 0;
+    var body_index = 0;
+    while body_index < body_boundary {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, body_stmt,
+                body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+                &var body_stmts, bs, ir_lookup_index, call_arg_type_cache
+            );
+            body_string_counter = let_result.string_counter;
+            body_temp_counter = let_result.temp_counter;
+            body_try_counter = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(body_kind, "If") {
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, body_stmt,
+                    body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
+                    body_index + 1, &var body_aliases, &var body_stmts, bs, ir_lookup_index,
+                    call_arg_type_cache
+                );
+                body_temp_counter = if_result.temp_counter;
+                body_string_counter = if_result.string_counter;
+                body_try_counter = if_result.try_counter;
+                body_alias_counter = if_result.alias_counter;
+            } else {
+                if std::mem::equal_bytes(body_kind, "ExprStmt") {
+                    let expr_result = try lower_multi_expr_statement(
+                        ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+                        body_stmt, body_string_counter, body_try_counter, &body_aliases,
+                        &var body_stmts, bs, ir_lookup_index, call_arg_type_cache
+                    );
+                    body_string_counter = expr_result.string_counter;
+                    body_try_counter = expr_result.try_counter;
+                } else {
+                    return error("compiled mir: unsupported embedded append-while body statement");
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    let latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let latch_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, latch_stmt, "value", 0, bs
+    );
+    let latch_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, latch_value, "value", 0, bs
+    );
+    let latch_called_error_union = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, latch_call, bs
+    );
+    let cursor_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, latch_call, bs, ir_lookup_index
+    );
+    let latch_callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, latch_call, bs
+    );
+    let latch_callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, latch_call, bs
+    );
+    let latch_args = try compiled_mir_lower_call::lower_call_args_cached(
+        ir_bytes, function_name, module_prefix, locals_spec, latch_call, body_string_counter, bs,
+        ir_lookup_index, call_arg_type_cache
+    );
+    let latch_arg_strings = try compiled_mir_lower_call::count_string_args(&latch_args);
+    let latch = compiled_mir::MirLetTryCallStmt {
+        name: cursor_var,
+        called_error_union: latch_called_error_union,
+        success_type: cursor_type,
+        own_error_union: llvm_return_type,
+        call_module_prefix: latch_callee_module_prefix,
+        call_callee_name: latch_callee_name,
+        string_index: body_string_counter,
+        try_index: body_try_counter,
+        arg_insts: std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        call_args: latch_args
+    };
+    try stmts.append(compiled_mir::value_cursor_while_stmt(
+        cursor_var, cursor_type, cursor_var, llvm_return_type, cond_insts, cond_result,
+        body_stmts, latch, "vcw", false
+    ));
+    return MultiLowerResult {
+        locals_spec: locals_spec,
+        string_counter: body_string_counter + latch_arg_strings,
+        temp_counter: body_temp_counter,
+        try_counter: body_try_counter + 1
+    };
 }
 
 pub fn lower_multi_statement_function(
@@ -4210,26 +4414,50 @@ pub fn lower_multi_statement_function(
             try_counter = let_result.try_counter;
         } else {
             if std::mem::equal_bytes(stmt_kind, "While") {
-                let while_result = try lower_multi_while_statement(
-                    ir_bytes,
-                    function_name,
-                    module_prefix,
-                    llvm_return_type,
-                    locals_spec,
-                    statement,
-                    string_counter,
-                    temp_counter,
-                    alias_counter,
-                    stmt_index,
-                    &var aliases,
-                    &var stmts,
-                    bs,
-                    ir_lookup_index,
-                    &var call_arg_type_cache
-                );
-                temp_counter = while_result.temp_counter;
-                string_counter = while_result.string_counter;
-                alias_counter = while_result.alias_counter;
+                if try is_embedded_value_cursor_append_loop_shape(
+                    ir_bytes, function_name, stmt_index, statement, bs
+                ) {
+                    let cursor_result = try lower_embedded_value_cursor_append_loop(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        llvm_return_type,
+                        locals_spec,
+                        statement,
+                        stmt_index,
+                        string_counter,
+                        temp_counter,
+                        try_counter,
+                        &var stmts,
+                        bs,
+                        ir_lookup_index,
+                        &var call_arg_type_cache
+                    );
+                    string_counter = cursor_result.string_counter;
+                    temp_counter = cursor_result.temp_counter;
+                    try_counter = cursor_result.try_counter;
+                } else {
+                    let while_result = try lower_multi_while_statement(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        llvm_return_type,
+                        locals_spec,
+                        statement,
+                        string_counter,
+                        temp_counter,
+                        alias_counter,
+                        stmt_index,
+                        &var aliases,
+                        &var stmts,
+                        bs,
+                        ir_lookup_index,
+                        &var call_arg_type_cache
+                    );
+                    temp_counter = while_result.temp_counter;
+                    string_counter = while_result.string_counter;
+                    alias_counter = while_result.alias_counter;
+                }
             } else {
             if std::mem::equal_bytes(stmt_kind, "Return") {
                 try stmts.append(try lower_multi_return_statement(
@@ -5541,12 +5769,11 @@ fn lower_multi_let_statement(
                 try_counter: try_counter
             };
         }
-        // 'let comparison = compare_bytes(token_text(source, left_token), token_text(source,
-        // right_token));' carries nested call arguments the inline call-arg descriptors cannot
-        // model, so it lowers through the generic expression path (which materializes each
-        // nested call into a preceding expr temp) as a let-expr statement, mirroring the
-        // return-statement nested-call handling (issue 1165 / 1162).
-        if try call_has_call_arg(ir_bytes, function_name, let_value, bs) {
+        // Some call arguments have no inline MirCallArg descriptor: nested calls,
+        // struct literals, namespace field values, and checked single-element index loads.
+        // Lower those calls through the generic expression path so each computed argument
+        // is materialized into a temp first, mirroring return-statement handling.
+        if try call_has_hoisted_arg(ir_bytes, function_name, let_value, bs) {
             var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             let nested_result_id = try lower_expr_with_local_aliases(
                 ir_bytes,
@@ -13171,6 +13398,14 @@ fn lower_expr_call_with_local_aliases(
         return try lower_expr_method_call_with_local_aliases(
             ir_bytes, function_name, module_prefix, params_spec, expr_node,
             string_index, id_base, insts, aliases, bs, ir_lookup_index, call_arg_type_cache
+        );
+    }
+    if try callee_is_namespace_union_ctor(
+        ir_bytes, function_name, module_prefix, expr_node, bs, ir_lookup_index
+    ) {
+        return try lower_expr_union_ctor_call(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node,
+            string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
         );
     }
     if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, bs) {
