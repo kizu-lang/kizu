@@ -676,10 +676,27 @@ fn append_multi_array_try_append(
     try out.append_bytes("_es0, i64 ptrtoint (ptr getelementptr (");
     try out.append_bytes(stmt.element_llvm);
     try append_ll_line(out, ", ptr null, i32 1) to i64), 1");
+    if stmt.receiver_field_index >= 0 {
+        try out.append_bytes("  %append");
+        try std::fmt::append_i64(out, stmt.try_index);
+        try out.append_bytes("_receiver = extractvalue ");
+        try out.append_bytes(stmt.receiver_source_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(stmt.receiver_name);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, stmt.receiver_field_index);
+        try out.append_byte(cast<u8>(10));
+    }
     try out.append_bytes("  %append");
     try std::fmt::append_i64(out, stmt.try_index);
     try out.append_bytes("_call = call %kizu.error.void @kizu_rt_array_append(%kizu.owned %");
-    try out.append_bytes(stmt.receiver_name);
+    if stmt.receiver_field_index >= 0 {
+        try out.append_bytes("append");
+        try std::fmt::append_i64(out, stmt.try_index);
+        try out.append_bytes("_receiver");
+    } else {
+        try out.append_bytes(stmt.receiver_name);
+    }
     try out.append_bytes(", %kizu.slice.u8 %append");
     try std::fmt::append_i64(out, stmt.try_index);
     try append_ll_line(out, "_eslice)");
@@ -7062,17 +7079,23 @@ fn append_struct_body_at(
                     string_index
                 );
             } else {
-                if field.kind == compiled_mir::MirStructFieldKind::Call {
-                    try append_struct_call_field(
-                        out, llvm_symbol, llvm_return_type, field, string_index
+                if field.kind == compiled_mir::MirStructFieldKind::ComputedBinary {
+                    try append_struct_computed_binary_field(
+                        out, llvm_return_type, field, string_index
                     );
                 } else {
-                    if field.kind == compiled_mir::MirStructFieldKind::StructLiteral {
-                        try append_struct_nested_field(
+                    if field.kind == compiled_mir::MirStructFieldKind::Call {
+                        try append_struct_call_field(
                             out, llvm_symbol, llvm_return_type, field, string_index
                         );
                     } else {
-                        try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                        if field.kind == compiled_mir::MirStructFieldKind::StructLiteral {
+                            try append_struct_nested_field(
+                                out, llvm_symbol, llvm_return_type, field, string_index
+                            );
+                        } else {
+                            try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                        }
                     }
                 }
             }
@@ -7336,4 +7359,60 @@ fn append_struct_field_access(
     try std::fmt::append_i64(out, field.index);
     try out.append_byte(cast<u8>(10));
     return result_counter + 1;
+}
+
+fn append_struct_computed_binary_field(
+    out: &var std::string::String,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField,
+    prefix: i64
+) -> !void {
+    try out.append_bytes("  %fc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_receiver = extractvalue ");
+    try out.append_bytes(field.source_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(field.value);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.source_field_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %fc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_left = call i64 @kizu_rt_array_len(%kizu.owned %fc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_receiver)");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %fc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_value = sub i64 %fc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_left, %");
+    try out.append_bytes(field.computed_rhs_name);
+    try out.append_byte(cast<u8>(10));
+    try compiled_util::append_insertvalue_line_with_prefix(
+        out,
+        llvm_return_type,
+        field.index,
+        field.llvm_type,
+        field.index,
+        prefix
+    );
+    try out.append_bytes("%fc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_value, ");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_byte(cast<u8>(10));
+    return;
 }

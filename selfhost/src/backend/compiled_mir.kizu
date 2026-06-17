@@ -76,6 +76,7 @@ pub enum MirStructFieldKind {
     ConstBool,
     ConstEnumTag,
     FieldAccess,
+    ComputedBinary,
     EmptySlice,
     Call,
     StructLiteral,
@@ -99,6 +100,7 @@ pub struct MirStructField {
     pub source_type: []u8,
     pub source_field_index: i64,
     pub nested_source_type: []u8,
+    pub computed_rhs_name: []u8,
     pub call_module_prefix: []u8,
     pub call_callee_name: []u8,
     pub call_args: std::array::Array<MirCallArg>,
@@ -1168,6 +1170,8 @@ pub struct MirStringTryAppendStmt {
 // the call-argument Array holding the single appended value.
 pub struct MirArrayTryAppendStmt {
     pub receiver_name: []u8,
+    pub receiver_source_type: []u8,
+    pub receiver_field_index: i64,
     pub element_llvm: []u8,
     pub own_error_union: []u8,
     pub string_index: i64,
@@ -2285,6 +2289,7 @@ pub fn var_struct_field(index: i64, ty: []u8, name: []u8) -> MirStructField {
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2303,6 +2308,7 @@ pub fn string_struct_field(index: i64, payload: []u8) -> MirStructField {
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2321,6 +2327,7 @@ pub fn int_struct_field(index: i64, value: i64) -> MirStructField {
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2339,6 +2346,7 @@ pub fn bool_struct_field(index: i64, value: bool) -> MirStructField {
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2357,6 +2365,7 @@ pub fn enum_tag_struct_field(index: i64, tag: i64) -> MirStructField {
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2381,6 +2390,7 @@ pub fn field_access_struct_field(
         source_type: receiver_type,
         source_field_index: source_field_index,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2407,6 +2417,33 @@ pub fn nested_field_access_struct_field(
         source_type: receiver_type,
         source_field_index: source_field_index,
         nested_source_type: nested_type,
+        computed_rhs_name: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
+    };
+}
+
+pub fn computed_binary_struct_field(
+    index: i64,
+    field_type: []u8,
+    receiver_name: []u8,
+    receiver_type: []u8,
+    source_field_index: i64,
+    rhs_name: []u8
+) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::ComputedBinary,
+        llvm_type: field_type,
+        value: receiver_name,
+        int_value: -1,
+        bool_value: false,
+        source_type: receiver_type,
+        source_field_index: source_field_index,
+        nested_source_type: "",
+        computed_rhs_name: rhs_name,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2425,6 +2462,7 @@ pub fn empty_slice_struct_field(index: i64) -> MirStructField {
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2449,6 +2487,7 @@ pub fn call_struct_field(
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: call_module_prefix,
         call_callee_name: call_callee_name,
         call_args: call_args,
@@ -2471,6 +2510,7 @@ pub fn struct_literal_struct_field(
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
+        computed_rhs_name: "",
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2784,6 +2824,7 @@ pub fn copy_struct_field(field: &MirStructField) -> !MirStructField {
         source_type: field.source_type,
         source_field_index: field.source_field_index,
         nested_source_type: field.nested_source_type,
+        computed_rhs_name: field.computed_rhs_name,
         call_module_prefix: field.call_module_prefix,
         call_callee_name: field.call_callee_name,
         call_args: try copy_call_args(&field.call_args),
@@ -3096,6 +3137,30 @@ pub fn array_try_append_stmt(
 ) -> MirStmt {
     return MirStmt::ArrayTryAppend(MirArrayTryAppendStmt {
         receiver_name: receiver_name,
+        receiver_source_type: "",
+        receiver_field_index: -1,
+        element_llvm: element_llvm,
+        own_error_union: own_error_union,
+        string_index: string_index,
+        try_index: try_index,
+        call_args: args
+    });
+}
+
+pub fn array_field_try_append_stmt(
+    receiver_name: []u8,
+    receiver_source_type: []u8,
+    receiver_field_index: i64,
+    element_llvm: []u8,
+    own_error_union: []u8,
+    string_index: i64,
+    try_index: i64,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::ArrayTryAppend(MirArrayTryAppendStmt {
+        receiver_name: receiver_name,
+        receiver_source_type: receiver_source_type,
+        receiver_field_index: receiver_field_index,
         element_llvm: element_llvm,
         own_error_union: own_error_union,
         string_index: string_index,

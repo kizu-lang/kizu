@@ -4801,6 +4801,63 @@ fn while_carries_scalar_var(
     return false;
 }
 
+fn lower_field_array_append_try_call_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    receiver_node: i64,
+    arg_node: i64,
+    string_counter: i64,
+    try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiExprLowerResult {
+    let root = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, receiver_node, "receiver", 0, bs
+    );
+    let root_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, root, bs);
+    if !std::mem::equal_bytes(root_kind, "Var") {
+        return error("compiled mir: array append field receiver must start with Var");
+    }
+    let root_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, root, bs
+    );
+    let field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, receiver_node, bs
+    );
+    let element_kizu = compiled_mir_types::array_value_element_kizu_type_or_empty(
+        compiled_mir_types::struct_lookup_kizu_type(field.field_kizu_type)
+    );
+    if std::mem::len(element_kizu) == 0 {
+        return error("compiled mir: append receiver field is not a std::array::Array");
+    }
+    let element_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, module_prefix, element_kizu
+    );
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    let consumed_string = try lower_string_method_arg(
+        ir_bytes, function_name, module_prefix, element_llvm,
+        arg_node, string_counter, aliases, &var args, bs
+    );
+    try stmts.append(compiled_mir::array_field_try_append_stmt(
+        try local_alias_current_name(aliases, root_name),
+        field.receiver_llvm_type,
+        field.field_index,
+        element_llvm,
+        llvm_return_type,
+        string_counter,
+        try_counter,
+        args
+    ));
+    return MultiExprLowerResult {
+        string_counter: string_counter + consumed_string,
+        try_counter: try_counter + 1
+    };
+}
+
 // lower_multi_expr_statement lowers side-effecting expression statements. Try-call statements keep
 // the existing error-propagating paths for String append methods and free-function '!void' calls.
 // Non-try calls are accepted only for the validated owned-handle destructor shape
@@ -4859,6 +4916,26 @@ fn lower_multi_expr_statement(
     let receiver_kind = try ir_contract::body_node_kind_from(
         ir_bytes, function_name, receiver_node, bs
     );
+    let arg_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, inner, "arg", 0, bs
+    );
+    if std::mem::equal_bytes(method_name, "append") and
+        std::mem::equal_bytes(receiver_kind, "FieldExpr") {
+        return try lower_field_array_append_try_call_statement(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            receiver_node,
+            arg_node,
+            string_counter,
+            try_counter,
+            aliases,
+            stmts,
+            bs
+        );
+    }
     if !std::mem::equal_bytes(receiver_kind, "Var") {
         return error("compiled mir: string method receiver must be a local");
     }
@@ -4866,9 +4943,6 @@ fn lower_multi_expr_statement(
         ir_bytes, function_name, receiver_node, bs
     );
     let receiver_alias = try local_alias_current_name(aliases, receiver_name);
-    let arg_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, inner, "arg", 0, bs
-    );
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var consumed_string = 0;
     // 'try <receiver>.set(<index>, <value>);' on a std::array::Array<T> receiver
@@ -4952,7 +5026,19 @@ fn lower_multi_expr_statement(
                 string_counter, try_counter, args
             ));
         } else {
-            return error("compiled mir: unsupported string method");
+            return try lower_void_method_try_call_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                locals_spec,
+                inner,
+                string_counter,
+                try_counter,
+                aliases,
+                stmts,
+                bs
+            );
         }
     }
     }
@@ -5095,6 +5181,86 @@ fn lower_void_free_try_call_statement(
     ));
     return MultiExprLowerResult {
         string_counter: new_counter,
+        try_counter: try_counter + 1
+    };
+}
+
+fn lower_void_method_try_call_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    call_node: i64,
+    string_counter: i64,
+    try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiExprLowerResult {
+    let info = try method_call_info(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs
+    );
+    if !std::mem::equal_bytes(info.return_llvm_type, "%kizu.error.void") {
+        return error("compiled mir: method try-call statement must return !void");
+    }
+    let explicit_arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var arg_types = try compiled_mir_types::lower_call_arg_types(
+        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
+    );
+    defer arg_types.deinit();
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    var alias_index = 0;
+    while alias_index < aliases.len() {
+        let state = try aliases.at(alias_index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try alias_sources.append(state.source_name);
+            try alias_currents.append(state.current_name);
+        }
+        alias_index = alias_index + 1;
+    }
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    try args.append(compiled_mir::var_call_arg(
+        try arg_types.get(0), try local_alias_current_name(aliases, info.receiver_name)
+    ));
+    var arg_index = 0;
+    var consumed_strings = 0;
+    while arg_index < explicit_arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", arg_index, bs
+        );
+        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+            return error("compiled mir: method try-call statement arg must be inline");
+        }
+        let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            try arg_types.get(arg_index + 1),
+            arg_node,
+            string_counter + consumed_strings,
+            &alias_sources,
+            &alias_currents,
+            bs
+        );
+        if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
+            consumed_strings = consumed_strings + 1;
+        }
+        try args.append(scalar_arg);
+        arg_index = arg_index + 1;
+    }
+    try stmts.append(compiled_mir::void_try_call_stmt(
+        llvm_return_type, info.module_prefix, info.callee_name,
+        string_counter, try_counter, args
+    ));
+    return MultiExprLowerResult {
+        string_counter: string_counter + consumed_strings,
         try_counter: try_counter + 1
     };
 }
