@@ -7103,3 +7103,42 @@ fn synth_append_loop(
     }
     return close;
 }
+
+// synth_collection_build is the issue 1157 NEW-A integration fixture for the
+// parse_call_with_args tail. It keeps the real argument-loop, child-range drain,
+// begin_children/add_child/finish_children calls, and final add_call construction, with only the
+// recursive parse_expr leaf replaced by synth_parse_node_sig. The qualified ChildRange copy pins
+// cross-module struct literal type resolution without changing the control-flow shape.
+fn synth_collection_build(
+    args: &var std::array::Array<std::kizu::ast::NodeId>,
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    callee: std::kizu::ast::NodeId,
+    open: std::kizu::lexer::Token,
+    seed: ParseNode
+) -> !ParseNode {
+    var close = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_call_close_token(close) {
+        let start_token = try std::kizu::parser::expect_call_arg_start(close);
+        let arg = try std::kizu::parser::synth_parse_node_sig(seed);
+        try args.append(arg.node);
+        close = try std::kizu::parser::next_call_arg_token(text, arg.next);
+    }
+    let start = ast.begin_children();
+    var index = 0;
+    while index < args.len() {
+        try ast.add_child(try args.get(index));
+        index = index + 1;
+    }
+    let range = ast.finish_children(start);
+    let pinned = std::kizu::ast::ChildRange {
+        start: range.start,
+        len: range.len
+    };
+    let callee_node = ast.get(callee);
+    let call_span = std::kizu::ast::span(callee_node.span.start, close.end);
+    let node = ast.add_call(call_span, callee, pinned);
+    let next = std::kizu::lexer::next_token(text, close);
+    return std::kizu::parser::parse_node(node, next);
+}
