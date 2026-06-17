@@ -7070,3 +7070,33 @@ fn synth_child_assembly(ast: std::kizu::ast::Ast) -> i64 {
     let start = ast.begin_children();
     return start;
 }
+
+// synth_append_loop is the issue 1157 NEW-A synthetic fixture for the value-carried append-while
+// loop control-flow (worker-3). It is spelled with the exact CFG of the parse_call_with_args
+// argument loop -- a Token cursor threaded through a 'while !<pred>(<cursor>)' loop, accumulating
+// into a borrowed '&var Array<NodeId>' through 'try args.append(..)' and reassigning the cursor
+// through a free error-union try-call latch -- but its body parses each argument through the
+// already-lowered leaf synth_parse_node_sig (seeded from a ParseNode parameter) instead of the
+// not-yet-lowered recursive parse_expr, so the fixture stays a leaf and avoids the parser SCC. The
+// predicate (is_call_close_token) and the latch (next_call_arg_token) are the real, already-lowered
+// parser helpers, so the fixture exercises the ValueCursorWhile lowering -- the value-cursor
+// loop-head phi, the prefix-not bool-predicate-call condition, the borrowed-array void try-call
+// append, the free error-union try-call value-cursor latch, and the carried-value error-union return
+// -- end to end on the native compiled path, ahead of seeding the real parse_call_with_args tail
+// (which additionally needs the loop embedded mid-function with a next_token call seed and parse_expr
+// lowered). The argument loop lowers identically; only its seed, body call and surrounding statements
+// differ. It is only lowered, never executed.
+fn synth_append_loop(
+    args: &var std::array::Array<std::kizu::ast::NodeId>,
+    text: []u8,
+    first: std::kizu::lexer::Token,
+    seed: ParseNode
+) -> !std::kizu::lexer::Token {
+    var close = first;
+    while !std::kizu::parser::is_call_close_token(close) {
+        let arg = try std::kizu::parser::synth_parse_node_sig(seed);
+        try args.append(arg.node);
+        close = try std::kizu::parser::next_call_arg_token(text, arg.next);
+    }
+    return close;
+}
