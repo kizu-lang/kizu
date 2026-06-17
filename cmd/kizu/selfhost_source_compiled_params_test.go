@@ -65,7 +65,7 @@ func assertSharedCompiledClosurePath(t *testing.T, cli string) {
 
 	collector := selfhostKizuFunctionBody(t, cli, "fn collect_component_compiled_body_callees(")
 	for _, fragment := range []string{
-		"let body_start = ir_contract::body_facts_start(ir_bytes, name);",
+		"let body_start = ir_index::body_node_facts_start(lookup_index, ir_bytes, name);",
 		"ir_contract::body_node_count_from(ir_bytes, name, body_start)",
 		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, body_start)",
 		"ir_contract::body_call_callee_or_empty_from(",
