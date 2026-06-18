@@ -460,6 +460,11 @@ pub struct MirLetTryCallStmt {
 pub union MirValueCursorLatch {
     TryCall(MirLetTryCallStmt),
     FieldRead(MirLetExprStmt),
+    // PlainCall backs a '<cursor> = <free-call>(.. <body-local> ..);' latch -- a non-try call that
+    // reassigns the carried cursor (parse_import_segments: 'token = next_token(text, segment)').
+    // It returns no error union, so like FieldRead it stays in the latch block (no fail/cont split)
+    // and binds %<cursor>_next via append_while_latch_call_body, the scalar plain-call latch renderer.
+    PlainCall(MirLetCallStmt),
 }
 
 // MirReturnArrayGetStmt backs a multi-statement 'return self.<field>.get(<expr>);'
@@ -1755,6 +1760,7 @@ impl MirValueCursorLatch {
         match self {
             TryCall(payload) => payload.deinit(),
             FieldRead(payload) => payload.deinit(),
+            PlainCall(payload) => payload.deinit(),
         }
         return;
     }
@@ -3973,6 +3979,24 @@ pub fn value_cursor_field_read_latch(
         string_index: string_index,
         expr_result_id: result_id,
         expr_insts: insts
+    });
+}
+
+pub fn value_cursor_plain_call_latch(
+    name: []u8,
+    llvm_type: []u8,
+    string_index: i64,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirValueCursorLatch {
+    return MirValueCursorLatch::PlainCall(MirLetCallStmt {
+        name: name,
+        llvm_type: llvm_type,
+        string_index: string_index,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args
     });
 }
 

@@ -3803,6 +3803,23 @@ fn value_cursor_cond_is_prefix_not_call(
     return !(try callee_is_field_expr(ir_bytes, function_name, right, bs));
 }
 
+// value_cursor_cond_is_plain_call reports whether the while header is a bare bool-predicate call
+// '<pred>(<cursor>)' (no 'not' prefix), the parse_import_segments 'while is_double_colon(token)'
+// shape. A free-function call (callee is not a field-expr method) gates it apart from a borrowed
+// '.is_empty()' method probe; lowering evaluates the whole condition node through the generic
+// expression path, so the branch reads the predicate result directly with no negation to invert.
+fn value_cursor_cond_is_plain_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    cond_node: i64,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, cond_node, "Call", bs)) {
+        return false;
+    }
+    return !(try callee_is_field_expr(ir_bytes, function_name, cond_node, bs));
+}
+
 // value_cursor_statement_is_array_append reports whether a body statement is a 'try
 // <array>.append(<x>);' void try-call -- an ExprStmt wrapping a try-call of the 'append' method on
 // a local/param Array receiver (issue 1157 NEW-A). It is the append-while's accumulation step; the
@@ -3847,6 +3864,65 @@ fn value_cursor_statement_is_array_append(
     return try node_kind_is(ir_bytes, function_name, receiver_node, "Var", bs);
 }
 
+// value_cursor_statement_is_local_void_call reports whether the body statement at stmt_index is a
+// 'try <free-fn>(.. <body-local> ..);' void try-call that consumes a value bound by an earlier let
+// in the same loop body (parse_import_segments: 'try add_name_child(ast, segment)', where 'segment'
+// is the prior let). It is the embedded value-cursor loop's non-array accumulation step: the call
+// is a free function (callee is not a field-expr method, distinguishing it from the '.append(x)'
+// array case) and at least one Var argument resolves to a prior body-local, so this consumes the
+// loop-local work rather than a free side effect. The body lowering re-validates it through the
+// shared void-try-call path.
+fn value_cursor_statement_is_local_void_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    stmt_index: i64,
+    bs: i64
+) -> !bool {
+    let statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", stmt_index, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, statement, "ExprStmt", bs)) {
+        return false;
+    }
+    let expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "expr", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, expr, "TryExpr", bs)) {
+        return false;
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, inner, "Call", bs)) {
+        return false;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+        return false;
+    }
+    let arg_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, inner, "arg", bs
+    );
+    var arg_index = 0;
+    while arg_index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, inner, "arg", arg_index, bs
+        );
+        if try node_kind_is(ir_bytes, function_name, arg_node, "Var", bs) {
+            let arg_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, arg_node, bs
+            );
+            if try value_cursor_body_has_prior_let(
+                ir_bytes, function_name, body_node, stmt_index, arg_name, bs
+            ) {
+                return true;
+            }
+        }
+        arg_index = arg_index + 1;
+    }
+    return false;
+}
+
 // value_cursor_latch_is_try_call reports whether a body statement is a '<cursor> = try
 // <free-call>(..);' value-cursor latch -- an Assign whose target is the carried cursor Var and
 // whose value is a TryExpr wrapping a free-function call (issue 1157 NEW-A). The latch reassigns
@@ -3886,6 +3962,42 @@ fn value_cursor_latch_is_try_call(
         return false;
     }
     return !(try callee_is_field_expr(ir_bytes, function_name, inner, bs));
+}
+
+// value_cursor_latch_is_plain_call reports whether a body statement is a '<cursor> =
+// <free-call>(..);' value-cursor latch -- an Assign to the carried cursor Var whose value is a
+// non-try free-function Call (parse_import_segments: 'token = next_token(text, segment)'). It mirrors
+// value_cursor_latch_is_try_call but the call returns its success type directly (no error union), so
+// the loop-head phi reads %<cursor>_next from the latch block rather than a try-cont block. A
+// field-mode method call is rejected so only free helpers latch.
+fn value_cursor_latch_is_plain_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    cursor_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Assign", bs)) {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs), cursor_var
+    ) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "Call", bs)) {
+        return false;
+    }
+    return !(try callee_is_field_expr(ir_bytes, function_name, value, bs));
 }
 
 fn value_cursor_body_has_prior_let(
@@ -3986,6 +4098,9 @@ fn value_cursor_latch_is_supported(
         ir_bytes, function_name, body_node, "statement", latch_index, bs
     );
     if try value_cursor_latch_is_try_call(ir_bytes, function_name, statement, cursor_var, bs) {
+        return true;
+    }
+    if try value_cursor_latch_is_plain_call(ir_bytes, function_name, statement, cursor_var, bs) {
         return true;
     }
     return try value_cursor_latch_is_field_read(
@@ -6782,7 +6897,11 @@ fn is_embedded_value_cursor_append_loop_shape(
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, while_statement, "condition", 0, bs
     );
-    if !(try value_cursor_cond_is_prefix_not_call(ir_bytes, function_name, cond_node, bs)) {
+    // The header is either the prefix-not bool-predicate call ('while !is_at_end(token)') or a bare
+    // bool-predicate call ('while is_double_colon(token)', parse_import_segments); both carry the
+    // cursor and lower through the generic condition path.
+    if !(try value_cursor_cond_is_prefix_not_call(ir_bytes, function_name, cond_node, bs)) and
+        !(try value_cursor_cond_is_plain_call(ir_bytes, function_name, cond_node, bs)) {
         return false;
     }
     let body_node = try ir_contract::body_child_sequence_from(
@@ -6797,12 +6916,21 @@ fn is_embedded_value_cursor_append_loop_shape(
     )) {
         return false;
     }
+    // The accumulation step is either a 'try <arr>.append(x)' array push or a non-array
+    // 'try <free-fn>(.. <body-local> ..)' void try-call that consumes a prior body-local
+    // (parse_import_segments: 'try add_name_child(ast, segment)'). Either marks this as the
+    // value-cursor loop rather than a generic While; the latch already pinned the carried cursor.
     var body_index = 0;
     while body_index < body_count - 1 {
         let body_stmt = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, body_node, "statement", body_index, bs
         );
         if try value_cursor_statement_is_array_append(ir_bytes, function_name, body_stmt, bs) {
+            return true;
+        }
+        if try value_cursor_statement_is_local_void_call(
+            ir_bytes, function_name, body_node, body_index, bs
+        ) {
             return true;
         }
         body_index = body_index + 1;
@@ -6992,7 +7120,38 @@ fn lower_embedded_value_cursor_append_loop(
                 cursor_var, body_string_counter, 0, latch_insts
             );
         } else {
-            return error("compiled mir: unsupported embedded value-cursor latch");
+            if std::mem::equal_bytes(latch_value_kind, "Call") {
+                // A plain-call latch ('token = next_token(text, segment)') reassigns the cursor
+                // through a non-try free call: the return type is its success type directly (no
+                // error union), the args lower through the same cached path as the try-call latch,
+                // and the renderer binds %<cursor>_next in the latch block (no try fail/cont split).
+                cursor_type = try compiled_mir_types::lower_call_return_type_indexed(
+                    ir_lookup_index,
+                    ir_bytes, function_name, module_prefix, latch_value, bs
+                );
+                let latch_callee_name = try compiled_mir_types::lower_call_callee_name(
+                    ir_bytes, function_name, module_prefix, latch_value, bs
+                );
+                let latch_callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+                    ir_bytes, function_name, module_prefix, latch_value, bs
+                );
+                let latch_args = try compiled_mir_lower_call::lower_call_args_cached(
+                    ir_bytes, function_name, module_prefix, body_locals, latch_value,
+                    body_string_counter, bs, ir_lookup_index, call_arg_type_cache
+                );
+                let latch_arg_strings = try compiled_mir_lower_call::count_string_args(&latch_args);
+                latch = compiled_mir::value_cursor_plain_call_latch(
+                    cursor_var,
+                    cursor_type,
+                    body_string_counter,
+                    latch_callee_module_prefix,
+                    latch_callee_name,
+                    latch_args
+                );
+                result_string_counter = body_string_counter + latch_arg_strings;
+            } else {
+                return error("compiled mir: unsupported embedded value-cursor latch");
+            }
         }
     }
     try stmts.append(compiled_mir::value_cursor_while_stmt(
@@ -12802,6 +12961,17 @@ fn while_carries_induction_var(
                 );
                 if try value_cursor_latch_is_field_read(
                     ir_bytes, function_name, body_node, latch_index, target_name, bs
+                ) {
+                    return std::mem::equal_bytes(target_name, name);
+                }
+                // A value-cursor plain-call latch ('token = next_token(text, segment)',
+                // parse_import_segments) reassigns the carried cursor through a non-try free call.
+                // Like the field-read latch above, the cursor is carried by the value-cursor phi, not
+                // an i64 trailing increment, so classify it here and return whether it is the queried
+                // seed name -- otherwise the trailing-increment count below errors on the Call-valued
+                // tail (the embedded value-cursor lowerer handles the loop itself).
+                if try value_cursor_latch_is_plain_call(
+                    ir_bytes, function_name, latch_stmt, target_name, bs
                 ) {
                     return std::mem::equal_bytes(target_name, name);
                 }
