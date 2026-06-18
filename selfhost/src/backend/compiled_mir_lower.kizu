@@ -7801,24 +7801,44 @@ fn lower_void_method_try_call_statement(
             try args.append(compiled_mir::var_call_arg(arg_type, hoist_name));
         } else {
             if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
-                return error("compiled mir: method try-call statement arg must be inline");
+                // A bare Call argument returns a non-error-union value and has no inline call-arg
+                // descriptor, so hoist it ahead of the statement into 'let __try_arg<slot> = <call>;'
+                // and pass the bound local by Var (the non-try mirror of the TryExpr branch above).
+                // The hoist consumes one synthesized slot; advancing cur_try keeps its name distinct
+                // from later hoists and from the trailing void call's try index. Other must-hoist
+                // kinds (struct literal, namespace field, single-element index) stay inline-required.
+                if !std::mem::equal_bytes(arg_kind, "Call") {
+                    return error("compiled mir: method try-call statement arg must be inline");
+                }
+                let hoist_name = try hoisted_try_arg_name(cur_try);
+                let hoist_result = try lower_multi_let_call(
+                    ir_bytes, function_name, module_prefix, cur_locals,
+                    hoist_name, arg_node, cur_string, cur_temp, cur_try, aliases, stmts, bs,
+                    ir_lookup_index, call_arg_type_cache
+                );
+                cur_locals = hoist_result.locals_spec;
+                cur_string = hoist_result.string_counter;
+                cur_temp = hoist_result.temp_counter;
+                cur_try = hoist_result.try_counter + 1;
+                try args.append(compiled_mir::var_call_arg(arg_type, hoist_name));
+            } else {
+                let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    cur_locals,
+                    arg_type,
+                    arg_node,
+                    cur_string,
+                    &alias_sources,
+                    &alias_currents,
+                    bs
+                );
+                if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
+                    cur_string = cur_string + 1;
+                }
+                try args.append(scalar_arg);
             }
-            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
-                ir_bytes,
-                function_name,
-                module_prefix,
-                cur_locals,
-                arg_type,
-                arg_node,
-                cur_string,
-                &alias_sources,
-                &alias_currents,
-                bs
-            );
-            if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
-                cur_string = cur_string + 1;
-            }
-            try args.append(scalar_arg);
         }
         arg_index = arg_index + 1;
     }
@@ -8744,6 +8764,57 @@ fn lower_multi_let_try_call(
         string_counter: lowered_args.string_counter,
         temp_counter: lowered_args.temp_counter,
         try_counter: try_counter + 1
+    };
+}
+
+// lower_multi_let_call is the non-error-union mirror of lower_multi_let_try_call: it binds a
+// plain (non-try) call's success value into 'let <name> = <call>;' so a method try-call statement
+// argument that is itself a bare Call (e.g. 'ast.span(...)', which returns a non-error-union value
+// and therefore has no inline call-arg descriptor) can be hoisted ahead of the statement and passed
+// by Var. It emits a single MirLetCall with no fail/cont propagation, reusing the shared call
+// callee/module/arg resolvers, then extends the locals so later statements resolve the bound type.
+fn lower_multi_let_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    let_name: []u8,
+    call_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiLowerResult {
+    let call_type = try compiled_mir_types::lower_call_return_type_indexed(
+        ir_lookup_index,
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let args = try lower_call_args_with_local_aliases_cached(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs,
+        ir_lookup_index, call_arg_type_cache
+    );
+    let new_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, locals_spec, let_name, call_type
+    );
+    let new_counter = string_counter + try compiled_mir_lower_call::count_string_args(&args);
+    try stmts.append(compiled_mir::let_call_stmt(
+        let_name, call_type, string_counter, callee_module_prefix, callee_name, args
+    ));
+    return MultiLowerResult {
+        locals_spec: new_locals,
+        string_counter: new_counter,
+        temp_counter: temp_counter,
+        try_counter: try_counter
     };
 }
 
