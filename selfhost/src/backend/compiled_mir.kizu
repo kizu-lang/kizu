@@ -1001,6 +1001,29 @@ pub struct MirPrecedenceLoopStmt {
     pub label_base: []u8,
 }
 
+// MirTypeApplyLoopStmt backs parse_type_apply_expr_with_args' 'while true' loop:
+// a Token cursor seeded by a plain call, a per-iteration ParseNode try-call, a borrowed
+// Array append, a terminal '>' arm that builds children and returns a ParseNode, an error
+// guard for non-comma tokens, and a plain-call cursor latch. It is disjoint from the
+// existing cursor shapes: grammar-postfix has a Var seed plus nested reassignment arms,
+// value-cursor has a prefix-not header and try-call latch, and value-array has a
+// struct-field sentinel header. This shape keeps the bool-literal header but requires the
+// plain-call seed/latch and terminal construction arm.
+pub struct MirTypeApplyLoopStmt {
+    pub cursor_var: []u8,
+    pub cursor_type: []u8,
+    pub own_error_union: []u8,
+    pub init: MirLetCallStmt,
+    pub parse_arg: MirLetTryCallStmt,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub terminal_cond_insts: std::array::Array<MirExprInst>,
+    pub terminal_cond_result_id: i64,
+    pub terminal_stmts: std::array::Array<MirStmt>,
+    pub guard_stmts: std::array::Array<MirStmt>,
+    pub latch: MirLetCallStmt,
+    pub label_base: []u8,
+}
+
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
 // (tracker 961, scope 4 prerequisite). The renderer builds the (1, 1) start Position then returns
 // token_at at offset 0. Its nested call argument (position(1, 1)) the generic path does not model,
@@ -1328,6 +1351,7 @@ pub union MirStmt {
     GrammarLoop(MirGrammarLoopStmt),
     ValueCursorWhile(MirValueCursorWhileStmt),
     PrecedenceLoop(MirPrecedenceLoopStmt),
+    TypeApplyLoop(MirTypeApplyLoopStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
     ParserPostfixStart(MirParserPostfixStartStmt),
@@ -1894,6 +1918,19 @@ impl MirWhileStmt {
     }
 }
 
+impl MirTypeApplyLoopStmt {
+    fn deinit(self: MirTypeApplyLoopStmt) -> void {
+        self.init.deinit();
+        self.parse_arg.deinit();
+        self.body_stmts.deinit();
+        self.terminal_cond_insts.deinit();
+        self.terminal_stmts.deinit();
+        self.guard_stmts.deinit();
+        self.latch.deinit();
+        return;
+    }
+}
+
 impl MirStmt {
     fn deinit(self: MirStmt) -> void {
         match self {
@@ -1929,6 +1966,7 @@ impl MirStmt {
             GrammarLoop(payload) => payload.deinit(),
             ValueCursorWhile(payload) => payload.deinit(),
             PrecedenceLoop(payload) => payload.deinit(),
+            TypeApplyLoop(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
             ParserPostfixStart(payload) => payload.deinit(),
@@ -3642,6 +3680,36 @@ pub fn precedence_loop_stmt(
         body_stmts: body_stmts,
         value_latch: value_latch,
         scalar_latch: scalar_latch,
+        label_base: label_base
+    });
+}
+
+pub fn type_apply_loop_stmt(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    own_error_union: []u8,
+    init: MirLetCallStmt,
+    parse_arg: MirLetTryCallStmt,
+    body_stmts: std::array::Array<MirStmt>,
+    terminal_cond_insts: std::array::Array<MirExprInst>,
+    terminal_cond_result_id: i64,
+    terminal_stmts: std::array::Array<MirStmt>,
+    guard_stmts: std::array::Array<MirStmt>,
+    latch: MirLetCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::TypeApplyLoop(MirTypeApplyLoopStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        own_error_union: own_error_union,
+        init: init,
+        parse_arg: parse_arg,
+        body_stmts: body_stmts,
+        terminal_cond_insts: terminal_cond_insts,
+        terminal_cond_result_id: terminal_cond_result_id,
+        terminal_stmts: terminal_stmts,
+        guard_stmts: guard_stmts,
+        latch: latch,
         label_base: label_base
     });
 }

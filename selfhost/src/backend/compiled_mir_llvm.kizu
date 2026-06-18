@@ -434,6 +434,7 @@ fn append_multi_stmt(
         GrammarLoop(payload) => try append_grammar_loop(out, function, payload);,
         ValueCursorWhile(payload) => try append_value_cursor_while(out, function, payload);,
         PrecedenceLoop(payload) => try append_precedence_loop(out, function, payload);,
+        TypeApplyLoop(payload) => try append_type_apply_loop(out, function, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
         ParserSpanPredicate(payload) => try append_multi_parser_span_predicate(out, payload);,
         ParserPostfixStart(payload) => try append_multi_parser_postfix_start(out, payload);,
@@ -3046,6 +3047,109 @@ fn append_precedence_loop(
     return;
 }
 
+// append_type_apply_loop renders parse_type_apply_expr_with_args' bool-literal cursor loop. The
+// preheader seeds %current from a plain call, the head holds the Token phi, the body parses one
+// type arg through a try-call and appends it, the terminal block renders the child assembly and
+// returns, and the guard/latch path either returns the comma error or advances the cursor.
+fn append_type_apply_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirTypeApplyLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let parse_arg = &stmt.parse_arg;
+    let latch = &stmt.latch;
+    try append_call_inst(
+        out,
+        function.name,
+        init.name,
+        init.llvm_type,
+        init.call_module_prefix,
+        init.call_callee_name,
+        &init.call_args,
+        0
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.cursor_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(latch.name);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch ]");
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    try append_try_call_body(out, function.name, parse_arg, "", 1);
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 2);
+        body_index = body_index + 1;
+    }
+    try append_expr_insts(out, function.name, &stmt.terminal_cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(
+        out, &stmt.terminal_cond_insts, stmt.terminal_cond_result_id
+    );
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_terminal, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_guard");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_terminal:");
+    let terminal_stmts = &stmt.terminal_stmts;
+    var terminal_index = 0;
+    while terminal_index < terminal_stmts.len() {
+        let terminal_stmt = try terminal_stmts.at(terminal_index);
+        try append_multi_stmt(out, function, terminal_stmt, 100 + terminal_index);
+        terminal_index = terminal_index + 1;
+    }
+    if !try while_body_terminates(terminal_stmts) {
+        return error("compiled mir llvm: type-apply terminal arm must return");
+    }
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_guard:");
+    let guard_stmts = &stmt.guard_stmts;
+    var guard_index = 0;
+    while guard_index < guard_stmts.len() {
+        let guard_stmt = try guard_stmts.at(guard_index);
+        try append_multi_stmt(out, function, guard_stmt, 200 + guard_index);
+        guard_index = guard_index + 1;
+    }
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch:");
+    try append_call_inst(
+        out,
+        function.name,
+        latch.name,
+        latch.llvm_type,
+        latch.call_module_prefix,
+        latch.call_callee_name,
+        &latch.call_args,
+        300
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    return;
+}
+
 // append_token_kind_predicate_globals: the predicate forwards only its Token value, so it emits no
 // string-constant globals (tracker 961).
 fn append_token_kind_predicate_globals(stmt: &compiled_mir::MirTokenKindPredicateStmt) -> !void {
@@ -4120,6 +4224,46 @@ fn append_precedence_loop_globals(
     return;
 }
 
+fn append_type_apply_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirTypeApplyLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let parse_arg = &stmt.parse_arg;
+    let latch = &stmt.latch;
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &init.call_args
+    );
+    try append_let_try_call_globals(out, llvm_symbol, parse_arg);
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        body_index = body_index + 1;
+    }
+    try append_expr_globals(out, llvm_symbol, &stmt.terminal_cond_insts);
+    let terminal_stmts = &stmt.terminal_stmts;
+    var terminal_index = 0;
+    while terminal_index < terminal_stmts.len() {
+        let terminal_stmt = try terminal_stmts.at(terminal_index);
+        try append_stmt_globals(out, llvm_symbol, terminal_stmt);
+        terminal_index = terminal_index + 1;
+    }
+    let guard_stmts = &stmt.guard_stmts;
+    var guard_index = 0;
+    while guard_index < guard_stmts.len() {
+        let guard_stmt = try guard_stmts.at(guard_index);
+        try append_stmt_globals(out, llvm_symbol, guard_stmt);
+        guard_index = guard_index + 1;
+    }
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &latch.call_args
+    );
+    return;
+}
+
 // append_traversal_literal_text renders a literal arm's value: bool literals print
 // true/false, integer literals their decimal value.
 fn append_traversal_literal_text(
@@ -4591,6 +4735,7 @@ fn append_stmt_globals(
         GrammarLoop(payload) => try append_grammar_loop_globals(out, llvm_symbol, payload);,
         ValueCursorWhile(payload) => try append_value_cursor_while_globals(out, llvm_symbol, payload);,
         PrecedenceLoop(payload) => try append_precedence_loop_globals(out, llvm_symbol, payload);,
+        TypeApplyLoop(payload) => try append_type_apply_loop_globals(out, llvm_symbol, payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,
         ParserSpanPredicate(payload) => try append_parser_span_predicate_globals(payload);,
         ParserPostfixStart(payload) => try append_parser_postfix_start_globals(payload);,

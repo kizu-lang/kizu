@@ -4689,6 +4689,681 @@ fn lower_precedence_loop(
     );
 }
 
+fn type_apply_loop_bool_true_header(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_statement: i64,
+    bs: i64
+) -> !bool {
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, cond_node, "Bool", bs)) {
+        return false;
+    }
+    return std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, cond_node, bs),
+        "true"
+    );
+}
+
+fn type_apply_loop_let_is_plain_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Let", bs)) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "Call", bs)) {
+        return false;
+    }
+    return !(try callee_is_field_expr(ir_bytes, function_name, value, bs));
+}
+
+fn type_apply_loop_assign_is_plain_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    cursor_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Assign", bs)) {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs),
+        cursor_var
+    ) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "Call", bs)) {
+        return false;
+    }
+    return !(try callee_is_field_expr(ir_bytes, function_name, value, bs));
+}
+
+fn type_apply_loop_return_is_error_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Return", bs)) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "Call", bs)) {
+        return false;
+    }
+    return try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, value, bs);
+}
+
+fn type_apply_terminal_let_call_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    block_node: i64,
+    stmt_index: i64,
+    bs: i64
+) -> !bool {
+    let statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, block_node, "statement", stmt_index, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Let", bs)) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    return try node_kind_is(ir_bytes, function_name, value, "Call", bs);
+}
+
+fn type_apply_terminal_index_init_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    block_node: i64,
+    stmt_index: i64,
+    bs: i64
+) -> !bool {
+    let statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, block_node, "statement", stmt_index, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Let", bs)) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    return try node_kind_is(ir_bytes, function_name, value, "Int", bs);
+}
+
+fn type_apply_terminal_if_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "If", bs)) {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, cond_node, "Call", bs)) {
+        return false;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, cond_node, bs) {
+        return false;
+    }
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "then", 0, bs
+    );
+    let then_count = try while_body_statement_count(ir_bytes, function_name, then_node, bs);
+    if then_count != 7 {
+        return false;
+    }
+    if !(try type_apply_terminal_let_call_matches(ir_bytes, function_name, then_node, 0, bs)) {
+        return false;
+    }
+    if !(try type_apply_terminal_index_init_matches(ir_bytes, function_name, then_node, 1, bs)) {
+        return false;
+    }
+    let child_loop = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 2, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, child_loop, "While", bs)) {
+        return false;
+    }
+    if !(try type_apply_terminal_let_call_matches(ir_bytes, function_name, then_node, 3, bs)) {
+        return false;
+    }
+    if !(try type_apply_terminal_let_call_matches(ir_bytes, function_name, then_node, 4, bs)) {
+        return false;
+    }
+    if !(try type_apply_terminal_let_call_matches(ir_bytes, function_name, then_node, 5, bs)) {
+        return false;
+    }
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 6, bs
+    );
+    return try node_kind_is(ir_bytes, function_name, return_stmt, "Return", bs);
+}
+
+fn type_apply_error_guard_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "If", bs)) {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    if !(try value_cursor_cond_is_prefix_not_call(ir_bytes, function_name, cond_node, bs)) {
+        return false;
+    }
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "then", 0, bs
+    );
+    let then_count = try while_body_statement_count(ir_bytes, function_name, then_node, bs);
+    if then_count != 1 {
+        return false;
+    }
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    return try type_apply_loop_return_is_error_call(ir_bytes, function_name, return_stmt, bs);
+}
+
+// is_type_apply_loop_shape reports whether this function is the parse_type_apply_expr_with_args
+// cursor loop: a plain-call Token seed, a bool-literal 'while true' header, a try-call parse let,
+// a borrowed-array append, a terminal construction return arm, a comma error guard, a plain-call
+// cursor latch, and an unreachable trailing error return. This is orthogonal to the existing
+// while-true grammar-postfix shape because that one starts from a Var seed and its body is a
+// nested if/else reassignment chain; it also cannot overlap value-cursor/value-array loops, whose
+// headers are prefix-not and struct-sentinel comparisons rather than the bool literal.
+fn is_type_apply_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 3 {
+        return false;
+    }
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    if !(try type_apply_loop_let_is_plain_call(ir_bytes, function_name, init_stmt, bs)) {
+        return false;
+    }
+    let cursor_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    let cursor_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, cursor_name_node, bs
+    );
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, while_statement, "While", bs)) {
+        return false;
+    }
+    if !(try type_apply_loop_bool_true_header(ir_bytes, function_name, while_statement, bs)) {
+        return false;
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count != 5 {
+        return false;
+    }
+    let parse_arg_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    if !(try precedence_loop_let_is_free_try_call(ir_bytes, function_name, parse_arg_stmt, bs)) {
+        return false;
+    }
+    let append_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 1, bs
+    );
+    if !(try value_cursor_statement_is_array_append(ir_bytes, function_name, append_stmt, bs)) {
+        return false;
+    }
+    let terminal_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 2, bs
+    );
+    if !(try type_apply_terminal_if_matches(ir_bytes, function_name, terminal_stmt, bs)) {
+        return false;
+    }
+    let guard_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 3, bs
+    );
+    if !(try type_apply_error_guard_matches(ir_bytes, function_name, guard_stmt, bs)) {
+        return false;
+    }
+    let latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 4, bs
+    );
+    if !(try type_apply_loop_assign_is_plain_call(
+        ir_bytes, function_name, latch_stmt, cursor_var, bs
+    )) {
+        return false;
+    }
+    let trailing_return = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 2, bs
+    );
+    return try type_apply_loop_return_is_error_call(
+        ir_bytes, function_name, trailing_return, bs
+    );
+}
+
+fn lower_type_apply_nested_counted_while(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    while_statement: i64,
+    loop_index: i64,
+    induction_var: []u8,
+    induction_init: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    alias_counter: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiIfLowerResult {
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes, function_name, module_prefix, locals_spec, cond_node,
+        string_counter, temp_counter, &var cond_insts, bs, ir_lookup_index, call_arg_type_cache
+    );
+    var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
+    var body_temp_counter = temp_counter + cond_insts.len();
+    var body_try_counter = try_counter;
+    var body_alias_counter = alias_counter;
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    let latch_count = try while_trailing_increment_count(
+        ir_bytes, function_name, body_node, body_count, bs
+    );
+    let body_boundary = body_count - latch_count;
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_index = 0;
+    while body_index < body_boundary {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, body_stmt,
+                body_string_counter, body_temp_counter, body_try_counter, aliases,
+                &var body_stmts, bs, ir_lookup_index, call_arg_type_cache
+            );
+            body_string_counter = let_result.string_counter;
+            body_temp_counter = let_result.temp_counter;
+            body_try_counter = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(body_kind, "If") {
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, body_stmt,
+                    body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
+                    loop_index * 1000 + body_index + 1, aliases, &var body_stmts, bs,
+                    ir_lookup_index, call_arg_type_cache
+                );
+                body_string_counter = if_result.string_counter;
+                body_temp_counter = if_result.temp_counter;
+                body_try_counter = if_result.try_counter;
+                body_alias_counter = if_result.alias_counter;
+            } else {
+                if std::mem::equal_bytes(body_kind, "ExprStmt") {
+                    let expr_result = try lower_multi_expr_statement(
+                        ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+                        body_stmt, body_string_counter, body_temp_counter, body_try_counter,
+                        aliases, &var body_stmts, bs, ir_lookup_index, call_arg_type_cache
+                    );
+                    body_string_counter = expr_result.string_counter;
+                    body_try_counter = expr_result.try_counter;
+                } else {
+                    return error("compiled mir: unsupported type-apply child loop body statement");
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    let increment_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let step = try parse_induction_step(ir_bytes, function_name, increment_stmt, induction_var, bs);
+    try stmts.append(compiled_mir::while_stmt(
+        loop_index,
+        induction_var,
+        induction_init,
+        "",
+        0,
+        step,
+        cond_result,
+        cond_insts,
+        0,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
+        body_stmts,
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        "",
+        std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        -1,
+        false,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
+    ));
+    return MultiIfLowerResult {
+        temp_counter: body_temp_counter,
+        string_counter: body_string_counter,
+        try_counter: body_try_counter,
+        alias_counter: body_alias_counter
+    };
+}
+
+fn lower_type_apply_terminal_block(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    then_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    alias_counter: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    terminal_stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiIfLowerResult {
+    var terminal_locals = locals_spec;
+    var terminal_strings = string_counter;
+    var terminal_temps = temp_counter;
+    var terminal_tries = try_counter;
+    var terminal_alias_counter = alias_counter;
+    let then_count = try while_body_statement_count(ir_bytes, function_name, then_node, bs);
+    var body_index = 0;
+    while body_index < then_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, then_node, "statement", body_index, bs
+        );
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(stmt_kind, "Let") {
+            let next_statement = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, then_node, "statement", body_index + 1, bs
+            );
+            var is_nested_induction_seed = false;
+            if next_statement >= 0 {
+                let next_kind = try ir_contract::body_node_kind_from(
+                    ir_bytes, function_name, next_statement, bs
+                );
+                let value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "value", 0, bs
+                );
+                if std::mem::equal_bytes(next_kind, "While") and
+                    (try node_kind_is(ir_bytes, function_name, value, "Int", bs)) {
+                    is_nested_induction_seed = true;
+                }
+            }
+            if is_nested_induction_seed {
+                let name_node = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "name", 0, bs
+                );
+                let name = try ir_contract::body_token_or_empty_from(
+                    ir_bytes, function_name, name_node, bs
+                );
+                terminal_locals = try compiled_signature::extend_locals_spec(
+                    ir_bytes, terminal_locals, name, "i64"
+                );
+            } else {
+                let let_result = try lower_multi_let_statement(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, terminal_locals,
+                    statement, terminal_strings, terminal_temps, terminal_tries, aliases,
+                    terminal_stmts, bs, ir_lookup_index, call_arg_type_cache
+                );
+                terminal_locals = let_result.locals_spec;
+                terminal_strings = let_result.string_counter;
+                terminal_temps = let_result.temp_counter;
+                terminal_tries = let_result.try_counter;
+            }
+        } else {
+            if std::mem::equal_bytes(stmt_kind, "While") {
+                let init_stmt = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, then_node, "statement", body_index - 1, bs
+                );
+                let name_node = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, init_stmt, "name", 0, bs
+                );
+                let induction_var = try ir_contract::body_token_or_empty_from(
+                    ir_bytes, function_name, name_node, bs
+                );
+                let init_value = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, init_stmt, "value", 0, bs
+                );
+                let init_literal = try ir_contract::body_int_value_from(
+                    ir_bytes, function_name, init_value, bs
+                );
+                let while_result = try lower_type_apply_nested_counted_while(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, terminal_locals,
+                    statement, 7000 + body_index, induction_var, init_literal, terminal_strings,
+                    terminal_temps, terminal_tries, terminal_alias_counter, aliases,
+                    terminal_stmts, bs, ir_lookup_index, call_arg_type_cache
+                );
+                terminal_strings = while_result.string_counter;
+                terminal_temps = while_result.temp_counter;
+                terminal_tries = while_result.try_counter;
+                terminal_alias_counter = while_result.alias_counter;
+            } else {
+                if std::mem::equal_bytes(stmt_kind, "Return") {
+                    try terminal_stmts.append(try lower_multi_return_statement(
+                        ir_bytes, function_name, module_prefix, llvm_return_type, terminal_locals,
+                        statement, terminal_strings, terminal_temps, aliases, bs,
+                        ir_lookup_index, call_arg_type_cache
+                    ));
+                    let ret_stmt = try terminal_stmts.at(terminal_stmts.len() - 1);
+                    let advance = try continue_latch_return_advance(
+                        &ret_stmt, terminal_temps, terminal_strings
+                    );
+                    terminal_strings = advance.string_counter;
+                    terminal_temps = advance.temp_counter;
+                } else {
+                    return error("compiled mir: unsupported type-apply terminal statement");
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    return MultiIfLowerResult {
+        temp_counter: terminal_temps,
+        string_counter: terminal_strings,
+        try_counter: terminal_tries,
+        alias_counter: terminal_alias_counter
+    };
+}
+
+fn lower_type_apply_loop(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    var empty_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer empty_aliases.deinit();
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let cursor_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    let cursor_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, cursor_name_node, bs
+    );
+    let init_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    let init_name = try precedence_loop_suffixed_name(cursor_var, "_init");
+    let init = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        init_name, init_call, 0, &empty_aliases, bs, &var call_arg_type_cache
+    );
+    let cursor_type = init.llvm_type;
+    let init_string_counter = try compiled_mir_lower_call::count_string_args(&init.call_args);
+    let loop_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, params_spec, cursor_var, cursor_type
+    );
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let parse_arg_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    let arg_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, parse_arg_stmt, "name", 0, bs
+    );
+    let arg_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, arg_name_node, bs
+    );
+    let parse_arg_expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, parse_arg_stmt, "value", 0, bs
+    );
+    let parse_arg_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, parse_arg_expr, "value", 0, bs
+    );
+    let parse_arg = try lower_precedence_loop_try_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, llvm_return_type, loop_locals,
+        arg_var, parse_arg_call, init_string_counter, 0, 0, &empty_aliases, bs,
+        &var call_arg_type_cache
+    );
+    let arg_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, loop_locals, arg_var, parse_arg.success_type
+    );
+    var body_string_counter =
+        init_string_counter + try count_strings_in_insts(&parse_arg.arg_insts) +
+        try compiled_mir_lower_call::count_string_args(&parse_arg.call_args);
+    var body_temp_counter = parse_arg.arg_insts.len();
+    var body_try_counter = 1;
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer body_aliases.deinit();
+    let append_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 1, bs
+    );
+    let append_result = try lower_multi_expr_statement(
+        ir_bytes, function_name, module_prefix, llvm_return_type, arg_locals, append_stmt,
+        body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+        &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
+    );
+    body_string_counter = append_result.string_counter;
+    body_try_counter = append_result.try_counter;
+    let terminal_if = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 2, bs
+    );
+    let terminal_cond = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, terminal_if, "condition", 0, bs
+    );
+    var terminal_cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let terminal_cond_result = try lower_expr_with_local_aliases(
+        ir_bytes, function_name, module_prefix, arg_locals, terminal_cond,
+        body_string_counter, body_temp_counter, &var terminal_cond_insts, &body_aliases, bs,
+        ir_lookup_index, &var call_arg_type_cache
+    );
+    let terminal_string_counter =
+        body_string_counter + try count_strings_in_insts(&terminal_cond_insts);
+    let terminal_temp_counter = body_temp_counter + terminal_cond_insts.len();
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, terminal_if, "then", 0, bs
+    );
+    var terminal_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var terminal_aliases = try copy_local_aliases(&body_aliases);
+    defer terminal_aliases.deinit();
+    let terminal_result = try lower_type_apply_terminal_block(
+        ir_bytes, function_name, module_prefix, llvm_return_type, arg_locals, then_node,
+        terminal_string_counter, terminal_temp_counter, body_try_counter, 0,
+        &var terminal_aliases, &var terminal_stmts, bs, ir_lookup_index,
+        &var call_arg_type_cache
+    );
+    var guard_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var guard_aliases = try copy_local_aliases(&body_aliases);
+    defer guard_aliases.deinit();
+    let guard_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 3, bs
+    );
+    let guard_result = try lower_multi_if_statement(
+        ir_bytes, function_name, module_prefix, llvm_return_type, arg_locals, guard_stmt,
+        terminal_result.string_counter, terminal_result.temp_counter,
+        terminal_result.try_counter, terminal_result.alias_counter, 6000,
+        &var guard_aliases, &var guard_stmts, bs, ir_lookup_index, &var call_arg_type_cache
+    );
+    let latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 4, bs
+    );
+    let latch_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, latch_stmt, "value", 0, bs
+    );
+    let latch_name = try precedence_loop_suffixed_name(cursor_var, "_next");
+    let latch = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, arg_locals,
+        latch_name, latch_call, guard_result.string_counter, &guard_aliases, bs,
+        &var call_arg_type_cache
+    );
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::type_apply_loop_stmt(
+        cursor_var, cursor_type, llvm_return_type, init, parse_arg, body_stmts,
+        terminal_cond_insts, terminal_cond_result, terminal_stmts, guard_stmts,
+        latch, "taloop"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 fn value_cursor_previous_call_init_name_or_empty(
     ir_bytes: []u8,
     function_name: []u8,
@@ -4924,6 +5599,14 @@ pub fn lower_multi_statement_function(
     // (issue 1157).
     if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
         return try lower_grammar_postfix_loop(
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+    }
+    // A type-apply parser loop also uses a bool-literal 'while true' header, but its carried value
+    // is a Token cursor seeded and latched by plain calls, with a terminal child-construction return
+    // arm and a comma error guard. Route it before scalar/generic loop lowering.
+    if try is_type_apply_loop_shape(ir_bytes, function_name, statement_count, bs) {
+        return try lower_type_apply_loop(
             ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
     }
