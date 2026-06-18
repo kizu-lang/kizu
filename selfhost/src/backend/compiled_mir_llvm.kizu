@@ -2840,18 +2840,66 @@ fn append_grammar_loop(
     return;
 }
 
+fn append_value_cursor_latch_try_pred(
+    out: &var std::string::String,
+    payload: &compiled_mir::MirLetTryCallStmt
+) -> !void {
+    try out.append_bytes("%try");
+    try std::fmt::append_i64(out, payload.try_index);
+    try out.append_bytes("_cont");
+    return;
+}
+
+fn append_value_cursor_latch_block_pred(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirValueCursorWhileStmt
+) -> !void {
+    try out.append_bytes("%");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_latch");
+    return;
+}
+
+fn append_value_cursor_latch_pred(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirValueCursorWhileStmt
+) -> !void {
+    let latch = &stmt.latch;
+    match latch {
+        TryCall(payload) => try append_value_cursor_latch_try_pred(out, payload);,
+        FieldRead(payload) => try append_value_cursor_latch_block_pred(out, stmt);,
+        _ => return error("compiled mir llvm: value-cursor latch must be try-call or field expr");,
+    }
+    return;
+}
+
+fn append_value_cursor_latch(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirValueCursorWhileStmt,
+    local_prefix: i64
+) -> !void {
+    let latch = &stmt.latch;
+    match latch {
+        TryCall(payload) => try append_try_call_body(out, function.name, payload, "_next", local_prefix);,
+        FieldRead(payload) => try append_while_latch_field_access_let(out, payload);,
+        _ => return error("compiled mir llvm: value-cursor latch must be try-call or field expr");,
+    }
+    return;
+}
+
 // append_value_cursor_while renders a value-carried append-while loop (issue 1157 NEW-A) into a
 // head/body/latch/exit CFG. The head holds one loop-carried phi for the value cursor, named
 // %<cursor_var> so plain Var reads in the condition, body and latch resolve to it. The phi seeds
-// from %<init_name> on the entry edge and from the latch try-call's success on its tryK_cont
-// back-edge. The condition (the prefix-not bool-predicate call, cond_insts) is evaluated in the
-// head and branches to the body when true (loop continues) or to the exit when false. The body
-// statements lower through the same per-statement renderer the top level uses, so a borrowed '&var
-// Array' append renders as a void try-call; control falls through to the latch block, which
-// reassigns the cursor through the free error-union try-call (reused append_try_call_body, bound to
-// %<cursor>_next so the phi reads it on the back-edge) then branches back to the head. A failure
-// propagates as the function's own error union. The terminal exit wraps the cursor into
-// own_error_union and returns it, subsuming the source's trailing 'return <cursor>'.
+// from %<init_name> on the entry edge and from %<cursor>_next on the latch back-edge. The
+// condition (the prefix-not bool-predicate call, cond_insts) is evaluated in the head and branches
+// to the body when true (loop continues) or to the exit when false. The body statements lower
+// through the same per-statement renderer the top level uses, so a borrowed '&var Array' append
+// renders as a void try-call; control falls through to the latch block, which reassigns the cursor
+// through either a free error-union try-call or a field read from a prior body local, then branches
+// back to the head. A try-call failure propagates as the function's own error union. The terminal
+// exit wraps the cursor into own_error_union and returns it, subsuming the source's trailing
+// 'return <cursor>'.
 fn append_value_cursor_while(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -2863,7 +2911,8 @@ fn append_value_cursor_while(
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_head:");
     // One loop-carried phi for the value cursor: %<init_name> on the entry edge, %<cursor>_next on
-    // the latch try-call's tryK_cont back-edge.
+    // the latch edge. A try-call latch uses its tryK_cont block; a field latch falls through from
+    // the value-cursor latch block.
     try out.append_bytes("  %");
     try out.append_bytes(stmt.cursor_var);
     try out.append_bytes(" = phi ");
@@ -2872,9 +2921,9 @@ fn append_value_cursor_while(
     try out.append_bytes(stmt.init_name);
     try out.append_bytes(", %entry ], [ %");
     try out.append_bytes(stmt.cursor_var);
-    try out.append_bytes("_next, %try");
-    try std::fmt::append_i64(out, stmt.latch.try_index);
-    try append_ll_line(out, "_cont ]");
+    try out.append_bytes("_next, ");
+    try append_value_cursor_latch_pred(out, stmt);
+    try append_ll_line(out, " ]");
     try append_expr_insts(out, function.name, &stmt.cond_insts);
     try out.append_bytes("  br i1 ");
     try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
@@ -2897,10 +2946,9 @@ fn append_value_cursor_while(
     try append_ll_line(out, "_latch");
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_latch:");
-    // The latch try-call binds the cursor's next value to %<cursor>_next (consumed by the loop-head
-    // phi) and ends in its tryK_cont block; a failure returns this function's own error union. Its
-    // call-arg setup prefix is past the body statement prefixes so its SSA names never collide.
-    try append_try_call_body(out, function.name, &stmt.latch, "_next", body_stmts.len() + 1);
+    // The latch binds the cursor's next value to %<cursor>_next (consumed by the loop-head phi).
+    // Try-call latches end in tryK_cont; field-read latches remain in the latch block.
+    try append_value_cursor_latch(out, function, stmt, body_stmts.len() + 1);
     try out.append_bytes("  br label %");
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_head");
@@ -4178,7 +4226,20 @@ fn append_grammar_loop_globals(
 
 // append_value_cursor_while_globals emits the string-constant globals an append-while loop needs:
 // the condition's expression-instruction globals, each body statement's globals, and the latch
-// try-call's globals (issue 1157 NEW-A).
+// globals (issue 1157 NEW-A).
+fn append_value_cursor_latch_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    latch: &compiled_mir::MirValueCursorLatch
+) -> !void {
+    match latch {
+        TryCall(payload) => try append_let_try_call_globals(out, llvm_symbol, payload);,
+        FieldRead(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
+        _ => return error("compiled mir llvm: value-cursor latch must be try-call or field expr");,
+    }
+    return;
+}
+
 fn append_value_cursor_while_globals(
     out: &var std::string::String,
     llvm_symbol: []u8,
@@ -4192,7 +4253,7 @@ fn append_value_cursor_while_globals(
         try append_stmt_globals(out, llvm_symbol, body_stmt);
         index = index + 1;
     }
-    try append_let_try_call_globals(out, llvm_symbol, &stmt.latch);
+    try append_value_cursor_latch_globals(out, llvm_symbol, &stmt.latch);
     return;
 }
 

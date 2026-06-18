@@ -3888,6 +3888,111 @@ fn value_cursor_latch_is_try_call(
     return !(try callee_is_field_expr(ir_bytes, function_name, inner, bs));
 }
 
+fn value_cursor_body_has_prior_let(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    latch_index: i64,
+    local_name: []u8,
+    bs: i64
+) -> !bool {
+    var body_index = 0;
+    while body_index < latch_index {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        if try node_kind_is(ir_bytes, function_name, statement, "Let", bs) {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
+            );
+            if std::mem::equal_bytes(
+                try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs),
+                local_name
+            ) {
+                return true;
+            }
+        }
+        body_index = body_index + 1;
+    }
+    return false;
+}
+
+// value_cursor_latch_is_field_read reports whether the terminal body statement is
+// '<cursor> = <prior-let>.<field>;' -- an Assign to the carried cursor whose value is a
+// field-mode FieldExpr over a variable bound by an earlier let in the same loop body. The field
+// name is deliberately not dispatched on; lowering resolves its actual type from the receiver
+// struct facts and wires that value to the loop-head phi.
+fn value_cursor_latch_is_field_read(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    latch_index: i64,
+    cursor_var: []u8,
+    bs: i64
+) -> !bool {
+    let statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", latch_index, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Assign", bs)) {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs),
+        cursor_var
+    ) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "FieldExpr", bs)) {
+        return false;
+    }
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, value, bs
+    );
+    if !std::mem::equal_bytes(mode, "field") {
+        return false;
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "receiver", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, receiver, "Var", bs)) {
+        return false;
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    return try value_cursor_body_has_prior_let(
+        ir_bytes, function_name, body_node, latch_index, receiver_name, bs
+    );
+}
+
+fn value_cursor_latch_is_supported(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    latch_index: i64,
+    cursor_var: []u8,
+    bs: i64
+) -> !bool {
+    let statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", latch_index, bs
+    );
+    if try value_cursor_latch_is_try_call(ir_bytes, function_name, statement, cursor_var, bs) {
+        return true;
+    }
+    return try value_cursor_latch_is_field_read(
+        ir_bytes, function_name, body_node, latch_index, cursor_var, bs
+    );
+}
+
 // is_value_cursor_append_loop_shape reports whether this multi-statement function is the
 // value-carried append-while loop NEW-A targets (issue 1157): exactly 'var <cursor> = <var>; while
 // !<pred>(<cursor>) { <body incl. try <arr>.append(x)>; <cursor> = try <latch>(..); }; return
@@ -4109,18 +4214,18 @@ fn lower_value_cursor_append_loop(
         ir_bytes, function_name, module_prefix, params_spec, latch_call, body_string_counter, bs,
         ir_lookup_index, &var call_arg_type_cache
     );
-    let latch = compiled_mir::MirLetTryCallStmt {
-        name: cursor_var,
-        called_error_union: latch_called_error_union,
-        success_type: cursor_type,
-        own_error_union: llvm_return_type,
-        call_module_prefix: latch_callee_module_prefix,
-        call_callee_name: latch_callee_name,
-        string_index: body_string_counter,
-        try_index: body_try_counter,
-        arg_insts: std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        call_args: latch_args
-    };
+    let latch = compiled_mir::value_cursor_try_call_latch(
+        cursor_var,
+        latch_called_error_union,
+        cursor_type,
+        llvm_return_type,
+        latch_callee_module_prefix,
+        latch_callee_name,
+        body_string_counter,
+        body_try_counter,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        latch_args
+    );
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::value_cursor_while_stmt(
         cursor_var, cursor_type, init_name, llvm_return_type, cond_insts, cond_result, body_stmts,
@@ -5443,10 +5548,9 @@ fn is_embedded_value_cursor_append_loop_shape(
     if body_count < 2 {
         return false;
     }
-    let latch_stmt = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
-    );
-    if !(try value_cursor_latch_is_try_call(ir_bytes, function_name, latch_stmt, cursor_var, bs)) {
+    if !(try value_cursor_latch_is_supported(
+        ir_bytes, function_name, body_node, body_count - 1, cursor_var, bs
+    )) {
         return false;
     }
     var body_index = 0;
@@ -5551,48 +5655,94 @@ fn lower_embedded_value_cursor_append_loop(
     let latch_value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, latch_stmt, "value", 0, bs
     );
-    let latch_call = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, latch_value, "value", 0, bs
+    let latch_value_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, latch_value, bs
     );
-    let latch_called_error_union = try compiled_mir_types::lower_call_return_type_indexed(
-        ir_lookup_index,
-        ir_bytes, function_name, module_prefix, latch_call, bs
+    var cursor_type = "";
+    var result_string_counter = body_string_counter;
+    var result_temp_counter = body_temp_counter;
+    var result_try_counter = body_try_counter;
+    var latch = compiled_mir::value_cursor_field_read_latch(
+        cursor_var,
+        body_string_counter,
+        0,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator())
     );
-    let cursor_type = try try_call_success_type(
-        ir_bytes, function_name, module_prefix, latch_call, bs, ir_lookup_index
-    );
-    let latch_callee_name = try compiled_mir_types::lower_call_callee_name(
-        ir_bytes, function_name, module_prefix, latch_call, bs
-    );
-    let latch_callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-        ir_bytes, function_name, module_prefix, latch_call, bs
-    );
-    let latch_args = try compiled_mir_lower_call::lower_call_args_cached(
-        ir_bytes, function_name, module_prefix, locals_spec, latch_call, body_string_counter, bs,
-        ir_lookup_index, call_arg_type_cache
-    );
-    let latch_arg_strings = try compiled_mir_lower_call::count_string_args(&latch_args);
-    let latch = compiled_mir::MirLetTryCallStmt {
-        name: cursor_var,
-        called_error_union: latch_called_error_union,
-        success_type: cursor_type,
-        own_error_union: llvm_return_type,
-        call_module_prefix: latch_callee_module_prefix,
-        call_callee_name: latch_callee_name,
-        string_index: body_string_counter,
-        try_index: body_try_counter,
-        arg_insts: std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        call_args: latch_args
-    };
+    if std::mem::equal_bytes(latch_value_kind, "TryExpr") {
+        let latch_call = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, latch_value, "value", 0, bs
+        );
+        let latch_called_error_union = try compiled_mir_types::lower_call_return_type_indexed(
+            ir_lookup_index,
+            ir_bytes, function_name, module_prefix, latch_call, bs
+        );
+        cursor_type = try try_call_success_type(
+            ir_bytes, function_name, module_prefix, latch_call, bs, ir_lookup_index
+        );
+        let latch_callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, latch_call, bs
+        );
+        let latch_callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, latch_call, bs
+        );
+        let latch_args = try compiled_mir_lower_call::lower_call_args_cached(
+            ir_bytes, function_name, module_prefix, locals_spec, latch_call, body_string_counter, bs,
+            ir_lookup_index, call_arg_type_cache
+        );
+        let latch_arg_strings = try compiled_mir_lower_call::count_string_args(&latch_args);
+        latch = compiled_mir::value_cursor_try_call_latch(
+            cursor_var,
+            latch_called_error_union,
+            cursor_type,
+            llvm_return_type,
+            latch_callee_module_prefix,
+            latch_callee_name,
+            body_string_counter,
+            body_try_counter,
+            std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+            latch_args
+        );
+        result_string_counter = body_string_counter + latch_arg_strings;
+        result_try_counter = body_try_counter + 1;
+    } else {
+        if std::mem::equal_bytes(latch_value_kind, "FieldExpr") {
+            let receiver = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, latch_value, "receiver", 0, bs
+            );
+            let receiver_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, receiver, bs
+            );
+            if !std::mem::equal_bytes(receiver_kind, "Var") {
+                return error("compiled mir: value-cursor field latch receiver must be a local var");
+            }
+            let receiver_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, receiver, bs
+            );
+            let info = try compiled_mir_types::resolve_field_expr_indexed(
+                ir_lookup_index,
+                ir_bytes, function_name, module_prefix, locals_spec, latch_value, bs
+            );
+            cursor_type = info.field_llvm_type;
+            var latch_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+            try latch_insts.append(compiled_mir::field_access_expr_inst(
+                0, cursor_type, receiver_name, info.receiver_llvm_type, info.field_index
+            ));
+            latch = compiled_mir::value_cursor_field_read_latch(
+                cursor_var, body_string_counter, 0, latch_insts
+            );
+        } else {
+            return error("compiled mir: unsupported embedded value-cursor latch");
+        }
+    }
     try stmts.append(compiled_mir::value_cursor_while_stmt(
         cursor_var, cursor_type, cursor_var, llvm_return_type, cond_insts, cond_result,
         body_stmts, latch, "vcw", false
     ));
     return MultiLowerResult {
         locals_spec: locals_spec,
-        string_counter: body_string_counter + latch_arg_strings,
-        temp_counter: body_temp_counter,
-        try_counter: body_try_counter + 1
+        string_counter: result_string_counter,
+        temp_counter: result_temp_counter,
+        try_counter: result_try_counter
     };
 }
 

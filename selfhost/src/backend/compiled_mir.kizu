@@ -435,6 +435,11 @@ pub struct MirLetTryCallStmt {
     pub call_args: std::array::Array<MirCallArg>,
 }
 
+pub union MirValueCursorLatch {
+    TryCall(MirLetTryCallStmt),
+    FieldRead(MirLetExprStmt),
+}
+
 // MirReturnArrayGetStmt backs a multi-statement 'return self.<field>.get(<expr>);'
 // (Array<T>.get -> !T, tracker 961). It composes the ArrayGet body with an arbitrary
 // index expression: expr_insts/index_result_id lower the index (e.g. range.start +
@@ -951,18 +956,19 @@ pub struct MirGrammarLoopStmt {
 
 // MirValueCursorWhileStmt backs a value-carried append-while loop (the parse_call_with_args
 // argument loop, issue 1157 NEW-A): 'var <cursor> = <init>; while !<pred>(<cursor>) { <body
-// incl. try <arr>.append(x)>; <cursor> = try <latch>(..); }; return <cursor>;'. It is
+// incl. try <arr>.append(x)>; <cursor> = try <latch>(..); }; return <cursor>;'. Embedded loops
+// can also latch through '<cursor> = <prior-let>.next;'. It is
 // structurally distinct from the i64-induction While (whose condition compares a counter), the
 // value-array loop (whose condition is a struct-field sentinel) and the grammar loop (whose
 // condition is the bool literal 'true'): the condition is a prefix-not over a free bool-predicate
-// call and the latch reassigns the cursor through a free error-union try-call whose success value
-// is a struct, not an i64, so detecting it never diverts any of those. The renderer emits a
+// call and the latch reassigns the cursor through a free error-union try-call or a field read from
+// a prior body local, so detecting it never diverts any of those. The renderer emits a
 // head/body/latch/exit CFG: the head holds one loop-carried phi for the value cursor (named
 // <cursor_var> so plain Var reads in the condition, body and latch resolve to it) seeded from
-// init_name on the entry edge and from the latch try-call's success on its tryK_cont back-edge;
-// the body statements lower through the same per-statement machinery the top level uses (so a
-// borrowed '&var Array' append lowers as a void try-call), and the terminal exit wraps the cursor
-// into own_error_union and returns it. It owns the cond insts, body stmts and the latch try-call.
+// init_name on the entry edge and from %<cursor>_next on the latch back-edge; the body statements
+// lower through the same per-statement machinery the top level uses (so a borrowed '&var Array'
+// append lowers as a void try-call), and the terminal exit wraps the cursor into own_error_union
+// and returns it. It owns the cond insts, body stmts and the latch statement.
 pub struct MirValueCursorWhileStmt {
     pub cursor_var: []u8,
     pub cursor_type: []u8,
@@ -971,7 +977,7 @@ pub struct MirValueCursorWhileStmt {
     pub cond_insts: std::array::Array<MirExprInst>,
     pub cond_result_id: i64,
     pub body_stmts: std::array::Array<MirStmt>,
-    pub latch: MirLetTryCallStmt,
+    pub latch: MirValueCursorLatch,
     pub label_base: []u8,
     pub terminal_return: bool,
 }
@@ -1608,6 +1614,16 @@ impl MirLetTryCallStmt {
     fn deinit(self: MirLetTryCallStmt) -> void {
         self.arg_insts.deinit();
         self.call_args.deinit();
+        return;
+    }
+}
+
+impl MirValueCursorLatch {
+    fn deinit(self: MirValueCursorLatch) -> void {
+        match self {
+            TryCall(payload) => payload.deinit(),
+            FieldRead(payload) => payload.deinit(),
+        }
         return;
     }
 }
@@ -3634,7 +3650,7 @@ pub fn value_cursor_while_stmt(
     cond_insts: std::array::Array<MirExprInst>,
     cond_result_id: i64,
     body_stmts: std::array::Array<MirStmt>,
-    latch: MirLetTryCallStmt,
+    latch: MirValueCursorLatch,
     label_base: []u8,
     terminal_return: bool
 ) -> MirStmt {
@@ -3649,6 +3665,46 @@ pub fn value_cursor_while_stmt(
         latch: latch,
         label_base: label_base,
         terminal_return: terminal_return
+    });
+}
+
+pub fn value_cursor_try_call_latch(
+    name: []u8,
+    called_error_union: []u8,
+    success_type: []u8,
+    own_error_union: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    string_index: i64,
+    try_index: i64,
+    arg_insts: std::array::Array<MirExprInst>,
+    args: std::array::Array<MirCallArg>
+) -> MirValueCursorLatch {
+    return MirValueCursorLatch::TryCall(MirLetTryCallStmt {
+        name: name,
+        called_error_union: called_error_union,
+        success_type: success_type,
+        own_error_union: own_error_union,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        string_index: string_index,
+        try_index: try_index,
+        arg_insts: arg_insts,
+        call_args: args
+    });
+}
+
+pub fn value_cursor_field_read_latch(
+    name: []u8,
+    string_index: i64,
+    result_id: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirValueCursorLatch {
+    return MirValueCursorLatch::FieldRead(MirLetExprStmt {
+        name: name,
+        string_index: string_index,
+        expr_result_id: result_id,
+        expr_insts: insts
     });
 }
 
