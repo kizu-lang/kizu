@@ -435,6 +435,7 @@ fn append_multi_stmt(
         ValueCursorWhile(payload) => try append_value_cursor_while(out, function, payload);,
         PrecedenceLoop(payload) => try append_precedence_loop(out, function, payload);,
         DualCursorLoop(payload) => try append_dual_cursor_loop(out, function, payload);,
+        TrailingTokenLoop(payload) => try append_trailing_token_loop(out, function, payload);,
         TypeApplyLoop(payload) => try append_type_apply_loop(out, function, payload);,
         WhileMatchLoop(payload) => try append_while_match_loop(out, function, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
@@ -3207,6 +3208,87 @@ fn append_dual_cursor_loop(
     return;
 }
 
+// append_trailing_token_loop renders the dual Token-cursor advance loop (NEW-3 second half). The
+// entry block seeds %current through the plain init call; the head holds two same-type Token phis --
+// %current (init on the entry edge, %current_next on the body edge) and %previous (init on the entry
+// edge, matching 'var previous = current', and %current on the body edge, which IS the copy latch
+// 'previous = current'). The compound-AND header is evaluated eagerly and branches to the body or the
+// exit. The body advances %current through the plain latch call as %current_next and back-edges to
+// the head. The exit block is opened with no terminator: the owning function's post-loop statements
+// (lowered as ordinary trailing MirStmts that read the loop-carried %previous/%current phis) render
+// straight into it.
+fn append_trailing_token_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirTrailingTokenLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let latch = &stmt.latch;
+    try append_call_inst(
+        out,
+        function.name,
+        init.name,
+        init.llvm_type,
+        init.call_module_prefix,
+        init.call_callee_name,
+        &init.call_args,
+        0
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.current_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(stmt.current_var);
+    try out.append_bytes("_next, %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body ]");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.previous_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(stmt.current_var);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body ]");
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_body, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    try append_call_inst(
+        out,
+        function.name,
+        latch.name,
+        latch.llvm_type,
+        latch.call_module_prefix,
+        latch.call_callee_name,
+        &latch.call_args,
+        1
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit:");
+    return;
+}
+
 // append_type_apply_loop renders parse_type_apply_expr_with_args' bool-literal cursor loop. The
 // preheader seeds %current from a plain call, the head holds the Token phi, the body parses one
 // type arg through a try-call and appends it, the terminal block renders the child assembly and
@@ -4579,6 +4661,23 @@ fn append_dual_cursor_loop_globals(
     return;
 }
 
+fn append_trailing_token_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirTrailingTokenLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let latch = &stmt.latch;
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &init.call_args
+    );
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &latch.call_args
+    );
+    return;
+}
+
 fn append_type_apply_loop_globals(
     out: &var std::string::String,
     llvm_symbol: []u8,
@@ -5091,6 +5190,7 @@ fn append_stmt_globals(
         ValueCursorWhile(payload) => try append_value_cursor_while_globals(out, llvm_symbol, payload);,
         PrecedenceLoop(payload) => try append_precedence_loop_globals(out, llvm_symbol, payload);,
         DualCursorLoop(payload) => try append_dual_cursor_loop_globals(out, llvm_symbol, payload);,
+        TrailingTokenLoop(payload) => try append_trailing_token_loop_globals(out, llvm_symbol, payload);,
         TypeApplyLoop(payload) => try append_type_apply_loop_globals(out, llvm_symbol, payload);,
         WhileMatchLoop(payload) => try append_while_match_loop_globals(out, llvm_symbol, payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,

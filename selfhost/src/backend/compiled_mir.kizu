@@ -1122,6 +1122,35 @@ pub struct MirWhileMatchLoopStmt {
     pub label_base: []u8,
 }
 
+// MirTrailingTokenLoopStmt backs a dual Token-cursor advance loop that tracks the trailing token
+// (generic_type_allows_const_arg's '<'-walk, NEW-3 second half): 'var <current> = <plain init>; var
+// <previous> = <current>; while <current>.<field> < <other>.<field> and <predicate>(<current>) {
+// <previous> = <current>; <current> = <plain latch>(<current>); }; <post stmts using previous>'. Two
+// Token cursors share one type: the head holds a phi for <current> seeded from the plain init on the
+// entry edge and from %<current>_next on the body edge, plus a phi for <previous> seeded from the
+// same init on entry (matching 'var previous = current') and from the <current> phi on the body edge
+// (the copy latch 'previous = current' is purely that back-edge, so it carries no instruction). The
+// compound-AND header is lowered eagerly into cond_insts; the body advances <current> through the
+// plain latch and back-edges to the head. The exit block falls through (no terminator) so the
+// post-loop statements -- lowered as ordinary trailing MirStmts on the owning function and using the
+// loop-carried <previous>/<current> phis -- render straight into it. It is disjoint from
+// MirDualCursorLoopStmt (whose value seed is a Var-copy at statement 0, whose header is a single
+// predicate call, and whose body ends in a try-call value latch plus a plain-call scalar latch, with
+// a bare 'return <value>' exit) because here statement 0 is the plain-call seed, statement 1 the
+// Var-copy seed, the header is a compound AND, both latches are Assigns (no try-call), and the exit
+// runs arbitrary post-loop statements. It owns the init call, the condition insts, and the latch
+// call.
+pub struct MirTrailingTokenLoopStmt {
+    pub current_var: []u8,
+    pub previous_var: []u8,
+    pub token_type: []u8,
+    pub init: MirLetCallStmt,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub latch: MirLetCallStmt,
+    pub label_base: []u8,
+}
+
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
 // (tracker 961, scope 4 prerequisite). The renderer builds the (1, 1) start Position then returns
 // token_at at offset 0. Its nested call argument (position(1, 1)) the generic path does not model,
@@ -1450,6 +1479,7 @@ pub union MirStmt {
     ValueCursorWhile(MirValueCursorWhileStmt),
     PrecedenceLoop(MirPrecedenceLoopStmt),
     DualCursorLoop(MirDualCursorLoopStmt),
+    TrailingTokenLoop(MirTrailingTokenLoopStmt),
     TypeApplyLoop(MirTypeApplyLoopStmt),
     WhileMatchLoop(MirWhileMatchLoopStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
@@ -1930,6 +1960,15 @@ impl MirDualCursorLoopStmt {
     }
 }
 
+impl MirTrailingTokenLoopStmt {
+    fn deinit(self: MirTrailingTokenLoopStmt) -> void {
+        self.init.deinit();
+        self.cond_insts.deinit();
+        self.latch.deinit();
+        return;
+    }
+}
+
 impl MirTokenKindPredicateStmt {
     fn deinit(self: MirTokenKindPredicateStmt) -> void {
         self.variant_tags.deinit();
@@ -2114,6 +2153,7 @@ impl MirStmt {
             ValueCursorWhile(payload) => payload.deinit(),
             PrecedenceLoop(payload) => payload.deinit(),
             DualCursorLoop(payload) => payload.deinit(),
+            TrailingTokenLoop(payload) => payload.deinit(),
             TypeApplyLoop(payload) => payload.deinit(),
             WhileMatchLoop(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
@@ -3996,6 +4036,28 @@ pub fn dual_cursor_loop_stmt(
         body_stmts: body_stmts,
         value_latch: value_latch,
         scalar_latch: scalar_latch,
+        label_base: label_base
+    });
+}
+
+pub fn trailing_token_loop_stmt(
+    current_var: []u8,
+    previous_var: []u8,
+    token_type: []u8,
+    init: MirLetCallStmt,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    latch: MirLetCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::TrailingTokenLoop(MirTrailingTokenLoopStmt {
+        current_var: current_var,
+        previous_var: previous_var,
+        token_type: token_type,
+        init: init,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        latch: latch,
         label_base: label_base
     });
 }

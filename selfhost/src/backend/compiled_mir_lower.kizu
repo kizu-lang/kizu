@@ -4664,6 +4664,282 @@ fn is_dual_cursor_loop_shape(
     );
 }
 
+// trailing_token_field_receiver_is reports whether a node is a 'field-of-var' projection
+// '<var_name>.<field>' (a FieldExpr whose receiver is the plain Var <var_name>), e.g. the
+// 'current.start' operand of the compound-AND header. A nested or non-Var receiver returns false.
+fn trailing_token_field_receiver_is(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    var_name: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, node, "FieldExpr", bs)) {
+        return false;
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node, "receiver", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, receiver, "Var", bs)) {
+        return false;
+    }
+    return std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, receiver, bs),
+        var_name
+    );
+}
+
+// trailing_token_compare_uses_current_field reports whether a node is a relational comparison
+// (lt/lte/gt/gte) with at least one operand a '<current>.<field>' projection -- the
+// 'current.start < open.start' arm of the dual Token-cursor header. The carried Token's field drives
+// the loop's termination, distinguishing this from a constant or unrelated comparison.
+fn trailing_token_compare_uses_current_field(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    current_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, node, "Binary", bs)) {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, node, bs
+    );
+    if !(std::mem::equal_bytes(op, "lt") or std::mem::equal_bytes(op, "lte") or
+        std::mem::equal_bytes(op, "gt") or std::mem::equal_bytes(op, "gte")) {
+        return false;
+    }
+    let left = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node, "left", 0, bs
+    );
+    if try trailing_token_field_receiver_is(ir_bytes, function_name, left, current_var, bs) {
+        return true;
+    }
+    let right = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node, "right", 0, bs
+    );
+    return try trailing_token_field_receiver_is(ir_bytes, function_name, right, current_var, bs);
+}
+
+// trailing_token_predicate_uses_current reports whether a node is a side-effect-free bool predicate
+// over the carried Token cursor -- a plain call carrying <current> as a Var argument, optionally
+// wrapped in a prefix '!' (e.g. '!is_eof_token(current)'). It is the second AND arm of the header;
+// keeping it side-effect-free is what lets the compound condition lower eagerly.
+fn trailing_token_predicate_uses_current(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node: i64,
+    current_var: []u8,
+    bs: i64
+) -> !bool {
+    var call_node = node;
+    if try node_kind_is(ir_bytes, function_name, node, "Prefix", bs) {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-prefix ", function_name, node, bs
+        );
+        if !std::mem::equal_bytes(op, "not") {
+            return false;
+        }
+        call_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "right", 0, bs
+        );
+    }
+    if !(try node_kind_is(ir_bytes, function_name, call_node, "Call", bs)) {
+        return false;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, call_node, bs) {
+        return false;
+    }
+    return try dual_cursor_call_uses_carried_var(
+        ir_bytes, function_name, call_node, current_var, bs
+    );
+}
+
+// trailing_token_cond_is_compound_advance reports whether the while header is the compound AND
+// '<current>.<field> < <other>.<field> and <predicate>(<current>)' -- a field comparison advancing
+// against a bound plus a side-effect-free bool predicate, both carrying the <current> cursor. The
+// AND of a relational comparison with a predicate call is what distinguishes this header from the
+// dual-cursor loop's single predicate call and the precedence loop's bare '>=' comparison.
+fn trailing_token_cond_is_compound_advance(
+    ir_bytes: []u8,
+    function_name: []u8,
+    cond_node: i64,
+    current_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, cond_node, "Binary", bs)) {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, cond_node, bs
+    );
+    if !std::mem::equal_bytes(op, "and") {
+        return false;
+    }
+    let left = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "left", 0, bs
+    );
+    if !(try trailing_token_compare_uses_current_field(
+        ir_bytes, function_name, left, current_var, bs
+    )) {
+        return false;
+    }
+    let right = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, cond_node, "right", 0, bs
+    );
+    return try trailing_token_predicate_uses_current(
+        ir_bytes, function_name, right, current_var, bs
+    );
+}
+
+// trailing_token_copy_latch_matches reports whether a body statement is the copy latch
+// '<previous> = <current>;' -- an Assign to <previous> whose value is the plain Var <current>. This
+// is the trailing-token tracker step: it carries no instruction at lowering (the head <previous> phi
+// reads the <current> phi on the back edge), so detecting it here keeps the body to its two latches.
+fn trailing_token_copy_latch_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    previous_var: []u8,
+    current_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Assign", bs)) {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs), previous_var
+    ) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "Var", bs)) {
+        return false;
+    }
+    return std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, value, bs), current_var
+    );
+}
+
+// is_trailing_token_loop_shape reports whether this function is the dual Token-cursor advance loop
+// that tracks the trailing token (generic_type_allows_const_arg's '<'-walk, NEW-3 second half): 'var
+// <current> = <plain init>; var <previous> = <current>; while <current>.<field> < <other>.<field>
+// and <predicate>(<current>) { <previous> = <current>; <current> = <plain>(<current>); }; <post
+// stmts using previous>'. Both cursors share one Token type. It does not overlap the other while
+// shapes: the dual-cursor loop's statement 0 is a Var-copy (here it is the plain-call seed) and its
+// header is a single predicate call (here a compound AND), the precedence loop seeds its value with a
+// try-call and compares a scalar with '>=', grammar/type-apply/while-match loops use a bool-literal
+// header, value-cursor loops carry one value behind a prefix-not predicate, and counted induction
+// loops carry an arithmetic scalar latch. The distinguishing marks are the plain-call seed at
+// statement 0, the Var-copy second seed at statement 1, the compound-AND header, the
+// '<previous> = <current>' copy latch plus '<current> = <plain>(<current>)' advance latch, and the
+// post-loop statements that consume <previous>.
+fn is_trailing_token_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count < 4 {
+        return false;
+    }
+    let current_init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, current_init_stmt, "Let", bs)) {
+        return false;
+    }
+    let current_init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, current_init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, current_init_value, "Call", bs)) {
+        return false;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, current_init_value, bs) {
+        return false;
+    }
+    let current_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, current_init_stmt, "name", 0, bs
+    );
+    let current_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, current_name_node, bs
+    );
+    let previous_init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, previous_init_stmt, "Let", bs)) {
+        return false;
+    }
+    let previous_init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, previous_init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, previous_init_value, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, previous_init_value, bs),
+        current_var
+    ) {
+        return false;
+    }
+    let previous_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, previous_init_stmt, "name", 0, bs
+    );
+    let previous_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, previous_name_node, bs
+    );
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 2, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, while_statement, "While", bs)) {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    if !(try trailing_token_cond_is_compound_advance(
+        ir_bytes, function_name, cond_node, current_var, bs
+    )) {
+        return false;
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count != 2 {
+        return false;
+    }
+    let copy_latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    if !(try trailing_token_copy_latch_matches(
+        ir_bytes, function_name, copy_latch_stmt, previous_var, current_var, bs
+    )) {
+        return false;
+    }
+    let advance_latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 1, bs
+    );
+    if !(try dual_cursor_scalar_latch_matches(
+        ir_bytes, function_name, advance_latch_stmt, current_var, current_var, bs
+    )) {
+        return false;
+    }
+    let last_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", statement_count - 1, bs
+    );
+    return try node_kind_is(ir_bytes, function_name, last_stmt, "Return", bs);
+}
+
 // is_precedence_loop_shape reports whether this function is the two-carried-value
 // precedence-climbing loop targeted by issue 1157: exactly value try-call init, scalar
 // plain-call init from a carried-value field, a while header comparing that scalar with
@@ -5213,6 +5489,168 @@ fn lower_dual_cursor_loop(
         scalar_init, cond_insts, cond_result, body_stmts,
         value_latch, scalar_latch, "dcloop"
     ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
+// lower_trailing_token_loop lowers the dual Token-cursor advance loop (NEW-3 second half). It seeds
+// %<current> through the plain init call, lowers the compound-AND header eagerly, lowers the
+// '<current> = <plain>(<current>)' advance latch (the '<previous> = <current>' copy latch needs no
+// instruction -- it is the head <previous> phi's back edge), and emits one TrailingTokenLoop MirStmt
+// whose renderer opens a fall-through exit block. The post-loop statements (statement 3 onward) lower
+// through the same per-statement path the top-level function loop uses and are appended as ordinary
+// trailing MirStmts so they render into that open exit block, reading the loop-carried %<previous>
+// and %<current> phis. The post statements start their expr-temp window above the header insts so
+// %t<n> names never collide with the loop head's condition temps.
+fn lower_trailing_token_loop(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    var empty_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer empty_aliases.deinit();
+    // The current cursor is seeded by a plain call; its preheader phi value is %<current>_init.
+    let current_init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let current_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, current_init_stmt, "name", 0, bs
+    );
+    let current_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, current_name_node, bs
+    );
+    let current_init_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, current_init_stmt, "value", 0, bs
+    );
+    let init_name = try precedence_loop_suffixed_name(current_var, "_init");
+    let init = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        init_name, current_init_call, 0, &empty_aliases, bs, &var call_arg_type_cache
+    );
+    let token_type = init.llvm_type;
+    let init_string_counter = try compiled_mir_lower_call::count_string_args(&init.call_args);
+    // The previous cursor is a Var-copy of current; both cursors share the Token type.
+    let previous_init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let previous_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, previous_init_stmt, "name", 0, bs
+    );
+    let previous_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, previous_name_node, bs
+    );
+    let current_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, params_spec, current_var, token_type
+    );
+    let loop_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, current_locals, previous_var, token_type
+    );
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 2, bs
+    );
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes, function_name, module_prefix, loop_locals, cond_node,
+        init_string_counter, 0, &var cond_insts, bs,
+        ir_lookup_index, &var call_arg_type_cache
+    );
+    let cond_inst_count = cond_insts.len();
+    let cond_string_counter = init_string_counter + try count_strings_in_insts(&cond_insts);
+    // The advance latch '<current> = <plain>(<current>)' refreshes the cursor as %<current>_next.
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let advance_latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 1, bs
+    );
+    let advance_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, advance_latch_stmt, "value", 0, bs
+    );
+    let latch_name = try precedence_loop_suffixed_name(current_var, "_next");
+    let latch = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, loop_locals,
+        latch_name, advance_call, cond_string_counter, &empty_aliases, bs, &var call_arg_type_cache
+    );
+    let latch_string_counter =
+        cond_string_counter + try compiled_mir_lower_call::count_string_args(&latch.call_args);
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::trailing_token_loop_stmt(
+        current_var, previous_var, token_type, init, cond_insts, cond_result, latch, "ttloop"
+    ));
+    // The post-loop statements render into the loop's fall-through exit block. They read the
+    // loop-carried %<previous>/%<current> phis, so lower them with both cursors in scope, and start
+    // their expr-temp window past the header insts so %t<n> names never collide.
+    var post_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer post_aliases.deinit();
+    var post_locals = loop_locals;
+    var post_string_counter = latch_string_counter;
+    var post_temp_counter = cond_inst_count;
+    var post_try_counter = 0;
+    var post_alias_counter = 0;
+    var post_index = 3;
+    while post_index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", post_index, bs
+        );
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(stmt_kind, "Return") {
+            try stmts.append(try lower_multi_return_statement(
+                ir_bytes, function_name, module_prefix, llvm_return_type, post_locals, statement,
+                post_string_counter, post_temp_counter, &post_aliases, bs, ir_lookup_index,
+                &var call_arg_type_cache
+            ));
+        } else {
+            if std::mem::equal_bytes(stmt_kind, "If") {
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, post_locals, statement,
+                    post_string_counter, post_temp_counter, post_try_counter, post_alias_counter,
+                    post_index, &var post_aliases, &var stmts, bs, ir_lookup_index,
+                    &var call_arg_type_cache
+                );
+                post_temp_counter = if_result.temp_counter;
+                post_string_counter = if_result.string_counter;
+                post_try_counter = if_result.try_counter;
+                post_alias_counter = if_result.alias_counter;
+            } else {
+                if std::mem::equal_bytes(stmt_kind, "Let") {
+                    let let_result = try lower_multi_let_statement(
+                        ir_bytes, function_name, module_prefix, llvm_return_type, post_locals,
+                        statement, post_string_counter, post_temp_counter, post_try_counter,
+                        &post_aliases, &var stmts, bs, ir_lookup_index, &var call_arg_type_cache
+                    );
+                    post_locals = let_result.locals_spec;
+                    post_string_counter = let_result.string_counter;
+                    post_temp_counter = let_result.temp_counter;
+                    post_try_counter = let_result.try_counter;
+                } else {
+                    if std::mem::equal_bytes(stmt_kind, "ExprStmt") {
+                        let expr_result = try lower_multi_expr_statement(
+                            ir_bytes, function_name, module_prefix, llvm_return_type, post_locals,
+                            statement, post_string_counter, post_temp_counter, post_try_counter,
+                            &post_aliases, &var stmts, bs, ir_lookup_index, &var call_arg_type_cache
+                        );
+                        post_string_counter = expr_result.string_counter;
+                        post_try_counter = expr_result.try_counter;
+                    } else {
+                        return error("compiled mir: unsupported trailing-token-loop post statement");
+                    }
+                }
+            }
+        }
+        post_index = post_index + 1;
+    }
     return compiled_mir_function::multi_statement_function(
         llvm_symbol, llvm_return_type, params_spec, stmts
     );
@@ -6585,6 +7023,19 @@ pub fn lower_multi_statement_function(
     if try is_dual_cursor_loop_shape(ir_bytes, function_name, statement_count, bs) {
         return try lower_dual_cursor_loop(
             ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+    }
+    // A dual Token-cursor advance loop (generic_type_allows_const_arg's '<'-walk, NEW-3 second half)
+    // also threads two carried values, but seeds the first cursor by a plain call (statement 0) and
+    // the second by a Var-copy of it (statement 1), drives a compound-AND header ('<current>.<field>
+    // < <other>.<field> and <predicate>(<current>)'), latches '<previous> = <current>' (a copy carried
+    // purely by the back-edge phi) plus '<current> = <plain>(<current>)', and runs post-loop
+    // statements that consume <previous>. The dual-cursor loop's Var-copy-at-statement-0 / single
+    // predicate header / try-call value latch / bare value return have no analogue here, so route it.
+    if try is_trailing_token_loop_shape(ir_bytes, function_name, statement_count, bs) {
+        return try lower_trailing_token_loop(
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+            statement_count, bs
         );
     }
     // A value-carried append-while loop (the parse_call_with_args argument loop: a value cursor
