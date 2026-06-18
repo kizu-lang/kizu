@@ -1049,6 +1049,18 @@ fn resolve_local_in_block_or_empty(
     block_node: i64,
     bs: i64
 ) -> ![]u8 {
+    // A let binding directly in this block shadows any same-named binding in a
+    // nested while/if body, so resolve direct bindings before descending. Without
+    // the level-first pass, parse_closed_start_slice's then-block 'let end =
+    // ast.add_empty(...)' (a NodeId) would be returned for the enclosing 'let end =
+    // try parse_expr(...)' (a ParseNode) that a later outer statement's 'end.next'
+    // field read targets, mis-resolving the receiver to a fieldless NodeId.
+    let direct = try resolve_direct_let_in_block_or_empty(
+        ir_bytes, function_name, module_prefix, name, block_node, bs
+    );
+    if std::mem::len(direct) > 0 {
+        return direct;
+    }
     var stmt_index = 0;
     while true {
         let statement = try ir_contract::body_child_sequence_or_minus_one_from(
@@ -1058,19 +1070,6 @@ fn resolve_local_in_block_or_empty(
             return "";
         }
         let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
-        if std::mem::equal_bytes(stmt_kind, "Let") {
-            let name_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, statement, "name", 0, bs
-            );
-            let local_name = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, name_node, bs
-            );
-            if std::mem::equal_bytes(local_name, name) {
-                return try resolve_let_value_kizu_type(
-                    ir_bytes, function_name, module_prefix, statement, bs
-                );
-            }
-        }
         if std::mem::equal_bytes(stmt_kind, "While") {
             let body_node = try ir_contract::body_child_sequence_from(
                 ir_bytes, function_name, statement, "body", 0, bs
@@ -1112,6 +1111,45 @@ fn resolve_local_in_block_or_empty(
                 if std::mem::len(else_nested) > 0 {
                     return else_nested;
                 }
+            }
+        }
+        stmt_index = stmt_index + 1;
+    }
+    return "";
+}
+// resolve_direct_let_in_block_or_empty scans only the let bindings directly in
+// 'block_node' (without descending into nested while/if bodies) for one named
+// 'name', returning its kizu type or "" when absent. resolve_local_in_block_or_empty
+// runs this level-first so an enclosing-scope binding wins over a same-named one
+// bound inside a nested block, matching lexical scoping.
+fn resolve_direct_let_in_block_or_empty(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    name: []u8,
+    block_node: i64,
+    bs: i64
+) -> ![]u8 {
+    var stmt_index = 0;
+    while true {
+        let statement = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, block_node, "statement", stmt_index, bs
+        );
+        if statement < 0 {
+            return "";
+        }
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(stmt_kind, "Let") {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
+            );
+            let local_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, name_node, bs
+            );
+            if std::mem::equal_bytes(local_name, name) {
+                return try resolve_let_value_kizu_type(
+                    ir_bytes, function_name, module_prefix, statement, bs
+                );
             }
         }
         stmt_index = stmt_index + 1;
