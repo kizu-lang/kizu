@@ -5605,6 +5605,11 @@ fn lower_embedded_value_cursor_append_loop(
     var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer body_aliases.deinit();
     var body_alias_counter = 0;
+    // Body-local lets ('let statement = try parse_statement(...)') must be tracked so later body
+    // statements and the loop latch resolve their struct types; the outer locals_spec lacks them.
+    // Threading body_locals keeps 'statement.next' resolvable instead of mis-resolving the receiver
+    // to NodeId (issue 1157 NEW-1 field-read latch).
+    var body_locals = locals_spec;
     var body_index = 0;
     while body_index < body_boundary {
         let body_stmt = try ir_contract::body_child_sequence_from(
@@ -5613,17 +5618,18 @@ fn lower_embedded_value_cursor_append_loop(
         let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
         if std::mem::equal_bytes(body_kind, "Let") {
             let let_result = try lower_multi_let_statement(
-                ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, body_stmt,
+                ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
                 body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
                 &var body_stmts, bs, ir_lookup_index, call_arg_type_cache
             );
+            body_locals = let_result.locals_spec;
             body_string_counter = let_result.string_counter;
             body_temp_counter = let_result.temp_counter;
             body_try_counter = let_result.try_counter;
         } else {
             if std::mem::equal_bytes(body_kind, "If") {
                 let if_result = try lower_multi_if_statement(
-                    ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, body_stmt,
+                    ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
                     body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
                     body_index + 1, &var body_aliases, &var body_stmts, bs, ir_lookup_index,
                     call_arg_type_cache
@@ -5635,7 +5641,7 @@ fn lower_embedded_value_cursor_append_loop(
             } else {
                 if std::mem::equal_bytes(body_kind, "ExprStmt") {
                     let expr_result = try lower_multi_expr_statement(
-                        ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+                        ir_bytes, function_name, module_prefix, llvm_return_type, body_locals,
                         body_stmt, body_string_counter, body_temp_counter, body_try_counter,
                         &body_aliases,
                         &var body_stmts, bs, ir_lookup_index, call_arg_type_cache
@@ -5720,7 +5726,7 @@ fn lower_embedded_value_cursor_append_loop(
             );
             let info = try compiled_mir_types::resolve_field_expr_indexed(
                 ir_lookup_index,
-                ir_bytes, function_name, module_prefix, locals_spec, latch_value, bs
+                ir_bytes, function_name, module_prefix, body_locals, latch_value, bs
             );
             cursor_type = info.field_llvm_type;
             var latch_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
