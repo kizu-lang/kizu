@@ -436,6 +436,7 @@ fn append_multi_stmt(
         PrecedenceLoop(payload) => try append_precedence_loop(out, function, payload);,
         DualCursorLoop(payload) => try append_dual_cursor_loop(out, function, payload);,
         TypeApplyLoop(payload) => try append_type_apply_loop(out, function, payload);,
+        WhileMatchLoop(payload) => try append_while_match_loop(out, function, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
         ParserSpanPredicate(payload) => try append_multi_parser_span_predicate(out, payload);,
         ParserPostfixStart(payload) => try append_multi_parser_postfix_start(out, payload);,
@@ -3309,6 +3310,162 @@ fn append_type_apply_loop(
     return;
 }
 
+// append_while_match_loop renders a 'while true' + match-dispatch loop (parse_generic_type_end,
+// worker-3 NEW-4) into a head/body CFG. The preheader runs the plain-call cursor seed as
+// %<init.name>; the head holds one loop-carried phi for the cursor (named %<cursor> so plain Var
+// reads in the prefix lets and the dispatch arms resolve to it) seeded from %<init.name> on the
+// entry edge and from %<cursor>_next on the latch try-call's tryK_cont block. The body lowers the
+// prefix lets through the same per-statement renderer the top level uses (so the leading try-call
+// propagates a failure as the function's own error union), evaluates the scrutinee discriminant,
+// and runs an exhaustive icmp/br dispatch chain whose last arm is the unconditional fallthrough.
+// Each return arm rets through the dispatch-scoped return renderer (arm_scope-suffixed SSA so the
+// arm blocks never collide); the single latch arm reassigns the cursor through the shared try-call
+// (binding %<cursor>_next in its tryK_cont block) and branches back to the head. The source's
+// trailing 'return error(..)' after the loop is unreachable and not emitted, exactly like the
+// type-apply loop's.
+fn append_while_match_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirWhileMatchLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let latch = &stmt.latch;
+    try append_call_inst(
+        out,
+        function.name,
+        init.name,
+        init.llvm_type,
+        init.call_module_prefix,
+        init.call_callee_name,
+        &init.call_args,
+        0
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.cursor_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes("_next, %try");
+    try std::fmt::append_i64(out, latch.try_index);
+    try append_ll_line(out, "_cont ]");
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 1);
+        body_index = body_index + 1;
+    }
+    try append_expr_insts(out, function.name, &stmt.scrutinee_insts);
+    let arms = &stmt.arms;
+    let arm_count = arms.len();
+    let dispatch_prefix = 4242;
+    var index = 0;
+    while index < arm_count {
+        if index > 0 {
+            try append_dispatch_label(out, dispatch_prefix, "check_", index);
+            try append_ll_line(out, ":");
+        }
+        if index == arm_count - 1 {
+            try out.append_bytes("  br label %");
+            try append_dispatch_label(out, dispatch_prefix, "arm_", index);
+            try out.append_byte(cast<u8>(10));
+        } else {
+            let arm = try arms.at(index);
+            try out.append_bytes("  %");
+            try append_dispatch_label(out, dispatch_prefix, "is_", index);
+            try out.append_bytes(" = icmp eq i64 ");
+            try append_expr_value_ref(out, &stmt.scrutinee_insts, stmt.scrutinee_result_id);
+            try out.append_bytes(", ");
+            try std::fmt::append_i64(out, arm.tag);
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  br i1 %");
+            try append_dispatch_label(out, dispatch_prefix, "is_", index);
+            try out.append_bytes(", label %");
+            try append_dispatch_label(out, dispatch_prefix, "arm_", index);
+            try out.append_bytes(", label %");
+            try append_dispatch_label(out, dispatch_prefix, "check_", index + 1);
+            try out.append_byte(cast<u8>(10));
+        }
+        index = index + 1;
+    }
+    var arm_index = 0;
+    while arm_index < arm_count {
+        let arm = try arms.at(arm_index);
+        try append_dispatch_label(out, dispatch_prefix, "arm_", arm_index);
+        try append_ll_line(out, ":");
+        if arm.is_latch {
+            try append_try_call_body(
+                out, function.name, latch, "_next", dispatch_prefix * 1000 + arm_index
+            );
+            try out.append_bytes("  br label %");
+            try out.append_bytes(stmt.label_base);
+            try append_ll_line(out, "_head");
+        } else {
+            let arm_stmts = &arm.arm_stmts;
+            var stmt_index = 0;
+            while stmt_index < arm_stmts.len() {
+                let arm_stmt = try arm_stmts.at(stmt_index);
+                try append_dispatch_arm_return(
+                    out, function, arm_stmt, dispatch_prefix * 1000 + arm_index
+                );
+                stmt_index = stmt_index + 1;
+            }
+        }
+        arm_index = arm_index + 1;
+    }
+    return;
+}
+
+// append_while_match_loop_globals emits the string-literal globals the loop references: the
+// plain-call seed args, each prefix-let statement, the scrutinee insts, each return arm's lowered
+// return, and the latch try-call (worker-3 NEW-4).
+fn append_while_match_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirWhileMatchLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &init.call_args
+    );
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        body_index = body_index + 1;
+    }
+    try append_expr_globals(out, llvm_symbol, &stmt.scrutinee_insts);
+    let arms = &stmt.arms;
+    var arm_index = 0;
+    while arm_index < arms.len() {
+        let arm = try arms.at(arm_index);
+        let arm_stmts = &arm.arm_stmts;
+        var stmt_index = 0;
+        while stmt_index < arm_stmts.len() {
+            let arm_stmt = try arm_stmts.at(stmt_index);
+            try append_stmt_globals(out, llvm_symbol, arm_stmt);
+            stmt_index = stmt_index + 1;
+        }
+        arm_index = arm_index + 1;
+    }
+    try append_let_try_call_globals(out, llvm_symbol, &stmt.latch);
+    return;
+}
+
 // append_token_kind_predicate_globals: the predicate forwards only its Token value, so it emits no
 // string-constant globals (tracker 961).
 fn append_token_kind_predicate_globals(stmt: &compiled_mir::MirTokenKindPredicateStmt) -> !void {
@@ -4935,6 +5092,7 @@ fn append_stmt_globals(
         PrecedenceLoop(payload) => try append_precedence_loop_globals(out, llvm_symbol, payload);,
         DualCursorLoop(payload) => try append_dual_cursor_loop_globals(out, llvm_symbol, payload);,
         TypeApplyLoop(payload) => try append_type_apply_loop_globals(out, llvm_symbol, payload);,
+        WhileMatchLoop(payload) => try append_while_match_loop_globals(out, llvm_symbol, payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,
         ParserSpanPredicate(payload) => try append_parser_span_predicate_globals(payload);,
         ParserPostfixStart(payload) => try append_parser_postfix_start_globals(payload);,

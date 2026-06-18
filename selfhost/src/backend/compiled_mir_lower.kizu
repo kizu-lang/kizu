@@ -5893,6 +5893,374 @@ fn lower_type_apply_loop(
     );
 }
 
+// while_match_arm_body_or_minus_one returns the single statement node of a match arm body,
+// unwrapping a one-statement Block, or -1 if the arm body holds more than one statement.
+fn while_match_arm_body_or_minus_one(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arm_node: i64,
+    bs: i64
+) -> !i64 {
+    let body = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arm_node, "body", 0, bs
+    );
+    let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body, bs);
+    if std::mem::equal_bytes(body_kind, "Block") {
+        let extra = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, body, "statement", 1, bs
+        );
+        if extra >= 0 {
+            return 0 - 1;
+        }
+        return try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body, "statement", 0, bs
+        );
+    }
+    return body;
+}
+
+// while_match_body_is_cursor_try_latch reports whether a match-arm body statement is a cursor
+// latch '<cursor> = try <free-call>(..)': an Assign whose target is the loop cursor Var and whose
+// value is a TryExpr wrapping a non-field (free) Call.
+fn while_match_body_is_cursor_try_latch(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    cursor_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Assign", bs)) {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs),
+        cursor_var
+    ) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "TryExpr", bs)) {
+        return false;
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, inner, "Call", bs)) {
+        return false;
+    }
+    return !(try callee_is_field_expr(ir_bytes, function_name, inner, bs));
+}
+
+// while_match_arms_are_supported validates the match dispatch arms: at least two arms, exactly one
+// cursor-latch arm, every other arm a single 'return', and the final (exhaustive fallthrough) arm a
+// return arm rather than the latch. This keeps the latch off the unconditional fallthrough block so
+// it always reaches the loop head through an explicit icmp.
+fn while_match_arms_are_supported(
+    ir_bytes: []u8,
+    function_name: []u8,
+    match_stmt: i64,
+    cursor_var: []u8,
+    bs: i64
+) -> !bool {
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, match_stmt, "arm", bs
+    );
+    if arm_count < 2 {
+        return false;
+    }
+    var latch_count = 0;
+    var index = 0;
+    while index < arm_count {
+        let arm_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, match_stmt, "arm", index, bs
+        );
+        let body = try while_match_arm_body_or_minus_one(ir_bytes, function_name, arm_node, bs);
+        if body < 0 {
+            return false;
+        }
+        if try while_match_body_is_cursor_try_latch(ir_bytes, function_name, body, cursor_var, bs) {
+            if index == arm_count - 1 {
+                return false;
+            }
+            latch_count = latch_count + 1;
+        } else {
+            if !(try node_kind_is(ir_bytes, function_name, body, "Return", bs)) {
+                return false;
+            }
+        }
+        index = index + 1;
+    }
+    return latch_count == 1;
+}
+
+// is_while_match_loop_shape reports whether this function is parse_generic_type_end's 'while true'
+// + match-dispatch loop: a plain-call Token seed, a bool-literal 'while true' header, a body of
+// [free try-call let, plain-call let, match <token>.kind { .. }] whose match latches the cursor in
+// one arm and returns from every other, and a trailing error-call return. It reuses the type-apply
+// loop's plain-call-let / bool-true-header / error-return detectors; the discriminator is the
+// 3-statement body ending in a Match (the type-apply loop ends in parse/append/if/guard/latch),
+// so the two never overlap, and the latch-in-a-match arm distinguishes it from the bare
+// EnumDispatch shape (whose every arm returns).
+fn is_while_match_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 3 {
+        return false;
+    }
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    if !(try type_apply_loop_let_is_plain_call(ir_bytes, function_name, init_stmt, bs)) {
+        return false;
+    }
+    let cursor_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    let cursor_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, cursor_name_node, bs
+    );
+    if std::mem::len(cursor_var) == 0 {
+        return false;
+    }
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, while_statement, "While", bs)) {
+        return false;
+    }
+    if !(try type_apply_loop_bool_true_header(ir_bytes, function_name, while_statement, bs)) {
+        return false;
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count != 3 {
+        return false;
+    }
+    let parse_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 0, bs
+    );
+    if !(try precedence_loop_let_is_free_try_call(ir_bytes, function_name, parse_stmt, bs)) {
+        return false;
+    }
+    let next_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 1, bs
+    );
+    if !(try type_apply_loop_let_is_plain_call(ir_bytes, function_name, next_stmt, bs)) {
+        return false;
+    }
+    let match_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 2, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, match_stmt, "Match", bs)) {
+        return false;
+    }
+    if !(try while_match_arms_are_supported(
+        ir_bytes, function_name, match_stmt, cursor_var, bs
+    )) {
+        return false;
+    }
+    let trailing_return = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 2, bs
+    );
+    return try type_apply_loop_return_is_error_call(
+        ir_bytes, function_name, trailing_return, bs
+    );
+}
+
+fn lower_while_match_loop(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    var empty_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer empty_aliases.deinit();
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let cursor_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "name", 0, bs
+    );
+    let cursor_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, cursor_name_node, bs
+    );
+    let init_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    let init_name = try precedence_loop_suffixed_name(cursor_var, "_init");
+    let init = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        init_name, init_call, 0, &empty_aliases, bs, &var call_arg_type_cache
+    );
+    let cursor_type = init.llvm_type;
+    let init_string_counter = try compiled_mir_lower_call::count_string_args(&init.call_args);
+    let loop_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, params_spec, cursor_var, cursor_type
+    );
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    // Lower the two prefix lets through the generic per-statement path, threading body_locals so
+    // the match scrutinee 'next.kind' and the latch call arguments resolve their struct types.
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer body_aliases.deinit();
+    var body_locals = loop_locals;
+    var body_string_counter = init_string_counter;
+    var body_temp_counter = 0;
+    var body_try_counter = 0;
+    var prefix_index = 0;
+    while prefix_index < 2 {
+        let prefix_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", prefix_index, bs
+        );
+        let let_result = try lower_multi_let_statement(
+            ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, prefix_stmt,
+            body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+            &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
+        );
+        body_locals = let_result.locals_spec;
+        body_string_counter = let_result.string_counter;
+        body_temp_counter = let_result.temp_counter;
+        body_try_counter = let_result.try_counter;
+        prefix_index = prefix_index + 1;
+    }
+    let match_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", 2, bs
+    );
+    let scrutinee = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_stmt, "value", 0, bs
+    );
+    let scrutinee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, scrutinee, bs
+    );
+    let enum_kizu = try resolve_dispatch_enum_kizu_type(
+        ir_bytes, function_name, module_prefix, body_locals, scrutinee, scrutinee_kind, bs,
+        ir_lookup_index
+    );
+    var scrutinee_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let scrutinee_result_id = try lower_expr_into(
+        ir_bytes, function_name, module_prefix, body_locals, scrutinee,
+        body_string_counter, body_temp_counter, &var scrutinee_insts, bs,
+        ir_lookup_index, &var call_arg_type_cache
+    );
+    let arm_temp_base = body_temp_counter + scrutinee_insts.len();
+    let arm_string_base = body_string_counter + try count_strings_in_insts(&scrutinee_insts);
+    let arm_ssa_stride = 1000;
+    let arm_count = try ir_contract::body_edge_count_from(
+        ir_bytes, function_name, match_stmt, "arm", bs
+    );
+    // Locate the single cursor-latch arm and build its try-call latch (binding %<cursor>_next at
+    // the next free try index after the body try-calls).
+    var latch_arm_index = 0 - 1;
+    var scan_index = 0;
+    while scan_index < arm_count {
+        let scan_arm = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, match_stmt, "arm", scan_index, bs
+        );
+        let scan_body = try while_match_arm_body_or_minus_one(
+            ir_bytes, function_name, scan_arm, bs
+        );
+        if scan_body >= 0 and (try while_match_body_is_cursor_try_latch(
+            ir_bytes, function_name, scan_body, cursor_var, bs
+        )) {
+            latch_arm_index = scan_index;
+        }
+        scan_index = scan_index + 1;
+    }
+    if latch_arm_index < 0 {
+        return error("compiled mir: while-match loop requires a cursor latch arm");
+    }
+    let latch_arm_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, match_stmt, "arm", latch_arm_index, bs
+    );
+    let latch_body = try while_match_arm_body_or_minus_one(
+        ir_bytes, function_name, latch_arm_node, bs
+    );
+    let latch_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, latch_body, "value", 0, bs
+    );
+    let latch_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, latch_value, "value", 0, bs
+    );
+    let latch = try lower_precedence_loop_try_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, llvm_return_type, body_locals,
+        cursor_var, latch_call, arm_string_base + latch_arm_index * arm_ssa_stride,
+        arm_temp_base + latch_arm_index * arm_ssa_stride, body_try_counter, &body_aliases, bs,
+        &var call_arg_type_cache
+    );
+    // Build the arms: the latch arm carries no statements (the shared latch renders it); every
+    // other arm lowers its 'return <expr>' off a private SSA window.
+    var arms = std::array::Array<compiled_mir::MirWhileMatchArm>(std::mem::page_allocator());
+    var arm_index = 0;
+    while arm_index < arm_count {
+        let arm_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, match_stmt, "arm", arm_index, bs
+        );
+        let pattern = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arm_node, "pattern", 0, bs
+        );
+        let variant_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, pattern, bs
+        );
+        let is_default = std::mem::equal_bytes(variant_name, "_");
+        var tag = 0 - 1;
+        if !is_default {
+            tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+                ir_lookup_index, ir_bytes, ir_bytes[0..0], enum_kizu, variant_name
+            );
+        }
+        var arm_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+        if arm_index == latch_arm_index {
+            try arms.append(compiled_mir::while_match_arm(tag, is_default, true, arm_stmts));
+        } else {
+            let body = try while_match_arm_body_or_minus_one(
+                ir_bytes, function_name, arm_node, bs
+            );
+            let arm_temp = arm_temp_base + arm_index * arm_ssa_stride;
+            let arm_string = arm_string_base + arm_index * arm_ssa_stride;
+            let return_stmt = try lower_multi_return_statement(
+                ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body,
+                arm_string, arm_temp, &body_aliases, bs, ir_lookup_index,
+                &var call_arg_type_cache
+            );
+            try arm_stmts.append(return_stmt);
+            try arms.append(compiled_mir::while_match_arm(tag, is_default, false, arm_stmts));
+        }
+        arm_index = arm_index + 1;
+    }
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::while_match_loop_stmt(
+        cursor_var, cursor_type, llvm_return_type, init, body_stmts, scrutinee_insts,
+        scrutinee_result_id, arms, latch, "wmloop"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 fn value_cursor_previous_call_init_name_or_empty(
     ir_bytes: []u8,
     function_name: []u8,
@@ -6187,6 +6555,16 @@ pub fn lower_multi_statement_function(
     // arm and a comma error guard. Route it before scalar/generic loop lowering.
     if try is_type_apply_loop_shape(ir_bytes, function_name, statement_count, bs) {
         return try lower_type_apply_loop(
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+    }
+    // A 'while true' + match-dispatch loop (parse_generic_type_end's generic-argument walk) also
+    // uses a plain-call Token seed and a bool-literal header, but its body is [free try-call let,
+    // plain-call let, match <token>.kind { .. }] where one match arm latches the cursor through a
+    // try-call and back-edges while every other arm returns. Its match-terminated body has no
+    // analogue in the type-apply loop's if/guard/latch tail, so route it here (worker-3 NEW-4).
+    if try is_while_match_loop_shape(ir_bytes, function_name, statement_count, bs) {
+        return try lower_while_match_loop(
             ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
     }

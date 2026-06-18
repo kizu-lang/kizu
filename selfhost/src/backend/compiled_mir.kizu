@@ -1062,6 +1062,48 @@ pub struct MirTypeApplyLoopStmt {
     pub label_base: []u8,
 }
 
+// MirWhileMatchArm is one arm of a while-true + match-dispatch loop body (parse_generic_type_end,
+// worker-3 NEW-4). tag is the matched TokenKind variant's discriminant; is_default marks the
+// trailing exhaustive fallthrough (the final arm, which carries no icmp). A return arm carries its
+// lowered 'return <expr>' in arm_stmts and leaves is_latch false; the single latch arm
+// ('<cursor> = try <call>(..)') sets is_latch true and leaves arm_stmts empty -- the loop's shared
+// MirLetTryCallStmt latch renders it and branches back to the loop head. arm_stmts is a heap-backed
+// Array<MirStmt> exactly like MirEnumDispatchArm so the union stays fixed-size.
+pub struct MirWhileMatchArm {
+    pub tag: i64,
+    pub is_default: bool,
+    pub is_latch: bool,
+    pub arm_stmts: std::array::Array<MirStmt>,
+}
+
+// MirWhileMatchLoopStmt backs a 'while true' loop whose body is a few prefix lets followed by a
+// 'match <token>.kind' dispatch (parse_generic_type_end's generic-argument walk, worker-3 NEW-4):
+// 'var <cursor> = <plain init>; while true { <try-call/plain prefix lets>; match <next>.kind {
+// <variant> => return <expr>, <comma> => <cursor> = try <latch>(..), <others> => return error(..)
+// } }; return error(..)'. It is structurally distinct from the i64-induction While (whose body ends
+// in an arithmetic increment), the value-cursor / type-apply loops (whose body ends in an
+// if-chain + unconditional latch), and the bare EnumDispatch (whose every arm returns): here one
+// match arm latches the cursor and back-edges to the loop head while every other arm returns. The
+// renderer emits a head/body CFG: the head holds one loop-carried phi for the cursor seeded from
+// the plain init on the entry edge and from %<cursor>_next on the latch try-call's cont block; the
+// body lowers the prefix lets, evaluates the scrutinee discriminant, and runs an exhaustive icmp/br
+// dispatch chain whose return arms ret and whose latch arm reassigns the cursor and branches back.
+// The source's trailing 'return error(..)' is unreachable (the loop never exits normally) and is
+// not emitted, exactly like the type-apply loop's trailing error return. It owns the init, the
+// body stmts, the scrutinee insts, the arm Array, and the latch.
+pub struct MirWhileMatchLoopStmt {
+    pub cursor_var: []u8,
+    pub cursor_type: []u8,
+    pub own_error_union: []u8,
+    pub init: MirLetCallStmt,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub scrutinee_insts: std::array::Array<MirExprInst>,
+    pub scrutinee_result_id: i64,
+    pub arms: std::array::Array<MirWhileMatchArm>,
+    pub latch: MirLetTryCallStmt,
+    pub label_base: []u8,
+}
+
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
 // (tracker 961, scope 4 prerequisite). The renderer builds the (1, 1) start Position then returns
 // token_at at offset 0. Its nested call argument (position(1, 1)) the generic path does not model,
@@ -1391,6 +1433,7 @@ pub union MirStmt {
     PrecedenceLoop(MirPrecedenceLoopStmt),
     DualCursorLoop(MirDualCursorLoopStmt),
     TypeApplyLoop(MirTypeApplyLoopStmt),
+    WhileMatchLoop(MirWhileMatchLoopStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
     ParserPostfixStart(MirParserPostfixStartStmt),
@@ -1998,6 +2041,24 @@ impl MirTypeApplyLoopStmt {
     }
 }
 
+impl MirWhileMatchArm {
+    fn deinit(self: MirWhileMatchArm) -> void {
+        self.arm_stmts.deinit();
+        return;
+    }
+}
+
+impl MirWhileMatchLoopStmt {
+    fn deinit(self: MirWhileMatchLoopStmt) -> void {
+        self.init.deinit();
+        self.body_stmts.deinit();
+        self.scrutinee_insts.deinit();
+        self.arms.deinit();
+        self.latch.deinit();
+        return;
+    }
+}
+
 impl MirStmt {
     fn deinit(self: MirStmt) -> void {
         match self {
@@ -2035,6 +2096,7 @@ impl MirStmt {
             PrecedenceLoop(payload) => payload.deinit(),
             DualCursorLoop(payload) => payload.deinit(),
             TypeApplyLoop(payload) => payload.deinit(),
+            WhileMatchLoop(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
             ParserPostfixStart(payload) => payload.deinit(),
@@ -3915,6 +3977,46 @@ pub fn type_apply_loop_stmt(
         terminal_cond_result_id: terminal_cond_result_id,
         terminal_stmts: terminal_stmts,
         guard_stmts: guard_stmts,
+        latch: latch,
+        label_base: label_base
+    });
+}
+
+pub fn while_match_arm(
+    tag: i64,
+    is_default: bool,
+    is_latch: bool,
+    arm_stmts: std::array::Array<MirStmt>
+) -> MirWhileMatchArm {
+    return MirWhileMatchArm {
+        tag: tag,
+        is_default: is_default,
+        is_latch: is_latch,
+        arm_stmts: arm_stmts
+    };
+}
+
+pub fn while_match_loop_stmt(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    own_error_union: []u8,
+    init: MirLetCallStmt,
+    body_stmts: std::array::Array<MirStmt>,
+    scrutinee_insts: std::array::Array<MirExprInst>,
+    scrutinee_result_id: i64,
+    arms: std::array::Array<MirWhileMatchArm>,
+    latch: MirLetTryCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::WhileMatchLoop(MirWhileMatchLoopStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        own_error_union: own_error_union,
+        init: init,
+        body_stmts: body_stmts,
+        scrutinee_insts: scrutinee_insts,
+        scrutinee_result_id: scrutinee_result_id,
+        arms: arms,
         latch: latch,
         label_base: label_base
     });
