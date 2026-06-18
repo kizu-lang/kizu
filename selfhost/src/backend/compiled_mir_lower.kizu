@@ -6699,7 +6699,14 @@ fn lower_while_match_loop(
     );
 }
 
-fn value_cursor_previous_call_init_name_or_empty(
+// value_cursor_previous_init_name_or_empty generalizes the value-cursor preheader-seed lookup to
+// admit a plain Var-copy init in addition to a preceding call. The statement before the while binds
+// the cursor either by 'let <cursor> = <Call>' (the parse_block_with_statements 'next_token' seed) or
+// by 'var <cursor> = <Var>' (parse_program_with_declarations' 'var token = first', a copy of a
+// parameter). Both are elided from emission by the induction-init scan when the loop's field-read
+// latch carries the same name, so the cursor is carried purely by the loop-head phi; returning the
+// bound name lets the embedded detector/lowerer recognize the cursor for either seed kind.
+fn value_cursor_previous_init_name_or_empty(
     ir_bytes: []u8,
     function_name: []u8,
     stmt_index: i64,
@@ -6717,13 +6724,46 @@ fn value_cursor_previous_call_init_name_or_empty(
     let init_value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, init_stmt, "value", 0, bs
     );
-    if !(try node_kind_is(ir_bytes, function_name, init_value, "Call", bs)) {
+    let init_value_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, init_value, bs
+    );
+    if !std::mem::equal_bytes(init_value_kind, "Call") and
+        !std::mem::equal_bytes(init_value_kind, "Var") {
         return ir_bytes[0..0];
     }
     let name_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, init_stmt, "name", 0, bs
     );
     return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+}
+
+// value_cursor_previous_copy_source_or_empty returns the source variable a Var-copy cursor init
+// ('var <cursor> = <source>') copies from, or empty when the preceding init is a call seed. The
+// embedded lowerer seeds the loop-head phi from %<source> on the entry edge (the copy itself is
+// elided by the induction-init scan, so %<cursor> is never materialized before the loop), matching
+// how the whole-function value-cursor lowerer threads its 'var close = first' copy seed.
+fn value_cursor_previous_copy_source_or_empty(
+    ir_bytes: []u8,
+    function_name: []u8,
+    stmt_index: i64,
+    bs: i64
+) -> ![]u8 {
+    if stmt_index == 0 {
+        return ir_bytes[0..0];
+    }
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", stmt_index - 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_stmt, "Let", bs)) {
+        return ir_bytes[0..0];
+    }
+    let init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_value, "Var", bs)) {
+        return ir_bytes[0..0];
+    }
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, init_value, bs);
 }
 
 fn is_embedded_value_cursor_append_loop_shape(
@@ -6733,7 +6773,7 @@ fn is_embedded_value_cursor_append_loop_shape(
     while_statement: i64,
     bs: i64
 ) -> !bool {
-    let cursor_var = try value_cursor_previous_call_init_name_or_empty(
+    let cursor_var = try value_cursor_previous_init_name_or_empty(
         ir_bytes, function_name, stmt_index, bs
     );
     if std::mem::len(cursor_var) == 0 {
@@ -6786,9 +6826,20 @@ fn lower_embedded_value_cursor_append_loop(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
-    let cursor_var = try value_cursor_previous_call_init_name_or_empty(
+    let cursor_var = try value_cursor_previous_init_name_or_empty(
         ir_bytes, function_name, stmt_index, bs
     );
+    // A Var-copy init ('var token = first') is elided by the induction-init scan, so the loop-head
+    // phi must seed from the copy's source (%first) on the entry edge -- %<cursor> is never
+    // materialized before the loop. A call-seeded init keeps seeding from %<cursor> (its emitted
+    // call result), preserving the existing parse_block_with_statements-style behavior.
+    let copy_source = try value_cursor_previous_copy_source_or_empty(
+        ir_bytes, function_name, stmt_index, bs
+    );
+    var seed_name = cursor_var;
+    if std::mem::len(copy_source) > 0 {
+        seed_name = copy_source;
+    }
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, while_statement, "condition", 0, bs
     );
@@ -6945,7 +6996,7 @@ fn lower_embedded_value_cursor_append_loop(
         }
     }
     try stmts.append(compiled_mir::value_cursor_while_stmt(
-        cursor_var, cursor_type, cursor_var, llvm_return_type, cond_insts, cond_result,
+        cursor_var, cursor_type, seed_name, llvm_return_type, cond_insts, cond_result,
         body_stmts, latch, "vcw", false
     ));
     return MultiLowerResult {
