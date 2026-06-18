@@ -6120,6 +6120,7 @@ pub struct VoidBodyLowerResult {
     pub temp_counter: i64,
     pub try_counter: i64,
     pub alias_counter: i64,
+    pub body_returns: bool,
 }
 
 fn void_then_alias_name(slot: i64) -> ![]u8 {
@@ -8384,15 +8385,6 @@ fn lower_try_call_void_if(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
-    let then_stmt = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, then_node, "statement", 0, bs
-    );
-    let then_stmt_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, then_stmt, bs
-    );
-    if std::mem::equal_bytes(then_stmt_kind, "Return") {
-        return error("compiled mir: positive try-call condition return body not yet supported");
-    }
     try require_void_then_block_no_else(ir_bytes, function_name, statement, bs);
 
     let called_error_union = try compiled_mir_types::lower_call_return_type_indexed(
@@ -8434,31 +8426,33 @@ fn lower_try_call_void_if(
     );
     var branch_alias_index = 0;
     var merge_alias_counter = then_body.alias_counter;
-    while branch_alias_index < branch_aliases.len() {
-        let branch_state = try branch_aliases.at(branch_alias_index);
-        let input_name = try local_alias_current_name(aliases, branch_state.source_name);
-        if !std::mem::equal_bytes(input_name, branch_state.current_name) {
-            let output_name = try void_then_alias_name(merge_alias_counter);
-            let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
-                ir_lookup_index,
-                ir_bytes,
-                function_name,
-                module_prefix,
-                locals_spec,
-                branch_state.source_name,
-                bs
-            );
-            try merge_vars.append(compiled_mir::if_merge_var(
-                branch_state.source_name,
-                input_name,
-                branch_state.current_name,
-                output_name,
-                merge_type
-            ));
-            try set_local_alias(aliases, branch_state.source_name, output_name);
-            merge_alias_counter = merge_alias_counter + 1;
+    if !then_body.body_returns {
+        while branch_alias_index < branch_aliases.len() {
+            let branch_state = try branch_aliases.at(branch_alias_index);
+            let input_name = try local_alias_current_name(aliases, branch_state.source_name);
+            if !std::mem::equal_bytes(input_name, branch_state.current_name) {
+                let output_name = try void_then_alias_name(merge_alias_counter);
+                let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+                    ir_lookup_index,
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    branch_state.source_name,
+                    bs
+                );
+                try merge_vars.append(compiled_mir::if_merge_var(
+                    branch_state.source_name,
+                    input_name,
+                    branch_state.current_name,
+                    output_name,
+                    merge_type
+                ));
+                try set_local_alias(aliases, branch_state.source_name, output_name);
+                merge_alias_counter = merge_alias_counter + 1;
+            }
+            branch_alias_index = branch_alias_index + 1;
         }
-        branch_alias_index = branch_alias_index + 1;
     }
     try stmts.append(compiled_mir::if_try_call_void_body_stmt(
         if_index,
@@ -9423,22 +9417,78 @@ fn lower_induction_init_alias(
         alias_counter: alias_counter + 1
     };
 }
+fn return_body_advance(
+    stmt: &compiled_mir::MirStmt,
+    base_temp: i64,
+    base_string: i64
+) -> !MultiIfLowerResult {
+    match stmt {
+        ReturnCall(payload) => return MultiIfLowerResult {
+            temp_counter: base_temp,
+            string_counter: base_string + try compiled_mir_lower_call::count_string_args(
+                &payload.call_args
+            ),
+            try_counter: 0,
+            alias_counter: 0
+        };,
+        ReturnNotTryCall(payload) => return MultiIfLowerResult {
+            temp_counter: base_temp,
+            string_counter: base_string + try compiled_mir_lower_call::count_string_args(
+                &payload.call_args
+            ),
+            try_counter: 0,
+            alias_counter: 0
+        };,
+        ReturnExpr(payload) => return try return_expr_advance(
+            &payload.expr_insts, base_temp, base_string
+        );,
+        ReturnError(payload) => return try return_expr_advance(
+            &payload.expr_insts, base_temp, base_string
+        );,
+        ReturnArrayGet(payload) => return try return_expr_advance(
+            &payload.expr_insts, base_temp, base_string
+        );,
+        ReturnStruct(payload) => return MultiIfLowerResult {
+            temp_counter: base_temp,
+            string_counter: base_string + payload.struct_fields.len(),
+            try_counter: 0,
+            alias_counter: 0
+        };,
+        VoidReturnSuccess(_) => return MultiIfLowerResult {
+            temp_counter: base_temp,
+            string_counter: base_string,
+            try_counter: 0,
+            alias_counter: 0
+        };,
+        ReturnTryBinary(payload) => return MultiIfLowerResult {
+            temp_counter: base_temp,
+            string_counter: base_string + try compiled_mir_lower_call::count_string_args(
+                &payload.call_args
+            ),
+            try_counter: 0,
+            alias_counter: 0
+        };,
+        _ => return error("compiled mir: void then-body return did not lower to a return statement");,
+    }
+}
+
 // lower_void_then_body lowers the statement list of a no-else void multi-statement if-then block
 // into then_body_stmts, dispatching each statement by kind through the same per-kind lowering the
 // top-level body loop uses. It is shape-driven, not name-driven: a then-block whose controlling
 // statement is not a single Return is a side-effecting body (let bindings, nested ifs, call
-// statements, and -- as later capabilities land -- assignments), so it descends into the statement
-// list rather than the Return-only then-kind machinery. The first statement kind it cannot lower
-// surfaces the next capability blocker (issue 1165 / 1162). The Let, If, and ExprStmt dispatches are
-// exercised today: the leading_imports sort branch at selfhost/src/parser/format.kizu:28 opens with
-// two 'let' bindings ('next_index', 'last_import'), then a nested 'if !has_line_comment_between(...)
-// { ... }' (selfhost/src/parser/format.kizu:31) whose own void then-body opens with a try-call
-// statement 'try append_sorted_imports(...)' (selfhost/src/parser/format.kizu:32). The nested 'if'
-// dispatches through lower_multi_if_statement -- the same if-lowering the top-level loop uses, which
-// recognizes the void then-block shape and descends here again -- and that inner ExprStmt dispatches
-// through lower_multi_expr_statement. The following Assign statements bind fresh aliases, and nested
-// lower_multi_if_statement calls thread try_counter / alias_counter so the rendered void then-body can
-// merge through its fall-through join without try-label or SSA-name collisions.
+// statements, assignments, and terminal returns), so it descends into the statement list rather
+// than the Return-only then-kind machinery. A Return must be the final statement; the result marks
+// that the then branch does not merge into the continuation. The Let, If, and ExprStmt dispatches
+// are exercised today: the leading_imports sort branch at selfhost/src/parser/format.kizu:28 opens
+// with two 'let' bindings ('next_index', 'last_import'), then a nested
+// 'if !has_line_comment_between(...) { ... }' (selfhost/src/parser/format.kizu:31) whose own void
+// then-body opens with a try-call statement 'try append_sorted_imports(...)'
+// (selfhost/src/parser/format.kizu:32). The nested 'if' dispatches through
+// lower_multi_if_statement -- the same if-lowering the top-level loop uses, which recognizes the
+// void then-block shape and descends here again -- and that inner ExprStmt dispatches through
+// lower_multi_expr_statement. The following Assign statements bind fresh aliases, and nested
+// lower_multi_if_statement calls thread try_counter / alias_counter so the rendered void then-body
+// can merge through its fall-through join without try-label or SSA-name collisions.
 fn lower_void_then_body(
     ir_bytes: []u8,
     function_name: []u8,
@@ -9463,6 +9513,7 @@ fn lower_void_then_body(
     var body_tries = try_counter;
     var body_alias_counter = alias_counter;
     var body_index = 0;
+    var body_returns = false;
     while true {
         let statement = try ir_contract::body_child_sequence_or_minus_one_from(
             ir_bytes, function_name, then_node, "statement", body_index, bs
@@ -9562,20 +9613,67 @@ fn lower_void_then_body(
                         body_tries = assign_result.try_counter;
                         body_alias_counter = assign_result.alias_counter;
                     } else {
-                        return error("compiled mir: unsupported then-body statement kind");
+                        if std::mem::equal_bytes(stmt_kind, "Return") {
+                            let after_return = try ir_contract::body_child_sequence_or_minus_one_from(
+                                ir_bytes, function_name, then_node, "statement", body_index + 1, bs
+                            );
+                            if after_return >= 0 {
+                                return error("compiled mir: void then-body return must be final");
+                            }
+                            let return_stmt = try lower_multi_return_statement(
+                                ir_bytes,
+                                function_name,
+                                module_prefix,
+                                llvm_return_type,
+                                body_locals,
+                                statement,
+                                body_strings,
+                                body_temps,
+                                aliases,
+                                bs,
+                                ir_lookup_index, call_arg_type_cache
+                            );
+                            try then_body_stmts.append(return_stmt);
+                            let appended = try then_body_stmts.at(then_body_stmts.len() - 1);
+                            let advance = try return_body_advance(
+                                &appended, body_temps, body_strings
+                            );
+                            body_strings = advance.string_counter;
+                            body_temps = advance.temp_counter;
+                            body_returns = true;
+                        } else {
+                            return error("compiled mir: unsupported then-body statement kind");
+                        }
                     }
                 }
             }
         }
         body_index = body_index + 1;
+        if body_returns {
+            break;
+        }
     }
     return VoidBodyLowerResult {
         locals_spec: body_locals,
         string_counter: body_strings,
         temp_counter: body_temps,
         try_counter: body_tries,
-        alias_counter: body_alias_counter
+        alias_counter: body_alias_counter,
+        body_returns: body_returns
     };
+}
+
+fn copy_aliases_into(
+    aliases: &var std::array::Array<LocalAliasState>,
+    source_aliases: &std::array::Array<LocalAliasState>
+) -> !void {
+    var index = 0;
+    while index < source_aliases.len() {
+        let state = try source_aliases.at(index);
+        try set_local_alias(aliases, state.source_name, state.current_name);
+        index = index + 1;
+    }
+    return;
 }
 
 fn append_void_if_else_merge_for_source(
@@ -9738,18 +9836,30 @@ fn lower_void_if_else_statement(
         bs,
         ir_lookup_index, call_arg_type_cache
     );
-    let merge_alias_counter = try append_void_if_else_merge_vars(
-        ir_bytes,
-        function_name,
-        module_prefix,
-        locals_spec,
-        else_body.alias_counter,
-        aliases,
-        &then_aliases,
-        &else_aliases,
-        &var merge_vars,
-        bs
-    );
+    var merge_alias_counter = else_body.alias_counter;
+    if then_body.body_returns and else_body.body_returns {
+        return error("compiled mir: void if/else with both branches returning not yet supported");
+    }
+    if then_body.body_returns {
+        try copy_aliases_into(aliases, &else_aliases);
+    } else {
+        if else_body.body_returns {
+            try copy_aliases_into(aliases, &then_aliases);
+        } else {
+            merge_alias_counter = try append_void_if_else_merge_vars(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                else_body.alias_counter,
+                aliases,
+                &then_aliases,
+                &else_aliases,
+                &var merge_vars,
+                bs
+            );
+        }
+    }
     try stmts.append(compiled_mir::if_else_void_body_stmt(
         if_index,
         string_counter,
@@ -9817,31 +9927,33 @@ fn lower_void_if_no_else_statement(
     );
     var branch_alias_index = 0;
     var merge_alias_counter = then_body.alias_counter;
-    while branch_alias_index < branch_aliases.len() {
-        let branch_state = try branch_aliases.at(branch_alias_index);
-        let input_name = try local_alias_current_name(aliases, branch_state.source_name);
-        if !std::mem::equal_bytes(input_name, branch_state.current_name) {
-            let output_name = try void_then_alias_name(merge_alias_counter);
-            let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
-                ir_lookup_index,
-                ir_bytes,
-                function_name,
-                module_prefix,
-                locals_spec,
-                branch_state.source_name,
-                bs
-            );
-            try merge_vars.append(compiled_mir::if_merge_var(
-                branch_state.source_name,
-                input_name,
-                branch_state.current_name,
-                output_name,
-                merge_type
-            ));
-            try set_local_alias(aliases, branch_state.source_name, output_name);
-            merge_alias_counter = merge_alias_counter + 1;
+    if !then_body.body_returns {
+        while branch_alias_index < branch_aliases.len() {
+            let branch_state = try branch_aliases.at(branch_alias_index);
+            let input_name = try local_alias_current_name(aliases, branch_state.source_name);
+            if !std::mem::equal_bytes(input_name, branch_state.current_name) {
+                let output_name = try void_then_alias_name(merge_alias_counter);
+                let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+                    ir_lookup_index,
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    branch_state.source_name,
+                    bs
+                );
+                try merge_vars.append(compiled_mir::if_merge_var(
+                    branch_state.source_name,
+                    input_name,
+                    branch_state.current_name,
+                    output_name,
+                    merge_type
+                ));
+                try set_local_alias(aliases, branch_state.source_name, output_name);
+                merge_alias_counter = merge_alias_counter + 1;
+            }
+            branch_alias_index = branch_alias_index + 1;
         }
-        branch_alias_index = branch_alias_index + 1;
     }
     try stmts.append(compiled_mir::if_stmt(
         if_index,
@@ -11833,7 +11945,8 @@ fn lower_branch_merge_block_prefix(
         string_counter: body_strings,
         temp_counter: body_temps,
         try_counter: body_tries,
-        alias_counter: body_alias_counter
+        alias_counter: body_alias_counter,
+        body_returns: false
     };
 }
 
