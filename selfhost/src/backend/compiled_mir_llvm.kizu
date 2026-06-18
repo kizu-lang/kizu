@@ -433,6 +433,7 @@ fn append_multi_stmt(
         ValueWhile(payload) => try append_value_while(out, payload);,
         GrammarLoop(payload) => try append_grammar_loop(out, function, payload);,
         ValueCursorWhile(payload) => try append_value_cursor_while(out, function, payload);,
+        PrecedenceLoop(payload) => try append_precedence_loop(out, function, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
         ParserSpanPredicate(payload) => try append_multi_parser_span_predicate(out, payload);,
         ParserPostfixStart(payload) => try append_multi_parser_postfix_start(out, payload);,
@@ -2924,6 +2925,127 @@ fn append_value_cursor_while(
     return;
 }
 
+// append_precedence_loop renders a two-carried-value precedence loop. The preheader runs
+// the initial value try-call as %<value>_init, computes %<scalar>_init from that value,
+// and branches to the head. The head phis are named as the source locals so condition,
+// body, and latch arguments read the carried values naturally. The latch first unwraps the
+// next value through a try-call as %<value>_next, then refreshes the scalar through a plain
+// call as %<scalar>_next in the actual back-edge predecessor block.
+fn append_precedence_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirPrecedenceLoopStmt
+) -> !void {
+    let value_init = &stmt.value_init;
+    let scalar_init = &stmt.scalar_init;
+    let value_latch = &stmt.value_latch;
+    let scalar_latch = &stmt.scalar_latch;
+    try append_try_call_body(out, function.name, value_init, "_init", 0);
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_preheader");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_preheader:");
+    try append_call_inst(
+        out,
+        function.name,
+        scalar_init.name,
+        scalar_init.llvm_type,
+        scalar_init.call_module_prefix,
+        scalar_init.call_callee_name,
+        &scalar_init.call_args,
+        1
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.value_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.value_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(value_init.name);
+    try out.append_bytes("_init, %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_preheader ], [ %");
+    try out.append_bytes(stmt.value_var);
+    try out.append_bytes("_next, %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar ]");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.scalar_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.scalar_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(scalar_init.name);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_preheader ], [ %");
+    try out.append_bytes(scalar_latch.name);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar ]");
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_body, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 2);
+        body_index = body_index + 1;
+    }
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_value");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_value:");
+    try append_try_call_body(out, function.name, value_latch, "_next", body_stmts.len() + 2);
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar:");
+    try append_call_inst(
+        out,
+        function.name,
+        scalar_latch.name,
+        scalar_latch.llvm_type,
+        scalar_latch.call_module_prefix,
+        scalar_latch.call_callee_name,
+        &scalar_latch.call_args,
+        body_stmts.len() + 3
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit:");
+    try out.append_bytes("  %retwrap_ok = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %retwrap_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %retwrap_ok, ");
+    try out.append_bytes(stmt.value_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.value_var);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %retwrap_val");
+    return;
+}
+
 // append_token_kind_predicate_globals: the predicate forwards only its Token value, so it emits no
 // string-constant globals (tracker 961).
 fn append_token_kind_predicate_globals(stmt: &compiled_mir::MirTokenKindPredicateStmt) -> !void {
@@ -3970,6 +4092,34 @@ fn append_value_cursor_while_globals(
     return;
 }
 
+fn append_precedence_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirPrecedenceLoopStmt
+) -> !void {
+    let value_init = &stmt.value_init;
+    let scalar_init = &stmt.scalar_init;
+    let value_latch = &stmt.value_latch;
+    let scalar_latch = &stmt.scalar_latch;
+    try append_let_try_call_globals(out, llvm_symbol, value_init);
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &scalar_init.call_args
+    );
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    let body_stmts = &stmt.body_stmts;
+    var index = 0;
+    while index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        index = index + 1;
+    }
+    try append_let_try_call_globals(out, llvm_symbol, value_latch);
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &scalar_latch.call_args
+    );
+    return;
+}
+
 // append_traversal_literal_text renders a literal arm's value: bool literals print
 // true/false, integer literals their decimal value.
 fn append_traversal_literal_text(
@@ -4440,6 +4590,7 @@ fn append_stmt_globals(
         ValueWhile(payload) => try append_value_while_globals(payload);,
         GrammarLoop(payload) => try append_grammar_loop_globals(out, llvm_symbol, payload);,
         ValueCursorWhile(payload) => try append_value_cursor_while_globals(out, llvm_symbol, payload);,
+        PrecedenceLoop(payload) => try append_precedence_loop_globals(out, llvm_symbol, payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,
         ParserSpanPredicate(payload) => try append_parser_span_predicate_globals(payload);,
         ParserPostfixStart(payload) => try append_parser_postfix_start_globals(payload);,

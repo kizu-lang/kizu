@@ -976,6 +976,31 @@ pub struct MirValueCursorWhileStmt {
     pub terminal_return: bool,
 }
 
+// MirPrecedenceLoopStmt backs a two-carried-value precedence-climbing loop:
+// 'var <value> = try <init>(..); var <scalar> = <rank>(<value>.field); while
+// <scalar> >= <min> { <body>; <value> = try <latch>(..); <scalar> =
+// <rank>(<value>.field); }; return <value>;'. It is structurally distinct from the
+// i64-induction While (one scalar induction and an arithmetic latch), the grammar loop
+// (bool literal 'true' header), and the value-cursor loop (one carried value and a
+// prefix-not predicate): this loop has two phis, a comparison header, a try-call value
+// latch, and a plain-call scalar latch derived from the updated value. It owns the init
+// calls, condition insts, body statements, and latch calls.
+pub struct MirPrecedenceLoopStmt {
+    pub value_var: []u8,
+    pub value_type: []u8,
+    pub scalar_var: []u8,
+    pub scalar_type: []u8,
+    pub own_error_union: []u8,
+    pub value_init: MirLetTryCallStmt,
+    pub scalar_init: MirLetCallStmt,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub value_latch: MirLetTryCallStmt,
+    pub scalar_latch: MirLetCallStmt,
+    pub label_base: []u8,
+}
+
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
 // (tracker 961, scope 4 prerequisite). The renderer builds the (1, 1) start Position then returns
 // token_at at offset 0. Its nested call argument (position(1, 1)) the generic path does not model,
@@ -1302,6 +1327,7 @@ pub union MirStmt {
     ValueWhile(MirValueWhileStmt),
     GrammarLoop(MirGrammarLoopStmt),
     ValueCursorWhile(MirValueCursorWhileStmt),
+    PrecedenceLoop(MirPrecedenceLoopStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
     ParserPostfixStart(MirParserPostfixStartStmt),
@@ -1739,6 +1765,18 @@ impl MirValueCursorWhileStmt {
     }
 }
 
+impl MirPrecedenceLoopStmt {
+    fn deinit(self: MirPrecedenceLoopStmt) -> void {
+        self.value_init.deinit();
+        self.scalar_init.deinit();
+        self.cond_insts.deinit();
+        self.body_stmts.deinit();
+        self.value_latch.deinit();
+        self.scalar_latch.deinit();
+        return;
+    }
+}
+
 impl MirTokenKindPredicateStmt {
     fn deinit(self: MirTokenKindPredicateStmt) -> void {
         self.variant_tags.deinit();
@@ -1890,6 +1928,7 @@ impl MirStmt {
             ValueWhile(payload) => payload.deinit(),
             GrammarLoop(payload) => payload.deinit(),
             ValueCursorWhile(payload) => payload.deinit(),
+            PrecedenceLoop(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
             ParserPostfixStart(payload) => payload.deinit(),
@@ -3572,6 +3611,38 @@ pub fn value_cursor_while_stmt(
         latch: latch,
         label_base: label_base,
         terminal_return: terminal_return
+    });
+}
+
+pub fn precedence_loop_stmt(
+    value_var: []u8,
+    value_type: []u8,
+    scalar_var: []u8,
+    scalar_type: []u8,
+    own_error_union: []u8,
+    value_init: MirLetTryCallStmt,
+    scalar_init: MirLetCallStmt,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    value_latch: MirLetTryCallStmt,
+    scalar_latch: MirLetCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::PrecedenceLoop(MirPrecedenceLoopStmt {
+        value_var: value_var,
+        value_type: value_type,
+        scalar_var: scalar_var,
+        scalar_type: scalar_type,
+        own_error_union: own_error_union,
+        value_init: value_init,
+        scalar_init: scalar_init,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        value_latch: value_latch,
+        scalar_latch: scalar_latch,
+        label_base: label_base
     });
 }
 
