@@ -280,10 +280,22 @@ pub fn resolve_call_arg_type(
     callee_name: []u8,
     arg_index: i64
 ) -> ![]u8 {
+    return try resolve_call_arg_type_with_lookup_prefix(
+        ir_bytes, module_prefix, module_prefix, callee_name, arg_index
+    );
+}
+
+fn resolve_call_arg_type_with_lookup_prefix(
+    ir_bytes: []u8,
+    lookup_prefix: []u8,
+    type_module_prefix: []u8,
+    callee_name: []u8,
+    arg_index: i64
+) -> ![]u8 {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "function-signature-param ";
     let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(module_prefix);
+    let mp_len = std::mem::len(lookup_prefix);
     let name_len = std::mem::len(callee_name);
     var index = 0;
     var matched = 0;
@@ -294,7 +306,7 @@ pub fn resolve_call_arg_type(
             let mp_end = mp_start + mp_len;
             let cn_end = mp_end + name_len;
             if cn_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], lookup_prefix) and
                 std::mem::equal_bytes(ir_bytes[mp_end..cn_end], callee_name) and
                 ir_bytes[cn_end] == cast<u8>(32) {
                 if matched == arg_index {
@@ -310,13 +322,20 @@ pub fn resolve_call_arg_type(
                     let colon2 = compiled_util::find_byte(entry, cast<u8>(58), colon1 + 1);
                     if colon2 < entry_len {
                         let kizu_type = entry[colon2 + 1..entry_len];
-                        return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
+                        return try compiled_type_lower::kizu_type_to_llvm(
+                            ir_bytes, type_module_prefix, kizu_type
+                        );
                     }
                 }
                 matched = matched + 1;
             }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    if std::mem::len(lookup_prefix) > 0 {
+        return try resolve_call_arg_type_with_lookup_prefix(
+            ir_bytes, ir_bytes[0..0], type_module_prefix, callee_name, arg_index
+        );
     }
     return error("compiled function: call arg type not found");
 }
