@@ -257,6 +257,21 @@ pub fn lower_single_call_arg(
             );
         }
     }
+    if std::mem::equal_bytes(arg_kind, "CastExpr") {
+        // A checked integer cast 'cast<T>(<int literal>)' (e.g. 'cast<u8>(62)' in the parser's
+        // is_single_token_byte byte comparisons) carries no inline descriptor of its own: the
+        // resolved arg_type is already the parameter's target LLVM width, so the cast literal
+        // lowers exactly like a plain Int argument of that width. Non-literal cast operands have
+        // no inline call-arg form and fall through to the unsupported-kind error.
+        let value_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arg_node, "value", 0, bs
+        );
+        let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value_node, bs);
+        if std::mem::equal_bytes(value_kind, "Int") {
+            let literal = try ir_contract::body_int_value_from(ir_bytes, function_name, value_node, bs);
+            return compiled_mir::int_literal_call_arg(arg_type, literal);
+        }
+    }
     return error("compiled mir: unsupported call arg kind");
 }
 
@@ -332,6 +347,18 @@ pub fn lower_single_call_arg_with_aliases(
                 ir_bytes, function_name, module_prefix, params_spec, arg_type, operand_node,
                 string_index, alias_sources, alias_currents, bs
             );
+        }
+    }
+    if std::mem::equal_bytes(arg_kind, "CastExpr") {
+        // See lower_single_call_arg: a 'cast<T>(<int literal>)' argument lowers as a plain Int of
+        // the already-resolved target width. Non-literal cast operands fall through to error.
+        let value_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arg_node, "value", 0, bs
+        );
+        let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value_node, bs);
+        if std::mem::equal_bytes(value_kind, "Int") {
+            let literal = try ir_contract::body_int_value_from(ir_bytes, function_name, value_node, bs);
+            return compiled_mir::int_literal_call_arg(arg_type, literal);
         }
     }
     return error("compiled mir: unsupported call arg kind");
