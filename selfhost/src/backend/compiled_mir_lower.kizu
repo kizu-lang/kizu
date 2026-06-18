@@ -4426,6 +4426,244 @@ fn precedence_loop_body_prefix_matches(
     return found_try_let;
 }
 
+// dual_cursor_call_uses_carried_var reports whether a call passes the carried var directly as a
+// plain Var argument (e.g. 'next_token(text, end)' carries 'end'). Unlike the precedence loop's
+// '<value>.field' projection, this shape threads the carried value itself, so the back-edge phi of
+// that value feeds the call.
+fn dual_cursor_call_uses_carried_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    carried_var: []u8,
+    bs: i64
+) -> !bool {
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var arg_index = 0;
+    while arg_index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", arg_index, bs
+        );
+        if try node_kind_is(ir_bytes, function_name, arg_node, "Var", bs) {
+            if std::mem::equal_bytes(
+                try ir_contract::body_token_or_empty_from(ir_bytes, function_name, arg_node, bs),
+                carried_var
+            ) {
+                return true;
+            }
+        }
+        arg_index = arg_index + 1;
+    }
+    return false;
+}
+
+// dual_cursor_cond_is_predicate_call reports whether the while header is a side-effect-free
+// predicate call over the carried scalar cursor (e.g. 'is_double_colon(next)'). It is a plain Call
+// (not a field-mode method, not a comparison, not a prefix-not), distinguishing this shape from the
+// precedence loop's '>=' comparison and the value-cursor loop's prefix-not predicate.
+fn dual_cursor_cond_is_predicate_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    cond_node: i64,
+    scalar_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, cond_node, "Call", bs)) {
+        return false;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, cond_node, bs) {
+        return false;
+    }
+    return try dual_cursor_call_uses_carried_var(
+        ir_bytes, function_name, cond_node, scalar_var, bs
+    );
+}
+
+// dual_cursor_scalar_latch_matches reports whether a body statement is the scalar plain-call latch
+// '<scalar> = <plain>(.. <value> ..);' -- an Assign to the carried scalar cursor whose value is a
+// free call threading the updated carried value (e.g. 'next = next_token(text, end)').
+fn dual_cursor_scalar_latch_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    scalar_var: []u8,
+    carried_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "Assign", bs)) {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs), scalar_var
+    ) {
+        return false;
+    }
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "Call", bs)) {
+        return false;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, value, bs) {
+        return false;
+    }
+    return try dual_cursor_call_uses_carried_var(
+        ir_bytes, function_name, value, carried_var, bs
+    );
+}
+
+// dual_cursor_body_prefix_all_lets reports whether every body statement before the two trailing
+// latches is a Let (the per-iteration intermediates the latches consume, e.g. 'let segment =
+// next_token(text, next)'). They lower generically through lower_multi_let_statement.
+fn dual_cursor_body_prefix_all_lets(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    body_boundary: i64,
+    bs: i64
+) -> !bool {
+    var body_index = 0;
+    while body_index < body_boundary {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        if !(try node_kind_is(ir_bytes, function_name, body_stmt, "Let", bs)) {
+            return false;
+        }
+        body_index = body_index + 1;
+    }
+    return true;
+}
+
+// is_dual_cursor_loop_shape reports whether this function is the copy-seeded two-carried-value
+// cursor loop (parse_type_base_end's '::' segment walk): 'var <value> = <source>; var <scalar> =
+// <plain>(<value>); while <predicate>(<scalar>) { <prefix lets>; <value> = try <latch>(..);
+// <scalar> = <plain>(<value>); }; return <value>;'. It does not overlap the other while shapes:
+// the precedence loop seeds its value with a try-call and compares a scalar with '>=', grammar and
+// type-apply loops use a bool-literal header, value-cursor loops carry one value behind a
+// prefix-not predicate, and counted induction loops carry an arithmetic scalar latch. The
+// distinguishing marks are the Var-copy value seed, the predicate-call header, and the paired
+// try-call value latch plus plain-call scalar latch.
+fn is_dual_cursor_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count != 4 {
+        return false;
+    }
+    let value_init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value_init_stmt, "Let", bs)) {
+        return false;
+    }
+    let value_init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value_init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value_init_value, "Var", bs)) {
+        return false;
+    }
+    let value_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value_init_stmt, "name", 0, bs
+    );
+    let value_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, value_name_node, bs
+    );
+    let scalar_init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, scalar_init_stmt, "Let", bs)) {
+        return false;
+    }
+    let scalar_init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, scalar_init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, scalar_init_value, "Call", bs)) {
+        return false;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, scalar_init_value, bs) {
+        return false;
+    }
+    if !(try dual_cursor_call_uses_carried_var(
+        ir_bytes, function_name, scalar_init_value, value_var, bs
+    )) {
+        return false;
+    }
+    let scalar_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, scalar_init_stmt, "name", 0, bs
+    );
+    let scalar_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, scalar_name_node, bs
+    );
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 2, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, while_statement, "While", bs)) {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    if !(try dual_cursor_cond_is_predicate_call(
+        ir_bytes, function_name, cond_node, scalar_var, bs
+    )) {
+        return false;
+    }
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 3, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, return_stmt, "Return", bs)) {
+        return false;
+    }
+    let return_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, return_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, return_value, "Var", bs)) {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        try ir_contract::body_token_or_empty_from(ir_bytes, function_name, return_value, bs),
+        value_var
+    ) {
+        return false;
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 2 {
+        return false;
+    }
+    let value_latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 2, bs
+    );
+    if !(try value_cursor_latch_is_try_call(
+        ir_bytes, function_name, value_latch_stmt, value_var, bs
+    )) {
+        return false;
+    }
+    let scalar_latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    if !(try dual_cursor_scalar_latch_matches(
+        ir_bytes, function_name, scalar_latch_stmt, scalar_var, value_var, bs
+    )) {
+        return false;
+    }
+    return try dual_cursor_body_prefix_all_lets(
+        ir_bytes, function_name, body_node, body_count - 2, bs
+    );
+}
+
 // is_precedence_loop_shape reports whether this function is the two-carried-value
 // precedence-climbing loop targeted by issue 1157: exactly value try-call init, scalar
 // plain-call init from a carried-value field, a while header comparing that scalar with
@@ -4814,6 +5052,166 @@ fn lower_precedence_loop(
         value_var, value_type, scalar_var, scalar_type, llvm_return_type,
         value_init, scalar_init, cond_insts, cond_result, body_stmts,
         value_latch, scalar_latch, "ploop"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
+fn lower_dual_cursor_loop(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    // The value cursor is seeded by copying a prior local/param: its preheader phi value is that
+    // source SSA name, so no value-init call is lowered.
+    let value_init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 0, bs
+    );
+    let value_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value_init_stmt, "name", 0, bs
+    );
+    let value_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, value_name_node, bs
+    );
+    let value_source_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value_init_stmt, "value", 0, bs
+    );
+    let value_source_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, value_source_node, bs
+    );
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 2, bs
+    );
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    // The value type comes from the try-call latch's success type, which the copied source shares.
+    let value_latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 2, bs
+    );
+    let value_latch_expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value_latch_stmt, "value", 0, bs
+    );
+    let value_latch_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value_latch_expr, "value", 0, bs
+    );
+    let value_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, value_latch_call, bs, ir_lookup_index
+    );
+    let value_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, params_spec, value_var, value_type
+    );
+    // The scalar cursor is seeded by a plain call that reads the copied value source, so its init
+    // call is lowered with the value aliased to that source SSA name.
+    let scalar_init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", 1, bs
+    );
+    let scalar_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, scalar_init_stmt, "name", 0, bs
+    );
+    let scalar_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, scalar_name_node, bs
+    );
+    let scalar_init_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, scalar_init_stmt, "value", 0, bs
+    );
+    var init_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer init_aliases.deinit();
+    try init_aliases.append(LocalAliasState {
+        source_name: value_var,
+        current_name: value_source_var
+    });
+    let scalar_init_name = try precedence_loop_suffixed_name(scalar_var, "_init");
+    let scalar_init = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, value_locals,
+        scalar_init_name, scalar_init_call, 0, &init_aliases, bs, &var call_arg_type_cache
+    );
+    let scalar_type = scalar_init.llvm_type;
+    let scalar_init_string_counter =
+        try compiled_mir_lower_call::count_string_args(&scalar_init.call_args);
+    let loop_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, value_locals, scalar_var, scalar_type
+    );
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes, function_name, module_prefix, loop_locals, cond_node,
+        scalar_init_string_counter, 0, &var cond_insts, bs,
+        ir_lookup_index, &var call_arg_type_cache
+    );
+    var body_string_counter = scalar_init_string_counter + try count_strings_in_insts(&cond_insts);
+    var body_temp_counter = cond_insts.len();
+    var body_try_counter = 0;
+    let body_boundary = body_count - 2;
+    var body_locals = loop_locals;
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer body_aliases.deinit();
+    var body_alias_counter = 0;
+    var body_index = 0;
+    while body_index < body_boundary {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
+                body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+                &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
+            );
+            body_locals = let_result.locals_spec;
+            body_string_counter = let_result.string_counter;
+            body_temp_counter = let_result.temp_counter;
+            body_try_counter = let_result.try_counter;
+        } else {
+            return error("compiled mir: unsupported dual-cursor-loop body statement");
+        }
+        body_index = body_index + 1;
+    }
+    let value_latch = try lower_precedence_loop_try_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, llvm_return_type, body_locals,
+        value_var, value_latch_call, body_string_counter, body_temp_counter, body_try_counter,
+        &body_aliases, bs, &var call_arg_type_cache
+    );
+    let value_latch_string_counter =
+        body_string_counter + try count_strings_in_insts(&value_latch.arg_insts) +
+        try compiled_mir_lower_call::count_string_args(&value_latch.call_args);
+    let value_next_name = try precedence_loop_suffixed_name(value_var, "_next");
+    var latch_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer latch_aliases.deinit();
+    try latch_aliases.append(LocalAliasState {
+        source_name: value_var,
+        current_name: value_next_name
+    });
+    let scalar_latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let scalar_latch_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, scalar_latch_stmt, "value", 0, bs
+    );
+    let scalar_latch_name = try precedence_loop_suffixed_name(scalar_var, "_next");
+    let scalar_latch = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, body_locals,
+        scalar_latch_name, scalar_latch_call, value_latch_string_counter, &latch_aliases, bs,
+        &var call_arg_type_cache
+    );
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::dual_cursor_loop_stmt(
+        value_var, value_type, value_source_var, scalar_var, scalar_type, llvm_return_type,
+        scalar_init, cond_insts, cond_result, body_stmts,
+        value_latch, scalar_latch, "dcloop"
     ));
     return compiled_mir_function::multi_statement_function(
         llvm_symbol, llvm_return_type, params_spec, stmts
@@ -5798,6 +6196,16 @@ pub fn lower_multi_statement_function(
     // cannot use the one-carried-value ValueCursorWhile or scalar induction renderers.
     if try is_precedence_loop_shape(ir_bytes, function_name, params_spec, statement_count, bs) {
         return try lower_precedence_loop(
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+    }
+    // A copy-seeded two-carried-value cursor loop (parse_type_base_end's '::' segment walk) threads
+    // a value cursor copied from a prior local plus a plain-call scalar cursor through loop-head
+    // phis, guarded by a side-effect-free predicate call. It closes with a try-call value latch and
+    // a plain-call scalar refresh derived from the updated value, and returns the value. Its Var-copy
+    // value seed has no analogue in the precedence loop's try-call init, so route it here.
+    if try is_dual_cursor_loop_shape(ir_bytes, function_name, statement_count, bs) {
+        return try lower_dual_cursor_loop(
             ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
     }

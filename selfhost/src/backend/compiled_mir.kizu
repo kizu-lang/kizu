@@ -1011,6 +1011,34 @@ pub struct MirPrecedenceLoopStmt {
     pub label_base: []u8,
 }
 
+// MirDualCursorLoopStmt backs a two-carried-value cursor loop that, unlike the
+// precedence loop, seeds its value cursor by copying a prior local/param rather
+// than a try-call: 'var <value> = <source>; var <scalar> = <plain>(<value>);
+// while <predicate>(<scalar>) { <prefix lets>; <value> = try <latch>(..);
+// <scalar> = <plain>(<value>); }; return <value>;' (parse_type_base_end's
+// '::' segment walk). The value phi takes its preheader incoming straight from
+// the copied source SSA value, so this shape carries no value-init call. The
+// scalar cursor is seeded and latched by plain calls and the header is a
+// side-effect-free predicate call, distinguishing it from the precedence loop
+// (try-call value init plus a '>=' comparison header) and the value-cursor loop
+// (a single carried value behind a prefix-not predicate). It owns the scalar
+// init call, condition insts, body statements, and latch calls.
+pub struct MirDualCursorLoopStmt {
+    pub value_var: []u8,
+    pub value_type: []u8,
+    pub value_source_var: []u8,
+    pub scalar_var: []u8,
+    pub scalar_type: []u8,
+    pub own_error_union: []u8,
+    pub scalar_init: MirLetCallStmt,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub value_latch: MirLetTryCallStmt,
+    pub scalar_latch: MirLetCallStmt,
+    pub label_base: []u8,
+}
+
 // MirTypeApplyLoopStmt backs parse_type_apply_expr_with_args' 'while true' loop:
 // a Token cursor seeded by a plain call, a per-iteration ParseNode try-call, a borrowed
 // Array append, a terminal '>' arm that builds children and returns a ParseNode, an error
@@ -1361,6 +1389,7 @@ pub union MirStmt {
     GrammarLoop(MirGrammarLoopStmt),
     ValueCursorWhile(MirValueCursorWhileStmt),
     PrecedenceLoop(MirPrecedenceLoopStmt),
+    DualCursorLoop(MirDualCursorLoopStmt),
     TypeApplyLoop(MirTypeApplyLoopStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
@@ -1828,6 +1857,17 @@ impl MirPrecedenceLoopStmt {
     }
 }
 
+impl MirDualCursorLoopStmt {
+    fn deinit(self: MirDualCursorLoopStmt) -> void {
+        self.scalar_init.deinit();
+        self.cond_insts.deinit();
+        self.body_stmts.deinit();
+        self.value_latch.deinit();
+        self.scalar_latch.deinit();
+        return;
+    }
+}
+
 impl MirTokenKindPredicateStmt {
     fn deinit(self: MirTokenKindPredicateStmt) -> void {
         self.variant_tags.deinit();
@@ -1993,6 +2033,7 @@ impl MirStmt {
             GrammarLoop(payload) => payload.deinit(),
             ValueCursorWhile(payload) => payload.deinit(),
             PrecedenceLoop(payload) => payload.deinit(),
+            DualCursorLoop(payload) => payload.deinit(),
             TypeApplyLoop(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
@@ -3807,6 +3848,38 @@ pub fn precedence_loop_stmt(
         scalar_type: scalar_type,
         own_error_union: own_error_union,
         value_init: value_init,
+        scalar_init: scalar_init,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        value_latch: value_latch,
+        scalar_latch: scalar_latch,
+        label_base: label_base
+    });
+}
+
+pub fn dual_cursor_loop_stmt(
+    value_var: []u8,
+    value_type: []u8,
+    value_source_var: []u8,
+    scalar_var: []u8,
+    scalar_type: []u8,
+    own_error_union: []u8,
+    scalar_init: MirLetCallStmt,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    value_latch: MirLetTryCallStmt,
+    scalar_latch: MirLetCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::DualCursorLoop(MirDualCursorLoopStmt {
+        value_var: value_var,
+        value_type: value_type,
+        value_source_var: value_source_var,
+        scalar_var: scalar_var,
+        scalar_type: scalar_type,
+        own_error_union: own_error_union,
         scalar_init: scalar_init,
         cond_insts: cond_insts,
         cond_result_id: cond_result_id,
