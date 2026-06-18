@@ -6971,7 +6971,79 @@ fn append_expr_inst(
         IntCast(payload) => try append_int_cast_expr(out, payload, insts);,
         UnionConstruct(payload) => try append_union_construct_expr(out, payload, insts);,
         StructLiteral(payload) => try append_struct_literal_expr(out, llvm_symbol, payload, insts);,
+        TryUnwrap(payload) => try append_try_unwrap_expr(out, payload, insts);,
     }
+    return;
+}
+
+// append_try_unwrap_expr renders a 'try <expr>' in value/sub-expression position (issue 1157
+// big-bang). operand already holds the inner error-union aggregate (called_error_union); this
+// extracts its ok flag (field 0) and branches on an id-suffixed label pair: t<id>_try_fail
+// re-wraps the callee message into own_error_union and returns it (propagation, never
+// 'unreachable'); t<id>_try_cont extracts the success value (field 1) into %t<id>. It mirrors
+// append_try_call_body for the statement-free expression path. The trailing 'br'/'ret' leave
+// the cont block active for the following insts, the same way append_slice_expr's bounds-check
+// trap leaves the slice_ok block active.
+fn append_try_unwrap_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirTryUnwrapExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ok = extractvalue ");
+    try out.append_bytes(inst.called_error_union);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.operand);
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  br i1 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ok, label %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_try_cont, label %t");
+    try std::fmt::append_i64(out, inst.id);
+    try append_ll_line(out, "_try_fail");
+    try out.append_bytes("t");
+    try std::fmt::append_i64(out, inst.id);
+    try append_ll_line(out, "_try_fail:");
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_msg = extractvalue ");
+    try out.append_bytes(inst.called_error_union);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.operand);
+    try out.append_bytes(", ");
+    try append_ll_line(out, error_union_msg_index_text(inst.called_error_union));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_fail_flag = insertvalue ");
+    try out.append_bytes(inst.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_fail_val = insertvalue ");
+    try out.append_bytes(inst.own_error_union);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_fail_flag, %kizu.slice.u8 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_msg, ");
+    try append_ll_line(out, error_union_msg_index_text(inst.own_error_union));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(inst.own_error_union);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, inst.id);
+    try append_ll_line(out, "_fail_val");
+    try out.append_bytes("t");
+    try std::fmt::append_i64(out, inst.id);
+    try append_ll_line(out, "_try_cont:");
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(inst.called_error_union);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.operand);
+    try append_ll_line(out, ", 1");
     return;
 }
 

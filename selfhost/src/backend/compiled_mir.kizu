@@ -263,6 +263,23 @@ pub struct MirIntCastExpr {
     pub source_llvm: []u8,
 }
 
+// MirTryUnwrapExpr backs a 'try <expr>' in value/sub-expression position (issue 1157
+// big-bang). operand references the earlier expr temp holding the inner error-union
+// aggregate (called_error_union); the renderer extracts its ok flag (field 0) and
+// branches on an id-suffixed label pair: t<id>_try_fail re-wraps the callee message
+// (field msg-index) into this function's own_error_union failure value and returns it
+// (propagation, never 'unreachable'); t<id>_try_cont extracts the success value
+// (field 1, llvm_type) into %t<id>. This mirrors MirLetTryCallStmt's propagation for
+// the statement-free expression path, which owns no stmts. It owns nothing, so it is
+// copy-only.
+pub struct MirTryUnwrapExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub operand: i64,
+    pub called_error_union: []u8,
+    pub own_error_union: []u8,
+}
+
 pub union MirExprInst {
     Var(MirVarExpr),
     ConstString(MirConstStringExpr),
@@ -280,6 +297,7 @@ pub union MirExprInst {
     IntCast(MirIntCastExpr),
     UnionConstruct(MirUnionConstructExpr),
     StructLiteral(MirStructLiteralExpr),
+    TryUnwrap(MirTryUnwrapExpr),
 }
 
 pub enum MirIfThenKind {
@@ -1618,6 +1636,7 @@ impl MirExprInst {
             IntCast(payload) => return;,
             UnionConstruct(payload) => return;,
             StructLiteral(payload) => payload.deinit(),
+            TryUnwrap(payload) => return;,
         }
     }
 }
@@ -3008,6 +3027,26 @@ pub fn int_cast_expr_inst(
     });
 }
 
+// try_unwrap_expr_inst builds a 'try <expr>' value-position instruction over the
+// already-lowered inner error-union temp 'operand' (called_error_union), unwrapping
+// its success value (llvm_type) on the continue path or propagating the re-wrapped
+// failure through own_error_union (issue 1157 big-bang).
+pub fn try_unwrap_expr_inst(
+    id: i64,
+    llvm_type: []u8,
+    operand: i64,
+    called_error_union: []u8,
+    own_error_union: []u8
+) -> MirExprInst {
+    return MirExprInst::TryUnwrap(MirTryUnwrapExpr {
+        id: id,
+        llvm_type: llvm_type,
+        operand: operand,
+        called_error_union: called_error_union,
+        own_error_union: own_error_union
+    });
+}
+
 // expr_inst_id and expr_inst_llvm_type read the result id and LLVM type that
 // every expr-inst variant carries, so result wiring (type-by-id lookups) does
 // not depend on the active variant.
@@ -3029,6 +3068,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         IntCast(payload) => payload.id,
         UnionConstruct(payload) => payload.id,
         StructLiteral(payload) => payload.id,
+        TryUnwrap(payload) => payload.id,
     };
 }
 
@@ -3050,6 +3090,7 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         IntCast(payload) => payload.llvm_type,
         UnionConstruct(payload) => payload.llvm_type,
         StructLiteral(payload) => payload.llvm_type,
+        TryUnwrap(payload) => payload.llvm_type,
     };
 }
 
@@ -3214,6 +3255,13 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
             id: payload.id,
             llvm_type: payload.llvm_type,
             struct_fields: try copy_struct_fields(&payload.struct_fields)
+        }),
+        TryUnwrap(payload) => MirExprInst::TryUnwrap(MirTryUnwrapExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            operand: payload.operand,
+            called_error_union: payload.called_error_union,
+            own_error_union: payload.own_error_union
         }),
     };
 }

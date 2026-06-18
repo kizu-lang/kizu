@@ -16655,6 +16655,31 @@ fn lower_expr_into_local_aliases(
             ir_lookup_index, call_arg_type_cache
         );
     }
+    // A 'try <expr>' in value/sub-expression position lowers its inner child generically
+    // through the same expr path (no inner-kind dispatch), reads the inner's produced
+    // error-union LLVM type, and emits a TryUnwrap that unwraps the success value or
+    // propagates the failure through this function's own error union (issue 1157 big-bang).
+    if std::mem::equal_bytes(kind, "TryExpr") {
+        let inner_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "value", 0, bs
+        );
+        let operand = try lower_expr_into_local_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, inner_node,
+            string_index, id_base, insts, aliases, bs, ir_lookup_index, call_arg_type_cache
+        );
+        let called_error_union = try expr_inst_llvm_type_by_id(insts, operand);
+        let success_type = try try_call_success_type(
+            ir_bytes, function_name, module_prefix, inner_node, bs, ir_lookup_index
+        );
+        let own_error_union = try compiled_signature::derive_return_type_indexed(
+            ir_lookup_index, ir_bytes, function_name
+        );
+        let result_id = id_base + insts.len();
+        try insts.append(compiled_mir::try_unwrap_expr_inst(
+            result_id, success_type, operand, called_error_union, own_error_union
+        ));
+        return result_id;
+    }
     return error("compiled mir: unsupported expression kind");
 }
 
@@ -16991,6 +17016,31 @@ fn lower_expr_into(
             args
         ));
         return id;
+    }
+    // A 'try <expr>' in value/sub-expression position lowers its inner child generically
+    // through the same expr path (no inner-kind dispatch), reads the inner's produced
+    // error-union LLVM type, and emits a TryUnwrap that unwraps the success value or
+    // propagates the failure through this function's own error union (issue 1157 big-bang).
+    if std::mem::equal_bytes(kind, "TryExpr") {
+        let inner_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "value", 0, bs
+        );
+        let operand = try lower_expr_into(
+            ir_bytes, function_name, module_prefix, params_spec, inner_node,
+            string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
+        );
+        let called_error_union = try expr_inst_llvm_type_by_id(insts, operand);
+        let success_type = try try_call_success_type(
+            ir_bytes, function_name, module_prefix, inner_node, bs, ir_lookup_index
+        );
+        let own_error_union = try compiled_signature::derive_return_type_indexed(
+            ir_lookup_index, ir_bytes, function_name
+        );
+        let result_id = id_base + insts.len();
+        try insts.append(compiled_mir::try_unwrap_expr_inst(
+            result_id, success_type, operand, called_error_union, own_error_union
+        ));
+        return result_id;
     }
     return error("compiled mir: unsupported expression kind");
 }
