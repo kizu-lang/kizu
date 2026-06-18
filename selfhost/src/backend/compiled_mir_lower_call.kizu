@@ -9,14 +9,10 @@ import selfhost::backend::ir_index;
 // Extracting it here lets call-valued struct field initializers reuse the same
 // arg lowering without an import cycle between the two lowering modules
 // (tracker 961).
-// lower_single_call_arg lowers one non-nested call argument into a MirCallArg
+// lower_single_call_arg lowers one call argument into a MirCallArg
 // descriptor. It is shared between lower_call_args (the inline statement/struct call
-// path) and the nested-call expression path, which lowers Call-valued arguments into
-// preceding expr temps and uses this helper for the remaining scalar arguments
-// (issue 1165). A nested Call argument is rejected here because it has no inline
-// descriptor; the expression path handles it instead. A String argument seeds itself
-// at string_index, so callers advance the shared string counter when the returned
-// arg.kind is String.
+// path) and the nested-call expression path. A String argument seeds itself at string_index,
+// so callers advance the shared string counter when the returned arg tree contains strings.
 fn aliased_name_or_original(
     alias_sources: &std::array::Array<[]u8>,
     alias_currents: &std::array::Array<[]u8>,
@@ -198,6 +194,18 @@ pub fn lower_single_call_arg(
         );
         return compiled_mir::var_call_arg(arg_type, var_name);
     }
+    if std::mem::equal_bytes(arg_kind, "Call") {
+        let callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, arg_node, bs
+        );
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, arg_node, bs
+        );
+        let args = try lower_call_args(
+            ir_bytes, function_name, module_prefix, params_spec, arg_node, string_index, bs
+        );
+        return compiled_mir::call_call_arg(arg_type, callee_module_prefix, callee_name, args);
+    }
     if std::mem::equal_bytes(arg_kind, "FieldExpr") {
         return try lower_call_field_arg(
             ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, bs
@@ -296,6 +304,19 @@ pub fn lower_single_call_arg_with_aliases(
             arg_type, try aliased_name_or_original(alias_sources, alias_currents, var_name)
         );
     }
+    if std::mem::equal_bytes(arg_kind, "Call") {
+        let callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, arg_node, bs
+        );
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, arg_node, bs
+        );
+        let args = try lower_call_args_with_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, arg_node, string_index,
+            alias_sources, alias_currents, bs
+        );
+        return compiled_mir::call_call_arg(arg_type, callee_module_prefix, callee_name, args);
+    }
     if std::mem::equal_bytes(arg_kind, "FieldExpr") {
         return try lower_call_field_arg_with_aliases(
             ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node,
@@ -393,10 +414,16 @@ pub fn lower_call_args(
             ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, string_index, bs
         );
         let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
-        try args.append(arg);
+        var string_arg_count = 0;
         if is_string_arg {
-            string_index = string_index + 1;
+            string_arg_count = 1;
+        } else {
+            if arg.kind == compiled_mir::MirCallArgKind::Call {
+                string_arg_count = try count_string_args(&arg.call_args);
+            }
         }
+        try args.append(arg);
+        string_index = string_index + string_arg_count;
         arg_index = arg_index + 1;
     }
     return args;
@@ -434,10 +461,16 @@ pub fn lower_call_args_cached(
             ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, string_index, bs
         );
         let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
-        try args.append(arg);
+        var string_arg_count = 0;
         if is_string_arg {
-            string_index = string_index + 1;
+            string_arg_count = 1;
+        } else {
+            if arg.kind == compiled_mir::MirCallArgKind::Call {
+                string_arg_count = try count_string_args(&arg.call_args);
+            }
         }
+        try args.append(arg);
+        string_index = string_index + string_arg_count;
         arg_index = arg_index + 1;
     }
     return args;
@@ -475,10 +508,16 @@ pub fn lower_call_args_with_aliases(
             string_index, alias_sources, alias_currents, bs
         );
         let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
-        try args.append(arg);
+        var string_arg_count = 0;
         if is_string_arg {
-            string_index = string_index + 1;
+            string_arg_count = 1;
+        } else {
+            if arg.kind == compiled_mir::MirCallArgKind::Call {
+                string_arg_count = try count_string_args(&arg.call_args);
+            }
         }
+        try args.append(arg);
+        string_index = string_index + string_arg_count;
         arg_index = arg_index + 1;
     }
     return args;
@@ -519,10 +558,16 @@ pub fn lower_call_args_with_aliases_cached(
             string_index, alias_sources, alias_currents, bs
         );
         let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
-        try args.append(arg);
+        var string_arg_count = 0;
         if is_string_arg {
-            string_index = string_index + 1;
+            string_arg_count = 1;
+        } else {
+            if arg.kind == compiled_mir::MirCallArgKind::Call {
+                string_arg_count = try count_string_args(&arg.call_args);
+            }
         }
+        try args.append(arg);
+        string_index = string_index + string_arg_count;
         arg_index = arg_index + 1;
     }
     return args;
@@ -541,6 +586,10 @@ pub fn count_string_args(args: &std::array::Array<compiled_mir::MirCallArg>) -> 
         let arg = try args.at(index);
         if arg.kind == compiled_mir::MirCallArgKind::String {
             count = count + 1;
+        } else {
+            if arg.kind == compiled_mir::MirCallArgKind::Call {
+                count = count + try count_string_args(&arg.call_args);
+            }
         }
         index = index + 1;
     }

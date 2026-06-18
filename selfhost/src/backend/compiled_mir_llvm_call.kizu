@@ -73,6 +73,10 @@ pub fn append_call_string_globals(
             );
             try out.append_byte(quote);
             try out.append_byte(cast<u8>(10));
+        } else {
+            if arg.kind == compiled_mir::MirCallArgKind::Call {
+                try append_call_string_globals(out, llvm_symbol, &arg.call_args);
+            }
         }
         index = index + 1;
     }
@@ -157,6 +161,25 @@ pub fn append_call_arg_setup_with_prefix(
                 } else {
                     if arg.kind == compiled_mir::MirCallArgKind::Arith {
                         try append_arith_arg_setup(out, &arg, call_prefix, index);
+                    } else {
+                        if arg.kind == compiled_mir::MirCallArgKind::Call {
+                            let nested_prefix = nested_call_arg_prefix(call_prefix, index);
+                            try append_call_arg_setup_with_prefix(
+                                out, llvm_symbol, &arg.call_args, nested_prefix
+                            );
+                            try out.append_bytes("  ");
+                            try append_arg_local_name(out, call_prefix, index);
+                            try out.append_bytes("_call = call ");
+                            try out.append_bytes(arg.ty);
+                            try out.append_bytes(" @");
+                            try append_callee_symbol(
+                                out, arg.call_module_prefix, arg.call_callee_name
+                            );
+                            try out.append_bytes("(");
+                            try append_call_args_with_prefix(out, &arg.call_args, nested_prefix);
+                            try out.append_bytes(")");
+                            try out.append_byte(cast<u8>(10));
+                        }
                     }
                 }
             }
@@ -359,6 +382,11 @@ fn append_slice_arg_bounds_check(
     return;
 }
 
+fn nested_call_arg_prefix(call_prefix: i64, index: i64) -> i64 {
+    // This base-1000 nesting scheme assumes each call has fewer than 1000 args.
+    return 1000000 + (call_prefix * 1000) + index;
+}
+
 fn append_arg_local_name(
     out: &var std::string::String,
     call_prefix: i64,
@@ -465,7 +493,12 @@ pub fn append_call_arg_value_with_prefix(
                                             try out.append_bytes("%t");
                                             try std::fmt::append_i64(out, arg.int_value);
                                         } else {
-                                            return error("compiled mir llvm: unsupported call arg");
+                                            if arg.kind == compiled_mir::MirCallArgKind::Call {
+                                                try append_arg_local_name(out, call_prefix, index);
+                                                try out.append_bytes("_call");
+                                            } else {
+                                                return error("compiled mir llvm: unsupported call arg");
+                                            }
                                         }
                                     }
                                 }

@@ -36,6 +36,7 @@ pub enum MirCallArgKind {
     IntLiteral,
     Arith,
     Temp,
+    Call,
 }
 
 // A FieldAccess call arg mirrors MirStructField's nested layout: source_type /
@@ -67,6 +68,9 @@ pub struct MirCallArg {
     pub slice_start_offset: i64,
     pub slice_end_base: []u8,
     pub slice_end_offset: i64,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub call_args: std::array::Array<MirCallArg>,
 }
 
 pub enum MirStructFieldKind {
@@ -1486,6 +1490,13 @@ pub struct MirFunction {
     pub entry: MirBlock,
 }
 
+impl MirCallArg {
+    fn deinit(self: MirCallArg) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
 // MirStructField owns the call-argument Array of a call-valued field (Call kind);
 // non-call fields hold the empty array from empty_struct_call_args. It is only
 // ever stored in struct_fields Arrays, so this cleanup runs through structural
@@ -2113,7 +2124,10 @@ pub fn var_call_arg(ty: []u8, name: []u8) -> MirCallArg {
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2132,7 +2146,10 @@ pub fn string_call_arg(ty: []u8, payload: []u8, string_index: i64) -> MirCallArg
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2151,7 +2168,10 @@ pub fn bool_call_arg(ty: []u8, value: bool) -> MirCallArg {
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2175,7 +2195,10 @@ pub fn field_access_call_arg(
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2206,7 +2229,10 @@ pub fn nested_field_access_call_arg(
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2225,7 +2251,10 @@ pub fn empty_slice_call_arg(ty: []u8) -> MirCallArg {
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2251,7 +2280,10 @@ pub fn slice_call_arg(
         slice_start_base: start_base,
         slice_start_offset: start_offset,
         slice_end_base: end_base,
-        slice_end_offset: end_offset
+        slice_end_offset: end_offset,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2273,7 +2305,10 @@ pub fn int_literal_call_arg(ty: []u8, value: i64) -> MirCallArg {
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2298,7 +2333,39 @@ pub fn temp_call_arg(ty: []u8, temp_id: i64) -> MirCallArg {
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+// call_call_arg materializes a nested call argument inline in the enclosing call's
+// argument setup, then passes that call result as the operand.
+pub fn call_call_arg(
+    ty: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::Call,
+        value: "",
+        bool_value: false,
+        string_index: -1,
+        int_value: 0,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: "",
+        slice_start_offset: 0,
+        slice_end_base: "",
+        slice_end_offset: 0,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args
     };
 }
 
@@ -2328,7 +2395,10 @@ pub fn arith_field_call_arg(
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2355,7 +2425,10 @@ pub fn arith_var_call_arg(
         slice_start_base: "",
         slice_start_offset: 0,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2877,7 +2950,8 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
     };
 }
 
-pub fn copy_call_arg(arg: &MirCallArg) -> MirCallArg {
+pub fn copy_call_arg(arg: &MirCallArg) -> !MirCallArg {
+    let copied_call_args = try copy_call_args(&arg.call_args);
     return MirCallArg {
         ty: arg.ty,
         kind: arg.kind,
@@ -2892,7 +2966,10 @@ pub fn copy_call_arg(arg: &MirCallArg) -> MirCallArg {
         slice_start_base: arg.slice_start_base,
         slice_start_offset: arg.slice_start_offset,
         slice_end_base: arg.slice_end_base,
-        slice_end_offset: arg.slice_end_offset
+        slice_end_offset: arg.slice_end_offset,
+        call_module_prefix: arg.call_module_prefix,
+        call_callee_name: arg.call_callee_name,
+        call_args: copied_call_args
     };
 }
 
@@ -2901,7 +2978,7 @@ pub fn copy_call_args(args: &std::array::Array<MirCallArg>) -> !std::array::Arra
     var index = 0;
     while index < args.len() {
         let arg = try args.at(index);
-        try copied.append(copy_call_arg(arg));
+        try copied.append(try copy_call_arg(arg));
         index = index + 1;
     }
     return copied;
