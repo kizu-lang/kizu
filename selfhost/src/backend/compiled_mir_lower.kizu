@@ -7932,7 +7932,38 @@ pub fn lower_multi_statement_function(
                             &var call_arg_type_cache
                         ));
                     } else {
+                    if std::mem::equal_bytes(stmt_kind, "Assign") {
+                        // A top-level '<local> = try <free-call>(args);' reassignment threads the
+                        // call's success value into an existing local. It reuses the LetTryCall
+                        // error-union branch/propagate path bound to a fresh alias name, then
+                        // redirects later reads of the target through that alias (the same
+                        // local-alias indirection the void-then-body reassignment uses), since the
+                        // SSA name already exists and cannot be redefined.
+                        let assign_result = try lower_multi_assign_statement(
+                            ir_bytes,
+                            function_name,
+                            module_prefix,
+                            llvm_return_type,
+                            locals_spec,
+                            statement,
+                            string_counter,
+                            temp_counter,
+                            try_counter,
+                            alias_counter,
+                            &var aliases,
+                            &var stmts,
+                            bs,
+                            ir_lookup_index,
+                            &var call_arg_type_cache
+                        );
+                        locals_spec = assign_result.locals_spec;
+                        string_counter = assign_result.string_counter;
+                        temp_counter = assign_result.temp_counter;
+                        try_counter = assign_result.try_counter;
+                        alias_counter = assign_result.alias_counter;
+                    } else {
                         return error("compiled mir: unsupported statement kind");
+                    }
                     }
                     }
                 }
@@ -7992,6 +8023,14 @@ pub struct MultiLowerResult {
     pub string_counter: i64,
     pub temp_counter: i64,
     pub try_counter: i64,
+}
+
+pub struct MultiAssignLowerResult {
+    pub locals_spec: []u8,
+    pub string_counter: i64,
+    pub temp_counter: i64,
+    pub try_counter: i64,
+    pub alias_counter: i64,
 }
 struct TryCallArgsLowerResult {
     string_counter: i64,
@@ -9911,6 +9950,83 @@ fn lower_multi_let_try_call(
         string_counter: lowered_args.string_counter,
         temp_counter: lowered_args.temp_counter,
         try_counter: try_counter + 1
+    };
+}
+
+// lower_multi_assign_statement lowers a top-level '<local> = try <free-call>(args);' reassignment.
+// The target is an already-bound local, so it cannot take a fresh SSA name like a 'let'. Instead the
+// call's success value is bound to a fresh alias name through the shared LetTryCall error-union
+// branch/propagate path, and the target local is redirected to that alias so later statements read
+// the updated value -- the same local-alias indirection lower_void_then_body_assign uses for
+// non-try reassignments inside if-then bodies. Only a free-function try-call value is accepted;
+// other shapes surface an explicit error rather than silently mis-lowering.
+fn lower_multi_assign_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    alias_counter: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiAssignLowerResult {
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+        return error("compiled mir: top-level assignment target must be a local");
+    }
+    let target_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, target, bs
+    );
+    // Resolving the target's type proves it is a bound local (an unbound name surfaces 'local type
+    // not found' rather than being silently accepted) and yields the type the reassigned value carries.
+    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+        ir_lookup_index,
+        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs
+    );
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, value, "TryExpr", bs)) {
+        return error("compiled mir: top-level assignment value must be a try-call");
+    }
+    let inner = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, inner, "Call", bs)) {
+        return error("compiled mir: top-level assignment try value must wrap a call");
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+        return error("compiled mir: top-level assignment try-call callee must be a free function");
+    }
+    // The reassigned local must carry the call's success type; a mismatch would silently mis-lower.
+    let success_type = try try_call_success_type(
+        ir_bytes, function_name, module_prefix, inner, bs, ir_lookup_index
+    );
+    if !std::mem::equal_bytes(success_type, target_type) {
+        return error("compiled mir: top-level assignment try-call success type mismatch");
+    }
+    let output_name = try void_then_alias_name(alias_counter);
+    let lowered = try lower_multi_let_try_call(
+        ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+        output_name, inner, string_counter, temp_counter, try_counter, aliases, stmts, bs,
+        ir_lookup_index, call_arg_type_cache
+    );
+    try set_local_alias(aliases, target_name, output_name);
+    return MultiAssignLowerResult {
+        locals_spec: lowered.locals_spec,
+        string_counter: lowered.string_counter,
+        temp_counter: lowered.temp_counter,
+        try_counter: lowered.try_counter,
+        alias_counter: alias_counter + 1
     };
 }
 
