@@ -16907,11 +16907,29 @@ fn lower_while_latch_try_call(
     );
 }
 
+// latch_call_cursor_type_is_seedable reports whether a token-carried plain-call latch's result type
+// can drive the loop-head induction phi. i64 is the historical scalar cursor; a named struct value
+// type (e.g. %kizu.kizu.lexer.token, the seven-i64 Token) is the struct cursor, symmetric with the
+// call-seeded primary init lowered through lower_expr_into. An error-union result (%kizu.error.*) is
+// rejected -- only a try-call latch carries one -- as is any other non-i64, non-named type, so the
+// relaxation stays bounded to the cursor types the init seed can produce (issue 1157 PR-P4 follow-up).
+fn latch_call_cursor_type_is_seedable(call_type: []u8) -> bool {
+    if std::mem::equal_bytes(call_type, "i64") {
+        return true;
+    }
+    if std::mem::starts_with(call_type, "%kizu.error.") {
+        return false;
+    }
+    return std::mem::starts_with(call_type, "%");
+}
+
 // lower_while_latch_call lowers a token-carried 'token = synth_next_token(token);' latch
 // update into a LetCall statement whose bound name is the induction variable (issue 1157
 // PR-P4). The latch renderer suffixes the bind name with "_next", so the call result binds
 // to %<induction_var>_next which the loop-head phi consumes on the latch edge. The callee
-// must be a free function returning i64; a field-mode method or non-i64 result is rejected.
+// must be a free function; an i64 result drives a scalar cursor and a struct value result (a
+// named LLVM type) drives a struct cursor, symmetric with the call-seeded init. A field-mode
+// method or an unseedable result type (error union / other) is rejected.
 fn lower_while_latch_call(
     ir_bytes: []u8,
     function_name: []u8,
@@ -16931,8 +16949,17 @@ fn lower_while_latch_call(
         ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    if !std::mem::equal_bytes(call_type, "i64") {
-        return error("compiled mir: token-carried latch call must return an i64");
+    // The latch reseats the cursor from the call's return value, which the loop-head phi reads on
+    // the latch edge. An i64 result drives the historical scalar cursor; a struct value result -- a
+    // named LLVM type such as %kizu.kizu.lexer.token (the seven-i64 Token) -- drives a struct cursor,
+    // the symmetric counterpart of the call-seeded primary init that lower_multi_while_statement
+    // lowers through lower_expr_into. Both the init seed and this latch update carry the cursor's
+    // declared type (the source's type system guarantees they agree), so the loop-head phi renders
+    // that exact type. The relaxation stays bounded to init-side-seedable cursors: an error-union
+    // result (%kizu.error.*, which only a try-call latch carries) or any non-i64, non-named type is
+    // still rejected (issue 1157 PR-P4 follow-up).
+    if !latch_call_cursor_type_is_seedable(call_type) {
+        return error("compiled mir: token-carried latch call must return an i64 or struct value");
     }
     let callee_name = try compiled_mir_types::lower_call_callee_name(
         ir_bytes, function_name, module_prefix, call_node, bs

@@ -6483,13 +6483,14 @@ fn append_multi_while(
     try append_while_counter_phi(
         out, stmt, stmt.induction_var, stmt.induction_init_var,
         stmt.induction_init_offset, stmt.induction_init, stmt.latch_copy_var,
-        stmt.init_result_id
+        stmt.init_result_id, try while_induction_phi_type(stmt)
     );
     var phi_index = 0;
     while phi_index < secondary.len() {
         let entry = try secondary.at(phi_index);
         try append_while_counter_phi(
-            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, "", -1
+            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, "", -1,
+            "i64"
         );
         phi_index = phi_index + 1;
     }
@@ -6504,7 +6505,7 @@ fn append_multi_while(
         } else {
             try append_while_counter_phi(
                 out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal,
-                entry.latch_var, -1
+                entry.latch_var, -1, "i64"
             );
         }
         carried_phi_index = carried_phi_index + 1;
@@ -6736,10 +6737,13 @@ fn append_while_counter_preheader_init(
     try out.append_byte(cast<u8>(10));
     return;
 }
-// append_while_counter_phi emits one loop-head phi for an i64 counter: '%<var> = phi i64
-// [ <seed>, %loopN_preheader ], [ %<var>_next, <latch-pred> ]'. The seed is %<var>_init for a
-// base-plus-offset init, %<init_var> for a plain copy, or the integer literal otherwise. The
-// latch-edge predecessor is shared with the primary counter (issue 1165 / 1162).
+// append_while_counter_phi emits one loop-head phi for a counter: '%<var> = phi <phi_llvm_type>
+// [ <seed>, %loopN_preheader ], [ %<var>_next, <latch-pred> ]'. phi_llvm_type is "i64" for every
+// scalar counter (the secondary lockstep and carried-scalar phis always pass "i64"); the primary
+// induction phi passes the cursor's declared type, which is a struct value type (e.g.
+// %kizu.kizu.lexer.token) for a token-carried struct-call latch (issue 1157 PR-P4). The seed is
+// %<var>_init for a base-plus-offset init, %<init_var> for a plain copy, or the integer literal
+// otherwise. The latch-edge predecessor is shared with the primary counter (issue 1165 / 1162).
 // latch_copy_var overrides the phi's latch-edge incoming value: when it is non-empty (a
 // copy-decrement latch's body-local, e.g. %previous for 'index = previous') the phi reads
 // %<latch_copy_var> on the latch edge instead of %<counter_var>_next, since the body already holds
@@ -6757,11 +6761,14 @@ fn append_while_counter_phi(
     init_offset: i64,
     init_literal: i64,
     latch_copy_var: []u8,
-    init_result_id: i64
+    init_result_id: i64,
+    phi_llvm_type: []u8
 ) -> !void {
     try out.append_bytes("  %");
     try out.append_bytes(counter_var);
-    try out.append_bytes(" = phi i64 [ ");
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(phi_llvm_type);
+    try out.append_bytes(" [ ");
     if init_result_id >= 0 {
         try append_expr_value_ref(out, &stmt.init_insts, init_result_id);
     } else {
@@ -6791,6 +6798,26 @@ fn append_while_counter_phi(
     try out.append_bytes(" ]");
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+// while_induction_phi_type returns the LLVM type of the primary loop-head induction phi. A
+// token-carried plain-call latch ('token = next_token(text, token)') reseats the cursor with the
+// call's return type, which may be a struct value (e.g. %kizu.kizu.lexer.token for
+// skip_balanced_block) rather than i64; the phi must carry that exact type so its preheader seed
+// (the init call result through init_result_id) and its latch operand (%<var>_next) agree. Every
+// other latch shape -- constant-step add, try-call, field-access, copy-decrement -- advances an i64
+// counter, so the phi stays i64 (issue 1157 PR-P4). It mirrors expr_inst_var_name_by_id's
+// payload-field read off the bound LetCall variant.
+fn while_induction_phi_type(stmt: &compiled_mir::MirWhileStmt) -> ![]u8 {
+    let latch_stmts = &stmt.latch_stmts;
+    if latch_stmts.len() == 0 {
+        return "i64";
+    }
+    let latch_stmt = try latch_stmts.at(0);
+    return match latch_stmt {
+        LetCall(payload) => payload.llvm_type,
+        _ => "i64",
+    };
 }
 
 fn append_while_carried_scalar_phi(
