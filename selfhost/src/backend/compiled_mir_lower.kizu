@@ -7166,6 +7166,49 @@ fn lower_embedded_value_cursor_append_loop(
     };
 }
 
+// emit_pending_defers lowers each recorded top-level 'defer <receiver>.deinit();' body and appends
+// its side-effect-only MIR statement to the running statement list, in LIFO order (last defer
+// registered runs first). Each body re-uses the validated owned-deinit expression path, so the
+// receiver type and %kizu.owned representation are re-checked at every emission site. The defer body
+// is a non-try '<receiver>.deinit()' call, which consumes no string/try counters, so the threaded
+// counters are passed through unchanged. This is called immediately before each top-level Return so
+// the cleanup precedes the produced return value.
+fn emit_pending_defers(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    pending_defers: &std::array::Array<i64>,
+    string_counter: i64,
+    try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !void {
+    var defer_index = pending_defers.len();
+    while defer_index > 0 {
+        defer_index = defer_index - 1;
+        let defer_body = try pending_defers.get(defer_index);
+        let emitted = try lower_owned_deinit_expr_statement(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            defer_body,
+            string_counter,
+            try_counter,
+            aliases,
+            stmts,
+            bs
+        );
+        // The owned-deinit path returns the counters unchanged; bind to acknowledge the result.
+        if emitted.try_counter != try_counter {
+            return error("compiled mir: defer deinit unexpectedly consumed a try slot");
+        }
+    }
+    return;
+}
+
 pub fn lower_multi_statement_function(
     ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
@@ -7269,6 +7312,12 @@ pub fn lower_multi_statement_function(
     defer aliases.deinit();
     var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
     defer call_arg_type_cache.deinit();
+    // Top-level 'defer <receiver>.deinit();' statements register a cleanup that must run on every
+    // exit path reached after the defer. We collect each defer body's inner expression node here and
+    // re-lower it (via the owned-deinit expression path) immediately before each top-level Return,
+    // in LIFO order, rather than emitting it in-place (issue 1157 parse_impl_decl Defer blocker).
+    var pending_defers = std::array::Array<i64>(std::mem::page_allocator());
+    defer pending_defers.deinit();
     var stmt_index = 0;
     while stmt_index < statement_count {
         let statement = try ir_contract::body_child_sequence_from(
@@ -7329,6 +7378,14 @@ pub fn lower_multi_statement_function(
             temp_counter = let_result.temp_counter;
             try_counter = let_result.try_counter;
         } else {
+            if std::mem::equal_bytes(stmt_kind, "Defer") {
+                // The defer body is the single 'expr' child of the Defer node (a '<receiver>.deinit()'
+                // call). Record it for emission at each subsequent top-level exit; emit nothing here.
+                let defer_body = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "expr", 0, bs
+                );
+                try pending_defers.append(defer_body);
+            } else {
             if std::mem::equal_bytes(stmt_kind, "While") {
                 if try is_embedded_value_cursor_append_loop_shape(
                     ir_bytes, function_name, stmt_index, statement, bs
@@ -7376,6 +7433,20 @@ pub fn lower_multi_statement_function(
                 }
             } else {
             if std::mem::equal_bytes(stmt_kind, "Return") {
+                // Cleanups registered by earlier top-level 'defer' statements run on this exit, in
+                // LIFO order, before the return value is produced.
+                try emit_pending_defers(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    &pending_defers,
+                    string_counter,
+                    try_counter,
+                    &aliases,
+                    &var stmts,
+                    bs
+                );
                 try stmts.append(try lower_multi_return_statement(
                     ir_bytes,
                     function_name,
@@ -7461,6 +7532,7 @@ pub fn lower_multi_statement_function(
                     }
                     }
                 }
+            }
             }
             }
         }
