@@ -213,7 +213,7 @@ pub fn lower_single_call_arg(
     }
     if std::mem::equal_bytes(arg_kind, "IndexExpr") {
         return try lower_call_index_arg(
-            ir_bytes, function_name, arg_type, arg_node, bs
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, bs
         );
     }
     if std::mem::equal_bytes(arg_kind, "String") {
@@ -325,7 +325,8 @@ pub fn lower_single_call_arg_with_aliases(
     }
     if std::mem::equal_bytes(arg_kind, "IndexExpr") {
         return try lower_call_index_arg_with_aliases(
-            ir_bytes, function_name, arg_type, arg_node, alias_sources, alias_currents, bs
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node,
+            alias_sources, alias_currents, bs
         );
     }
     if std::mem::equal_bytes(arg_kind, "String") {
@@ -595,25 +596,74 @@ pub fn count_string_args(args: &std::array::Array<compiled_mir::MirCallArg>) -> 
     }
     return count;
 }
+// A SliceBound carries a static base register plus a constant offset. When the
+// bound is a single-level field read off a Var receiver (FieldExpr, e.g.
+// current.start), base holds the receiver register and field_index >= 0 names the
+// field to extractvalue off source_type before adding offset; field_index == -1
+// keeps the plain register/literal bound. This lets text[current.start..current.end]
+// style slices lower their dynamic field-read bounds (frontier: parse_impl_decl
+// token extraction).
 struct SliceBound {
     base: []u8,
     offset: i64,
+    source_type: []u8,
+    field_index: i64,
+}
+
+fn slice_bound_field_read(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    node: i64,
+    base: []u8,
+    bs: i64
+) -> !SliceBound {
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, receiver, bs);
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: slice bound field receiver must be a var");
+    }
+    let field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, node, bs
+    );
+    return SliceBound {
+        base: base,
+        offset: 0,
+        source_type: field.receiver_llvm_type,
+        field_index: field.field_index
+    };
 }
 
 fn lower_slice_bound(
     ir_bytes: []u8,
     function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
     node: i64,
     bs: i64
 ) -> !SliceBound {
     let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, node, bs);
     if std::mem::equal_bytes(kind, "Var") {
         let name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, node, bs);
-        return SliceBound { base: name, offset: 0 };
+        return SliceBound { base: name, offset: 0, source_type: "", field_index: -1 };
     }
     if std::mem::equal_bytes(kind, "Int") {
         let literal = try ir_contract::body_int_value_from(ir_bytes, function_name, node, bs);
-        return SliceBound { base: "", offset: literal };
+        return SliceBound { base: "", offset: literal, source_type: "", field_index: -1 };
+    }
+    if std::mem::equal_bytes(kind, "FieldExpr") {
+        let receiver = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "receiver", 0, bs
+        );
+        let receiver_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, receiver, bs
+        );
+        return try slice_bound_field_read(
+            ir_bytes, function_name, module_prefix, params_spec, node, receiver_name, bs
+        );
     }
     if std::mem::equal_bytes(kind, "Binary") {
         let op = try ir_contract::sequence_fact_value_from(
@@ -637,10 +687,10 @@ fn lower_slice_bound(
             ir_bytes, function_name, right_node, bs
         );
         if std::mem::equal_bytes(op, "add") {
-            return SliceBound { base: base, offset: literal };
+            return SliceBound { base: base, offset: literal, source_type: "", field_index: -1 };
         }
         if std::mem::equal_bytes(op, "sub") {
-            return SliceBound { base: base, offset: 0 - literal };
+            return SliceBound { base: base, offset: 0 - literal, source_type: "", field_index: -1 };
         }
         return error("compiled mir: unsupported slice bound op");
     }
@@ -650,6 +700,8 @@ fn lower_slice_bound(
 fn lower_slice_bound_with_aliases(
     ir_bytes: []u8,
     function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
     node: i64,
     alias_sources: &std::array::Array<[]u8>,
     alias_currents: &std::array::Array<[]u8>,
@@ -660,12 +712,26 @@ fn lower_slice_bound_with_aliases(
         let name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, node, bs);
         return SliceBound {
             base: try aliased_name_or_original(alias_sources, alias_currents, name),
-            offset: 0
+            offset: 0,
+            source_type: "",
+            field_index: -1
         };
     }
     if std::mem::equal_bytes(kind, "Int") {
         let literal = try ir_contract::body_int_value_from(ir_bytes, function_name, node, bs);
-        return SliceBound { base: "", offset: literal };
+        return SliceBound { base: "", offset: literal, source_type: "", field_index: -1 };
+    }
+    if std::mem::equal_bytes(kind, "FieldExpr") {
+        let receiver = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, node, "receiver", 0, bs
+        );
+        let receiver_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, receiver, bs
+        );
+        return try slice_bound_field_read(
+            ir_bytes, function_name, module_prefix, params_spec, node,
+            try aliased_name_or_original(alias_sources, alias_currents, receiver_name), bs
+        );
     }
     if std::mem::equal_bytes(kind, "Binary") {
         let op = try ir_contract::sequence_fact_value_from(
@@ -690,10 +756,12 @@ fn lower_slice_bound_with_aliases(
         );
         let aliased_base = try aliased_name_or_original(alias_sources, alias_currents, base);
         if std::mem::equal_bytes(op, "add") {
-            return SliceBound { base: aliased_base, offset: literal };
+            return SliceBound { base: aliased_base, offset: literal, source_type: "", field_index: -1 };
         }
         if std::mem::equal_bytes(op, "sub") {
-            return SliceBound { base: aliased_base, offset: 0 - literal };
+            return SliceBound {
+                base: aliased_base, offset: 0 - literal, source_type: "", field_index: -1
+            };
         }
         return error("compiled mir: unsupported slice bound op");
     }
@@ -703,6 +771,8 @@ fn lower_slice_bound_with_aliases(
 fn lower_call_index_arg(
     ir_bytes: []u8,
     function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
     arg_type: []u8,
     arg_node: i64,
     bs: i64
@@ -725,21 +795,31 @@ fn lower_call_index_arg(
     let end_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, arg_node, "end", 0, bs
     );
-    let start_bound = try lower_slice_bound(ir_bytes, function_name, start_node, bs);
-    let end_bound = try lower_slice_bound(ir_bytes, function_name, end_node, bs);
+    let start_bound = try lower_slice_bound(
+        ir_bytes, function_name, module_prefix, params_spec, start_node, bs
+    );
+    let end_bound = try lower_slice_bound(
+        ir_bytes, function_name, module_prefix, params_spec, end_node, bs
+    );
     return compiled_mir::slice_call_arg(
         arg_type,
         target_name,
         start_bound.base,
         start_bound.offset,
+        start_bound.source_type,
+        start_bound.field_index,
         end_bound.base,
-        end_bound.offset
+        end_bound.offset,
+        end_bound.source_type,
+        end_bound.field_index
     );
 }
 
 fn lower_call_index_arg_with_aliases(
     ir_bytes: []u8,
     function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
     arg_type: []u8,
     arg_node: i64,
     alias_sources: &std::array::Array<[]u8>,
@@ -765,18 +845,24 @@ fn lower_call_index_arg_with_aliases(
         ir_bytes, function_name, arg_node, "end", 0, bs
     );
     let start_bound = try lower_slice_bound_with_aliases(
-        ir_bytes, function_name, start_node, alias_sources, alias_currents, bs
+        ir_bytes, function_name, module_prefix, params_spec, start_node,
+        alias_sources, alias_currents, bs
     );
     let end_bound = try lower_slice_bound_with_aliases(
-        ir_bytes, function_name, end_node, alias_sources, alias_currents, bs
+        ir_bytes, function_name, module_prefix, params_spec, end_node,
+        alias_sources, alias_currents, bs
     );
     return compiled_mir::slice_call_arg(
         arg_type,
         try aliased_name_or_original(alias_sources, alias_currents, target_name),
         start_bound.base,
         start_bound.offset,
+        start_bound.source_type,
+        start_bound.field_index,
         end_bound.base,
-        end_bound.offset
+        end_bound.offset,
+        end_bound.source_type,
+        end_bound.field_index
     );
 }
 

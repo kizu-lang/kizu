@@ -53,6 +53,13 @@ pub enum MirCallArgKind {
 // otherwise the base is the Var %value directly; bool_value true selects sub
 // over add. These back the lexer's position(initial.line + 1, 1) style calls
 // (tracker 961, scope 4 prerequisite).
+//
+// For a Slice arg a bound is normally the static slice_*_base register plus a
+// constant slice_*_offset. When a bound is a single-level field read off a Var
+// receiver (e.g. text[current.start..current.end]) slice_*_base holds the
+// receiver register and slice_*_field_index >= 0 names the field; the renderer
+// then extractvalue's that field off slice_*_source_type %base before adding the
+// offset. slice_*_field_index == -1 keeps the plain register/literal bound.
 pub struct MirCallArg {
     pub ty: []u8,
     pub kind: MirCallArgKind,
@@ -66,8 +73,12 @@ pub struct MirCallArg {
     pub nested_field_index: i64,
     pub slice_start_base: []u8,
     pub slice_start_offset: i64,
+    pub slice_start_source_type: []u8,
+    pub slice_start_field_index: i64,
     pub slice_end_base: []u8,
     pub slice_end_offset: i64,
+    pub slice_end_source_type: []u8,
+    pub slice_end_field_index: i64,
     pub call_module_prefix: []u8,
     pub call_callee_name: []u8,
     pub call_args: std::array::Array<MirCallArg>,
@@ -2291,8 +2302,12 @@ pub fn var_call_arg(ty: []u8, name: []u8) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2313,8 +2328,12 @@ pub fn string_call_arg(ty: []u8, payload: []u8, string_index: i64) -> MirCallArg
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2335,8 +2354,12 @@ pub fn bool_call_arg(ty: []u8, value: bool) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2362,8 +2385,12 @@ pub fn field_access_call_arg(
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2396,8 +2423,12 @@ pub fn nested_field_access_call_arg(
         nested_field_index: nested_field_index,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2418,8 +2449,12 @@ pub fn empty_slice_call_arg(ty: []u8) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2431,8 +2466,12 @@ pub fn slice_call_arg(
     target: []u8,
     start_base: []u8,
     start_offset: i64,
+    start_source_type: []u8,
+    start_field_index: i64,
     end_base: []u8,
-    end_offset: i64
+    end_offset: i64,
+    end_source_type: []u8,
+    end_field_index: i64
 ) -> MirCallArg {
     return MirCallArg {
         ty: ty,
@@ -2447,8 +2486,12 @@ pub fn slice_call_arg(
         nested_field_index: -1,
         slice_start_base: start_base,
         slice_start_offset: start_offset,
+        slice_start_source_type: start_source_type,
+        slice_start_field_index: start_field_index,
         slice_end_base: end_base,
         slice_end_offset: end_offset,
+        slice_end_source_type: end_source_type,
+        slice_end_field_index: end_field_index,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2472,8 +2515,12 @@ pub fn int_literal_call_arg(ty: []u8, value: i64) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2500,8 +2547,12 @@ pub fn temp_call_arg(ty: []u8, temp_id: i64) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2529,8 +2580,12 @@ pub fn call_call_arg(
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
         call_args: args
@@ -2562,8 +2617,12 @@ pub fn arith_field_call_arg(
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -2592,8 +2651,12 @@ pub fn arith_var_call_arg(
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
         slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
@@ -3155,8 +3218,12 @@ pub fn copy_call_arg(arg: &MirCallArg) -> !MirCallArg {
         nested_field_index: arg.nested_field_index,
         slice_start_base: arg.slice_start_base,
         slice_start_offset: arg.slice_start_offset,
+        slice_start_source_type: arg.slice_start_source_type,
+        slice_start_field_index: arg.slice_start_field_index,
         slice_end_base: arg.slice_end_base,
         slice_end_offset: arg.slice_end_offset,
+        slice_end_source_type: arg.slice_end_source_type,
+        slice_end_field_index: arg.slice_end_field_index,
         call_module_prefix: arg.call_module_prefix,
         call_callee_name: arg.call_callee_name,
         call_args: copied_call_args

@@ -232,14 +232,43 @@ fn append_arith_arg_setup(
     return;
 }
 
+// append_slice_arg_bound emits the i64 bound register for a slice start/end. The
+// static form adds a constant offset onto the base register (or onto 0 when base
+// is empty for an Int bound). When field_index >= 0 the bound is a single-level
+// field read off the base struct register (e.g. current.start): extractvalue the
+// field off source_type %base into %argN<suffix>_ex first, then add the offset.
 fn append_slice_arg_bound(
     out: &var std::string::String,
     call_prefix: i64,
     index: i64,
     suffix: []u8,
     base: []u8,
-    offset: i64
+    offset: i64,
+    source_type: []u8,
+    field_index: i64
 ) -> !void {
+    if field_index >= 0 {
+        try out.append_bytes("  ");
+        try append_arg_local_name(out, call_prefix, index);
+        try out.append_bytes(suffix);
+        try out.append_bytes("_ex = extractvalue ");
+        try out.append_bytes(source_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(base);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, field_index);
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  ");
+        try append_arg_local_name(out, call_prefix, index);
+        try out.append_bytes(suffix);
+        try out.append_bytes(" = add i64 ");
+        try append_arg_local_name(out, call_prefix, index);
+        try out.append_bytes(suffix);
+        try out.append_bytes("_ex, ");
+        try std::fmt::append_i64(out, offset);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
     try out.append_bytes("  ");
     try append_arg_local_name(out, call_prefix, index);
     try out.append_bytes(suffix);
@@ -268,10 +297,12 @@ fn append_slice_arg_setup(
     try out.append_bytes(", 0");
     try out.append_byte(cast<u8>(10));
     try append_slice_arg_bound(
-        out, call_prefix, index, "_sstart", arg.slice_start_base, arg.slice_start_offset
+        out, call_prefix, index, "_sstart", arg.slice_start_base, arg.slice_start_offset,
+        arg.slice_start_source_type, arg.slice_start_field_index
     );
     try append_slice_arg_bound(
-        out, call_prefix, index, "_send", arg.slice_end_base, arg.slice_end_offset
+        out, call_prefix, index, "_send", arg.slice_end_base, arg.slice_end_offset,
+        arg.slice_end_source_type, arg.slice_end_field_index
     );
     try append_slice_arg_bounds_check(out, &arg, call_prefix, index);
     try out.append_bytes("  ");
