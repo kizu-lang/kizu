@@ -6881,6 +6881,34 @@ fn value_cursor_previous_copy_source_or_empty(
     return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, init_value, bs);
 }
 
+// value_cursor_pre_latch_is_guard_scan reports whether every body statement before the value-cursor
+// latch is a guard 'if' (a sentinel early-exit such as 'if is_eof_token(current) { return error(..) }').
+// A scan loop advances its cursor to a sentinel without accumulating into an array or a sink call, so
+// it carries no append / void-call accumulation step; the predicate-call header, cursor seed, and
+// value-cursor latch already pin it as a value-cursor loop, and the guard ifs lower through the same
+// generic body-statement path the accumulation loops use (parse_skipped_top_level_block's brace scan).
+fn value_cursor_pre_latch_is_guard_scan(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    body_count: i64,
+    bs: i64
+) -> !bool {
+    if body_count < 2 {
+        return false;
+    }
+    var body_index = 0;
+    while body_index < body_count - 1 {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        if !(try node_kind_is(ir_bytes, function_name, body_stmt, "If", bs)) {
+            return false;
+        }
+        body_index = body_index + 1;
+    }
+    return true;
+}
 fn is_embedded_value_cursor_append_loop_shape(
     ir_bytes: []u8,
     function_name: []u8,
@@ -6935,7 +6963,12 @@ fn is_embedded_value_cursor_append_loop_shape(
         }
         body_index = body_index + 1;
     }
-    return false;
+    // No append / void-call accumulation: a sentinel scan loop whose pre-latch body is only guard
+    // ifs is still a value-cursor loop (parse_skipped_top_level_block scans tokens to the opening
+    // brace, advancing the cursor with no accumulation), so accept it through the guard-scan path.
+    return try value_cursor_pre_latch_is_guard_scan(
+        ir_bytes, function_name, body_node, body_count, bs
+    );
 }
 
 fn lower_embedded_value_cursor_append_loop(
