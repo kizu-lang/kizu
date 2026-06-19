@@ -1167,6 +1167,42 @@ pub struct MirTrailingTokenLoopStmt {
     pub label_base: []u8,
 }
 
+// MirGuardedCursorLoopStmt backs a value-carried cursor loop whose latch is reached only through a
+// terminal if/else (parse_type_params' '<T, U>' walk): 'var <cursor> = <plain init>(..); while
+// !<pred>(<cursor>) { <body lets/void-calls>; if <pred2>(<local>) { <cursor> = <plain latch>(..); }
+// else { <else lets>; return <expr>; } }; return <expr>;'. It is structurally distinct from the
+// value-cursor append loop (whose latch is the unconditional last body statement, an error-union
+// try-call, and whose exit returns the bare cursor), the type-apply / while-match loops (a
+// bool-literal 'while true' header with no normal exit), and the i64-induction While (whose body
+// ends in an arithmetic increment): here the header is a prefix-not predicate giving a normal exit,
+// the body's terminal If latches the cursor through a plain call in one arm and returns from the
+// other, and both the else arm and the post-loop trailing statement return a struct value reading
+// the loop-head phi. The renderer emits a head/body/latch/else/exit CFG: the head holds one
+// loop-carried phi for the cursor (named <cursor_var> so plain Var reads in the condition, body,
+// terminal condition and exit resolve to it) seeded from %<cursor>_init on the entry edge and from
+// %<cursor>_next on the latch back-edge; the body statements lower through the same per-statement
+// machinery the top level uses, the terminal condition branches to the plain-call latch or the else
+// arm, the latch reassigns the cursor and back-edges to the head, and the else and exit arms run
+// their lowered statements (each ending in a return). The pre-cursor lets (e.g. 'let start =
+// begin_children()') are emitted as ordinary top-level statements ahead of this one, so the cursor
+// init is the only preheader instruction this statement owns. It owns the init, the condition
+// insts, the body stmts, the terminal condition insts, the latch, and the else/exit stmts.
+pub struct MirGuardedCursorLoopStmt {
+    pub cursor_var: []u8,
+    pub cursor_type: []u8,
+    pub own_error_union: []u8,
+    pub init: MirLetCallStmt,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub terminal_cond_insts: std::array::Array<MirExprInst>,
+    pub terminal_cond_result_id: i64,
+    pub latch: MirLetCallStmt,
+    pub else_stmts: std::array::Array<MirStmt>,
+    pub exit_stmts: std::array::Array<MirStmt>,
+    pub label_base: []u8,
+}
+
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
 // (tracker 961, scope 4 prerequisite). The renderer builds the (1, 1) start Position then returns
 // token_at at offset 0. Its nested call argument (position(1, 1)) the generic path does not model,
@@ -1498,6 +1534,7 @@ pub union MirStmt {
     TrailingTokenLoop(MirTrailingTokenLoopStmt),
     TypeApplyLoop(MirTypeApplyLoopStmt),
     WhileMatchLoop(MirWhileMatchLoopStmt),
+    GuardedCursorLoop(MirGuardedCursorLoopStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
     ParserPostfixStart(MirParserPostfixStartStmt),
@@ -2134,6 +2171,19 @@ impl MirWhileMatchLoopStmt {
     }
 }
 
+impl MirGuardedCursorLoopStmt {
+    fn deinit(self: MirGuardedCursorLoopStmt) -> void {
+        self.init.deinit();
+        self.cond_insts.deinit();
+        self.body_stmts.deinit();
+        self.terminal_cond_insts.deinit();
+        self.latch.deinit();
+        self.else_stmts.deinit();
+        self.exit_stmts.deinit();
+        return;
+    }
+}
+
 impl MirStmt {
     fn deinit(self: MirStmt) -> void {
         match self {
@@ -2173,6 +2223,7 @@ impl MirStmt {
             TrailingTokenLoop(payload) => payload.deinit(),
             TypeApplyLoop(payload) => payload.deinit(),
             WhileMatchLoop(payload) => payload.deinit(),
+            GuardedCursorLoop(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
             ParserPostfixStart(payload) => payload.deinit(),
@@ -4219,6 +4270,38 @@ pub fn while_match_loop_stmt(
         scrutinee_result_id: scrutinee_result_id,
         arms: arms,
         latch: latch,
+        label_base: label_base
+    });
+}
+
+pub fn guarded_cursor_loop_stmt(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    own_error_union: []u8,
+    init: MirLetCallStmt,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    terminal_cond_insts: std::array::Array<MirExprInst>,
+    terminal_cond_result_id: i64,
+    latch: MirLetCallStmt,
+    else_stmts: std::array::Array<MirStmt>,
+    exit_stmts: std::array::Array<MirStmt>,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::GuardedCursorLoop(MirGuardedCursorLoopStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        own_error_union: own_error_union,
+        init: init,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        terminal_cond_insts: terminal_cond_insts,
+        terminal_cond_result_id: terminal_cond_result_id,
+        latch: latch,
+        else_stmts: else_stmts,
+        exit_stmts: exit_stmts,
         label_base: label_base
     });
 }

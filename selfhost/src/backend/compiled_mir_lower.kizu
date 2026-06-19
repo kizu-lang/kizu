@@ -6814,6 +6814,363 @@ fn lower_while_match_loop(
     );
 }
 
+// guarded_cursor_terminal_if_matches reports whether a body's terminal statement is the if/else
+// latch the guarded-cursor loop requires: a plain bool-predicate-call condition, a then arm of
+// exactly one '<cursor> = <plain call>(..)' latch Assign, and an else arm whose last statement is a
+// Return. The plain-call latch (rather than the value-cursor loop's terminal try-call Assign) and
+// the returning else arm (rather than the type-apply / while-match loops' bool-literal headers) keep
+// this shape disjoint from those.
+fn guarded_cursor_terminal_if_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    cursor_var: []u8,
+    bs: i64
+) -> !bool {
+    if !(try node_kind_is(ir_bytes, function_name, statement, "If", bs)) {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, cond_node, "Call", bs)) {
+        return false;
+    }
+    if try callee_is_field_expr(ir_bytes, function_name, cond_node, bs) {
+        return false;
+    }
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "then", 0, bs
+    );
+    let then_count = try while_body_statement_count(ir_bytes, function_name, then_node, bs);
+    if then_count != 1 {
+        return false;
+    }
+    let latch_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    if !(try type_apply_loop_assign_is_plain_call(
+        ir_bytes, function_name, latch_stmt, cursor_var, bs
+    )) {
+        return false;
+    }
+    let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+        ir_bytes, function_name, statement, "else", 0, bs
+    );
+    if else_node < 0 {
+        return false;
+    }
+    let else_count = try while_body_statement_count(ir_bytes, function_name, else_node, bs);
+    if else_count < 1 {
+        return false;
+    }
+    let last_else = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, else_node, "statement", else_count - 1, bs
+    );
+    return try node_kind_is(ir_bytes, function_name, last_else, "Return", bs);
+}
+
+// is_guarded_cursor_return_loop_shape reports whether this multi-statement function is the
+// guarded-cursor loop (parse_type_params' '<T, U>' walk): zero or more plain prefix lets, a
+// plain-call cursor seed, a prefix-not predicate 'while' header, and a trailing return, whose loop
+// body ends in the if/else latch guarded_cursor_terminal_if_matches accepts. The prefix-not header
+// (giving a normal exit) plus the terminal-if plain-call latch keep it disjoint from the value-cursor
+// append loop (an unconditional terminal try-call latch and a bare cursor return), the type-apply /
+// while-match loops (a bool-literal 'while true' header) and the i64-induction While (whose body ends
+// in an arithmetic increment). lower_guarded_cursor_return_loop re-walks and commits on a true result.
+fn is_guarded_cursor_return_loop_shape(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if statement_count < 3 {
+        return false;
+    }
+    let while_index = statement_count - 2;
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", while_index, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, while_statement, "While", bs)) {
+        return false;
+    }
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    if !(try value_cursor_cond_is_prefix_not_call(ir_bytes, function_name, cond_node, bs)) {
+        return false;
+    }
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", statement_count - 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, return_stmt, "Return", bs)) {
+        return false;
+    }
+    let seed_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", while_index - 1, bs
+    );
+    if !(try type_apply_loop_let_is_plain_call(ir_bytes, function_name, seed_stmt, bs)) {
+        return false;
+    }
+    let seed_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, seed_stmt, "name", 0, bs
+    );
+    let cursor_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, seed_name_node, bs
+    );
+    if std::mem::len(cursor_var) == 0 {
+        return false;
+    }
+    var prefix_index = 0;
+    while prefix_index < while_index - 1 {
+        let prefix_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", prefix_index, bs
+        );
+        if !(try node_kind_is(ir_bytes, function_name, prefix_stmt, "Let", bs)) {
+            return false;
+        }
+        prefix_index = prefix_index + 1;
+    }
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 1 {
+        return false;
+    }
+    let terminal_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    return try guarded_cursor_terminal_if_matches(
+        ir_bytes, function_name, terminal_stmt, cursor_var, bs
+    );
+}
+
+// lower_guarded_cursor_return_loop lowers the guarded-cursor loop into a head/body/latch/else/exit
+// CFG behind a single MirGuardedCursorLoop statement. The pre-cursor lets emit as ordinary top-level
+// statements ahead of the loop (so their values stay available to the return arms); the cursor seed
+// becomes the plain-call init (%<cursor>_init); the header predicate, body statements, terminal
+// condition, plain-call latch, else return arm and trailing exit return all lower through the same
+// per-statement machinery the top level uses, with the carried cursor read from the loop-head phi.
+// The two return arms take string-index windows 1000 apart so their struct-result SSA names never
+// collide. Every type is derived from the IR; no callee, field, or function name is hardcoded.
+fn lower_guarded_cursor_return_loop(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var top_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer top_aliases.deinit();
+    var locals_spec = params_spec;
+    var string_counter = 0;
+    var temp_counter = 0;
+    var try_counter = 0;
+
+    let while_index = statement_count - 2;
+    // Emit the pre-cursor lets (e.g. 'let start = begin_children()') ahead of the loop.
+    var prefix_index = 0;
+    while prefix_index < while_index - 1 {
+        let prefix_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", prefix_index, bs
+        );
+        let prefix_result = try lower_multi_let_statement(
+            ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, prefix_stmt,
+            string_counter, temp_counter, try_counter, &top_aliases, &var stmts, bs,
+            ir_lookup_index, &var call_arg_type_cache
+        );
+        locals_spec = prefix_result.locals_spec;
+        string_counter = prefix_result.string_counter;
+        temp_counter = prefix_result.temp_counter;
+        try_counter = prefix_result.try_counter;
+        prefix_index = prefix_index + 1;
+    }
+
+    // Cursor seed: lowered as the preheader plain-call init bound to %<cursor>_init.
+    let seed_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", while_index - 1, bs
+    );
+    let seed_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, seed_stmt, "name", 0, bs
+    );
+    let cursor_var = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, seed_name_node, bs
+    );
+    let seed_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, seed_stmt, "value", 0, bs
+    );
+    let init_name = try precedence_loop_suffixed_name(cursor_var, "_init");
+    let init = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, locals_spec,
+        init_name, seed_call, string_counter, &top_aliases, bs, &var call_arg_type_cache
+    );
+    let cursor_type = init.llvm_type;
+    string_counter = string_counter +
+        try compiled_mir_lower_call::count_string_args(&init.call_args);
+    let loop_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, locals_spec, cursor_var, cursor_type
+    );
+
+    // Header predicate: the prefix-not call, read off the loop-head cursor phi.
+    let while_statement = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", while_index, bs
+    );
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "condition", 0, bs
+    );
+    var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    defer body_aliases.deinit();
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_with_local_aliases(
+        ir_bytes, function_name, module_prefix, loop_locals, cond_node,
+        string_counter, temp_counter, &var cond_insts, &body_aliases, bs,
+        ir_lookup_index, &var call_arg_type_cache
+    );
+    string_counter = string_counter + try count_strings_in_insts(&cond_insts);
+    temp_counter = temp_counter + cond_insts.len();
+
+    // Body statements before the terminal if.
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_locals = loop_locals;
+    var body_index = 0;
+    while body_index < body_count - 1 {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
+                string_counter, temp_counter, try_counter, &body_aliases, &var body_stmts, bs,
+                ir_lookup_index, &var call_arg_type_cache
+            );
+            body_locals = let_result.locals_spec;
+            string_counter = let_result.string_counter;
+            temp_counter = let_result.temp_counter;
+            try_counter = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(body_kind, "ExprStmt") {
+                let expr_result = try lower_multi_expr_statement(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
+                    string_counter, temp_counter, try_counter, &body_aliases, &var body_stmts, bs,
+                    ir_lookup_index, &var call_arg_type_cache
+                );
+                string_counter = expr_result.string_counter;
+                try_counter = expr_result.try_counter;
+            } else {
+                return error("compiled mir: unsupported guarded-cursor body statement");
+            }
+        }
+        body_index = body_index + 1;
+    }
+
+    // Terminal if: condition, plain-call latch (then arm), and else return arm.
+    let terminal_if = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let terminal_cond = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, terminal_if, "condition", 0, bs
+    );
+    var terminal_cond_insts =
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let terminal_cond_result = try lower_expr_with_local_aliases(
+        ir_bytes, function_name, module_prefix, body_locals, terminal_cond,
+        string_counter, temp_counter, &var terminal_cond_insts, &body_aliases, bs,
+        ir_lookup_index, &var call_arg_type_cache
+    );
+    string_counter = string_counter + try count_strings_in_insts(&terminal_cond_insts);
+    temp_counter = temp_counter + terminal_cond_insts.len();
+
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, terminal_if, "then", 0, bs
+    );
+    let latch_assign = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    let latch_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, latch_assign, "value", 0, bs
+    );
+    let latch_name = try precedence_loop_suffixed_name(cursor_var, "_next");
+    let latch = try lower_precedence_loop_plain_call(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, body_locals,
+        latch_name, latch_call, string_counter, &body_aliases, bs, &var call_arg_type_cache
+    );
+    string_counter = string_counter +
+        try compiled_mir_lower_call::count_string_args(&latch.call_args);
+
+    // Else arm: lets followed by a terminal return, reading the body locals.
+    let else_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, terminal_if, "else", 0, bs
+    );
+    let else_count = try while_body_statement_count(ir_bytes, function_name, else_node, bs);
+    var else_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var else_locals = body_locals;
+    var else_aliases = try copy_local_aliases(&body_aliases);
+    defer else_aliases.deinit();
+    var else_index = 0;
+    while else_index < else_count {
+        let else_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, else_node, "statement", else_index, bs
+        );
+        let else_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, else_stmt, bs);
+        if std::mem::equal_bytes(else_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes, function_name, module_prefix, llvm_return_type, else_locals, else_stmt,
+                string_counter, temp_counter, try_counter, &else_aliases, &var else_stmts, bs,
+                ir_lookup_index, &var call_arg_type_cache
+            );
+            else_locals = let_result.locals_spec;
+            string_counter = let_result.string_counter;
+            temp_counter = let_result.temp_counter;
+            try_counter = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(else_kind, "Return") {
+                try else_stmts.append(try lower_multi_return_statement(
+                    ir_bytes, function_name, module_prefix, llvm_return_type, else_locals, else_stmt,
+                    string_counter, temp_counter, &else_aliases, bs, ir_lookup_index,
+                    &var call_arg_type_cache
+                ));
+            } else {
+                return error("compiled mir: unsupported guarded-cursor else statement");
+            }
+        }
+        else_index = else_index + 1;
+    }
+
+    // Normal exit: the trailing return reads the loop-head cursor phi (and the pre-cursor lets). It
+    // takes a string-index window 1000 past the else arm so the two struct-result returns never
+    // collide on '%v<index>_*' names.
+    let return_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", statement_count - 1, bs
+    );
+    var exit_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try exit_stmts.append(try lower_multi_return_statement(
+        ir_bytes, function_name, module_prefix, llvm_return_type, loop_locals, return_stmt,
+        string_counter + 1000, temp_counter + 1000, &top_aliases, bs, ir_lookup_index,
+        &var call_arg_type_cache
+    ));
+
+    try stmts.append(compiled_mir::guarded_cursor_loop_stmt(
+        cursor_var, cursor_type, llvm_return_type, init, cond_insts, cond_result, body_stmts,
+        terminal_cond_insts, terminal_cond_result, latch, else_stmts, exit_stmts, "gcloop"
+    ));
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol, llvm_return_type, params_spec, stmts
+    );
+}
+
 // value_cursor_previous_init_name_or_empty generalizes the value-cursor preheader-seed lookup to
 // admit a plain Var-copy init in addition to a preceding call. The statement before the while binds
 // the cursor either by 'let <cursor> = <Call>' (the parse_block_with_statements 'next_token' seed) or
@@ -7332,6 +7689,20 @@ pub fn lower_multi_statement_function(
     if try is_value_cursor_append_loop_shape(ir_bytes, function_name, statement_count, bs) {
         return try lower_value_cursor_append_loop(
             ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        );
+    }
+    // A guarded-cursor loop (parse_type_params' '<T, U>' walk) threads a plain-call Token cursor
+    // through a prefix-not predicate header and latches it only through a terminal if/else: the then
+    // arm advances the cursor by a plain call and back-edges, while the else arm and the post-loop
+    // trailing statement each return a struct value reading the loop-head phi. Its conditional latch
+    // and normal exit have no analogue in the value-cursor append loop (an unconditional terminal
+    // try-call latch plus a bare cursor return) or the bool-literal type-apply / while-match loops,
+    // so route it before the generic i64-induction While machinery, whose trailing-Assign latch this
+    // shape's terminal If has no analogue for.
+    if try is_guarded_cursor_return_loop_shape(ir_bytes, function_name, statement_count, bs) {
+        return try lower_guarded_cursor_return_loop(
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+            statement_count, bs
         );
     }
     let module_prefix = compiled_util::module_prefix_of(function_name);
