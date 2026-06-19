@@ -14686,19 +14686,54 @@ fn lower_multi_while_statement(
         );
     }
     let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
+    let induction_alias = try local_alias_current_name(aliases, induction_var);
     // loop_index is this while's top-level statement index, so the induction initializer
     // is the nearest preceding 'var <induction_var> = <init>'.
-    let induction_init = try find_induction_init(
+    var induction_init_literal = 0;
+    var induction_init_var = "";
+    var induction_init_offset = 0;
+    // A call-seeded primary init ('var token = next_token(text, open)') lowers its call into the
+    // preheader -- init_insts run before the loop head and the loop-head phi reads the call result
+    // through init_result_id -- exactly as the continue-latch seed path does (find_induction_init_value_node
+    // + lower_expr_into). Only a fresh cursor with no incoming alias takes this path; an aliased
+    // induction variable, or any literal / plain-copy / base-plus-offset seed, resolves through
+    // find_induction_init's classification so the existing seeds stay byte-identical (issue 1165 / 1162).
+    var init_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    var init_result_id = -1;
+    var cond_string_base = string_counter;
+    var cond_temp_base = temp_counter;
+    let init_node = try find_induction_init_value_node(
         ir_bytes, function_name, induction_var, loop_index, bs
     );
-    var induction_init_literal = induction_init.literal;
-    var induction_init_var = induction_init.var_name;
-    var induction_init_offset = induction_init.offset;
-    let induction_alias = try local_alias_current_name(aliases, induction_var);
-    if !std::mem::equal_bytes(induction_alias, induction_var) {
-        induction_init_literal = 0;
-        induction_init_var = induction_alias;
-        induction_init_offset = 0;
+    let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
+    if std::mem::equal_bytes(init_kind, "Call") and
+        std::mem::equal_bytes(induction_alias, induction_var) {
+        init_result_id = try lower_expr_into(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            init_node,
+            string_counter,
+            temp_counter,
+            &var init_insts,
+            bs,
+            ir_lookup_index, call_arg_type_cache
+        );
+        cond_string_base = string_counter + try count_strings_in_insts(&init_insts);
+        cond_temp_base = temp_counter + init_insts.len();
+    } else {
+        let induction_init = try find_induction_init(
+            ir_bytes, function_name, induction_var, loop_index, bs
+        );
+        induction_init_literal = induction_init.literal;
+        induction_init_var = induction_init.var_name;
+        induction_init_offset = induction_init.offset;
+        if !std::mem::equal_bytes(induction_alias, induction_var) {
+            induction_init_literal = 0;
+            induction_init_var = induction_alias;
+            induction_init_offset = 0;
+        }
     }
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var cond_rhs_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
@@ -14706,8 +14741,8 @@ fn lower_multi_while_statement(
     var cond_result = -1;
     var cond_rhs_result = -1;
     var mir_short_circuit = 0;
-    var body_string_counter = string_counter;
-    var body_temp_counter = temp_counter;
+    var body_string_counter = cond_string_base;
+    var body_temp_counter = cond_temp_base;
     if cond_kind == 1 and
         !(try while_and_condition_eager_safe(ir_bytes, function_name, cond_node, bs)) {
         // A genuine short-circuit 'and' chain: the leaf operands are evaluated left to
@@ -14734,14 +14769,14 @@ fn lower_multi_while_statement(
             module_prefix,
             locals_spec,
             op0,
-            string_counter,
-            temp_counter,
+            cond_string_base,
+            cond_temp_base,
             &var cond_insts,
             bs,
             ir_lookup_index, call_arg_type_cache
         );
         var acc_strings = try count_strings_in_insts(&cond_insts);
-        var acc_temp = temp_counter + cond_insts.len();
+        var acc_temp = cond_temp_base + cond_insts.len();
         let op1 = try operands.get(1);
         cond_rhs_result = try lower_expr_into(
             ir_bytes,
@@ -14749,7 +14784,7 @@ fn lower_multi_while_statement(
             module_prefix,
             locals_spec,
             op1,
-            string_counter + acc_strings,
+            cond_string_base + acc_strings,
             acc_temp,
             &var cond_rhs_insts,
             bs,
@@ -14767,7 +14802,7 @@ fn lower_multi_while_statement(
                 module_prefix,
                 locals_spec,
                 operand_node,
-                string_counter + acc_strings,
+                cond_string_base + acc_strings,
                 acc_temp,
                 &var operand_insts,
                 bs,
@@ -14780,7 +14815,7 @@ fn lower_multi_while_statement(
             );
             extra_index = extra_index + 1;
         }
-        body_string_counter = string_counter + acc_strings;
+        body_string_counter = cond_string_base + acc_strings;
         body_temp_counter = acc_temp;
         operands.deinit();
     } else {
@@ -14790,14 +14825,14 @@ fn lower_multi_while_statement(
             module_prefix,
             locals_spec,
             cond_node,
-            string_counter,
-            temp_counter,
+            cond_string_base,
+            cond_temp_base,
             &var cond_insts,
             bs,
             ir_lookup_index, call_arg_type_cache
         );
-        body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
-        body_temp_counter = temp_counter + cond_insts.len();
+        body_string_counter = cond_string_base + try count_strings_in_insts(&cond_insts);
+        body_temp_counter = cond_temp_base + cond_insts.len();
     }
     var body_try_counter = loop_index * 1000;
     var body_alias_counter = alias_counter;
@@ -15055,8 +15090,8 @@ fn lower_multi_while_statement(
         latch_copy_var,
         secondary_inductions,
         std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        -1,
+        init_insts,
+        init_result_id,
         false,
         -1,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
