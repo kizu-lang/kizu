@@ -10822,7 +10822,8 @@ fn flatten_or_operands(
 // fresh binding. It is shape-driven, not name-driven: the target must be a Var naming a local already
 // resolvable in this function (so locals_spec is left unchanged and no binding is fabricated), the
 // value must be one of the scalar/slice expression kinds the generic expr lowering handles (Var /
-// FieldExpr / String / CastExpr / Bool / non-short-circuit Binary / non-method Call), and the
+// FieldExpr / String / CastExpr / Bool / non-short-circuit Binary / non-method Call / a 'try <call>'
+// over such a free call, whose failure propagates through this function's own error union), and the
 // value's lowered LLVM type must match the target's resolved type. The lowered value binds to a
 // fresh MirAliasAssign name, never to the target itself, so rendering cannot redefine the original
 // SSA name. The
@@ -10858,6 +10859,26 @@ fn void_then_assignment_value_supported(
     }
     if std::mem::equal_bytes(value_kind, "Call") {
         return !(try callee_is_field_expr(ir_bytes, function_name, value, bs));
+    }
+    // A 'try <call>' value (TryExpr) reassigns the target with the success value of a
+    // free try-call, propagating the failure through this function's own error union via
+    // the shared value-position TryUnwrap machinery (lower_expr_into_local_aliases /
+    // append_try_unwrap_expr). The inner must be a free Call (not a field-mode method
+    // call), the same shape the non-try Call branch admits, so the generic expr lowering
+    // and the id-suffixed t<id>_try_fail/_try_cont labels (never colliding with if/then
+    // labels) carry it without a method-receiver special case (parse_impl_decl's
+    // 'method = try parse_directive_decl(...)', issue 1207).
+    if std::mem::equal_bytes(value_kind, "TryExpr") {
+        let inner_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, value, "value", 0, bs
+        );
+        let inner_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, inner_node, bs
+        );
+        if !std::mem::equal_bytes(inner_kind, "Call") {
+            return false;
+        }
+        return !(try callee_is_field_expr(ir_bytes, function_name, inner_node, bs));
     }
     return false;
 }
