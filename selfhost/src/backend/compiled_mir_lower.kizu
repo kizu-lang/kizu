@@ -4263,7 +4263,7 @@ fn lower_value_cursor_append_loop(
         if std::mem::equal_bytes(body_kind, "Let") {
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, params_spec, body_stmt,
-                body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+                body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
                 &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
             );
             body_string_counter = let_result.string_counter;
@@ -5366,7 +5366,7 @@ fn lower_precedence_loop(
         if std::mem::equal_bytes(body_kind, "Let") {
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
-                body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+                body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
                 &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
@@ -5559,7 +5559,7 @@ fn lower_dual_cursor_loop(
         if std::mem::equal_bytes(body_kind, "Let") {
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
-                body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+                body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
                 &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
@@ -5743,7 +5743,7 @@ fn lower_trailing_token_loop(
                     let let_result = try lower_multi_let_statement(
                         ir_bytes, function_name, module_prefix, llvm_return_type, post_locals,
                         statement, post_string_counter, post_temp_counter, post_try_counter,
-                        &post_aliases, &var stmts, bs, ir_lookup_index, &var call_arg_type_cache
+                        &var post_aliases, &var stmts, bs, ir_lookup_index, &var call_arg_type_cache
                     );
                     post_locals = let_result.locals_spec;
                     post_string_counter = let_result.string_counter;
@@ -6691,7 +6691,7 @@ fn lower_while_match_loop(
         );
         let let_result = try lower_multi_let_statement(
             ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, prefix_stmt,
-            body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+            body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
             &var body_stmts, bs, ir_lookup_index, &var call_arg_type_cache
         );
         body_locals = let_result.locals_spec;
@@ -6984,7 +6984,7 @@ fn lower_guarded_cursor_return_loop(
         );
         let prefix_result = try lower_multi_let_statement(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, prefix_stmt,
-            string_counter, temp_counter, try_counter, &top_aliases, &var stmts, bs,
+            string_counter, temp_counter, try_counter, &var top_aliases, &var stmts, bs,
             ir_lookup_index, &var call_arg_type_cache
         );
         locals_spec = prefix_result.locals_spec;
@@ -7053,7 +7053,7 @@ fn lower_guarded_cursor_return_loop(
         if std::mem::equal_bytes(body_kind, "Let") {
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
-                string_counter, temp_counter, try_counter, &body_aliases, &var body_stmts, bs,
+                string_counter, temp_counter, try_counter, &var body_aliases, &var body_stmts, bs,
                 ir_lookup_index, &var call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
@@ -7128,7 +7128,7 @@ fn lower_guarded_cursor_return_loop(
         if std::mem::equal_bytes(else_kind, "Let") {
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, else_locals, else_stmt,
-                string_counter, temp_counter, try_counter, &else_aliases, &var else_stmts, bs,
+                string_counter, temp_counter, try_counter, &var else_aliases, &var else_stmts, bs,
                 ir_lookup_index, &var call_arg_type_cache
             );
             else_locals = let_result.locals_spec;
@@ -7392,7 +7392,7 @@ fn lower_embedded_value_cursor_append_loop(
         if std::mem::equal_bytes(body_kind, "Let") {
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
-                body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
+                body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
                 &var body_stmts, bs, ir_lookup_index, call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
@@ -7771,7 +7771,7 @@ pub fn lower_multi_statement_function(
                 string_counter,
                 temp_counter,
                 try_counter,
-                &aliases,
+                &var aliases,
                 &var stmts,
                 bs,
                 ir_lookup_index,
@@ -8105,6 +8105,103 @@ fn void_then_alias_name(slot: i64) -> ![]u8 {
     var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
     try copied.insert(name, name);
     return try copied.get(name);
+}
+
+// shadow_binding_name renders a shadowed let binding's per-binding-unique SSA name,
+// '<source>.shadow.<slot>'. The slot is the binding's own IR statement node, unique within
+// the function, so two same-named bindings (e.g. parse_closed_start_slice's then-block
+// 'let end = ast.add_empty(...)' and the enclosing 'let end = try parse_expr(...)') receive
+// distinct LLVM names and never define the same %end twice. It mirrors void_then_alias_name's
+// Map insert/get byte-copy boundary so the generated name outlives the helper.
+fn shadow_binding_name(source_name: []u8, slot: i64) -> ![]u8 {
+    if slot < 0 {
+        return error("compiled mir: negative shadow binding slot");
+    }
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes(source_name);
+    try out.append_bytes(".shadow.");
+    try std::fmt::append_i64(&var out, slot);
+    let name = out.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(name, name);
+    return try copied.get(name);
+}
+
+// count_let_bindings_in_block counts the let/var bindings of 'name' in one statement block,
+// descending into while bodies and if then/else blocks so a binding nested in a branch counts
+// alongside one at the enclosing level. Two or more bindings of the same name in a function
+// means the name is shadowed: each binding must take a distinct SSA name.
+fn count_let_bindings_in_block(
+    ir_bytes: []u8,
+    function_name: []u8,
+    name: []u8,
+    block_node: i64,
+    bs: i64
+) -> !i64 {
+    var count = 0;
+    var stmt_index = 0;
+    while true {
+        let statement = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, block_node, "statement", stmt_index, bs
+        );
+        if statement < 0 {
+            return count;
+        }
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(stmt_kind, "Let") {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
+            );
+            let bound = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, name_node, bs
+            );
+            if std::mem::equal_bytes(bound, name) {
+                count = count + 1;
+            }
+        }
+        if std::mem::equal_bytes(stmt_kind, "While") {
+            let body_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "body", 0, bs
+            );
+            count = count + try count_let_bindings_in_block(
+                ir_bytes, function_name, name, body_node, bs
+            );
+        }
+        if std::mem::equal_bytes(stmt_kind, "If") {
+            let then_node = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, statement, "then", 0, bs
+            );
+            if then_node >= 0 {
+                count = count + try count_let_bindings_in_block(
+                    ir_bytes, function_name, name, then_node, bs
+                );
+            }
+            let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, statement, "else", 0, bs
+            );
+            if else_node >= 0 {
+                count = count + try count_let_bindings_in_block(
+                    ir_bytes, function_name, name, else_node, bs
+                );
+            }
+        }
+        stmt_index = stmt_index + 1;
+    }
+    return count;
+}
+
+// let_binding_is_shadowed reports whether 'name' is bound by two or more let/var statements in
+// the function body. A shadowed name cannot keep its source spelling as its SSA name: the inner
+// and outer bindings would define the same %name, which is invalid LLVM. The renamed binding is
+// redirected through the local-alias map so in-scope reads still resolve to it.
+fn let_binding_is_shadowed(
+    ir_bytes: []u8,
+    function_name: []u8,
+    name: []u8,
+    bs: i64
+) -> !bool {
+    let total = try count_let_bindings_in_block(ir_bytes, function_name, name, 0, bs);
+    return total >= 2;
 }
 
 fn local_alias_index(
@@ -9125,6 +9222,14 @@ fn lower_string_method_arg(
     }
     return error("compiled mir: unsupported string method argument");
 }
+// lower_multi_let_statement lowers a 'let'/'var' binding. It resolves the binding's emitted SSA
+// name first: a name bound more than once in the function is shadowed, so it takes a
+// per-binding-unique '<source>.shadow.<node>' name and, after the value is lowered, redirects
+// later reads of the source name through the local-alias map (the same indirection
+// lower_multi_assign_statement uses). The alias is set *after* lower_multi_let_statement_named
+// returns so a self-referential initializer ('let x = x + 1' shadowing an outer x) still reads
+// the outer binding while its own value is lowered. Type resolution is unaffected: it resolves a
+// name from the IR let-binding scan, not from the emitted SSA name.
 fn lower_multi_let_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -9135,7 +9240,7 @@ fn lower_multi_let_statement(
     string_counter: i64,
     temp_counter: i64,
     try_counter: i64,
-    aliases: &std::array::Array<LocalAliasState>,
+    aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
@@ -9144,9 +9249,42 @@ fn lower_multi_let_statement(
     let let_name_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "name", 0, bs
     );
-    let let_name = try ir_contract::body_token_or_empty_from(
+    let source_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, let_name_node, bs
     );
+    let shadowed = try let_binding_is_shadowed(ir_bytes, function_name, source_name, bs);
+    var emit_name = source_name;
+    if shadowed {
+        emit_name = try shadow_binding_name(source_name, statement);
+    }
+    let result = try lower_multi_let_statement_named(
+        ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, statement,
+        emit_name, string_counter, temp_counter, try_counter, aliases, stmts, bs,
+        ir_lookup_index, call_arg_type_cache
+    );
+    if shadowed {
+        try set_local_alias(aliases, source_name, emit_name);
+    }
+    return result;
+}
+
+fn lower_multi_let_statement_named(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    let_name: []u8,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiLowerResult {
     let let_value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "value", 0, bs
     );
@@ -10555,6 +10693,13 @@ fn lower_try_call_void_if(
     if !then_body.body_returns {
         while branch_alias_index < branch_aliases.len() {
             let branch_state = try branch_aliases.at(branch_alias_index);
+            // A shadowed name is handled by per-binding SSA rename, not by a join phi: each
+            // 'let <name>' inside a branch is an independent value that dies at the branch end, so
+            // its branch alias must never merge into the enclosing scope's binding of the same name.
+            if try let_binding_is_shadowed(ir_bytes, function_name, branch_state.source_name, bs) {
+                branch_alias_index = branch_alias_index + 1;
+                continue;
+            }
             let input_name = try local_alias_current_name(aliases, branch_state.source_name);
             if !std::mem::equal_bytes(input_name, branch_state.current_name) {
                 let output_name = try void_then_alias_name(merge_alias_counter);
@@ -11836,6 +11981,12 @@ fn append_void_if_else_merge_for_source(
     merge_vars: &var std::array::Array<compiled_mir::MirIfMergeVar>,
     bs: i64
 ) -> !i64 {
+    // A shadowed name is handled by per-binding SSA rename, not by a join phi: a 'let <name>'
+    // inside either arm is an independent value that dies at the arm's end, so its branch alias
+    // must never merge into the enclosing scope's binding of the same name.
+    if try let_binding_is_shadowed(ir_bytes, function_name, source_name, bs) {
+        return alias_counter;
+    }
     let input_name = try local_alias_current_name(aliases, source_name);
     let then_name = try local_alias_current_name(then_aliases, source_name);
     let else_name = try local_alias_current_name(else_aliases, source_name);
@@ -12077,6 +12228,13 @@ fn lower_void_if_no_else_statement(
     if !then_body.body_returns {
         while branch_alias_index < branch_aliases.len() {
             let branch_state = try branch_aliases.at(branch_alias_index);
+            // A shadowed name is handled by per-binding SSA rename, not by a join phi: each
+            // 'let <name>' inside a branch is an independent value that dies at the branch end, so
+            // its branch alias must never merge into the enclosing scope's binding of the same name.
+            if try let_binding_is_shadowed(ir_bytes, function_name, branch_state.source_name, bs) {
+                branch_alias_index = branch_alias_index + 1;
+                continue;
+            }
             let input_name = try local_alias_current_name(aliases, branch_state.source_name);
             if !std::mem::equal_bytes(input_name, branch_state.current_name) {
                 let output_name = try void_then_alias_name(merge_alias_counter);
@@ -14993,7 +15151,7 @@ fn lower_multi_while_statement(
                 body_string_counter,
                 body_temp_counter,
                 body_try_counter,
-                &body_aliases,
+                &var body_aliases,
                 &var body_stmts,
                 bs,
                 ir_lookup_index, call_arg_type_cache
@@ -16006,7 +16164,7 @@ fn lower_multi_while_leading_decrement(
                 body_string_counter,
                 body_temp_counter,
                 body_try_counter,
-                &body_aliases,
+                &var body_aliases,
                 &var body_stmts,
                 bs,
                 ir_lookup_index, call_arg_type_cache
@@ -16645,7 +16803,7 @@ fn lower_multi_while_continue_latch(
                     body_string_counter,
                     body_temp_counter,
                     body_try_counter,
-                    &body_aliases,
+                    &var body_aliases,
                     &var body_stmts,
                     bs,
                     ir_lookup_index, call_arg_type_cache
