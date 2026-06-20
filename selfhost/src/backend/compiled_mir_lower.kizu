@@ -240,24 +240,31 @@ fn lower_multi_let_ast_get(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
+    // cf tightens this call's own structural facts (callee/receiver edges, receiver token, arg
+    // edge/kind) to the call node's body-node line via the index; the subtree sorts at-or-after
+    // it, so a scan from cf is byte-identical to one from bs. The hoisted/single arg lowering
+    // recurses into expr lowering, so it keeps bs.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "callee", 0, bs
+        ir_bytes, function_name, call_node, "callee", 0, cf
     );
     let receiver_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, cf
     );
     let receiver_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, cf
     );
     let receiver_alias = try local_alias_current_name(aliases, receiver_name);
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     if arg_count != 1 {
         return error("compiled mir: Ast.get takes one node id argument");
     }
     let arg_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "arg", 0, bs
+        ir_bytes, function_name, call_node, "arg", 0, cf
     );
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     try args.append(compiled_mir::var_call_arg("%kizu.kizu.ast.ast", receiver_alias));
@@ -265,7 +272,7 @@ fn lower_multi_let_ast_get(
     var cur_string = string_counter;
     var cur_temp = temp_counter;
     var cur_try = try_counter;
-    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, cf);
     var id_arg = compiled_mir::var_call_arg("%kizu.kizu.ast.node_id", "");
     if std::mem::equal_bytes(arg_kind, "TryExpr") {
         let hoist_name = try hoisted_try_arg_name(cur_try);
@@ -469,44 +476,51 @@ fn lower_multi_let_arena_add(
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex
 ) -> !MultiLowerResult {
+    // cf tightens this call's own structural facts (callee/receiver/field edges, kinds, tokens,
+    // arg edge/kind) to the call node's body-node line via the index; the subtree sorts
+    // at-or-after it, so a scan from cf is byte-identical to one from bs. Param type resolution
+    // (find_param_*) and the struct-field lowering recursion keep bs.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "callee", 0, bs
+        ir_bytes, function_name, call_node, "callee", 0, cf
     );
     let method_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, callee_node, "field", bs
+        ir_bytes, function_name, callee_node, "field", cf
     );
     if !std::mem::equal_bytes(method_name, "add") {
         return error("compiled mir: only Arena.add method let is supported");
     }
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     if arg_count != 1 {
         return error("compiled mir: Arena.add accessor takes one element argument");
     }
     let field_expr = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, cf
     );
     let field_expr_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, field_expr, bs
+        ir_bytes, function_name, field_expr, cf
     );
     if !std::mem::equal_bytes(field_expr_kind, "FieldExpr") {
         return error("compiled mir: Arena.add receiver must be a struct field access");
     }
     let field_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, field_expr, "field", bs
+        ir_bytes, function_name, field_expr, "field", cf
     );
     let var_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, field_expr, "receiver", 0, bs
+        ir_bytes, function_name, field_expr, "receiver", 0, cf
     );
     let var_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, var_node, bs
+        ir_bytes, function_name, var_node, cf
     );
     if !std::mem::equal_bytes(var_kind, "Var") {
         return error("compiled mir: Arena.add field receiver must be a parameter");
     }
     let var_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, var_node, bs
+        ir_bytes, function_name, var_node, cf
     );
     let receiver_llvm_type = try compiled_signature::find_param_type(locals_spec, var_name);
     let struct_kizu_type = try compiled_signature::find_param_kizu_type(
@@ -527,10 +541,10 @@ fn lower_multi_let_arena_add(
         ir_lookup_index, ir_bytes, "", element_kizu_type
     );
     let element_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "arg", 0, bs
+        ir_bytes, function_name, call_node, "arg", 0, cf
     );
     let element_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, element_node, bs
+        ir_bytes, function_name, element_node, cf
     );
     if !std::mem::equal_bytes(element_kind, "StructLiteralExpr") {
         return error("compiled mir: Arena.add argument must be a struct literal");
@@ -7860,11 +7874,23 @@ pub fn lower_multi_statement_function(
     var pending_defers = std::array::Array<i64>(std::mem::page_allocator());
     defer pending_defers.deinit();
     var stmt_index = 0;
+    // The root block's 'statement' edges interleave with each statement's subtree in the fact
+    // stream, so rescanning from bs to find the stmt_index-th edge is O(function) per statement
+    // (quadratic overall). stmt_scan_from advances to the current statement's body-node line
+    // each turn: the next statement's edge sorts after this statement's whole subtree, which
+    // begins at that line, so the walk stays byte-identical while the loop becomes O(function).
+    var stmt_scan_from = bs;
     while stmt_index < statement_count {
         let statement = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, 0, "statement", stmt_index, bs
+            ir_bytes, function_name, 0, "statement", stmt_index, stmt_scan_from
         );
-        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        // sf is this statement's body-node line via the index; its own structural facts (its kind
+        // here) sort at-or-after it, so a scan from sf is byte-identical to one from bs.
+        let sf = ir_index::body_node_line_start_for_sequence(
+            ir_lookup_index, ir_bytes, function_name, statement, bs
+        );
+        stmt_scan_from = sf;
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, sf);
         if std::mem::equal_bytes(stmt_kind, "Let") {
             // A 'var counter = <int>' that a later while increments is the loop
             // induction initializer: it is not emitted as a let because the loop-head
@@ -8780,10 +8806,19 @@ fn lower_multi_expr_statement(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiExprLowerResult {
-    let expr = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, statement, "expr", 0, bs
+    // sf tightens this expression statement's own structural facts (its expr/try/call subtree:
+    // kinds, callee field-expr, receiver/arg edges and tokens) to its body-node line via the
+    // index; the subtree sorts at-or-after it, so a scan from sf is byte-identical to one from bs.
+    // The statement-lowering recursion (owned-deinit / free-try-call / array-append / string-arg /
+    // method-try-call) and receiver type resolution keep bs because they read facts that can
+    // precede this node.
+    let sf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, statement, bs
     );
-    let expr_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr, bs);
+    let expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "expr", 0, sf
+    );
+    let expr_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr, sf);
     if std::mem::equal_bytes(expr_kind, "Call") {
         return try lower_owned_deinit_expr_statement(
             ir_bytes, function_name, module_prefix, locals_spec, expr,
@@ -8794,32 +8829,32 @@ fn lower_multi_expr_statement(
         return error("compiled mir: unsupported expression statement");
     }
     let inner = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, expr, "value", 0, bs
+        ir_bytes, function_name, expr, "value", 0, sf
     );
-    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, sf);
     if !std::mem::equal_bytes(inner_kind, "Call") {
         return error("compiled mir: try expression statement must wrap a call");
     }
-    if !try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+    if !try callee_is_field_expr(ir_bytes, function_name, inner, sf) {
         return try lower_void_free_try_call_statement(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
             inner, string_counter, try_counter, aliases, stmts, bs, ir_lookup_index, call_arg_type_cache
         );
     }
     let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, inner, "callee", 0, bs
+        ir_bytes, function_name, inner, "callee", 0, sf
     );
     let method_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, callee_node, "field", bs
+        ir_bytes, function_name, callee_node, "field", sf
     );
     let receiver_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, sf
     );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, sf
     );
     let arg_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, inner, "arg", 0, bs
+        ir_bytes, function_name, inner, "arg", 0, sf
     );
     if std::mem::equal_bytes(method_name, "append") and
         std::mem::equal_bytes(receiver_kind, "FieldExpr") {
@@ -9383,11 +9418,18 @@ fn lower_multi_let_statement(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
+    // sf tightens this Let statement's own structural facts (its 'name' edge / name token) to its
+    // body-node line via the index; those facts sort at-or-after it, so a scan from sf is
+    // byte-identical to one from bs. let_binding_is_shadowed scans for sibling bindings that can
+    // precede this node, so it keeps bs, as does the named-lowering recursion below.
+    let sf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, statement, bs
+    );
     let let_name_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, statement, "name", 0, bs
+        ir_bytes, function_name, statement, "name", 0, sf
     );
     let source_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, let_name_node, bs
+        ir_bytes, function_name, let_name_node, sf
     );
     let shadowed = try let_binding_is_shadowed(ir_bytes, function_name, source_name, bs);
     var emit_name = source_name;
@@ -9422,19 +9464,28 @@ fn lower_multi_let_statement_named(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
-    let let_value = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, statement, "value", 0, bs
+    // sf tightens this Let statement's own structural facts (its 'value' subtree: kind/edges,
+    // callee detail, arg edges) to its body-node line via the index; the whole subtree sorts
+    // at-or-after it, so a scan from sf is byte-identical to one from bs. Type/name resolution
+    // (method_call_info, ast_get_receiver_is_ast, struct-field/return-type resolvers) and the
+    // expr/call lowering recursion keep bs because they read let/param facts that can precede
+    // this node (the index-keyed return/struct-type resolvers tighten their own structural read).
+    let sf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, statement, bs
     );
-    let let_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, let_value, bs);
+    let let_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, sf
+    );
+    let let_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, let_value, sf);
     // A 'let <name> = try <callee>(<args>);' try-call over an error-union-returning free
     // function (the node_count traversal cluster, tracker 961). It lowers to a LetTryCall
     // statement: call the error union, branch on its ok flag, propagate the failure as this
     // function's own error union, and bind the success value.
     if std::mem::equal_bytes(let_value_kind, "TryExpr") {
         let inner = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, let_value, "value", 0, bs
+            ir_bytes, function_name, let_value, "value", 0, sf
         );
-        let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+        let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, sf);
         if !std::mem::equal_bytes(inner_kind, "Call") {
             return error("compiled mir: try let value must wrap a call");
         }
@@ -9442,7 +9493,7 @@ fn lower_multi_let_statement_named(
         // element by value off the checked array_at builtin and propagates a failure as
         // this function's own error union (issue 1165). The callee is a field-mode method,
         // so it is routed ahead of the free-function try-call path.
-        if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+        if try callee_is_field_expr(ir_bytes, function_name, inner, sf) {
             return try lower_multi_let_array_get(
                 ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
                 let_name, inner, string_counter, temp_counter, try_counter, aliases, stmts,
@@ -9461,11 +9512,11 @@ fn lower_multi_let_statement_named(
         // index. Ast.add_node is its first consumer (tracker 961). The element struct
         // consumes string_counter prefixes for its insertvalue chain, so the counter
         // advances by the element field count to keep later struct temps distinct.
-        if try callee_is_field_expr(ir_bytes, function_name, let_value, bs) {
+        if try callee_is_field_expr(ir_bytes, function_name, let_value, sf) {
             // 'let node = ast.get(<node_id>);' binds an AstNode by value off the
             // compiled external std::kizu::ast accessor in any statement position
             // (the match-union shapes special-case statement 0; this serves the rest).
-            if try call_method_name_is(ir_bytes, function_name, let_value, "get", bs) {
+            if try call_method_name_is(ir_bytes, function_name, let_value, "get", sf) {
                 if try ast_get_receiver_is_ast(
                     ir_bytes, function_name, module_prefix, locals_spec, let_value, bs
                 ) {
@@ -9480,7 +9531,7 @@ fn lower_multi_let_statement_named(
             // 'let base = local_starts.len();' binds a value-receiver length read;
             // it lowers through the generic expression path (which already models
             // .len() on owned containers) as a let-expr statement.
-            if try call_method_name_is(ir_bytes, function_name, let_value, "len", bs) {
+            if try call_method_name_is(ir_bytes, function_name, let_value, "len", sf) {
                 var len_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
                 let len_result_id = try lower_expr_with_local_aliases(
                     ir_bytes,
@@ -9513,8 +9564,8 @@ fn lower_multi_let_statement_named(
             // ast.add_bool(...)) lowers as a normal call expression with the receiver
             // passed as arg 0. Field receivers such as self.nodes.add(...) stay on the
             // Arena.add lowering below.
-            if try call_method_receiver_is_var(ir_bytes, function_name, let_value, bs) {
-                if try call_has_try_arg(ir_bytes, function_name, let_value, bs) {
+            if try call_method_receiver_is_var(ir_bytes, function_name, let_value, sf) {
+                if try call_has_try_arg(ir_bytes, function_name, let_value, sf) {
                     let info = try method_call_info(
                         ir_bytes, function_name, module_prefix, locals_spec, let_value, bs
                     );
@@ -9595,7 +9646,7 @@ fn lower_multi_let_statement_named(
         // binding the owned handle and registering the Array<T> local so later borrows of it
         // resolve to %kizu.owned.
         let ctor_callee = try ir_contract::body_call_callee_or_empty_from(
-            ir_bytes, function_name, let_value, bs
+            ir_bytes, function_name, let_value, sf
         );
         if std::mem::starts_with(ctor_callee, "std::array::Array<") {
             let ctor_len = std::mem::len(ctor_callee);
@@ -9609,16 +9660,16 @@ fn lower_multi_let_statement_named(
                 ir_bytes, module_prefix, element_kizu
             );
             let ctor_arg_count = try compiled_mir_types::count_call_args(
-                ir_bytes, function_name, let_value, bs
+                ir_bytes, function_name, let_value, sf
             );
             if ctor_arg_count != 1 {
                 return error("compiled mir: array constructor takes exactly the allocator argument");
             }
             let alloc_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, let_value, "arg", 0, bs
+                ir_bytes, function_name, let_value, "arg", 0, sf
             );
             let alloc_name = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, alloc_node, bs
+                ir_bytes, function_name, alloc_node, sf
             );
             let alloc_alias = try local_alias_current_name(aliases, alloc_name);
             let array_locals = try compiled_signature::extend_locals_spec(
@@ -9638,16 +9689,16 @@ fn lower_multi_let_statement_named(
         // struct literals, namespace field values, and checked single-element index loads.
         // Lower those calls through the generic expression path so each computed argument
         // is materialized into a temp first, mirroring return-statement handling.
-        if try call_has_try_arg(ir_bytes, function_name, let_value, bs) {
+        if try call_has_try_arg(ir_bytes, function_name, let_value, sf) {
             let call_type = try compiled_mir_types::lower_call_return_type_indexed(
                 ir_lookup_index,
                 ir_bytes, function_name, module_prefix, let_value, bs
             );
             let callee_name = try compiled_mir_types::lower_call_callee_name(
-                ir_bytes, function_name, module_prefix, let_value, bs
+                ir_bytes, function_name, module_prefix, let_value, sf
             );
             let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-                ir_bytes, function_name, module_prefix, let_value, bs
+                ir_bytes, function_name, module_prefix, let_value, sf
             );
             var call_arg_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             var call_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
@@ -9687,7 +9738,7 @@ fn lower_multi_let_statement_named(
                 };
             }
         }
-        if try call_has_hoisted_arg(ir_bytes, function_name, let_value, bs) {
+        if try call_has_hoisted_arg(ir_bytes, function_name, let_value, sf) {
             var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             let nested_result_id = try lower_expr_with_local_aliases(
                 ir_bytes,
@@ -9726,10 +9777,10 @@ fn lower_multi_let_statement_named(
             ir_bytes, function_name, module_prefix, let_value, bs
         );
         let callee_name = try compiled_mir_types::lower_call_callee_name(
-            ir_bytes, function_name, module_prefix, let_value, bs
+            ir_bytes, function_name, module_prefix, let_value, sf
         );
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-            ir_bytes, function_name, module_prefix, let_value, bs
+            ir_bytes, function_name, module_prefix, let_value, sf
         );
         let args = try lower_call_args_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, locals_spec, let_value, string_counter, aliases, bs,
@@ -10189,11 +10240,18 @@ fn lower_multi_let_try_call(
     let success_type = try try_call_success_type(
         ir_bytes, function_name, module_prefix, call_node, bs, ir_lookup_index
     );
+    // cf tightens the pure structural callee read (this call's 'body-call' detail) to the call
+    // node's body-node line via the index; lower_call_callee_name / module_prefix only scan the
+    // callee, so passing cf is byte-identical to bs (the return/success-type resolvers above
+    // tighten their own structural read internally and keep index-keyed type resolution on bs).
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let callee_name = try compiled_mir_types::lower_call_callee_name(
-        ir_bytes, function_name, module_prefix, call_node, bs
+        ir_bytes, function_name, module_prefix, call_node, cf
     );
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-        ir_bytes, function_name, module_prefix, call_node, bs
+        ir_bytes, function_name, module_prefix, call_node, cf
     );
     var arg_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
@@ -10252,14 +10310,22 @@ fn lower_multi_assign_statement(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiAssignLowerResult {
-    let target = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, statement, "target", 0, bs
+    // sf tightens this Assign statement's own structural facts (target/value subtree kinds, tokens,
+    // edges, callee detail) to its body-node line via the index; the subtree sorts at-or-after it,
+    // so a scan from sf is byte-identical to one from bs. The target type resolution reads back
+    // across the function, and the let-try-call recursion / index-keyed success-type resolver keep
+    // bs.
+    let sf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, statement, bs
     );
-    if !(try node_kind_is(ir_bytes, function_name, target, "Var", bs)) {
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "target", 0, sf
+    );
+    if !(try node_kind_is(ir_bytes, function_name, target, "Var", sf)) {
         return error("compiled mir: top-level assignment target must be a local");
     }
     let target_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, target, bs
+        ir_bytes, function_name, target, sf
     );
     // Resolving the target's type proves it is a bound local (an unbound name surfaces 'local type
     // not found' rather than being silently accepted) and yields the type the reassigned value carries.
@@ -10268,18 +10334,18 @@ fn lower_multi_assign_statement(
         ir_bytes, function_name, module_prefix, locals_spec, target_name, bs
     );
     let value = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, statement, "value", 0, bs
+        ir_bytes, function_name, statement, "value", 0, sf
     );
-    if !(try node_kind_is(ir_bytes, function_name, value, "TryExpr", bs)) {
+    if !(try node_kind_is(ir_bytes, function_name, value, "TryExpr", sf)) {
         return error("compiled mir: top-level assignment value must be a try-call");
     }
     let inner = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, value, "value", 0, bs
+        ir_bytes, function_name, value, "value", 0, sf
     );
-    if !(try node_kind_is(ir_bytes, function_name, inner, "Call", bs)) {
+    if !(try node_kind_is(ir_bytes, function_name, inner, "Call", sf)) {
         return error("compiled mir: top-level assignment try value must wrap a call");
     }
-    if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+    if try callee_is_field_expr(ir_bytes, function_name, inner, sf) {
         return error("compiled mir: top-level assignment try-call callee must be a free function");
     }
     // The reassigned local must carry the call's success type; a mismatch would silently mis-lower.
@@ -10327,15 +10393,22 @@ fn lower_multi_let_call(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
+    // cf tightens the pure structural callee read (this call's 'body-call' detail) to the call
+    // node's body-node line via the index; lower_call_callee_name / module_prefix only scan the
+    // callee, so passing cf is byte-identical to bs. The return-type resolver tightens its own
+    // structural read internally and the cached arg lowering recurses, so both keep bs.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let call_type = try compiled_mir_types::lower_call_return_type_indexed(
         ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
     );
     let callee_name = try compiled_mir_types::lower_call_callee_name(
-        ir_bytes, function_name, module_prefix, call_node, bs
+        ir_bytes, function_name, module_prefix, call_node, cf
     );
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-        ir_bytes, function_name, module_prefix, call_node, bs
+        ir_bytes, function_name, module_prefix, call_node, cf
     );
     let args = try lower_call_args_with_local_aliases_cached(
         ir_bytes, function_name, module_prefix, locals_spec, call_node, string_counter, aliases, bs,
@@ -10482,11 +10555,18 @@ fn lower_multi_let_array_get(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
+    // cf tightens this call's own structural facts (its callee field-expr / method name, receiver
+    // edge and kind/token, arg edge) to the call node's body-node line via the index; the subtree
+    // sorts at-or-after it, so a scan from cf is byte-identical to one from bs. The receiver type
+    // resolution reads back across the function and the index lowering recurses, so both keep bs.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "callee", 0, bs
+        ir_bytes, function_name, call_node, "callee", 0, cf
     );
     let method_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, callee_node, "field", bs
+        ir_bytes, function_name, callee_node, "field", cf
     );
     // 'let child = try ast.child_at(range, index);' on a value std::kizu::ast::Ast
     // receiver lowers as a LetTryCall to the compiled external accessor
@@ -10504,22 +10584,22 @@ fn lower_multi_let_array_get(
         return error("compiled mir: only Array.get is supported in let-try position on a value receiver");
     }
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     if arg_count != 1 {
         return error("compiled mir: Array.get accessor takes one index argument");
     }
     let receiver_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, cf
     );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, cf
     );
     if !std::mem::equal_bytes(receiver_kind, "Var") {
         return error("compiled mir: Array.get value receiver must be a local or parameter");
     }
     let receiver_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, cf
     );
     let receiver_alias = try local_alias_current_name(aliases, receiver_name);
     let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed(
@@ -10536,7 +10616,7 @@ fn lower_multi_let_array_get(
         ir_bytes, module_prefix, element_kizu_type
     );
     let index_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "arg", 0, bs
+        ir_bytes, function_name, call_node, "arg", 0, cf
     );
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let index_result_id = try lower_expr_with_local_aliases(
@@ -10585,8 +10665,14 @@ fn try_call_success_type(
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex
 ) -> ![]u8 {
+    // cf tightens the structural callee read to the call node's body-node line via the index
+    // (the 'body-call' detail sorts immediately after it); the signature-return lookup below is
+    // index-keyed by callee name, so it is unaffected. Byte-identical to a scan from bs.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     // A 'try lexer::tokenize(...)' crosses a module boundary through an import alias, so its
     // '!T' signature-return fact is keyed under the callee's real owning module rather than
@@ -10927,10 +11013,18 @@ fn lower_multi_return_statement(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStmt {
-    let value = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, statement, "value", 0, bs
+    // sf tightens this Return statement's own structural facts (its value subtree: kind, callee
+    // detail/field-expr, arg edges) to its body-node line via the index; the subtree sorts
+    // at-or-after it, so a scan from sf is byte-identical to one from bs. Shape detection that
+    // reads back across the function, the expr/call lowering recursion, and the index-keyed
+    // return-type resolver keep bs.
+    let sf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, statement, bs
     );
-    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, sf
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, sf);
     // 'return !(try <callee>(<args>));' hoists the sub-expression try-call: the renderer emits the
     // call, propagates a failure as this function's own error union, and negates the unwrapped bool
     // success before wrapping it as the error-union success (issue 1165 / 1162).
@@ -10943,10 +11037,10 @@ fn lower_multi_return_statement(
             ir_bytes, function_name, module_prefix, return_not_try, bs
         );
         let callee_name = try compiled_mir_types::lower_call_callee_name(
-            ir_bytes, function_name, module_prefix, return_not_try, bs
+            ir_bytes, function_name, module_prefix, return_not_try, sf
         );
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-            ir_bytes, function_name, module_prefix, return_not_try, bs
+            ir_bytes, function_name, module_prefix, return_not_try, sf
         );
         let args = try lower_call_args_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, locals_spec, return_not_try,
@@ -10958,9 +11052,9 @@ fn lower_multi_return_statement(
         );
     }
     if std::mem::equal_bytes(value_kind, "Call") {
-        if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, value, bs) {
+        if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, value, sf) {
             let message_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, value, "arg", 0, bs
+                ir_bytes, function_name, value, "arg", 0, sf
             );
             var message_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             let message_result = try lower_expr_with_local_aliases(
@@ -10983,8 +11077,8 @@ fn lower_multi_return_statement(
         // 'return <value>.len();' on an Array<T>/String value receiver reads the length
         // through its runtime helper; it lowers through the generic expression path (the
         // same value-receiver len lowering conditions use) as a return-expr statement.
-        if try callee_is_field_expr(ir_bytes, function_name, value, bs) and
-            (try call_method_name_is(ir_bytes, function_name, value, "len", bs)) {
+        if try callee_is_field_expr(ir_bytes, function_name, value, sf) and
+            (try call_method_name_is(ir_bytes, function_name, value, "len", sf)) {
             var len_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             let len_result_id = try lower_expr_with_local_aliases(
                 ir_bytes,
@@ -11005,8 +11099,8 @@ fn lower_multi_return_statement(
         // (self.<field>.get(<expr>) -> !T), backing Ast.child_at (tracker 961).
         // Other value-receiver methods with real signatures lower through the generic
         // expression path, which passes the receiver as arg 0 and can hoist computed args.
-        if try callee_is_field_expr(ir_bytes, function_name, value, bs) {
-            if !(try call_method_name_is(ir_bytes, function_name, value, "get", bs)) {
+        if try callee_is_field_expr(ir_bytes, function_name, value, sf) {
+            if !(try call_method_name_is(ir_bytes, function_name, value, "get", sf)) {
                 var method_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
                 let method_result_id = try lower_expr_with_local_aliases(
                     ir_bytes,
@@ -11035,7 +11129,7 @@ fn lower_multi_return_statement(
         // generic expression path (which materializes the nested call or checked byte load into a
         // preceding temp) as a return-expr statement instead of an inline return-call (issue 1165 /
         // 1162).
-        if try call_has_hoisted_arg(ir_bytes, function_name, value, bs) {
+        if try call_has_hoisted_arg(ir_bytes, function_name, value, sf) {
             var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             let nested_result_id = try lower_expr_with_local_aliases(
                 ir_bytes,
@@ -11057,10 +11151,10 @@ fn lower_multi_return_statement(
             ir_bytes, function_name, module_prefix, value, bs
         );
         let callee_name = try compiled_mir_types::lower_call_callee_name(
-            ir_bytes, function_name, module_prefix, value, bs
+            ir_bytes, function_name, module_prefix, value, sf
         );
         let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-            ir_bytes, function_name, module_prefix, value, bs
+            ir_bytes, function_name, module_prefix, value, sf
         );
         let args = try lower_call_args_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, locals_spec, value, string_counter, aliases, bs,
@@ -11080,10 +11174,10 @@ fn lower_multi_return_statement(
     // caller unwraps (the tape's recursive list walks end this way).
     if std::mem::equal_bytes(value_kind, "TryExpr") {
         let try_inner = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, value, "value", 0, bs
+            ir_bytes, function_name, value, "value", 0, sf
         );
         let try_inner_kind = try ir_contract::body_node_kind_from(
-            ir_bytes, function_name, try_inner, bs
+            ir_bytes, function_name, try_inner, sf
         );
         if std::mem::equal_bytes(try_inner_kind, "Var") {
             var var_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
@@ -11117,10 +11211,10 @@ fn lower_multi_return_statement(
             return error("compiled mir: return try call must share the function's error union");
         }
         let try_callee_name = try compiled_mir_types::lower_call_callee_name(
-            ir_bytes, function_name, module_prefix, try_inner, bs
+            ir_bytes, function_name, module_prefix, try_inner, sf
         );
         let try_callee_module = try compiled_mir_types::lower_call_module_prefix(
-            ir_bytes, function_name, module_prefix, try_inner, bs
+            ir_bytes, function_name, module_prefix, try_inner, sf
         );
         let try_args = try lower_call_args_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, locals_spec, try_inner,
@@ -11351,45 +11445,52 @@ fn lower_multi_return_array_get(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStmt {
+    // cf tightens this call's own structural facts (callee/receiver/field edges, kinds, tokens,
+    // arg edge) to the call node's body-node line via the index; the subtree sorts at-or-after it,
+    // so a scan from cf is byte-identical to one from bs. Param type resolution (find_param_*) and
+    // the index expression lowering recursion keep bs.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "callee", 0, bs
+        ir_bytes, function_name, call_node, "callee", 0, cf
     );
     let method_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, callee_node, "field", bs
+        ir_bytes, function_name, callee_node, "field", cf
     );
     if !std::mem::equal_bytes(method_name, "get") {
         return error("compiled mir: only Array.get method return is supported");
     }
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     if arg_count != 1 {
         return error("compiled mir: Array.get accessor takes one index argument");
     }
     // The method receiver is the array field expression self.<field>.
     let field_expr = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, cf
     );
     let field_expr_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, field_expr, bs
+        ir_bytes, function_name, field_expr, cf
     );
     if !std::mem::equal_bytes(field_expr_kind, "FieldExpr") {
         return error("compiled mir: Array.get receiver must be a struct field access");
     }
     let field_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, field_expr, "field", bs
+        ir_bytes, function_name, field_expr, "field", cf
     );
     let var_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, field_expr, "receiver", 0, bs
+        ir_bytes, function_name, field_expr, "receiver", 0, cf
     );
     let var_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, var_node, bs
+        ir_bytes, function_name, var_node, cf
     );
     if !std::mem::equal_bytes(var_kind, "Var") {
         return error("compiled mir: Array.get field receiver must be a parameter");
     }
     let var_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, var_node, bs
+        ir_bytes, function_name, var_node, cf
     );
     let receiver_llvm_type = try compiled_signature::find_param_type(locals_spec, var_name);
     let struct_kizu_type = try compiled_signature::find_param_kizu_type(
@@ -11412,7 +11513,7 @@ fn lower_multi_return_array_get(
     // Lower the index expression (e.g. range.start + index) into expr_insts; the
     // result temp %t<index_result_id> feeds the checked array element accessor.
     let index_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "arg", 0, bs
+        ir_bytes, function_name, call_node, "arg", 0, cf
     );
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let index_result_id = try lower_expr_with_local_aliases(
@@ -12535,11 +12636,19 @@ fn lower_multi_if_statement(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
+    // sf tightens this If statement's own structural facts (condition/then/else edges, the
+    // guard-then block's statement/return shape, the guard callee detail) to its body-node line
+    // via the index; that subtree sorts at-or-after it, so a scan from sf is byte-identical to one
+    // from bs. The try-call shape detectors that read back across the function, the then/else block
+    // lowering recursion, and the index-keyed return-type resolver keep bs.
+    let sf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, statement, bs
+    );
     let cond_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, statement, "condition", 0, bs
+        ir_bytes, function_name, statement, "condition", 0, sf
     );
     let then_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, statement, "then", 0, bs
+        ir_bytes, function_name, statement, "then", 0, sf
     );
     // Prefix-not try-call conditions hoist the sub-expression try-call (issue 1165 / 1162). The
     // existing return-bool guard keeps its dedicated renderer; void then-bodies share the positive
@@ -12550,29 +12659,29 @@ fn lower_multi_if_statement(
     );
     if guard_not_try >= 0 {
         let guard_then_extra = try ir_contract::body_child_sequence_or_minus_one_from(
-            ir_bytes, function_name, then_node, "statement", 1, bs
+            ir_bytes, function_name, then_node, "statement", 1, sf
         );
         if guard_then_extra < 0 {
             let guard_then_stmt = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, then_node, "statement", 0, bs
+                ir_bytes, function_name, then_node, "statement", 0, sf
             );
             let guard_then_kind = try ir_contract::body_node_kind_from(
-                ir_bytes, function_name, guard_then_stmt, bs
+                ir_bytes, function_name, guard_then_stmt, sf
             );
             if std::mem::equal_bytes(guard_then_kind, "Return") {
                 let guard_ret_value = try ir_contract::body_child_sequence_from(
-                    ir_bytes, function_name, guard_then_stmt, "value", 0, bs
+                    ir_bytes, function_name, guard_then_stmt, "value", 0, sf
                 );
                 let guard_ret_kind = try ir_contract::body_node_kind_from(
-                    ir_bytes, function_name, guard_ret_value, bs
+                    ir_bytes, function_name, guard_ret_value, sf
                 );
                 if std::mem::equal_bytes(guard_ret_kind, "Bool") {
                     // The guard is rendered then-only (the negation returns the bool or falls through
                     // to the join), so an else arm with a real body would be silently dropped: reject
                     // it as an explicit error rather than mis-lower it (issue 1165 / 1162).
-                    try require_if_not_try_guard_no_else(ir_bytes, function_name, statement, bs);
+                    try require_if_not_try_guard_no_else(ir_bytes, function_name, statement, sf);
                     let guard_token = try ir_contract::body_token_or_empty_from(
-                        ir_bytes, function_name, guard_ret_value, bs
+                        ir_bytes, function_name, guard_ret_value, sf
                     );
                     let guard_bool_value = std::mem::equal_bytes(guard_token, "true");
                     let guard_error_union = try compiled_mir_types::lower_call_return_type_indexed(
@@ -12580,10 +12689,10 @@ fn lower_multi_if_statement(
                         ir_bytes, function_name, module_prefix, guard_not_try, bs
                     );
                     let guard_callee_name = try compiled_mir_types::lower_call_callee_name(
-                        ir_bytes, function_name, module_prefix, guard_not_try, bs
+                        ir_bytes, function_name, module_prefix, guard_not_try, sf
                     );
                     let guard_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-                        ir_bytes, function_name, module_prefix, guard_not_try, bs
+                        ir_bytes, function_name, module_prefix, guard_not_try, sf
                     );
                     let guard_args = try lower_call_args_with_local_aliases_cached(
                         ir_bytes, function_name, module_prefix, locals_spec, guard_not_try,

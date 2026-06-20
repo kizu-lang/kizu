@@ -215,8 +215,14 @@ pub fn resolve_call_return_type_indexed(
     call_node: i64,
     bs: i64
 ) -> ![]u8 {
+    // cf tightens the structural callee read to the call node's body-node line via the index
+    // (the 'body-call' detail sorts immediately after it); the signature-return lookup below is
+    // index-keyed by callee name, so it is unaffected. Byte-identical to a scan from bs.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        index, ir_bytes, function_name, call_node, bs
+    );
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     var ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
         index, ir_bytes, "function-signature-return ", module_prefix, callee_name
@@ -245,11 +251,18 @@ pub fn resolve_struct_literal_type_indexed(
     struct_literal_node: i64,
     bs: i64
 ) -> ![]u8 {
+    // nf tightens this struct-literal's own structural facts (its 'type' edge / name token and
+    // 'body-struct-literal' detail) to its body-node line via the index; those facts sort
+    // at-or-after that line, so a scan from nf is byte-identical to one from bs. The type-name
+    // resolution below is index-keyed, so it is unaffected.
+    let nf = ir_index::body_node_line_start_for_sequence(
+        index, ir_bytes, function_name, struct_literal_node, bs
+    );
     let type_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, struct_literal_node, "type", 0, bs
+        ir_bytes, function_name, struct_literal_node, "type", 0, nf
     );
     let type_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, type_node, bs
+        ir_bytes, function_name, type_node, nf
     );
     if std::mem::len(type_name) > 0 {
         return try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
@@ -257,7 +270,7 @@ pub fn resolve_struct_literal_type_indexed(
         );
     }
     let qualified_name = try ir_contract::sequence_fact_value_from(
-        ir_bytes, "body-struct-literal ", function_name, struct_literal_node, bs
+        ir_bytes, "body-struct-literal ", function_name, struct_literal_node, nf
     );
     return try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
         index, ir_bytes, module_prefix, qualified_name
