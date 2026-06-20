@@ -432,7 +432,7 @@ fn append_multi_stmt(
         ArrayNew(payload) => try append_array_new(out, payload);,
         ValueWhile(payload) => try append_value_while(out, payload);,
         GrammarLoop(payload) => try append_grammar_loop(out, function, payload);,
-        ValueCursorWhile(payload) => try append_value_cursor_while(out, function, payload);,
+        ValueCursorWhile(payload) => try append_value_cursor_while(out, function, payload, local_prefix);,
         PrecedenceLoop(payload) => try append_precedence_loop(out, function, payload);,
         DualCursorLoop(payload) => try append_dual_cursor_loop(out, function, payload);,
         TrailingTokenLoop(payload) => try append_trailing_token_loop(out, function, payload);,
@@ -2909,8 +2909,27 @@ fn append_value_cursor_latch(
 fn append_value_cursor_while(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
-    stmt: &compiled_mir::MirValueCursorWhileStmt
+    stmt: &compiled_mir::MirValueCursorWhileStmt,
+    local_prefix: i64
 ) -> !void {
+    // When the loop is not the function's first emitted statement (local_prefix > 0) the block
+    // reached just before it is some prior block (an ifN_cont / tryK_cont), not %entry, so the
+    // loop-head phi cannot name %entry on its preheader edge -- doing so lists a non-predecessor
+    // block and the optimizer's SimplifyCFG crashes on the malformed CFG. Route the entry edge
+    // through a dedicated preheader block whose single unconditional branch makes it the loop
+    // head's real entry predecessor regardless of what preceded the loop (the precedence and
+    // dual-cursor loops emit their own preheader for the same reason). The first-statement case
+    // (local_prefix == 0) keeps the historical %entry preheader byte for byte. Body statements
+    // take local prefixes offset by local_prefix * 1000 so a body 'if' (or try) never reuses a
+    // top-level statement's label / temp numbering, matching the i64-induction While body-if
+    // encoding; for the first-statement case the offset collapses to the historical numbering.
+    if local_prefix > 0 {
+        try out.append_bytes("  br label %");
+        try out.append_bytes(stmt.label_base);
+        try append_ll_line(out, "_preheader");
+        try out.append_bytes(stmt.label_base);
+        try append_ll_line(out, "_preheader:");
+    }
     try out.append_bytes("  br label %");
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_head");
@@ -2925,7 +2944,13 @@ fn append_value_cursor_while(
     try out.append_bytes(stmt.cursor_type);
     try out.append_bytes(" [ %");
     try out.append_bytes(stmt.init_name);
-    try out.append_bytes(", %entry ], [ %");
+    if local_prefix > 0 {
+        try out.append_bytes(", %");
+        try out.append_bytes(stmt.label_base);
+        try out.append_bytes("_preheader ], [ %");
+    } else {
+        try out.append_bytes(", %entry ], [ %");
+    }
     try out.append_bytes(stmt.cursor_var);
     try out.append_bytes("_next, ");
     try append_value_cursor_latch_pred(out, stmt);
@@ -2944,7 +2969,7 @@ fn append_value_cursor_while(
     var body_index = 0;
     while body_index < body_stmts.len() {
         let body_stmt = try body_stmts.at(body_index);
-        try append_multi_stmt(out, function, body_stmt, body_index + 1);
+        try append_multi_stmt(out, function, body_stmt, local_prefix * 1000 + body_index + 1);
         body_index = body_index + 1;
     }
     try out.append_bytes("  br label %");
@@ -2954,7 +2979,7 @@ fn append_value_cursor_while(
     try append_ll_line(out, "_latch:");
     // The latch binds the cursor's next value to %<cursor>_next (consumed by the loop-head phi).
     // Try-call latches end in tryK_cont; field-read latches remain in the latch block.
-    try append_value_cursor_latch(out, function, stmt, body_stmts.len() + 1);
+    try append_value_cursor_latch(out, function, stmt, local_prefix * 1000 + body_stmts.len() + 1);
     try out.append_bytes("  br label %");
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_head");
