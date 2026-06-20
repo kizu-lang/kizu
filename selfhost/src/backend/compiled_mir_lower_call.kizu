@@ -35,6 +35,63 @@ fn aliased_name_or_original(
     return name;
 }
 
+// call_arg_nodes_bounded collects a call's "arg" child nodes by scanning only the call node's
+// own subtree instead of call_arg_nodes' scan over every body-edge fact of the whole function.
+// The call node's body-node line is located via the index, and the scan starts there: a Call
+// emits every callee/arg edge (parent == call_node) interleaved with those children's subtrees
+// (append_body_one_range_ir / append_body_range_ir), and all of those facts carry sequences
+// inside the call node's subtree. Because facts are emitted in pre-order DFS, the first
+// body-edge whose parent sequence is < call_node marks the point where the scan has left the
+// subtree, so no further parent == call_node edge can follow and the scan stops. The collected
+// (ordinal, child) set is byte-identical to call_arg_nodes' -- both route matching lines through
+// append_call_arg_node_from_line, which keeps only parent == call_node "arg" edges and dedups by
+// ordinal -- so the result is unchanged; only the O(function body-edge count) scan becomes
+// O(call subtree). An index miss falls back to the full linear scan so behaviour is preserved.
+fn call_arg_nodes_bounded(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64
+) -> !std::array::Array<i64> {
+    let entry = ir_index::first_entry_for_fn_token(
+        ir_lookup_index, ir_bytes, "body-node ", function_name, call_node
+    );
+    if entry < 0 {
+        return try call_arg_nodes(ir_bytes, function_name, call_node, bs);
+    }
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "body-edge ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(function_name);
+    var nodes = std::array::Array<i64>(std::mem::page_allocator());
+    var index = ir_index::entry_line_start(ir_lookup_index, entry);
+    var done = false;
+    while !done and index + prefix_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(ir_bytes[name_start..name_end], function_name) and
+                call_arg_is_space(ir_bytes[name_end]) {
+                let parent_start = call_arg_skip_spaces(ir_bytes, name_end);
+                let parent = try call_arg_parse_i64_token(ir_bytes, parent_start);
+                if parent < call_node {
+                    done = true;
+                } else {
+                    try append_call_arg_node_from_line(ir_bytes, name_end, call_node, &var nodes);
+                }
+            } else {
+                done = true;
+            }
+        }
+        if !done {
+            index = compiled_util::find_line_end(ir_bytes, index) + 1;
+        }
+    }
+    return nodes;
+}
+
 fn call_arg_nodes(
     ir_bytes: []u8,
     function_name: []u8,
@@ -441,10 +498,21 @@ pub fn lower_call_args_cached(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !std::array::Array<compiled_mir::MirCallArg> {
-    let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+    // cf tightens the body-fact scans that locate this call's own facts (its body-call callee
+    // detail and its "arg" child edges) to the call node's body-node line via the index. The
+    // callee detail sorts immediately after the body-node line and every "arg" edge sorts after
+    // it too, so a scan from cf collects the byte-identical callee/arg set a scan from bs would
+    // (perf only); bs is kept for per-argument lowering, which resolves value types that read
+    // let/param facts that can precede this node.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
     );
-    var arg_nodes = try call_arg_nodes(ir_bytes, function_name, call_node, bs);
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, cf
+    );
+    var arg_nodes = try call_arg_nodes_bounded(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     defer arg_nodes.deinit();
     try require_contiguous_call_args(&arg_nodes);
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
@@ -537,10 +605,21 @@ pub fn lower_call_args_with_aliases_cached(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !std::array::Array<compiled_mir::MirCallArg> {
-    let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+    // cf tightens the body-fact scans that locate this call's own facts (its body-call callee
+    // detail and its "arg" child edges) to the call node's body-node line via the index. The
+    // callee detail sorts immediately after the body-node line and every "arg" edge sorts after
+    // it too, so a scan from cf collects the byte-identical callee/arg set a scan from bs would
+    // (perf only); bs is kept for per-argument lowering, which resolves value types that read
+    // let/param facts that can precede this node.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
     );
-    var arg_nodes = try call_arg_nodes(ir_bytes, function_name, call_node, bs);
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, cf
+    );
+    var arg_nodes = try call_arg_nodes_bounded(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     defer arg_nodes.deinit();
     try require_contiguous_call_args(&arg_nodes);
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(

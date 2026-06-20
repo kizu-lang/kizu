@@ -17944,11 +17944,18 @@ fn lower_expr_method_call_with_local_aliases(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
+    // cf tightens this call's own structural facts (its arg edges, per-arg hoist kind checks)
+    // to the call node's body-node line via the index; the args sort after it, so a scan from
+    // cf reaches the byte-identical facts a scan from bs would. bs is kept for receiver/return
+    // type resolution and lowering recursion, which read facts that can precede this node.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let info = try method_call_info(
         ir_bytes, function_name, module_prefix, params_spec, call_node, bs
     );
     let explicit_arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types(
         ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
@@ -17975,10 +17982,10 @@ fn lower_expr_method_call_with_local_aliases(
     var string_idx = string_index;
     while arg_index < explicit_arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
         let arg_type = try arg_types.get(arg_index + 1);
-        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, cf) {
             let before = insts.len();
             let temp_id = try lower_expr_with_local_aliases(
                 ir_bytes, function_name, module_prefix, params_spec, arg_node,
@@ -18029,8 +18036,17 @@ fn lower_expr_call_with_local_aliases(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let id = id_base + insts.len();
-    if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
-        if try call_method_name_is(ir_bytes, function_name, expr_node, "len", bs) {
+    // cf tightens the body-fact scan for this call's own structural facts (its callee, arg
+    // edges, field-expr mode/name) to the call node's body-node line via the index instead of
+    // rescanning from the function body start; the call's children sort after it, so a scan
+    // from cf reaches the byte-identical facts a scan from bs would (perf only). bs is kept for
+    // type/name resolution (return type, arg types) and lowering recursion, which read let/param
+    // facts that can precede this node.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, expr_node, bs
+    );
+    if try callee_is_field_expr(ir_bytes, function_name, expr_node, cf) {
+        if try call_method_name_is(ir_bytes, function_name, expr_node, "len", cf) {
             let result = try lower_expr_value_len(
                 ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
             );
@@ -18043,14 +18059,14 @@ fn lower_expr_call_with_local_aliases(
         );
     }
     if try callee_is_namespace_union_ctor(
-        ir_bytes, function_name, module_prefix, expr_node, bs, ir_lookup_index
+        ir_bytes, function_name, module_prefix, expr_node, cf, ir_lookup_index
     ) {
         return try lower_expr_union_ctor_call(
             ir_bytes, function_name, module_prefix, params_spec, expr_node,
             string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
         );
     }
-    if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, bs) {
+    if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, cf) {
         return try lower_expr_call_with_nested_args_with_local_aliases(
             ir_bytes, function_name, module_prefix, params_spec, expr_node,
             string_index, id_base, insts, aliases, bs, ir_lookup_index, call_arg_type_cache
@@ -18061,10 +18077,10 @@ fn lower_expr_call_with_local_aliases(
         ir_bytes, function_name, module_prefix, expr_node, bs
     );
     let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
-        ir_bytes, function_name, module_prefix, expr_node, bs
+        ir_bytes, function_name, module_prefix, expr_node, cf
     );
     let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-        ir_bytes, function_name, module_prefix, expr_node, bs
+        ir_bytes, function_name, module_prefix, expr_node, cf
     );
     let args = try lower_call_args_with_local_aliases_cached(
         ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, aliases, bs,
@@ -18094,14 +18110,22 @@ fn lower_expr_into_local_aliases(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
-    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr_node, bs);
+    // nf tightens the body-fact scan for this node's own structural facts (its kind, child
+    // edges, detail token/int/op) to its body-node line via the index instead of rescanning
+    // from the function body start. This node's children sort after it, so a scan from nf
+    // reaches the byte-identical facts a scan from bs would (perf only). bs is kept for
+    // type/name resolution and lowering recursion, which read facts that can precede this node.
+    let nf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, expr_node, bs
+    );
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr_node, nf);
     let id = id_base + insts.len();
     if std::mem::equal_bytes(kind, "Var") {
         let var_name = try ir_contract::body_token_or_empty_from(
             ir_bytes,
             function_name,
             expr_node,
-            bs
+            nf
         );
         let var_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
             ir_lookup_index,
@@ -18117,7 +18141,7 @@ fn lower_expr_into_local_aliases(
             ir_bytes,
             function_name,
             expr_node,
-            bs
+            nf
         );
         try insts.append(compiled_mir::bool_expr_inst(
             id,
@@ -18130,7 +18154,7 @@ fn lower_expr_into_local_aliases(
             ir_bytes,
             function_name,
             expr_node,
-            bs
+            nf
         );
         try insts.append(compiled_mir::int_expr_inst(id, int_value));
         return id;
@@ -18140,7 +18164,7 @@ fn lower_expr_into_local_aliases(
             ir_bytes,
             function_name,
             expr_node,
-            bs
+            nf
         );
         let _payload_len = try compiled_util::string_token_decoded_len(
             token,
@@ -18155,20 +18179,20 @@ fn lower_expr_into_local_aliases(
     }
     if std::mem::equal_bytes(kind, "Prefix") {
         let op = try ir_contract::sequence_fact_value_from(
-            ir_bytes, "body-prefix ", function_name, expr_node, bs
+            ir_bytes, "body-prefix ", function_name, expr_node, nf
         );
         let right_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "right", 0, bs
+            ir_bytes, function_name, expr_node, "right", 0, nf
         );
         if std::mem::equal_bytes(op, "neg") {
             let right_kind = try ir_contract::body_node_kind_from(
-                ir_bytes, function_name, right_node, bs
+                ir_bytes, function_name, right_node, nf
             );
             if !std::mem::equal_bytes(right_kind, "Int") {
                 return error("compiled mir: unsupported neg operand");
             }
             let int_value = try ir_contract::body_int_value_from(
-                ir_bytes, function_name, right_node, bs
+                ir_bytes, function_name, right_node, nf
             );
             try insts.append(compiled_mir::int_expr_inst(id, 0 - int_value));
             return id;
@@ -18195,13 +18219,13 @@ fn lower_expr_into_local_aliases(
     }
     if std::mem::equal_bytes(kind, "Binary") {
         let op = try ir_contract::sequence_fact_value_from(
-            ir_bytes, "body-binary ", function_name, expr_node, bs
+            ir_bytes, "body-binary ", function_name, expr_node, nf
         );
         let left_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "left", 0, bs
+            ir_bytes, function_name, expr_node, "left", 0, nf
         );
         let right_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "right", 0, bs
+            ir_bytes, function_name, expr_node, "right", 0, nf
         );
         let before_left = insts.len();
         let left = try lower_expr_into_local_aliases(
@@ -18219,24 +18243,24 @@ fn lower_expr_into_local_aliases(
     }
     if std::mem::equal_bytes(kind, "CastExpr") {
         let type_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "type", 0, bs
+            ir_bytes, function_name, expr_node, "type", 0, nf
         );
         let type_text = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, type_node, bs
+            ir_bytes, function_name, type_node, nf
         );
         let target_llvm = try compiled_type_lower::kizu_type_to_llvm_indexed(
             ir_lookup_index,
             ir_bytes, module_prefix, type_text
         );
         let value_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "value", 0, bs
+            ir_bytes, function_name, expr_node, "value", 0, nf
         );
         let value_kind = try ir_contract::body_node_kind_from(
-            ir_bytes, function_name, value_node, bs
+            ir_bytes, function_name, value_node, nf
         );
         if std::mem::equal_bytes(value_kind, "Int") {
             let int_value = try ir_contract::body_int_value_from(
-                ir_bytes, function_name, value_node, bs
+                ir_bytes, function_name, value_node, nf
             );
             try insts.append(compiled_mir::typed_int_expr_inst(id, int_value, target_llvm));
             return id;
@@ -18272,16 +18296,16 @@ fn lower_expr_into_local_aliases(
     }
     if std::mem::equal_bytes(kind, "IndexExpr") {
         let end_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "end", 0, bs
+            ir_bytes, function_name, expr_node, "end", 0, nf
         );
         let end_kind = try ir_contract::body_node_kind_from(
-            ir_bytes, function_name, end_node, bs
+            ir_bytes, function_name, end_node, nf
         );
         let target_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "target", 0, bs
+            ir_bytes, function_name, expr_node, "target", 0, nf
         );
         let index_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "start", 0, bs
+            ir_bytes, function_name, expr_node, "start", 0, nf
         );
         if !std::mem::equal_bytes(end_kind, "Empty") {
             let target_id = try lower_expr_into_local_aliases(
@@ -18330,13 +18354,13 @@ fn lower_expr_into_local_aliases(
             return result_id;
         }
         let target_kind = try ir_contract::body_node_kind_from(
-            ir_bytes, function_name, target_node, bs
+            ir_bytes, function_name, target_node, nf
         );
         if !std::mem::equal_bytes(target_kind, "Var") {
             return error("compiled mir: index target must be a var");
         }
         let target_name = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, target_node, bs
+            ir_bytes, function_name, target_node, nf
         );
         let index_id = try lower_expr_into_local_aliases(
             ir_bytes,
@@ -18394,7 +18418,7 @@ fn lower_expr_into_local_aliases(
     // propagates the failure through this function's own error union (issue 1157 big-bang).
     if std::mem::equal_bytes(kind, "TryExpr") {
         let inner_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, expr_node, "value", 0, bs
+            ir_bytes, function_name, expr_node, "value", 0, nf
         );
         let operand = try lower_expr_into_local_aliases(
             ir_bytes, function_name, module_prefix, params_spec, inner_node,
@@ -19020,8 +19044,15 @@ fn lower_expr_field_with_local_aliases(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
+    // nf tightens this field expression's own structural facts (its field-expr mode, receiver
+    // edge, receiver kind/token) to its body-node line via the index; the receiver sorts after
+    // it, so a scan from nf reaches the byte-identical facts a scan from bs would. bs is kept
+    // for the delegated namespace path, field-type resolution, and lowering recursion.
+    let nf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, expr_node, bs
+    );
     let mode = try ir_contract::sequence_fact_second_value_from(
-        ir_bytes, "body-field-expr ", function_name, expr_node, bs
+        ir_bytes, "body-field-expr ", function_name, expr_node, nf
     );
     if std::mem::equal_bytes(mode, "namespace") {
         return try lower_expr_field(
@@ -19030,17 +19061,17 @@ fn lower_expr_field_with_local_aliases(
         );
     }
     let receiver = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, expr_node, "receiver", 0, bs
+        ir_bytes, function_name, expr_node, "receiver", 0, nf
     );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver, bs
+        ir_bytes, function_name, receiver, nf
     );
     if std::mem::equal_bytes(receiver_kind, "Var") {
         let receiver_name = try ir_contract::body_token_or_empty_from(
             ir_bytes,
             function_name,
             receiver,
-            bs
+            nf
         );
         let field = try compiled_mir_types::resolve_field_expr_indexed(
             ir_lookup_index,

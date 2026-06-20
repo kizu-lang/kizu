@@ -246,6 +246,132 @@ pub fn body_node_facts_start(
     return entry_line_start(index, found);
 }
 
+// body_node_line_start_for_sequence returns the byte offset of the
+// 'body-node <function_name> <sequence> ...' line via the sorted index instead of a linear
+// scan from the function body start. Every fact line is keyed by its first two tokens, so all
+// 'body-node <function_name>' entries share a key and sort by ascending line_start.
+// append_body_node_ir emits body-node facts in pre-order DFS with strictly increasing
+// sequence numbers, so within that key group line_start order equals sequence order; a binary
+// search keyed on (the 'body-node <function_name>' key, then the third sequence token) lands
+// on the exact body-node line. The returned offset is byte-identical to the offset a linear
+// scan from the body start reaches for the same (function_name, sequence) -- the body-node
+// line is the first and only line carrying that sequence -- so a scan started here finds the
+// same facts as one started at the body start. When no matching entry exists the caller's
+// fallback is returned so the downstream scan behaves exactly as before.
+pub fn body_node_line_start_for_sequence(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    sequence: i64,
+    fallback: i64
+) -> i64 {
+    let found = first_entry_for_fn_token(
+        index, ir_bytes, "body-node ", function_name, sequence
+    );
+    if found < 0 {
+        return fallback;
+    }
+    return entry_line_start(index, found);
+}
+
+// first_entry_for_fn_token binary-searches for the first index entry whose first two tokens
+// equal '<fact_prefix><function_name>' and whose third token parses to token_value, returning
+// its entry index or -1. It is the shared primitive behind the body-node sequence lookup and
+// the body-edge parent lookup: both fact kinds key by '<prefix> <function_name>', share that
+// key across a function's facts, and (because append_body_node_ir emits facts in pre-order DFS
+// with strictly increasing sequence numbers, a node's edges contiguously in increasing parent
+// order) sort by ascending third token within the key group, so the array is ordered by
+// exactly (key, third token) and a binary search on that pair is valid.
+pub fn first_entry_for_fn_token(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    fact_prefix: []u8,
+    function_name: []u8,
+    token_value: i64
+) -> i64 {
+    var low = 0;
+    var high = entry_count(index);
+    while low < high {
+        let mid = (low + high) / 2;
+        let cmp = compare_entry_to_fn_token(
+            ir_bytes, index, mid, fact_prefix, function_name, token_value
+        );
+        if cmp < 0 {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    if low >= entry_count(index) {
+        return 0 - 1;
+    }
+    if compare_entry_to_fn_token(ir_bytes, index, low, fact_prefix, function_name, token_value) == 0 {
+        return low;
+    }
+    return 0 - 1;
+}
+
+// entry_is_fn_token reports whether entry_index is in range and matches
+// '<fact_prefix><function_name>' with third token token_value -- used to walk the contiguous
+// run of entries that share a (prefix, function, token) after first_entry_for_fn_token.
+pub fn entry_is_fn_token(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    entry_index: i64,
+    fact_prefix: []u8,
+    function_name: []u8,
+    token_value: i64
+) -> bool {
+    if entry_index < 0 or entry_index >= entry_count(index) {
+        return false;
+    }
+    return compare_entry_to_fn_token(
+        ir_bytes, index, entry_index, fact_prefix, function_name, token_value
+    ) == 0;
+}
+
+fn compare_entry_to_fn_token(
+    ir_bytes: []u8,
+    index: &IrIndex,
+    entry_index: i64,
+    fact_prefix: []u8,
+    function_name: []u8,
+    token_value: i64
+) -> i64 {
+    let key_cmp = compare_entry_to_query(
+        ir_bytes, index, entry_index, fact_prefix, ir_bytes[0..0], function_name
+    );
+    if key_cmp != 0 {
+        return key_cmp;
+    }
+    let actual = entry_third_token_i64(ir_bytes, index, entry_index);
+    if actual < token_value {
+        return 0 - 1;
+    }
+    if actual > token_value {
+        return 1;
+    }
+    return 0;
+}
+
+fn entry_third_token_i64(ir_bytes: []u8, index: &IrIndex, entry_index: i64) -> i64 {
+    var pos = entry_key_end(index, entry_index);
+    let line_end = entry_line_end(index, entry_index);
+    while pos < line_end and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    var value = 0;
+    while pos < line_end {
+        let byte = ir_bytes[pos];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return value;
+        }
+        value = value * 10 + cast<i64>(byte) - 48;
+        pos = pos + 1;
+    }
+    return value;
+}
+
 pub fn lookup_fact_value_by_prefix_or_empty(
     index: &IrIndex,
     ir_bytes: []u8,
