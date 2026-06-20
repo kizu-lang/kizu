@@ -1019,6 +1019,15 @@ pub struct MirValueCursorWhileStmt {
     pub latch: MirValueCursorLatch,
     pub label_base: []u8,
     pub terminal_return: bool,
+    // A call-seeded cursor init ('var <cursor> = next_token(text, token)') is materialized in the
+    // loop preheader as '%<init_name> = call <cursor_type> @<callee>(<args>)' so the loop-head phi
+    // seeds from that concrete SSA value instead of self-referencing %<cursor> on the entry edge (an
+    // undef cursor cycle the optimizer's GVN can crash on). init_call_callee_name is empty for the
+    // var-copy seed path (the phi seeds directly from the copied local/param), in which case no
+    // preheader call is rendered.
+    pub init_call_callee_name: []u8,
+    pub init_call_module_prefix: []u8,
+    pub init_call_args: std::array::Array<MirCallArg>,
 }
 
 // MirPrecedenceLoopStmt backs a two-carried-value precedence-climbing loop:
@@ -1988,6 +1997,7 @@ impl MirValueCursorWhileStmt {
         self.cond_insts.deinit();
         self.body_stmts.deinit();
         self.latch.deinit();
+        self.init_call_args.deinit();
         return;
     }
 }
@@ -4090,7 +4100,47 @@ pub fn value_cursor_while_stmt(
         body_stmts: body_stmts,
         latch: latch,
         label_base: label_base,
-        terminal_return: terminal_return
+        terminal_return: terminal_return,
+        init_call_callee_name: "",
+        init_call_module_prefix: "",
+        init_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    });
+}
+
+// value_cursor_while_stmt_with_init backs a value-cursor loop whose cursor is seeded by a plain
+// call ('var <cursor> = next_token(text, token)'). The init call is rendered into the loop
+// preheader binding %<init_name> (= %<cursor>_init), and the loop-head phi seeds from that concrete
+// value rather than self-referencing %<cursor> on the entry edge. Sharing the same MirStmt position
+// as the elided init keeps every body label and the rendering local_prefix unchanged.
+pub fn value_cursor_while_stmt_with_init(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    init_name: []u8,
+    own_error_union: []u8,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    latch: MirValueCursorLatch,
+    label_base: []u8,
+    terminal_return: bool,
+    init_call_module_prefix: []u8,
+    init_call_callee_name: []u8,
+    init_call_args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::ValueCursorWhile(MirValueCursorWhileStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        init_name: init_name,
+        own_error_union: own_error_union,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        latch: latch,
+        label_base: label_base,
+        terminal_return: terminal_return,
+        init_call_callee_name: init_call_callee_name,
+        init_call_module_prefix: init_call_module_prefix,
+        init_call_args: init_call_args
     });
 }
 

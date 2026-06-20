@@ -7313,6 +7313,35 @@ fn value_cursor_previous_copy_source_or_empty(
     return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, init_value, bs);
 }
 
+// value_cursor_previous_call_node_or_minus_one returns the Call value node of a plain-call cursor
+// init ('var <cursor> = next_token(text, token)') preceding the embedded value-cursor while, or -1
+// when the preceding init is absent or a Var-copy seed. The embedded lowerer materializes this call
+// in the loop preheader as %<cursor>_init and seeds the loop-head phi from it, replacing the
+// degenerate self-referential phi seed that an elided call init would otherwise leave behind.
+fn value_cursor_previous_call_node_or_minus_one(
+    ir_bytes: []u8,
+    function_name: []u8,
+    stmt_index: i64,
+    bs: i64
+) -> !i64 {
+    if stmt_index == 0 {
+        return -1;
+    }
+    let init_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", stmt_index - 1, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_stmt, "Let", bs)) {
+        return -1;
+    }
+    let init_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_stmt, "value", 0, bs
+    );
+    if !(try node_kind_is(ir_bytes, function_name, init_value, "Call", bs)) {
+        return -1;
+    }
+    return init_value;
+}
+
 // value_cursor_pre_latch_is_guard_scan reports whether every body statement before the value-cursor
 // latch is a guard 'if' (a sentinel early-exit such as 'if is_eof_token(current) { return error(..) }').
 // A scan loop advances its cursor to a sentinel without accumulating into an array or a sink call, so
@@ -7423,15 +7452,41 @@ fn lower_embedded_value_cursor_append_loop(
         ir_bytes, function_name, stmt_index, bs
     );
     // A Var-copy init ('var token = first') is elided by the induction-init scan, so the loop-head
-    // phi must seed from the copy's source (%first) on the entry edge -- %<cursor> is never
-    // materialized before the loop. A call-seeded init keeps seeding from %<cursor> (its emitted
-    // call result), preserving the existing parse_block_with_statements-style behavior.
+    // phi seeds from the copy's source (%first) on the entry edge -- %<cursor> is never materialized
+    // before the loop. A plain-call init ('var current = next_token(text, token)') is also elided,
+    // but its copied value has no prior SSA name, so it is materialized in the loop preheader as
+    // %<cursor>_init and the phi seeds from that concrete value, replacing the degenerate %<cursor>
+    // self-reference on the entry edge (an undef cursor cycle the optimizer's GVN can crash on).
     let copy_source = try value_cursor_previous_copy_source_or_empty(
         ir_bytes, function_name, stmt_index, bs
     );
     var seed_name = cursor_var;
+    var seed_string_base = string_counter;
+    var init_call_module_prefix = ir_bytes[0..0];
+    var init_call_callee_name = ir_bytes[0..0];
+    var init_call_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     if std::mem::len(copy_source) > 0 {
         seed_name = copy_source;
+    } else {
+        let init_call_node = try value_cursor_previous_call_node_or_minus_one(
+            ir_bytes, function_name, stmt_index, bs
+        );
+        if init_call_node >= 0 {
+            seed_name = try precedence_loop_suffixed_name(cursor_var, "_init");
+            init_call_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+                ir_bytes, function_name, module_prefix, init_call_node, bs
+            );
+            init_call_callee_name = try compiled_mir_types::lower_call_callee_name(
+                ir_bytes, function_name, module_prefix, init_call_node, bs
+            );
+            let init_args = try compiled_mir_lower_call::lower_call_args_cached(
+                ir_bytes, function_name, module_prefix, locals_spec, init_call_node,
+                string_counter, bs, ir_lookup_index, call_arg_type_cache
+            );
+            seed_string_base = string_counter +
+                try compiled_mir_lower_call::count_string_args(&init_args);
+            init_call_args = init_args;
+        }
     }
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, while_statement, "condition", 0, bs
@@ -7439,9 +7494,9 @@ fn lower_embedded_value_cursor_append_loop(
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let cond_result = try lower_expr_into(
         ir_bytes, function_name, module_prefix, locals_spec, cond_node,
-        string_counter, temp_counter, &var cond_insts, bs, ir_lookup_index, call_arg_type_cache
+        seed_string_base, temp_counter, &var cond_insts, bs, ir_lookup_index, call_arg_type_cache
     );
-    var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
+    var body_string_counter = seed_string_base + try count_strings_in_insts(&cond_insts);
     var body_temp_counter = temp_counter + cond_insts.len();
     var body_try_counter = try_counter;
     let body_node = try ir_contract::body_child_sequence_from(
@@ -7625,9 +7680,10 @@ fn lower_embedded_value_cursor_append_loop(
             }
         }
     }
-    try stmts.append(compiled_mir::value_cursor_while_stmt(
+    try stmts.append(compiled_mir::value_cursor_while_stmt_with_init(
         cursor_var, cursor_type, seed_name, llvm_return_type, cond_insts, cond_result,
-        body_stmts, latch, "vcw", false
+        body_stmts, latch, "vcw", false,
+        init_call_module_prefix, init_call_callee_name, init_call_args
     ));
     return MultiLowerResult {
         locals_spec: locals_spec,
