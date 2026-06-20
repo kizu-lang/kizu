@@ -2637,6 +2637,81 @@ pub fn lower_struct_return_function(
         fields
     );
 }
+
+// lower_stdlib_struct_constructor_function synthesizes the definition of an owned-container struct
+// constructor (e.g. std::kizu::ast::Ast) the frontend records as a stdlib callee: it carries
+// 'stdlib-return' / 'stdlib-symbol' / 'struct-field' / 'type-llvm' facts but no body facts, so its
+// definition cannot be lowered from a body. The constructor body is canonical -- each field is
+// either a fresh runtime-owned container built from the allocator (Arena<T> / Array<T>) or a
+// passthrough of the same-named parameter -- so the field descriptors are rebuilt from the
+// struct-field facts: owned-container fields become ArrayNew fields keyed off the leading allocator
+// parameter, and every other field becomes a Var passthrough resolved by its field name against the
+// params_spec. The return type comes from the stdlib-return fact, so neither the field set nor the
+// return type is hardcoded.
+pub fn lower_stdlib_struct_constructor_function(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    params_spec: []u8
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let short_type = function_name[std::mem::len(module_prefix)..std::mem::len(function_name)];
+    let return_kizu = try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, function_name);
+    let llvm_return_type = try compiled_type_lower::kizu_type_to_llvm_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, return_kizu
+    );
+    let allocator_name = try compiled_signature::first_param_name(params_spec);
+    var fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
+    var field_index = 0;
+    var done = false;
+    while !done {
+        let field_type = try compiled_fact_lookup::lookup_struct_field_type_by_prefix_or_empty_indexed(
+            ir_lookup_index, ir_bytes, module_prefix, short_type, field_index
+        );
+        if std::mem::len(field_type) == 0 {
+            done = true;
+        } else {
+            if std::mem::starts_with(field_type, "std::arena::Arena<") or
+                std::mem::starts_with(field_type, "std::array::Array<") {
+                let field_len = std::mem::len(field_type);
+                if field_type[field_len - 1] != cast<u8>(62) {
+                    return error("compiled mir: malformed owned-container constructor field type");
+                }
+                var prefix_len = std::mem::len("std::array::Array<");
+                if std::mem::starts_with(field_type, "std::arena::Arena<") {
+                    prefix_len = std::mem::len("std::arena::Arena<");
+                }
+                let element_kizu = field_type[prefix_len..field_len - 1];
+                let element_llvm = try compiled_type_lower::kizu_type_to_llvm_indexed(
+                    ir_lookup_index, ir_bytes, module_prefix, element_kizu
+                );
+                try fields.append(compiled_mir::array_new_struct_field(
+                    field_index, "%kizu.owned", allocator_name, element_llvm
+                ));
+            } else {
+                let field_name = try compiled_fact_lookup::lookup_struct_field_name_by_prefix_indexed(
+                    ir_lookup_index, ir_bytes, module_prefix, short_type, field_index
+                );
+                if std::mem::len(field_name) == 0 {
+                    return error("compiled mir: struct constructor field name not found");
+                }
+                let field_llvm = try compiled_signature::find_param_type(params_spec, field_name);
+                try fields.append(compiled_mir::var_struct_field(field_index, field_llvm, field_name));
+            }
+            field_index = field_index + 1;
+        }
+    }
+    if field_index == 0 {
+        return error("compiled mir: struct constructor has no struct-field facts");
+    }
+    return compiled_mir_function::single_struct_return_function(
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        fields
+    );
+}
 pub fn lower_expr_return_function(
     ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,

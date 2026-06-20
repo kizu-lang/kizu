@@ -3,6 +3,7 @@ import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_mir_lower_call;
 import selfhost::backend::compiled_mir_types;
 import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_type_lower;
 import selfhost::backend::compiled_util;
 import selfhost::backend::ir_contract;
 
@@ -226,6 +227,21 @@ fn lower_struct_field_call(
     field_value: i64,
     bs: i64
 ) -> !compiled_mir::MirStructField {
+    let field_callee = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, field_value, bs
+    );
+    // 'Struct { field: std::array::Array<T>(alloc), ... }' /
+    // 'Struct { field: std::arena::Arena<T>(alloc), ... }' construct a fresh runtime-owned
+    // container directly into a struct field (the std::kizu::ast::Ast constructor seeds its
+    // nodes Arena<AstNode> and children Array<NodeId> this way). Both lower to the
+    // element-size-generic @kizu_rt_array_new builtin, so the field carries an ArrayNew
+    // descriptor instead of a resolved component call.
+    if std::mem::starts_with(field_callee, "std::array::Array<") or
+        std::mem::starts_with(field_callee, "std::arena::Arena<") {
+        return try lower_struct_field_owned_container(
+            ir_bytes, function_name, module_prefix, field_index, field_value, field_callee, bs
+        );
+    }
     if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, field_value, bs) {
         return error("compiled mir: error call not supported in struct field");
     }
@@ -251,6 +267,47 @@ fn lower_struct_field_call(
         callee_name,
         args
     );
+}
+
+// lower_struct_field_owned_container lowers an owned-container constructor used as a struct
+// field value (std::array::Array<T>(alloc) / std::arena::Arena<T>(alloc)). The element type is
+// stripped off the constructor callee and mapped to its LLVM type so the renderer can derive the
+// element-size constant; the sole argument is the allocator value. It mirrors the standalone
+// 'var <name> = std::array::Array<T>(alloc)' ArrayNew statement lowering, reusing the same
+// element-size-generic @kizu_rt_array_new builtin (no per-type size or symbol is hardcoded).
+fn lower_struct_field_owned_container(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    field_index: i64,
+    field_value: i64,
+    callee: []u8,
+    bs: i64
+) -> !compiled_mir::MirStructField {
+    let callee_len = std::mem::len(callee);
+    if callee[callee_len - 1] != cast<u8>(62) {
+        return error("compiled mir: malformed owned-container struct field constructor type");
+    }
+    var prefix_len = std::mem::len("std::array::Array<");
+    if std::mem::starts_with(callee, "std::arena::Arena<") {
+        prefix_len = std::mem::len("std::arena::Arena<");
+    }
+    let element_kizu = callee[prefix_len..callee_len - 1];
+    let element_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, module_prefix, element_kizu
+    );
+    let arg_count = try compiled_mir_types::count_call_args(ir_bytes, function_name, field_value, bs);
+    if arg_count != 1 {
+        return error("compiled mir: owned-container struct field constructor takes exactly the allocator argument");
+    }
+    let alloc_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_value, "arg", 0, bs
+    );
+    let alloc_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, alloc_node, bs);
+    if std::mem::len(alloc_name) == 0 {
+        return error("compiled mir: owned-container struct field allocator must be a value name");
+    }
+    return compiled_mir::array_new_struct_field(field_index, "%kizu.owned", alloc_name, element_llvm);
 }
 
 fn lower_struct_field_computed_binary(

@@ -8135,7 +8135,13 @@ fn append_struct_body_at(
                                 out, llvm_symbol, llvm_return_type, field, string_index
                             );
                         } else {
-                            try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                            if field.kind == compiled_mir::MirStructFieldKind::ArrayNew {
+                                try append_struct_array_new_field(
+                                    out, llvm_return_type, field, string_index
+                                );
+                            } else {
+                                try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                            }
                         }
                     }
                 }
@@ -8220,6 +8226,50 @@ fn append_struct_call_field(
     try compiled_mir_llvm_call::append_call_args_with_prefix(
         out, &field.call_args, call_prefix
     );
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    try compiled_util::append_insertvalue_line_with_prefix(
+        out,
+        llvm_return_type,
+        field.index,
+        field.llvm_type,
+        field.index,
+        prefix
+    );
+    try out.append_bytes("%vc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_struct_array_new_field renders an owned-container-constructor struct field
+// (std::array::Array<T>(alloc) / std::arena::Arena<T>(alloc)): a kizu_rt_array_new call
+// whose element width comes from the field's element type, bound into the same %vc
+// namespace the call-field result uses, then an insertvalue that feeds the owned handle
+// into the struct chain. It mirrors append_array_new (the standalone var ArrayNew stmt)
+// so neither the element size nor the runtime symbol is hardcoded.
+fn append_struct_array_new_field(
+    out: &var std::string::String,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField,
+    prefix: i64
+) -> !void {
+    try out.append_bytes("  %vc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(field.llvm_type);
+    try out.append_bytes(" @kizu_rt_array_new(");
+    try out.append_bytes(field.llvm_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(field.value);
+    try out.append_bytes(", i64 ");
+    try append_array_element_size(out, field.source_type);
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
     try compiled_util::append_insertvalue_line_with_prefix(
