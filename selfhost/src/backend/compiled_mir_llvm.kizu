@@ -4894,22 +4894,47 @@ fn traversal_arm_call_type(
     }
     return stmt.own_error_union;
 }
+// append_return_call_result_name renders a standalone return-call's result SSA base name,
+// '<stmt.name>_<local_prefix>'. The render-local prefix is unique per top-level / if-body
+// statement slot (stmt_index at top level, if_index * 1000 + body_index + 1 inside an
+// if-then-body), so it disambiguates the otherwise-fixed 'ret_val' when one function lowers
+// multiple standalone 'return parse_X(...)' bodies (parse_ident_top_level_decl emits three).
+fn append_return_call_result_name(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirReturnCallStmt,
+    local_prefix: i64
+) -> !void {
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, local_prefix);
+    return;
+}
 fn append_multi_return_call(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirReturnCallStmt,
     local_prefix: i64
 ) -> !void {
-    try append_call_inst(
-        out,
-        function.name,
-        stmt.name,
-        stmt.llvm_type,
-        stmt.call_module_prefix,
-        stmt.call_callee_name,
-        &stmt.call_args,
-        local_prefix
+    // Emit the call with a render-local-unique result name rather than the fixed 'ret_val':
+    // a function with several standalone 'return <call>;' bodies (e.g. three top-level if
+    // then-bodies in parse_ident_top_level_decl) would otherwise define '%ret_val' more than
+    // once, which is invalid LLVM. append_call_inst hardcodes the bare result name, so this
+    // path inlines the same call emission with the suffixed name.
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function.name, &stmt.call_args, local_prefix
     );
+    try out.append_bytes("  %");
+    try append_return_call_result_name(out, stmt, local_prefix);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, stmt.call_module_prefix, stmt.call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
     // 'return code_eval_unsupported(...);' inside an '!CodeEval' function calls a
     // success-typed callee: wrap the plain result into the function's error union.
     // A callee sharing the function's return type returns its value directly.
@@ -4917,32 +4942,32 @@ fn append_multi_return_call(
     if std::mem::starts_with(own_return, "%kizu.error.") and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
         try out.append_bytes("  %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try out.append_bytes("_wrap0 = insertvalue ");
         try out.append_bytes(own_return);
         try append_ll_line(out, " zeroinitializer, i1 true, 0");
         try out.append_bytes("  %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try out.append_bytes("_wrap1 = insertvalue ");
         try out.append_bytes(own_return);
         try out.append_bytes(" %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try out.append_bytes("_wrap0, ");
         try out.append_bytes(stmt.llvm_type);
         try out.append_bytes(" %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try append_ll_line(out, ", 1");
         try out.append_bytes("  ret ");
         try out.append_bytes(own_return);
         try out.append_bytes(" %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try append_ll_line(out, "_wrap1");
         return;
     }
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" %");
-    try out.append_bytes(stmt.name);
+    try append_return_call_result_name(out, stmt, local_prefix);
     try out.append_byte(cast<u8>(10));
     return;
 }
