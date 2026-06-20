@@ -242,6 +242,16 @@ fn lower_struct_field_call(
             ir_bytes, function_name, module_prefix, field_index, field_value, field_callee, bs
         );
     }
+    // 'Struct { field: <receiver>.<method>(<args>), ... }' is a value-receiver method call in
+    // struct-field position (e.g. 'ParseRange { range: ast.finish_children(start), ... }'). It must
+    // resolve the cross-module method symbol and prepend the receiver as the first argument, the
+    // same way the statement/expression lowerers do; the generic call path below would otherwise
+    // emit the literal 'ast.<method>' against the caller's module and drop the receiver.
+    if try compiled_mir_types::callee_is_field_mode_method(ir_bytes, function_name, field_value, bs) {
+        return try lower_struct_field_method_call(
+            ir_bytes, function_name, module_prefix, params_spec, field_index, field_value, bs
+        );
+    }
     if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, field_value, bs) {
         return error("compiled mir: error call not supported in struct field");
     }
@@ -308,6 +318,59 @@ fn lower_struct_field_owned_container(
         return error("compiled mir: owned-container struct field allocator must be a value name");
     }
     return compiled_mir::array_new_struct_field(field_index, "%kizu.owned", alloc_name, element_llvm);
+}
+
+// lower_struct_field_method_call lowers a value-receiver method call used as a struct field value
+// ('Struct { field: <receiver>.<method>(<args>) }'). It resolves the cross-module method symbol and
+// receiver through compiled_mir_types::resolve_method_call, prepends the receiver as the first call
+// argument (matching the statement/expression method-call lowering), and reuses the shared scalar
+// argument lowering for the explicit arguments. The resulting call-valued field renders the
+// receiver-carrying call before the insertvalue, so a struct field never emits the literal
+// 'ast.<method>' symbol with a dropped receiver. String-literal arguments are rejected because
+// struct fields do not reserve their own string-global pool.
+fn lower_struct_field_method_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    field_index: i64,
+    field_value: i64,
+    bs: i64
+) -> !compiled_mir::MirStructField {
+    let info = try compiled_mir_types::resolve_method_call(
+        ir_bytes, function_name, module_prefix, params_spec, field_value, bs
+    );
+    let explicit_arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, field_value, bs
+    );
+    var arg_types = try compiled_mir_types::lower_call_arg_types(
+        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
+    );
+    defer arg_types.deinit();
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    try args.append(compiled_mir::var_call_arg(try arg_types.get(0), info.receiver_name));
+    var arg_index = 0;
+    while arg_index < explicit_arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, field_value, "arg", arg_index, bs
+        );
+        let arg_type = try arg_types.get(arg_index + 1);
+        let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, 0, bs
+        );
+        if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
+            return error("compiled mir: string-literal args unsupported in method-call struct field");
+        }
+        try args.append(scalar_arg);
+        arg_index = arg_index + 1;
+    }
+    return compiled_mir::call_struct_field(
+        field_index,
+        info.return_llvm_type,
+        info.module_prefix,
+        info.callee_name,
+        args
+    );
 }
 
 fn lower_struct_field_computed_binary(

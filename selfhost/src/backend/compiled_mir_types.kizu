@@ -1257,6 +1257,120 @@ fn value_receiver_method_return_kizu_or_empty(
     return requalified_name;
 }
 
+pub struct MethodCallResolved {
+    pub receiver_name: []u8,
+    pub receiver_llvm_type: []u8,
+    pub return_llvm_type: []u8,
+    pub module_prefix: []u8,
+    pub callee_name: []u8,
+}
+
+// callee_is_field_mode_method reports whether a Call node's callee is a field-mode FieldExpr,
+// i.e. a value-receiver method call (receiver.method(...)) rather than a free or namespaced call.
+// It mirrors the statement lowerer's callee_is_field_expr predicate so struct-field lowering can
+// detect cross-module method calls without importing the statement lowerer (avoiding a cycle).
+pub fn callee_is_field_mode_method(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64
+) -> !bool {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let callee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, callee_node, bs
+    );
+    if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        return false;
+    }
+    let callee_mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, bs
+    );
+    return std::mem::equal_bytes(callee_mode, "field");
+}
+
+// resolve_method_call resolves a value-receiver method call '<receiver>.<method>(<args>)' to its
+// mangled cross-module symbol, receiver value, and return type. The method symbol is derived as
+// <impl-prefix><lower-snake receiver type>_<method> (e.g. ast.finish_children ->
+// std::kizu::ast::ast_finish_children) and the return type comes from the function-signature-return
+// fact, so neither is hardcoded. It mirrors the statement lowerer's method_call_info but lives here
+// so both the statement and struct-field lowerers share the same receiver-prepended method symbol
+// resolution (the struct-field path previously emitted the literal 'ast.<method>' against the
+// caller module and dropped the receiver).
+pub fn resolve_method_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    bs: i64
+) -> !MethodCallResolved {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, bs
+    );
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, bs
+    );
+    if !std::mem::equal_bytes(mode, "field") {
+        return error("compiled mir: method call callee must be field-mode");
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: method call receiver must be a local or parameter");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, bs
+    );
+    let receiver_kizu = try resolve_value_kizu_type(
+        ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
+    );
+    let receiver_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, module_prefix, receiver_kizu
+    );
+    let lookup_type = struct_lookup_kizu_type(receiver_kizu);
+    let type_prefix = compiled_util::module_prefix_of(lookup_type);
+    var impl_prefix = type_prefix;
+    if std::mem::len(impl_prefix) == 0 {
+        impl_prefix = module_prefix;
+    }
+    let type_name = lookup_type[std::mem::len(type_prefix)..std::mem::len(lookup_type)];
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", bs
+    );
+    var qualified = std::string::String(std::mem::page_allocator());
+    try qualified.append_bytes(impl_prefix);
+    try append_lower_snake_type_name(&var qualified, type_name);
+    try qualified.append_byte(cast<u8>(95));
+    try qualified.append_bytes(method_name);
+    let qualified_name_view = qualified.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(qualified_name_view, qualified_name_view);
+    let qualified_name = try copied.get(qualified_name_view);
+    let return_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+        ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified_name
+    );
+    if std::mem::len(return_kizu) == 0 {
+        return error("compiled mir: method call signature not found");
+    }
+    let return_llvm = try compiled_type_lower::kizu_type_to_llvm(
+        ir_bytes, impl_prefix, return_kizu
+    );
+    let callee_prefix = compiled_util::module_prefix_of(qualified_name);
+    return MethodCallResolved {
+        receiver_name: receiver_name,
+        receiver_llvm_type: receiver_llvm,
+        return_llvm_type: return_llvm,
+        module_prefix: callee_prefix,
+        callee_name: qualified_name[std::mem::len(callee_prefix)..std::mem::len(qualified_name)]
+    };
+}
+
 // resolve_let_value_kizu_type resolves the declared kizu type of a let binding from
 // its initializer node.
 fn resolve_let_value_kizu_type(
