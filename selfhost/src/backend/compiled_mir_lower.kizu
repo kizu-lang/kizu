@@ -12001,6 +12001,33 @@ fn return_body_advance(
     }
 }
 
+// reserved_nested_base maps a control construct's index to the base its nested children use to
+// namespace their LLVM block labels ('base * 1000 + body_index + 1'). A control construct that is
+// the function's first top-level statement carries index 0, so its children would encode into
+// bucket 0 = {1, 2, ...} -- exactly the numbers sibling top-level statements use for their own
+// if<n>/loop<n> labels. clang does not reject the resulting duplicate block labels; it silently
+// merges the same-named blocks, producing a malformed, non-terminating CFG (the issue 1157 hang in
+// parse_ident_top_level_decl, whose leading 'if try is_token_text("test")' nests an 'if public'
+// that collides with the sibling top-level 'if try is_token_text("impl")'). To reserve bucket 0,
+// an index-0 parent namespaces its children under the function's top-level statement count instead:
+// that bucket (statement_count * 1000) sits one bucket past every sibling's bucket and own label,
+// so the labels stay disjoint. Every other statement (index >= 1) and every already-nested
+// encoding (index >= 1) is returned unchanged, so only the first top-level statement's children
+// move. Only an If can be a top-level statement-0 control construct -- a top-level while always
+// follows its induction/seed init at an earlier statement -- so only the if-body encoders consult
+// this.
+fn reserved_nested_base(
+    index: i64,
+    ir_bytes: []u8,
+    function_name: []u8,
+    bs: i64
+) -> !i64 {
+    if index != 0 {
+        return index;
+    }
+    return try ir_contract::body_edge_count_from(ir_bytes, function_name, 0, "statement", bs);
+}
+
 // lower_void_then_body lowers the statement list of a no-else void multi-statement if-then block
 // into then_body_stmts, dispatching each statement by kind through the same per-kind lowering the
 // top-level body loop uses. It is shape-driven, not name-driven: a then-block whose controlling
@@ -12041,6 +12068,10 @@ fn lower_void_then_body(
     var body_temps = temp_counter;
     var body_tries = try_counter;
     var body_alias_counter = alias_counter;
+    // Namespace base for this block's nested-if labels. Identity for an already-nested block
+    // (if_index >= 1); for the function's first top-level statement (if_index 0) it resolves to the
+    // top-level statement count so the children clear bucket 0 (see reserved_nested_base, issue 1157).
+    let child_namespace = try reserved_nested_base(if_index, ir_bytes, function_name, bs);
     var body_index = 0;
     var body_returns = false;
     while true {
@@ -12084,7 +12115,7 @@ fn lower_void_then_body(
                     body_temps,
                     body_tries,
                     body_alias_counter,
-                    if_index * 1000 + body_index + 1,
+                    child_namespace * 1000 + body_index + 1,
                     aliases,
                     then_body_stmts,
                     bs,
@@ -12365,7 +12396,10 @@ fn lower_void_if_else_statement(
         then_body.temp_counter,
         then_body.try_counter,
         then_body.alias_counter,
-        if_index * 1000 + 500,
+        // Else-body nested-if namespace base: the then base * 1000 + 500 reserves the else its own
+        // sub-bucket above the then body's range. reserved_nested_base keeps the statement-0 case
+        // (if_index 0) out of bucket 0 here too, matching the then body (issue 1157).
+        (try reserved_nested_base(if_index, ir_bytes, function_name, bs)) * 1000 + 500,
         &var else_aliases,
         &var else_body_stmts,
         bs,
