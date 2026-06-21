@@ -934,69 +934,6 @@ pub fn resolve_field_receiver_kizu_type(
     return error("compiled mir: unsupported field receiver type");
 }
 
-// resolve_field_receiver_kizu_type_indexed mirrors resolve_field_receiver_kizu_type but routes
-// every whole-IR lookup it performs through the sorted index, closing the last non-indexed hole
-// in the indexed field-access path: resolve_field_expr_indexed reaches the receiver type through
-// here, so a non-indexed receiver re-scanned the whole IR per field access (and recursively per
-// nested receiver). The per-function body-fact reads (body_node_kind_from / body_token_or_empty_from
-// / body_call_callee_or_empty_from) stay on their _from scans, and cross_module... keeps its linear
-// path (it only does whole-IR work for the rare alias-qualified cross-module callee, matching
-// lower_call_return_type_indexed); only the signature-return / stdlib-return / nested field and
-// value resolutions become index lookups. Each swapped sub-lookup is the proven byte-identical
-// indexed twin of the one resolve_field_receiver_kizu_type calls, so the resolved type is unchanged.
-fn resolve_field_receiver_kizu_type_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    function_name: []u8,
-    module_prefix: []u8,
-    params_spec: []u8,
-    receiver_node: i64,
-    bs: i64
-) -> ![]u8 {
-    let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, bs
-    );
-    if std::mem::equal_bytes(receiver_kind, "Var") {
-        let receiver_name = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, receiver_node, bs
-        );
-        return try resolve_value_kizu_type_indexed(
-            index, ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
-        );
-    }
-    if std::mem::equal_bytes(receiver_kind, "FieldExpr") {
-        let info = try resolve_field_expr_indexed(
-            index, ir_bytes, function_name, module_prefix, params_spec, receiver_node, bs
-        );
-        return info.field_kizu_type;
-    }
-    if std::mem::equal_bytes(receiver_kind, "Call") {
-        let callee = try ir_contract::body_call_callee_or_empty_from(
-            ir_bytes, function_name, receiver_node, bs
-        );
-        let qualified = cross_module_callee_qualified_name_or_empty(ir_bytes, callee);
-        if std::mem::len(qualified) > 0 {
-            let cross_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
-                index, ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified
-            );
-            if std::mem::len(cross_ret) > 0 {
-                return cross_ret;
-            }
-        }
-        if compiled_fact_lookup::is_stdlib_callee(callee) {
-            return try compiled_fact_lookup::lookup_stdlib_return_indexed(index, ir_bytes, callee);
-        }
-        let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
-            index, ir_bytes, "function-signature-return ", module_prefix, callee
-        );
-        if std::mem::len(ret_type) == 0 {
-            return error("compiled mir: call receiver return type not found");
-        }
-        return ret_type;
-    }
-    return error("compiled mir: unsupported field receiver type");
-}
-
 pub fn resolve_field_receiver_llvm_type(
     ir_bytes: []u8,
     function_name: []u8,
