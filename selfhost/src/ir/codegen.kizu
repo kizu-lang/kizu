@@ -7610,7 +7610,70 @@ fn lower_code_prefix(
     if op == std::kizu::ast::prefix_mut_borrow() {
         return try lower_code_mut_borrow_scalar(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
     }
+    // A unary minus '-<expr>' lowers as '0 - <expr>' through the existing BINARY
+    // sub path, so the renderer needs no change. A bool/slice operand has no i64
+    // temp and stays unsupported (handled inside lower_code_neg).
+    if op == std::kizu::ast::prefix_neg() {
+        return try lower_code_neg(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     return code_eval_unsupported(next_value);
+}
+
+// lower_code_neg lowers a unary minus '-<operand>' as '0 - <operand>': it first
+// emits a const-0 i64 (the same CONST_INT record lower_code_int emits) as the sub
+// record's left operand, lowers the operand as the right, guards that the operand
+// is i64-like (the BINARY record types both operands as i64, so a bool/slice
+// operand is not owned by it -- the same guard lower_code_binary uses), then emits
+// the BINARY sub record (kind 2) with an i64 result. Values thread exactly as
+// lower_code_binary threads its two operands, so '-x', '-f()', '-5 + 3', and
+// 'return -7' all flow through this one general form -- no source-literal folding.
+fn lower_code_neg(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    right: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    // Emit the const-0 left operand: op, value id, literal 0, kind i64.
+    let op_const = code_op_const_int();
+    let zero_literal = 0;
+    try code.append(op_const);
+    try code.append(next_value);
+    try code.append(zero_literal);
+    let kind_i64 = code_kind_i64();
+    try kinds.append(kind_i64);
+    let zero_value = next_value;
+    let after_zero = next_value + 1;
+    // Lower the operand as the right side, starting after the const-0 value.
+    let operand_eval = try lower_code_expr(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, after_zero);
+    if !operand_eval.ok {
+        return code_eval_unsupported(operand_eval.next);
+    }
+    let operand_kind = try kinds.get(operand_eval.value_id);
+    let operand_i64_like = try code_operand_is_i64_like(code, operand_kind);
+    if !operand_i64_like {
+        return code_eval_unsupported(operand_eval.next);
+    }
+    // Emit the BINARY sub record (kind 2): op, result value, kind, left (const 0),
+    // right (operand). The result is i64.
+    let op_binary = code_op_binary();
+    let sub_kind = 2;
+    try code.append(op_binary);
+    try code.append(operand_eval.next);
+    try code.append(sub_kind);
+    try code.append(zero_value);
+    try code.append(operand_eval.value_id);
+    try kinds.append(kind_i64);
+    let result_value = operand_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
 }
 
 // lower_code_mut_borrow_scalar lowers '&var <var>' for an i64 or '[]u8' var: it
