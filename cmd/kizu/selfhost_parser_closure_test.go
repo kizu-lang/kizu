@@ -62,6 +62,9 @@ var parserClosureSeeds = []string{
 	// ok-wrap lowering from the parser closure without seeding parse_primary.
 	"prefix_op",
 	"binary_op",
+	// issue 1157: parse_program is the parser entry point seeded so the compiled closure
+	// provides @kizu_kizu__parser_parse_program for the cli_parse_validated_ast glue.
+	"parse_program",
 }
 
 var parserClosurePrivateHelpers = []string{

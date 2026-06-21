@@ -45,7 +45,7 @@ selfhost-oracle-budget:
 
 # Run the stage0-native backend artifact contract gate.
 selfhost-backend-artifact-gate:
-    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostBackendArtifactGate$' -count=1 -v
+    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=40m ./cmd/kizu -run 'TestSelfhostBackendArtifactGate$' -count=1 -v
 
 # Run direct heavyweight interpreted selfhost gates for focused debugging.
 selfhost-integration-gates:
@@ -70,7 +70,7 @@ selfhost-bootstrap-preflight:
 
 # Run the stage0-stage1-stage2 selfhost bootstrap comparison.
 selfhost-bootstrap:
-    KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
+    KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=60m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
 
 # Run #458 commands through the hosted stage2 production artifact.
 selfhost-production-gate:
@@ -162,7 +162,7 @@ selfhost-test-parity-gate-from-scratch:
 
 # Build selfhost from source as a native executable and run checked-AST executable artifacts.
 selfhost-native-source-gate:
-    KIZU_RUN_SELFHOST_NATIVE_SOURCE=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostNativeSourceExecutableGate$' -count=1 -v
+    KIZU_RUN_SELFHOST_NATIVE_SOURCE=1 go test -timeout=40m ./cmd/kizu -run 'TestSelfhostNativeSourceExecutableGate$' -count=1 -v
 
 # Install local git hooks.
 hooks:

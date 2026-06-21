@@ -1879,7 +1879,7 @@ func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
 
 	for _, fragment := range []string{
 		"@kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_kizu__lexer_tokenize",
+		"@kizu_kizu__parser_parse_program",
 		"@kizu_selfhost__ir_code_render_render_run_artifact",
 		"@kizu_selfhost__cli_lower_test_parse_result",
 	} {
@@ -2020,7 +2020,9 @@ func assertHostedRunLLVMResponsibilities(
 	}
 	requiredAstBoundary := []string{
 		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_kizu__lexer_tokenize",
+		// issue 1157: the AST boundary now delegates tokenizing + parsing to the compiled
+		// std::kizu::parser::parse_program rather than the retired hand-written tokenize loop.
+		"@kizu_kizu__parser_parse_program",
 		"@kizu_kizu__ast_ast_add_node",
 		"@kizu_kizu__ast_parse_result",
 	}
@@ -2562,10 +2564,13 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_ast_boundary_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_functions(",
+		// issue 1157: the boundary is now the four-function glue over the compiled
+		// parser; the per-shape hand-parse appenders + keyword globals were deleted.
+		"fn append_ast_new_function(",
+		"fn append_unsupported_parse_result_function(",
 		"fn append_parse_validated_ast_function(",
-		"fn append_parse_decl_function(",
-		"fn append_parse_block_function(",
-		"@kizu_kizu__lexer_tokenize",
+		"fn append_add_leaf_node_function(",
+		"@kizu_kizu__parser_parse_program",
 		"@kizu_kizu__ast_ast_add_node",
 	},
 	"../../selfhost/src/backend/cli_codegen_llvm.kizu": {
@@ -3547,7 +3552,7 @@ func assertExecutableParserConsumers(
 func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"@kizu_kizu__lexer_tokenize",
+		"@kizu_kizu__parser_parse_program",
 		"@kizu_selfhost__cli_parse_validated_ast",
 		"@kizu_kizu__ast_ast_add_node",
 		"@kizu_kizu__ast_parse_result",
@@ -3577,6 +3582,24 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	} {
 		if strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser still depends on exact body facts with %q", fragment)
+		}
+	}
+	// issue 1157: the retired hand-written tokenize/parse loop and its keyword
+	// globals must not reappear now that cli_parse_validated_ast delegates to the
+	// compiled std::kizu::parser::parse_program.
+	for _, retired := range []string{
+		"@kizu_selfhost__cli_token_at",
+		"@kizu_selfhost__cli_token_text_equal",
+		"@kizu_selfhost__cli_ast_child_len",
+		"@kizu_selfhost__cli_ast_append_child",
+		"@kizu_selfhost__cli_parse_decl",
+		"@kizu_selfhost__cli_parse_block",
+		"@.kizu.cli.ast_test_keyword",
+		"@.kizu.cli.ast_cast_keyword",
+		"@.kizu.cli.ast_impl_keyword",
+	} {
+		if strings.Contains(parser, retired) {
+			t.Fatalf("AST boundary still emits retired hand-parser output %q", retired)
 		}
 	}
 }
