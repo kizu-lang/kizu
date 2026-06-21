@@ -44,6 +44,22 @@ pub fn append_params_signature(
     return;
 }
 
+// first_param_name returns the name of the first parameter in a 'type name;...' params_spec.
+// Owned-container struct constructors take their allocator as the leading parameter, so the
+// fact-driven constructor emitter reads it here to source the @kizu_rt_array_new allocator
+// argument without hardcoding a parameter name.
+pub fn first_param_name(params_spec: []u8) -> ![]u8 {
+    let spec_len = std::mem::len(params_spec);
+    let semicolon = cast<u8>(59);
+    let space = cast<u8>(32);
+    let entry_end = compiled_util::find_byte(params_spec, semicolon, 0);
+    let space_pos = compiled_util::find_byte(params_spec, space, 0);
+    if space_pos >= entry_end or space_pos >= spec_len {
+        return error("compiled function: empty params_spec has no first parameter");
+    }
+    return params_spec[space_pos + 1..entry_end];
+}
+
 pub fn find_param_type(params_spec: []u8, name: []u8) -> ![]u8 {
     let spec_len = std::mem::len(params_spec);
     let semicolon = cast<u8>(59);
@@ -174,9 +190,17 @@ pub fn resolve_call_return_type(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, bs
     );
-    let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+    var ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
         ir_bytes, "function-signature-return ", module_prefix, callee_name
     );
+    if std::mem::len(ret_type) == 0 {
+        // Receiver-method callees (e.g. 'ast.finish_children') carry a module-agnostic
+        // 'function-signature-return ast.<method> <type>' fact emitted globally, so fall back
+        // to an empty module-prefix lookup when the caller-module-qualified lookup misses.
+        ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+            ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
+        );
+    }
     if std::mem::len(ret_type) == 0 {
         return error("compiled signature: call return type not found");
     }
@@ -191,12 +215,26 @@ pub fn resolve_call_return_type_indexed(
     call_node: i64,
     bs: i64
 ) -> ![]u8 {
-    let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+    // cf tightens the structural callee read to the call node's body-node line via the index
+    // (the 'body-call' detail sorts immediately after it); the signature-return lookup below is
+    // index-keyed by callee name, so it is unaffected. Byte-identical to a scan from bs.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        index, ir_bytes, function_name, call_node, bs
     );
-    let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, cf
+    );
+    var ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
         index, ir_bytes, "function-signature-return ", module_prefix, callee_name
     );
+    if std::mem::len(ret_type) == 0 {
+        // Receiver-method callees (e.g. 'ast.finish_children') carry a module-agnostic
+        // 'function-signature-return ast.<method> <type>' fact emitted globally, so fall back
+        // to an empty module-prefix lookup when the caller-module-qualified lookup misses.
+        ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+            index, ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
+        );
+    }
     if std::mem::len(ret_type) == 0 {
         return error("compiled signature: call return type not found");
     }
@@ -213,11 +251,18 @@ pub fn resolve_struct_literal_type_indexed(
     struct_literal_node: i64,
     bs: i64
 ) -> ![]u8 {
+    // nf tightens this struct-literal's own structural facts (its 'type' edge / name token and
+    // 'body-struct-literal' detail) to its body-node line via the index; those facts sort
+    // at-or-after that line, so a scan from nf is byte-identical to one from bs. The type-name
+    // resolution below is index-keyed, so it is unaffected.
+    let nf = ir_index::body_node_line_start_for_sequence(
+        index, ir_bytes, function_name, struct_literal_node, bs
+    );
     let type_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, struct_literal_node, "type", 0, bs
+        ir_bytes, function_name, struct_literal_node, "type", 0, nf
     );
     let type_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, type_node, bs
+        ir_bytes, function_name, type_node, nf
     );
     if std::mem::len(type_name) > 0 {
         return try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
@@ -225,7 +270,7 @@ pub fn resolve_struct_literal_type_indexed(
         );
     }
     let qualified_name = try ir_contract::sequence_fact_value_from(
-        ir_bytes, "body-struct-literal ", function_name, struct_literal_node, bs
+        ir_bytes, "body-struct-literal ", function_name, struct_literal_node, nf
     );
     return try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
         index, ir_bytes, module_prefix, qualified_name
@@ -264,10 +309,22 @@ pub fn resolve_call_arg_type(
     callee_name: []u8,
     arg_index: i64
 ) -> ![]u8 {
+    return try resolve_call_arg_type_with_lookup_prefix(
+        ir_bytes, module_prefix, module_prefix, callee_name, arg_index
+    );
+}
+
+fn resolve_call_arg_type_with_lookup_prefix(
+    ir_bytes: []u8,
+    lookup_prefix: []u8,
+    type_module_prefix: []u8,
+    callee_name: []u8,
+    arg_index: i64
+) -> ![]u8 {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "function-signature-param ";
     let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(module_prefix);
+    let mp_len = std::mem::len(lookup_prefix);
     let name_len = std::mem::len(callee_name);
     var index = 0;
     var matched = 0;
@@ -278,7 +335,7 @@ pub fn resolve_call_arg_type(
             let mp_end = mp_start + mp_len;
             let cn_end = mp_end + name_len;
             if cn_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], lookup_prefix) and
                 std::mem::equal_bytes(ir_bytes[mp_end..cn_end], callee_name) and
                 ir_bytes[cn_end] == cast<u8>(32) {
                 if matched == arg_index {
@@ -294,13 +351,20 @@ pub fn resolve_call_arg_type(
                     let colon2 = compiled_util::find_byte(entry, cast<u8>(58), colon1 + 1);
                     if colon2 < entry_len {
                         let kizu_type = entry[colon2 + 1..entry_len];
-                        return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
+                        return try compiled_type_lower::kizu_type_to_llvm(
+                            ir_bytes, type_module_prefix, kizu_type
+                        );
                     }
                 }
                 matched = matched + 1;
             }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    if std::mem::len(lookup_prefix) > 0 {
+        return try resolve_call_arg_type_with_lookup_prefix(
+            ir_bytes, ir_bytes[0..0], type_module_prefix, callee_name, arg_index
+        );
     }
     return error("compiled function: call arg type not found");
 }

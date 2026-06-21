@@ -432,7 +432,13 @@ fn append_multi_stmt(
         ArrayNew(payload) => try append_array_new(out, payload);,
         ValueWhile(payload) => try append_value_while(out, payload);,
         GrammarLoop(payload) => try append_grammar_loop(out, function, payload);,
-        ValueCursorWhile(payload) => try append_value_cursor_while(out, function, payload);,
+        ValueCursorWhile(payload) => try append_value_cursor_while(out, function, payload, local_prefix);,
+        PrecedenceLoop(payload) => try append_precedence_loop(out, function, payload);,
+        DualCursorLoop(payload) => try append_dual_cursor_loop(out, function, payload);,
+        TrailingTokenLoop(payload) => try append_trailing_token_loop(out, function, payload);,
+        TypeApplyLoop(payload) => try append_type_apply_loop(out, function, payload);,
+        WhileMatchLoop(payload) => try append_while_match_loop(out, function, payload);,
+        GuardedCursorLoop(payload) => try append_guarded_cursor_loop(out, function, payload);,
         TokenKindPredicate(payload) => try append_multi_token_kind_predicate(out, payload);,
         ParserSpanPredicate(payload) => try append_multi_parser_span_predicate(out, payload);,
         ParserPostfixStart(payload) => try append_multi_parser_postfix_start(out, payload);,
@@ -2838,41 +2844,133 @@ fn append_grammar_loop(
     return;
 }
 
+fn append_value_cursor_latch_try_pred(
+    out: &var std::string::String,
+    payload: &compiled_mir::MirLetTryCallStmt
+) -> !void {
+    try out.append_bytes("%try");
+    try std::fmt::append_i64(out, payload.try_index);
+    try out.append_bytes("_cont");
+    return;
+}
+
+fn append_value_cursor_latch_block_pred(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirValueCursorWhileStmt
+) -> !void {
+    try out.append_bytes("%");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_latch");
+    return;
+}
+
+fn append_value_cursor_latch_pred(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirValueCursorWhileStmt
+) -> !void {
+    let latch = &stmt.latch;
+    match latch {
+        TryCall(payload) => try append_value_cursor_latch_try_pred(out, payload);,
+        FieldRead(payload) => try append_value_cursor_latch_block_pred(out, stmt);,
+        PlainCall(payload) => try append_value_cursor_latch_block_pred(out, stmt);,
+        _ => return error("compiled mir llvm: value-cursor latch must be try-call or field expr");,
+    }
+    return;
+}
+
+fn append_value_cursor_latch(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirValueCursorWhileStmt,
+    local_prefix: i64
+) -> !void {
+    let latch = &stmt.latch;
+    match latch {
+        TryCall(payload) => try append_try_call_body(out, function.name, payload, "_next", local_prefix);,
+        FieldRead(payload) => try append_while_latch_field_access_let(out, payload);,
+        PlainCall(payload) => try append_while_latch_call_body(out, function.name, payload, local_prefix);,
+        _ => return error("compiled mir llvm: value-cursor latch must be try-call or field expr");,
+    }
+    return;
+}
+
 // append_value_cursor_while renders a value-carried append-while loop (issue 1157 NEW-A) into a
 // head/body/latch/exit CFG. The head holds one loop-carried phi for the value cursor, named
 // %<cursor_var> so plain Var reads in the condition, body and latch resolve to it. The phi seeds
-// from %<init_name> on the entry edge and from the latch try-call's success on its tryK_cont
-// back-edge. The condition (the prefix-not bool-predicate call, cond_insts) is evaluated in the
-// head and branches to the body when true (loop continues) or to the exit when false. The body
-// statements lower through the same per-statement renderer the top level uses, so a borrowed '&var
-// Array' append renders as a void try-call; control falls through to the latch block, which
-// reassigns the cursor through the free error-union try-call (reused append_try_call_body, bound to
-// %<cursor>_next so the phi reads it on the back-edge) then branches back to the head. A failure
-// propagates as the function's own error union. The terminal exit wraps the cursor into
-// own_error_union and returns it, subsuming the source's trailing 'return <cursor>'.
+// from %<init_name> on the entry edge and from %<cursor>_next on the latch back-edge. The
+// condition (the prefix-not bool-predicate call, cond_insts) is evaluated in the head and branches
+// to the body when true (loop continues) or to the exit when false. The body statements lower
+// through the same per-statement renderer the top level uses, so a borrowed '&var Array' append
+// renders as a void try-call; control falls through to the latch block, which reassigns the cursor
+// through either a free error-union try-call or a field read from a prior body local, then branches
+// back to the head. A try-call failure propagates as the function's own error union. The terminal
+// exit wraps the cursor into own_error_union and returns it, subsuming the source's trailing
+// 'return <cursor>'.
 fn append_value_cursor_while(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
-    stmt: &compiled_mir::MirValueCursorWhileStmt
+    stmt: &compiled_mir::MirValueCursorWhileStmt,
+    local_prefix: i64
 ) -> !void {
+    // When the loop is not the function's first emitted statement (local_prefix > 0) the block
+    // reached just before it is some prior block (an ifN_cont / tryK_cont), not %entry, so the
+    // loop-head phi cannot name %entry on its preheader edge -- doing so lists a non-predecessor
+    // block and the optimizer's SimplifyCFG crashes on the malformed CFG. Route the entry edge
+    // through a dedicated preheader block whose single unconditional branch makes it the loop
+    // head's real entry predecessor regardless of what preceded the loop (the precedence and
+    // dual-cursor loops emit their own preheader for the same reason). The first-statement case
+    // (local_prefix == 0) keeps the historical %entry preheader byte for byte. Body statements
+    // take local prefixes offset by local_prefix * 1000 so a body 'if' (or try) never reuses a
+    // top-level statement's label / temp numbering, matching the i64-induction While body-if
+    // encoding; for the first-statement case the offset collapses to the historical numbering.
+    if local_prefix > 0 {
+        try out.append_bytes("  br label %");
+        try out.append_bytes(stmt.label_base);
+        try append_ll_line(out, "_preheader");
+        try out.append_bytes(stmt.label_base);
+        try append_ll_line(out, "_preheader:");
+    }
+    // A call-seeded cursor materializes its init in the preheader (the entry block when this is the
+    // function's first statement, otherwise the dedicated _preheader block) as %<init_name>, so the
+    // loop-head phi seeds from that concrete value rather than self-referencing %<cursor> on the
+    // entry edge. The var-copy seed path leaves init_call_callee_name empty and renders no call.
+    if std::mem::len(stmt.init_call_callee_name) > 0 {
+        try append_call_inst(
+            out,
+            function.name,
+            stmt.init_name,
+            stmt.cursor_type,
+            stmt.init_call_module_prefix,
+            stmt.init_call_callee_name,
+            &stmt.init_call_args,
+            local_prefix
+        );
+    }
     try out.append_bytes("  br label %");
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_head");
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_head:");
     // One loop-carried phi for the value cursor: %<init_name> on the entry edge, %<cursor>_next on
-    // the latch try-call's tryK_cont back-edge.
+    // the latch edge. A try-call latch uses its tryK_cont block; a field latch falls through from
+    // the value-cursor latch block.
     try out.append_bytes("  %");
     try out.append_bytes(stmt.cursor_var);
     try out.append_bytes(" = phi ");
     try out.append_bytes(stmt.cursor_type);
     try out.append_bytes(" [ %");
     try out.append_bytes(stmt.init_name);
-    try out.append_bytes(", %entry ], [ %");
+    if local_prefix > 0 {
+        try out.append_bytes(", %");
+        try out.append_bytes(stmt.label_base);
+        try out.append_bytes("_preheader ], [ %");
+    } else {
+        try out.append_bytes(", %entry ], [ %");
+    }
     try out.append_bytes(stmt.cursor_var);
-    try out.append_bytes("_next, %try");
-    try std::fmt::append_i64(out, stmt.latch.try_index);
-    try append_ll_line(out, "_cont ]");
+    try out.append_bytes("_next, ");
+    try append_value_cursor_latch_pred(out, stmt);
+    try append_ll_line(out, " ]");
     try append_expr_insts(out, function.name, &stmt.cond_insts);
     try out.append_bytes("  br i1 ");
     try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
@@ -2887,7 +2985,7 @@ fn append_value_cursor_while(
     var body_index = 0;
     while body_index < body_stmts.len() {
         let body_stmt = try body_stmts.at(body_index);
-        try append_multi_stmt(out, function, body_stmt, body_index + 1);
+        try append_multi_stmt(out, function, body_stmt, local_prefix * 1000 + body_index + 1);
         body_index = body_index + 1;
     }
     try out.append_bytes("  br label %");
@@ -2895,10 +2993,9 @@ fn append_value_cursor_while(
     try append_ll_line(out, "_latch");
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_latch:");
-    // The latch try-call binds the cursor's next value to %<cursor>_next (consumed by the loop-head
-    // phi) and ends in its tryK_cont block; a failure returns this function's own error union. Its
-    // call-arg setup prefix is past the body statement prefixes so its SSA names never collide.
-    try append_try_call_body(out, function.name, &stmt.latch, "_next", body_stmts.len() + 1);
+    // The latch binds the cursor's next value to %<cursor>_next (consumed by the loop-head phi).
+    // Try-call latches end in tryK_cont; field-read latches remain in the latch block.
+    try append_value_cursor_latch(out, function, stmt, local_prefix * 1000 + body_stmts.len() + 1);
     try out.append_bytes("  br label %");
     try out.append_bytes(stmt.label_base);
     try append_ll_line(out, "_head");
@@ -2921,6 +3018,719 @@ fn append_value_cursor_while(
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.own_error_union);
     try append_ll_line(out, " %retwrap_val");
+    return;
+}
+
+// append_precedence_loop renders a two-carried-value precedence loop. The preheader runs
+// the initial value try-call as %<value>_init, computes %<scalar>_init from that value,
+// and branches to the head. The head phis are named as the source locals so condition,
+// body, and latch arguments read the carried values naturally. The latch first unwraps the
+// next value through a try-call as %<value>_next, then refreshes the scalar through a plain
+// call as %<scalar>_next in the actual back-edge predecessor block.
+fn append_precedence_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirPrecedenceLoopStmt
+) -> !void {
+    let value_init = &stmt.value_init;
+    let scalar_init = &stmt.scalar_init;
+    let value_latch = &stmt.value_latch;
+    let scalar_latch = &stmt.scalar_latch;
+    try append_try_call_body(out, function.name, value_init, "_init", 0);
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_preheader");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_preheader:");
+    try append_call_inst(
+        out,
+        function.name,
+        scalar_init.name,
+        scalar_init.llvm_type,
+        scalar_init.call_module_prefix,
+        scalar_init.call_callee_name,
+        &scalar_init.call_args,
+        1
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.value_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.value_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(value_init.name);
+    try out.append_bytes("_init, %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_preheader ], [ %");
+    try out.append_bytes(stmt.value_var);
+    try out.append_bytes("_next, %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar ]");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.scalar_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.scalar_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(scalar_init.name);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_preheader ], [ %");
+    try out.append_bytes(scalar_latch.name);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar ]");
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_body, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 2);
+        body_index = body_index + 1;
+    }
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_value");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_value:");
+    try append_try_call_body(out, function.name, value_latch, "_next", body_stmts.len() + 2);
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar:");
+    try append_call_inst(
+        out,
+        function.name,
+        scalar_latch.name,
+        scalar_latch.llvm_type,
+        scalar_latch.call_module_prefix,
+        scalar_latch.call_callee_name,
+        &scalar_latch.call_args,
+        body_stmts.len() + 3
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit:");
+    try out.append_bytes("  %retwrap_ok = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %retwrap_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %retwrap_ok, ");
+    try out.append_bytes(stmt.value_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.value_var);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %retwrap_val");
+    return;
+}
+
+// append_dual_cursor_loop renders a two-carried-value cursor loop whose value phi is seeded by a
+// copied source SSA value (no value-init call). The entry block seeds the scalar cursor through a
+// plain call, the head phis read the copied value source and the scalar init on the preheader edge,
+// the body runs its prefix lets, the value latch unwraps the next value through a try-call as
+// %<value>_next, and the scalar latch refreshes the scalar through a plain call in the back-edge
+// predecessor. The exit block ok-wraps and returns the carried value.
+fn append_dual_cursor_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirDualCursorLoopStmt
+) -> !void {
+    let scalar_init = &stmt.scalar_init;
+    let value_latch = &stmt.value_latch;
+    let scalar_latch = &stmt.scalar_latch;
+    try append_call_inst(
+        out,
+        function.name,
+        scalar_init.name,
+        scalar_init.llvm_type,
+        scalar_init.call_module_prefix,
+        scalar_init.call_callee_name,
+        &scalar_init.call_args,
+        0
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.value_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.value_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(stmt.value_source_var);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(stmt.value_var);
+    try out.append_bytes("_next, %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar ]");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.scalar_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.scalar_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(scalar_init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(scalar_latch.name);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar ]");
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_body, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 2);
+        body_index = body_index + 1;
+    }
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_value");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_value:");
+    try append_try_call_body(out, function.name, value_latch, "_next", body_stmts.len() + 2);
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch_scalar:");
+    try append_call_inst(
+        out,
+        function.name,
+        scalar_latch.name,
+        scalar_latch.llvm_type,
+        scalar_latch.call_module_prefix,
+        scalar_latch.call_callee_name,
+        &scalar_latch.call_args,
+        body_stmts.len() + 3
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit:");
+    try out.append_bytes("  %retwrap_ok = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %retwrap_val = insertvalue ");
+    try out.append_bytes(stmt.own_error_union);
+    try out.append_bytes(" %retwrap_ok, ");
+    try out.append_bytes(stmt.value_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(stmt.value_var);
+    try append_ll_line(out, ", 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(stmt.own_error_union);
+    try append_ll_line(out, " %retwrap_val");
+    return;
+}
+
+// append_trailing_token_loop renders the dual Token-cursor advance loop (NEW-3 second half). The
+// entry block seeds %current through the plain init call; the head holds two same-type Token phis --
+// %current (init on the entry edge, %current_next on the body edge) and %previous (init on the entry
+// edge, matching 'var previous = current', and %current on the body edge, which IS the copy latch
+// 'previous = current'). The compound-AND header is evaluated eagerly and branches to the body or the
+// exit. The body advances %current through the plain latch call as %current_next and back-edges to
+// the head. The exit block is opened with no terminator: the owning function's post-loop statements
+// (lowered as ordinary trailing MirStmts that read the loop-carried %previous/%current phis) render
+// straight into it.
+fn append_trailing_token_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirTrailingTokenLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let latch = &stmt.latch;
+    try append_call_inst(
+        out,
+        function.name,
+        init.name,
+        init.llvm_type,
+        init.call_module_prefix,
+        init.call_callee_name,
+        &init.call_args,
+        0
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.current_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(stmt.current_var);
+    try out.append_bytes("_next, %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body ]");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.previous_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.token_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(stmt.current_var);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body ]");
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_body, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    try append_call_inst(
+        out,
+        function.name,
+        latch.name,
+        latch.llvm_type,
+        latch.call_module_prefix,
+        latch.call_callee_name,
+        &latch.call_args,
+        1
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit:");
+    return;
+}
+
+// append_type_apply_loop renders parse_type_apply_expr_with_args' bool-literal cursor loop. The
+// preheader seeds %current from a plain call, the head holds the Token phi, the body parses one
+// type arg through a try-call and appends it, the terminal block renders the child assembly and
+// returns, and the guard/latch path either returns the comma error or advances the cursor.
+fn append_type_apply_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirTypeApplyLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let parse_arg = &stmt.parse_arg;
+    let latch = &stmt.latch;
+    try append_call_inst(
+        out,
+        function.name,
+        init.name,
+        init.llvm_type,
+        init.call_module_prefix,
+        init.call_callee_name,
+        &init.call_args,
+        0
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.cursor_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(latch.name);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch ]");
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    try append_try_call_body(out, function.name, parse_arg, "", 1);
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 2);
+        body_index = body_index + 1;
+    }
+    try append_expr_insts(out, function.name, &stmt.terminal_cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(
+        out, &stmt.terminal_cond_insts, stmt.terminal_cond_result_id
+    );
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_terminal, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_guard");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_terminal:");
+    let terminal_stmts = &stmt.terminal_stmts;
+    var terminal_index = 0;
+    while terminal_index < terminal_stmts.len() {
+        let terminal_stmt = try terminal_stmts.at(terminal_index);
+        try append_multi_stmt(out, function, terminal_stmt, 100 + terminal_index);
+        terminal_index = terminal_index + 1;
+    }
+    if !try while_body_terminates(terminal_stmts) {
+        return error("compiled mir llvm: type-apply terminal arm must return");
+    }
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_guard:");
+    let guard_stmts = &stmt.guard_stmts;
+    var guard_index = 0;
+    while guard_index < guard_stmts.len() {
+        let guard_stmt = try guard_stmts.at(guard_index);
+        try append_multi_stmt(out, function, guard_stmt, 200 + guard_index);
+        guard_index = guard_index + 1;
+    }
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch:");
+    try append_call_inst(
+        out,
+        function.name,
+        latch.name,
+        latch.llvm_type,
+        latch.call_module_prefix,
+        latch.call_callee_name,
+        &latch.call_args,
+        300
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    return;
+}
+
+// append_while_match_loop renders a 'while true' + match-dispatch loop (parse_generic_type_end,
+// worker-3 NEW-4) into a head/body CFG. The preheader runs the plain-call cursor seed as
+// %<init.name>; the head holds one loop-carried phi for the cursor (named %<cursor> so plain Var
+// reads in the prefix lets and the dispatch arms resolve to it) seeded from %<init.name> on the
+// entry edge and from %<cursor>_next on the latch try-call's tryK_cont block. The body lowers the
+// prefix lets through the same per-statement renderer the top level uses (so the leading try-call
+// propagates a failure as the function's own error union), evaluates the scrutinee discriminant,
+// and runs an exhaustive icmp/br dispatch chain whose last arm is the unconditional fallthrough.
+// Each return arm rets through the dispatch-scoped return renderer (arm_scope-suffixed SSA so the
+// arm blocks never collide); the single latch arm reassigns the cursor through the shared try-call
+// (binding %<cursor>_next in its tryK_cont block) and branches back to the head. The source's
+// trailing 'return error(..)' after the loop is unreachable and not emitted, exactly like the
+// type-apply loop's.
+fn append_while_match_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirWhileMatchLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let latch = &stmt.latch;
+    try append_call_inst(
+        out,
+        function.name,
+        init.name,
+        init.llvm_type,
+        init.call_module_prefix,
+        init.call_callee_name,
+        &init.call_args,
+        0
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.cursor_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes("_next, %try");
+    try std::fmt::append_i64(out, latch.try_index);
+    try append_ll_line(out, "_cont ]");
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 1);
+        body_index = body_index + 1;
+    }
+    try append_expr_insts(out, function.name, &stmt.scrutinee_insts);
+    let arms = &stmt.arms;
+    let arm_count = arms.len();
+    let dispatch_prefix = 4242;
+    var index = 0;
+    while index < arm_count {
+        if index > 0 {
+            try append_dispatch_label(out, dispatch_prefix, "check_", index);
+            try append_ll_line(out, ":");
+        }
+        if index == arm_count - 1 {
+            try out.append_bytes("  br label %");
+            try append_dispatch_label(out, dispatch_prefix, "arm_", index);
+            try out.append_byte(cast<u8>(10));
+        } else {
+            let arm = try arms.at(index);
+            try out.append_bytes("  %");
+            try append_dispatch_label(out, dispatch_prefix, "is_", index);
+            try out.append_bytes(" = icmp eq i64 ");
+            try append_expr_value_ref(out, &stmt.scrutinee_insts, stmt.scrutinee_result_id);
+            try out.append_bytes(", ");
+            try std::fmt::append_i64(out, arm.tag);
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  br i1 %");
+            try append_dispatch_label(out, dispatch_prefix, "is_", index);
+            try out.append_bytes(", label %");
+            try append_dispatch_label(out, dispatch_prefix, "arm_", index);
+            try out.append_bytes(", label %");
+            try append_dispatch_label(out, dispatch_prefix, "check_", index + 1);
+            try out.append_byte(cast<u8>(10));
+        }
+        index = index + 1;
+    }
+    var arm_index = 0;
+    while arm_index < arm_count {
+        let arm = try arms.at(arm_index);
+        try append_dispatch_label(out, dispatch_prefix, "arm_", arm_index);
+        try append_ll_line(out, ":");
+        if arm.is_latch {
+            try append_try_call_body(
+                out, function.name, latch, "_next", dispatch_prefix * 1000 + arm_index
+            );
+            try out.append_bytes("  br label %");
+            try out.append_bytes(stmt.label_base);
+            try append_ll_line(out, "_head");
+        } else {
+            let arm_stmts = &arm.arm_stmts;
+            var stmt_index = 0;
+            while stmt_index < arm_stmts.len() {
+                let arm_stmt = try arm_stmts.at(stmt_index);
+                try append_dispatch_arm_return(
+                    out, function, arm_stmt, dispatch_prefix * 1000 + arm_index
+                );
+                stmt_index = stmt_index + 1;
+            }
+        }
+        arm_index = arm_index + 1;
+    }
+    return;
+}
+
+// append_while_match_loop_globals emits the string-literal globals the loop references: the
+// plain-call seed args, each prefix-let statement, the scrutinee insts, each return arm's lowered
+// return, and the latch try-call (worker-3 NEW-4).
+fn append_while_match_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirWhileMatchLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &init.call_args
+    );
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        body_index = body_index + 1;
+    }
+    try append_expr_globals(out, llvm_symbol, &stmt.scrutinee_insts);
+    let arms = &stmt.arms;
+    var arm_index = 0;
+    while arm_index < arms.len() {
+        let arm = try arms.at(arm_index);
+        let arm_stmts = &arm.arm_stmts;
+        var stmt_index = 0;
+        while stmt_index < arm_stmts.len() {
+            let arm_stmt = try arm_stmts.at(stmt_index);
+            try append_stmt_globals(out, llvm_symbol, arm_stmt);
+            stmt_index = stmt_index + 1;
+        }
+        arm_index = arm_index + 1;
+    }
+    try append_let_try_call_globals(out, llvm_symbol, &stmt.latch);
+    return;
+}
+
+// append_guarded_cursor_loop renders a value-carried cursor loop whose latch is reached only through
+// a terminal if/else (parse_type_params' '<T, U>' walk) into a head/body/latch/else/exit CFG. The
+// pre-cursor lets were already emitted as top-level statements in entry, so this renderer seeds the
+// cursor through the plain init call (%<cursor>_init) and branches to the head. The head holds one
+// loop-carried phi for the cursor (named %<cursor> so plain Var reads in the condition, body,
+// terminal condition and exit resolve to it) seeded from %<cursor>_init on the entry edge and from
+// %<cursor>_next on the latch back-edge. The header predicate (the prefix-not call, cond_insts)
+// branches into the body when true (loop continues) or to the normal exit when false. The body
+// statements lower through the same per-statement renderer the top level uses; the terminal
+// condition then branches to the plain-call latch arm or the else arm. The latch reassigns the
+// cursor through the plain call (%<cursor>_next) and back-edges to the head; the else and exit arms
+// each run their lowered statements, which end in a return (a struct value reading the cursor phi).
+fn append_guarded_cursor_loop(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirGuardedCursorLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let latch = &stmt.latch;
+    // The init shares the entry block with the pre-cursor lets (top-level statements rendered ahead
+    // of this one with local_prefix = their statement index), so it takes a high call prefix to keep
+    // its arg locals disjoint from theirs; the body/latch/else/exit arms likewise take disjoint
+    // prefix bands so no %arg<prefix>_<idx> SSA name repeats across the function.
+    try append_call_inst(
+        out, function.name, init.name, init.llvm_type, init.call_module_prefix,
+        init.call_callee_name, &init.call_args, 700
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head:");
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.cursor_var);
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(stmt.cursor_type);
+    try out.append_bytes(" [ %");
+    try out.append_bytes(init.name);
+    try out.append_bytes(", %entry ], [ %");
+    try out.append_bytes(latch.name);
+    try out.append_bytes(", %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch ]");
+    try append_expr_insts(out, function.name, &stmt.cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.cond_insts, stmt.cond_result_id);
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_body, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_body:");
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_multi_stmt(out, function, body_stmt, body_index + 100);
+        body_index = body_index + 1;
+    }
+    try append_expr_insts(out, function.name, &stmt.terminal_cond_insts);
+    try out.append_bytes("  br i1 ");
+    try append_expr_value_ref(out, &stmt.terminal_cond_insts, stmt.terminal_cond_result_id);
+    try out.append_bytes(", label %");
+    try out.append_bytes(stmt.label_base);
+    try out.append_bytes("_latch, label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_else");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_latch:");
+    try append_call_inst(
+        out, function.name, latch.name, latch.llvm_type, latch.call_module_prefix,
+        latch.call_callee_name, &latch.call_args, 300
+    );
+    try out.append_bytes("  br label %");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_head");
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_else:");
+    let else_stmts = &stmt.else_stmts;
+    var else_index = 0;
+    while else_index < else_stmts.len() {
+        let else_stmt = try else_stmts.at(else_index);
+        try append_multi_stmt(out, function, else_stmt, 400 + else_index);
+        else_index = else_index + 1;
+    }
+    if !try while_body_terminates(else_stmts) {
+        return error("compiled mir llvm: guarded-cursor else arm must return");
+    }
+    try out.append_bytes(stmt.label_base);
+    try append_ll_line(out, "_exit:");
+    let exit_stmts = &stmt.exit_stmts;
+    var exit_index = 0;
+    while exit_index < exit_stmts.len() {
+        let exit_stmt = try exit_stmts.at(exit_index);
+        try append_multi_stmt(out, function, exit_stmt, 500 + exit_index);
+        exit_index = exit_index + 1;
+    }
+    if !try while_body_terminates(exit_stmts) {
+        return error("compiled mir llvm: guarded-cursor exit arm must return");
+    }
+    return;
+}
+
+// append_guarded_cursor_loop_globals emits the string-literal globals the loop references: the
+// plain-call seed args, the header condition insts, each body statement, the terminal condition
+// insts, the plain-call latch args, and the else/exit return statements.
+fn append_guarded_cursor_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirGuardedCursorLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let latch = &stmt.latch;
+    try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &init.call_args);
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        body_index = body_index + 1;
+    }
+    try append_expr_globals(out, llvm_symbol, &stmt.terminal_cond_insts);
+    try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &latch.call_args);
+    let else_stmts = &stmt.else_stmts;
+    var else_index = 0;
+    while else_index < else_stmts.len() {
+        let else_stmt = try else_stmts.at(else_index);
+        try append_stmt_globals(out, llvm_symbol, else_stmt);
+        else_index = else_index + 1;
+    }
+    let exit_stmts = &stmt.exit_stmts;
+    var exit_index = 0;
+    while exit_index < exit_stmts.len() {
+        let exit_stmt = try exit_stmts.at(exit_index);
+        try append_stmt_globals(out, llvm_symbol, exit_stmt);
+        exit_index = exit_index + 1;
+    }
     return;
 }
 
@@ -3952,7 +4762,21 @@ fn append_grammar_loop_globals(
 
 // append_value_cursor_while_globals emits the string-constant globals an append-while loop needs:
 // the condition's expression-instruction globals, each body statement's globals, and the latch
-// try-call's globals (issue 1157 NEW-A).
+// globals (issue 1157 NEW-A).
+fn append_value_cursor_latch_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    latch: &compiled_mir::MirValueCursorLatch
+) -> !void {
+    match latch {
+        TryCall(payload) => try append_let_try_call_globals(out, llvm_symbol, payload);,
+        FieldRead(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
+        PlainCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
+        _ => return error("compiled mir llvm: value-cursor latch must be try-call or field expr");,
+    }
+    return;
+}
+
 fn append_value_cursor_while_globals(
     out: &var std::string::String,
     llvm_symbol: []u8,
@@ -3966,7 +4790,118 @@ fn append_value_cursor_while_globals(
         try append_stmt_globals(out, llvm_symbol, body_stmt);
         index = index + 1;
     }
-    try append_let_try_call_globals(out, llvm_symbol, &stmt.latch);
+    try append_value_cursor_latch_globals(out, llvm_symbol, &stmt.latch);
+    return;
+}
+
+fn append_precedence_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirPrecedenceLoopStmt
+) -> !void {
+    let value_init = &stmt.value_init;
+    let scalar_init = &stmt.scalar_init;
+    let value_latch = &stmt.value_latch;
+    let scalar_latch = &stmt.scalar_latch;
+    try append_let_try_call_globals(out, llvm_symbol, value_init);
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &scalar_init.call_args
+    );
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    let body_stmts = &stmt.body_stmts;
+    var index = 0;
+    while index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        index = index + 1;
+    }
+    try append_let_try_call_globals(out, llvm_symbol, value_latch);
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &scalar_latch.call_args
+    );
+    return;
+}
+
+fn append_dual_cursor_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirDualCursorLoopStmt
+) -> !void {
+    let scalar_init = &stmt.scalar_init;
+    let value_latch = &stmt.value_latch;
+    let scalar_latch = &stmt.scalar_latch;
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &scalar_init.call_args
+    );
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    let body_stmts = &stmt.body_stmts;
+    var index = 0;
+    while index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        index = index + 1;
+    }
+    try append_let_try_call_globals(out, llvm_symbol, value_latch);
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &scalar_latch.call_args
+    );
+    return;
+}
+
+fn append_trailing_token_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirTrailingTokenLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let latch = &stmt.latch;
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &init.call_args
+    );
+    try append_expr_globals(out, llvm_symbol, &stmt.cond_insts);
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &latch.call_args
+    );
+    return;
+}
+
+fn append_type_apply_loop_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirTypeApplyLoopStmt
+) -> !void {
+    let init = &stmt.init;
+    let parse_arg = &stmt.parse_arg;
+    let latch = &stmt.latch;
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &init.call_args
+    );
+    try append_let_try_call_globals(out, llvm_symbol, parse_arg);
+    let body_stmts = &stmt.body_stmts;
+    var body_index = 0;
+    while body_index < body_stmts.len() {
+        let body_stmt = try body_stmts.at(body_index);
+        try append_stmt_globals(out, llvm_symbol, body_stmt);
+        body_index = body_index + 1;
+    }
+    try append_expr_globals(out, llvm_symbol, &stmt.terminal_cond_insts);
+    let terminal_stmts = &stmt.terminal_stmts;
+    var terminal_index = 0;
+    while terminal_index < terminal_stmts.len() {
+        let terminal_stmt = try terminal_stmts.at(terminal_index);
+        try append_stmt_globals(out, llvm_symbol, terminal_stmt);
+        terminal_index = terminal_index + 1;
+    }
+    let guard_stmts = &stmt.guard_stmts;
+    var guard_index = 0;
+    while guard_index < guard_stmts.len() {
+        let guard_stmt = try guard_stmts.at(guard_index);
+        try append_stmt_globals(out, llvm_symbol, guard_stmt);
+        guard_index = guard_index + 1;
+    }
+    try compiled_mir_llvm_call::append_call_string_globals(
+        out, llvm_symbol, &latch.call_args
+    );
     return;
 }
 
@@ -4000,22 +4935,47 @@ fn traversal_arm_call_type(
     }
     return stmt.own_error_union;
 }
+// append_return_call_result_name renders a standalone return-call's result SSA base name,
+// '<stmt.name>_<local_prefix>'. The render-local prefix is unique per top-level / if-body
+// statement slot (stmt_index at top level, if_index * 1000 + body_index + 1 inside an
+// if-then-body), so it disambiguates the otherwise-fixed 'ret_val' when one function lowers
+// multiple standalone 'return parse_X(...)' bodies (parse_ident_top_level_decl emits three).
+fn append_return_call_result_name(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirReturnCallStmt,
+    local_prefix: i64
+) -> !void {
+    try out.append_bytes(stmt.name);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, local_prefix);
+    return;
+}
 fn append_multi_return_call(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirReturnCallStmt,
     local_prefix: i64
 ) -> !void {
-    try append_call_inst(
-        out,
-        function.name,
-        stmt.name,
-        stmt.llvm_type,
-        stmt.call_module_prefix,
-        stmt.call_callee_name,
-        &stmt.call_args,
-        local_prefix
+    // Emit the call with a render-local-unique result name rather than the fixed 'ret_val':
+    // a function with several standalone 'return <call>;' bodies (e.g. three top-level if
+    // then-bodies in parse_ident_top_level_decl) would otherwise define '%ret_val' more than
+    // once, which is invalid LLVM. append_call_inst hardcodes the bare result name, so this
+    // path inlines the same call emission with the suffixed name.
+    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+        out, function.name, &stmt.call_args, local_prefix
     );
+    try out.append_bytes("  %");
+    try append_return_call_result_name(out, stmt, local_prefix);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, stmt.call_module_prefix, stmt.call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
     // 'return code_eval_unsupported(...);' inside an '!CodeEval' function calls a
     // success-typed callee: wrap the plain result into the function's error union.
     // A callee sharing the function's return type returns its value directly.
@@ -4023,32 +4983,32 @@ fn append_multi_return_call(
     if std::mem::starts_with(own_return, "%kizu.error.") and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
         try out.append_bytes("  %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try out.append_bytes("_wrap0 = insertvalue ");
         try out.append_bytes(own_return);
         try append_ll_line(out, " zeroinitializer, i1 true, 0");
         try out.append_bytes("  %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try out.append_bytes("_wrap1 = insertvalue ");
         try out.append_bytes(own_return);
         try out.append_bytes(" %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try out.append_bytes("_wrap0, ");
         try out.append_bytes(stmt.llvm_type);
         try out.append_bytes(" %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try append_ll_line(out, ", 1");
         try out.append_bytes("  ret ");
         try out.append_bytes(own_return);
         try out.append_bytes(" %");
-        try out.append_bytes(stmt.name);
+        try append_return_call_result_name(out, stmt, local_prefix);
         try append_ll_line(out, "_wrap1");
         return;
     }
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" %");
-    try out.append_bytes(stmt.name);
+    try append_return_call_result_name(out, stmt, local_prefix);
     try out.append_byte(cast<u8>(10));
     return;
 }
@@ -4440,6 +5400,12 @@ fn append_stmt_globals(
         ValueWhile(payload) => try append_value_while_globals(payload);,
         GrammarLoop(payload) => try append_grammar_loop_globals(out, llvm_symbol, payload);,
         ValueCursorWhile(payload) => try append_value_cursor_while_globals(out, llvm_symbol, payload);,
+        PrecedenceLoop(payload) => try append_precedence_loop_globals(out, llvm_symbol, payload);,
+        DualCursorLoop(payload) => try append_dual_cursor_loop_globals(out, llvm_symbol, payload);,
+        TrailingTokenLoop(payload) => try append_trailing_token_loop_globals(out, llvm_symbol, payload);,
+        TypeApplyLoop(payload) => try append_type_apply_loop_globals(out, llvm_symbol, payload);,
+        WhileMatchLoop(payload) => try append_while_match_loop_globals(out, llvm_symbol, payload);,
+        GuardedCursorLoop(payload) => try append_guarded_cursor_loop_globals(out, llvm_symbol, payload);,
         TokenKindPredicate(payload) => try append_token_kind_predicate_globals(payload);,
         ParserSpanPredicate(payload) => try append_parser_span_predicate_globals(payload);,
         ParserPostfixStart(payload) => try append_parser_postfix_start_globals(payload);,
@@ -5064,6 +6030,26 @@ fn if_has_else_body(stmt: &compiled_mir::MirIfStmt) -> bool {
     return stmt.else_body_stmts.len() > 0;
 }
 
+fn body_ends_with_return(
+    body_stmts: &std::array::Array<compiled_mir::MirStmt>
+) -> !bool {
+    if body_stmts.len() < 1 {
+        return false;
+    }
+    let last = try body_stmts.at(body_stmts.len() - 1);
+    match last {
+        ReturnCall(_) => return true;,
+        ReturnStruct(_) => return true;,
+        ReturnExpr(_) => return true;,
+        ReturnError(_) => return true;,
+        ReturnArrayGet(_) => return true;,
+        ReturnTryBinary(_) => return true;,
+        ReturnNotTryCall(_) => return true;,
+        VoidReturnSuccess(_) => return true;,
+        _ => return false;,
+    }
+}
+
 fn append_void_then_body(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -5080,6 +6066,9 @@ fn append_void_then_body(
             stmt.if_index * 1000 + body_index + 1
         );
         body_index = body_index + 1;
+    }
+    if try body_ends_with_return(body) {
+        return;
     }
     try append_if_merge_then_stores(out, stmt);
     try out.append_bytes("  br label %if");
@@ -5105,6 +6094,9 @@ fn append_void_else_body(
             stmt.if_index * 1000 + 500 + body_index + 1
         );
         body_index = body_index + 1;
+    }
+    if try body_ends_with_return(body) {
+        return;
     }
     try append_if_merge_else_stores(out, stmt);
     try out.append_bytes("  br label %if");
@@ -5444,19 +6436,7 @@ fn append_multi_if_return_expr(
 fn while_body_terminates(
     body_stmts: &std::array::Array<compiled_mir::MirStmt>
 ) -> !bool {
-    if body_stmts.len() < 1 {
-        return false;
-    }
-    let last = try body_stmts.at(body_stmts.len() - 1);
-    match last {
-        ReturnCall(_) => return true;,
-        ReturnStruct(_) => return true;,
-        ReturnExpr(_) => return true;,
-        ReturnError(_) => return true;,
-        ReturnArrayGet(_) => return true;,
-        ReturnTryBinary(_) => return true;,
-        _ => return false;,
-    }
+    return try body_ends_with_return(body_stmts);
 }
 
 fn while_has_branch_merge_latch(stmt: &compiled_mir::MirWhileStmt) -> bool {
@@ -5569,13 +6549,14 @@ fn append_multi_while(
     try append_while_counter_phi(
         out, stmt, stmt.induction_var, stmt.induction_init_var,
         stmt.induction_init_offset, stmt.induction_init, stmt.latch_copy_var,
-        stmt.init_result_id
+        stmt.init_result_id, try while_induction_phi_type(stmt)
     );
     var phi_index = 0;
     while phi_index < secondary.len() {
         let entry = try secondary.at(phi_index);
         try append_while_counter_phi(
-            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, "", -1
+            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, "", -1,
+            "i64"
         );
         phi_index = phi_index + 1;
     }
@@ -5590,7 +6571,7 @@ fn append_multi_while(
         } else {
             try append_while_counter_phi(
                 out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal,
-                entry.latch_var, -1
+                entry.latch_var, -1, "i64"
             );
         }
         carried_phi_index = carried_phi_index + 1;
@@ -5822,10 +6803,13 @@ fn append_while_counter_preheader_init(
     try out.append_byte(cast<u8>(10));
     return;
 }
-// append_while_counter_phi emits one loop-head phi for an i64 counter: '%<var> = phi i64
-// [ <seed>, %loopN_preheader ], [ %<var>_next, <latch-pred> ]'. The seed is %<var>_init for a
-// base-plus-offset init, %<init_var> for a plain copy, or the integer literal otherwise. The
-// latch-edge predecessor is shared with the primary counter (issue 1165 / 1162).
+// append_while_counter_phi emits one loop-head phi for a counter: '%<var> = phi <phi_llvm_type>
+// [ <seed>, %loopN_preheader ], [ %<var>_next, <latch-pred> ]'. phi_llvm_type is "i64" for every
+// scalar counter (the secondary lockstep and carried-scalar phis always pass "i64"); the primary
+// induction phi passes the cursor's declared type, which is a struct value type (e.g.
+// %kizu.kizu.lexer.token) for a token-carried struct-call latch (issue 1157 PR-P4). The seed is
+// %<var>_init for a base-plus-offset init, %<init_var> for a plain copy, or the integer literal
+// otherwise. The latch-edge predecessor is shared with the primary counter (issue 1165 / 1162).
 // latch_copy_var overrides the phi's latch-edge incoming value: when it is non-empty (a
 // copy-decrement latch's body-local, e.g. %previous for 'index = previous') the phi reads
 // %<latch_copy_var> on the latch edge instead of %<counter_var>_next, since the body already holds
@@ -5843,11 +6827,14 @@ fn append_while_counter_phi(
     init_offset: i64,
     init_literal: i64,
     latch_copy_var: []u8,
-    init_result_id: i64
+    init_result_id: i64,
+    phi_llvm_type: []u8
 ) -> !void {
     try out.append_bytes("  %");
     try out.append_bytes(counter_var);
-    try out.append_bytes(" = phi i64 [ ");
+    try out.append_bytes(" = phi ");
+    try out.append_bytes(phi_llvm_type);
+    try out.append_bytes(" [ ");
     if init_result_id >= 0 {
         try append_expr_value_ref(out, &stmt.init_insts, init_result_id);
     } else {
@@ -5877,6 +6864,26 @@ fn append_while_counter_phi(
     try out.append_bytes(" ]");
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+// while_induction_phi_type returns the LLVM type of the primary loop-head induction phi. A
+// token-carried plain-call latch ('token = next_token(text, token)') reseats the cursor with the
+// call's return type, which may be a struct value (e.g. %kizu.kizu.lexer.token for
+// skip_balanced_block) rather than i64; the phi must carry that exact type so its preheader seed
+// (the init call result through init_result_id) and its latch operand (%<var>_next) agree. Every
+// other latch shape -- constant-step add, try-call, field-access, copy-decrement -- advances an i64
+// counter, so the phi stays i64 (issue 1157 PR-P4). It mirrors expr_inst_var_name_by_id's
+// payload-field read off the bound LetCall variant.
+fn while_induction_phi_type(stmt: &compiled_mir::MirWhileStmt) -> ![]u8 {
+    let latch_stmts = &stmt.latch_stmts;
+    if latch_stmts.len() == 0 {
+        return "i64";
+    }
+    let latch_stmt = try latch_stmts.at(0);
+    return match latch_stmt {
+        LetCall(payload) => payload.llvm_type,
+        _ => "i64",
+    };
 }
 
 fn append_while_carried_scalar_phi(
@@ -6304,7 +7311,79 @@ fn append_expr_inst(
         IntCast(payload) => try append_int_cast_expr(out, payload, insts);,
         UnionConstruct(payload) => try append_union_construct_expr(out, payload, insts);,
         StructLiteral(payload) => try append_struct_literal_expr(out, llvm_symbol, payload, insts);,
+        TryUnwrap(payload) => try append_try_unwrap_expr(out, payload, insts);,
     }
+    return;
+}
+
+// append_try_unwrap_expr renders a 'try <expr>' in value/sub-expression position (issue 1157
+// big-bang). operand already holds the inner error-union aggregate (called_error_union); this
+// extracts its ok flag (field 0) and branches on an id-suffixed label pair: t<id>_try_fail
+// re-wraps the callee message into own_error_union and returns it (propagation, never
+// 'unreachable'); t<id>_try_cont extracts the success value (field 1) into %t<id>. It mirrors
+// append_try_call_body for the statement-free expression path. The trailing 'br'/'ret' leave
+// the cont block active for the following insts, the same way append_slice_expr's bounds-check
+// trap leaves the slice_ok block active.
+fn append_try_unwrap_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirTryUnwrapExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ok = extractvalue ");
+    try out.append_bytes(inst.called_error_union);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.operand);
+    try append_ll_line(out, ", 0");
+    try out.append_bytes("  br i1 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ok, label %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_try_cont, label %t");
+    try std::fmt::append_i64(out, inst.id);
+    try append_ll_line(out, "_try_fail");
+    try out.append_bytes("t");
+    try std::fmt::append_i64(out, inst.id);
+    try append_ll_line(out, "_try_fail:");
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_msg = extractvalue ");
+    try out.append_bytes(inst.called_error_union);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.operand);
+    try out.append_bytes(", ");
+    try append_ll_line(out, error_union_msg_index_text(inst.called_error_union));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_fail_flag = insertvalue ");
+    try out.append_bytes(inst.own_error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_fail_val = insertvalue ");
+    try out.append_bytes(inst.own_error_union);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_fail_flag, %kizu.slice.u8 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_msg, ");
+    try append_ll_line(out, error_union_msg_index_text(inst.own_error_union));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(inst.own_error_union);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, inst.id);
+    try append_ll_line(out, "_fail_val");
+    try out.append_bytes("t");
+    try std::fmt::append_i64(out, inst.id);
+    try append_ll_line(out, "_try_cont:");
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(inst.called_error_union);
+    try out.append_bytes(" ");
+    try append_expr_value_ref(out, insts, inst.operand);
+    try append_ll_line(out, ", 1");
     return;
 }
 
@@ -7097,7 +8176,13 @@ fn append_struct_body_at(
                                 out, llvm_symbol, llvm_return_type, field, string_index
                             );
                         } else {
-                            try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                            if field.kind == compiled_mir::MirStructFieldKind::ArrayNew {
+                                try append_struct_array_new_field(
+                                    out, llvm_return_type, field, string_index
+                                );
+                            } else {
+                                try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                            }
                         }
                     }
                 }
@@ -7182,6 +8267,50 @@ fn append_struct_call_field(
     try compiled_mir_llvm_call::append_call_args_with_prefix(
         out, &field.call_args, call_prefix
     );
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    try compiled_util::append_insertvalue_line_with_prefix(
+        out,
+        llvm_return_type,
+        field.index,
+        field.llvm_type,
+        field.index,
+        prefix
+    );
+    try out.append_bytes("%vc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_struct_array_new_field renders an owned-container-constructor struct field
+// (std::array::Array<T>(alloc) / std::arena::Arena<T>(alloc)): a kizu_rt_array_new call
+// whose element width comes from the field's element type, bound into the same %vc
+// namespace the call-field result uses, then an insertvalue that feeds the owned handle
+// into the struct chain. It mirrors append_array_new (the standalone var ArrayNew stmt)
+// so neither the element size nor the runtime symbol is hardcoded.
+fn append_struct_array_new_field(
+    out: &var std::string::String,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField,
+    prefix: i64
+) -> !void {
+    try out.append_bytes("  %vc");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(field.llvm_type);
+    try out.append_bytes(" @kizu_rt_array_new(");
+    try out.append_bytes(field.llvm_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(field.value);
+    try out.append_bytes(", i64 ");
+    try append_array_element_size(out, field.source_type);
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
     try compiled_util::append_insertvalue_line_with_prefix(

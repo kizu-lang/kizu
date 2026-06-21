@@ -1084,6 +1084,96 @@ fn body_node_kind_start_from(
     return error("missing IR artifact fact");
 }
 
+// body_node_line_offset_from returns the byte offset of the 'body-node <function_name> <sequence>'
+// line, scanning forward from from, or from itself when that line is not reached ahead (so a
+// caller advancing it as a forward cursor degrades to its starting point rather than jumping). It
+// mirrors body_node_kind_start_from's scan but yields the line start, letting a per-block statement
+// walk advance to each statement's body-node line without the global index -- turning a from-bs
+// rescan into a forward cursor while reaching the byte-identical line.
+pub fn body_node_line_offset_from(
+    bytes: []u8,
+    function_name: []u8,
+    sequence: i64,
+    from: i64
+) -> !i64 {
+    let byte_len = std::mem::len(bytes);
+    let prefix = "body-node ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(function_name);
+    var index = from;
+    var seen = false;
+    while index + prefix_len + name_len < byte_len {
+        if is_line_start(bytes, index) and
+            std::mem::equal_bytes(bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(bytes[name_start..name_end], function_name) and
+                is_space(bytes[name_end]) {
+                seen = true;
+                let sequence_start = skip_spaces(bytes, name_end);
+                let actual = try parse_i64_token(bytes, sequence_start);
+                if actual == sequence {
+                    return index;
+                }
+            } else {
+                if seen {
+                    return from;
+                }
+            }
+        }
+        index = line_end(bytes, index) + 1;
+    }
+    return from;
+}
+
+// collect_body_node_line_starts scans the contiguous body-node facts of one function (from from,
+// the offset of its 'body-node <function_name> 0' line) and appends the byte offset of each
+// 'body-node <function_name> <seq>' line to out in ascending seq order, so out[seq] equals the
+// offset body_node_line_start_for_sequence(seq) returns. It mirrors body_node_kind_start_from's
+// scan exactly (same prefix/name/space match, same line stepping, same 'seen then other function
+// ends the run' boundary), so the offsets it records are byte-identical to per-sequence lookups.
+// body-node facts emit in pre-order DFS with strictly increasing sequence, so appending in scan
+// order fills out[seq] directly; any gap (never expected) is padded with -1 so out[seq] < 0 is an
+// unambiguous 'no offset, use the fallback' signal for the caller.
+pub fn collect_body_node_line_starts(
+    bytes: []u8,
+    function_name: []u8,
+    from: i64,
+    out: &var std::array::Array<i64>
+) -> !void {
+    let byte_len = std::mem::len(bytes);
+    let prefix = "body-node ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(function_name);
+    var index = from;
+    var seen = false;
+    while index + prefix_len + name_len < byte_len {
+        if is_line_start(bytes, index) and
+            std::mem::equal_bytes(bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(bytes[name_start..name_end], function_name) and
+                is_space(bytes[name_end]) {
+                seen = true;
+                let sequence_start = skip_spaces(bytes, name_end);
+                let actual = try parse_i64_token(bytes, sequence_start);
+                if out.len() <= actual {
+                    while out.len() < actual {
+                        try out.append(0 - 1);
+                    }
+                    try out.append(index);
+                }
+            } else {
+                if seen {
+                    return;
+                }
+            }
+        }
+        index = line_end(bytes, index) + 1;
+    }
+    return;
+}
+
 pub fn body_edge_count_from(
     bytes: []u8,
     function_name: []u8,

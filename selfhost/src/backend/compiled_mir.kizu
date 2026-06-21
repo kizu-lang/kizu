@@ -36,6 +36,7 @@ pub enum MirCallArgKind {
     IntLiteral,
     Arith,
     Temp,
+    Call,
 }
 
 // A FieldAccess call arg mirrors MirStructField's nested layout: source_type /
@@ -52,6 +53,13 @@ pub enum MirCallArgKind {
 // otherwise the base is the Var %value directly; bool_value true selects sub
 // over add. These back the lexer's position(initial.line + 1, 1) style calls
 // (tracker 961, scope 4 prerequisite).
+//
+// For a Slice arg a bound is normally the static slice_*_base register plus a
+// constant slice_*_offset. When a bound is a single-level field read off a Var
+// receiver (e.g. text[current.start..current.end]) slice_*_base holds the
+// receiver register and slice_*_field_index >= 0 names the field; the renderer
+// then extractvalue's that field off slice_*_source_type %base before adding the
+// offset. slice_*_field_index == -1 keeps the plain register/literal bound.
 pub struct MirCallArg {
     pub ty: []u8,
     pub kind: MirCallArgKind,
@@ -65,8 +73,15 @@ pub struct MirCallArg {
     pub nested_field_index: i64,
     pub slice_start_base: []u8,
     pub slice_start_offset: i64,
+    pub slice_start_source_type: []u8,
+    pub slice_start_field_index: i64,
     pub slice_end_base: []u8,
     pub slice_end_offset: i64,
+    pub slice_end_source_type: []u8,
+    pub slice_end_field_index: i64,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub call_args: std::array::Array<MirCallArg>,
 }
 
 pub enum MirStructFieldKind {
@@ -80,6 +95,7 @@ pub enum MirStructFieldKind {
     EmptySlice,
     Call,
     StructLiteral,
+    ArrayNew,
 }
 
 // A Call struct field carries a resolved direct call (callee + module prefix +
@@ -259,6 +275,23 @@ pub struct MirIntCastExpr {
     pub source_llvm: []u8,
 }
 
+// MirTryUnwrapExpr backs a 'try <expr>' in value/sub-expression position (issue 1157
+// big-bang). operand references the earlier expr temp holding the inner error-union
+// aggregate (called_error_union); the renderer extracts its ok flag (field 0) and
+// branches on an id-suffixed label pair: t<id>_try_fail re-wraps the callee message
+// (field msg-index) into this function's own_error_union failure value and returns it
+// (propagation, never 'unreachable'); t<id>_try_cont extracts the success value
+// (field 1, llvm_type) into %t<id>. This mirrors MirLetTryCallStmt's propagation for
+// the statement-free expression path, which owns no stmts. It owns nothing, so it is
+// copy-only.
+pub struct MirTryUnwrapExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub operand: i64,
+    pub called_error_union: []u8,
+    pub own_error_union: []u8,
+}
+
 pub union MirExprInst {
     Var(MirVarExpr),
     ConstString(MirConstStringExpr),
@@ -276,6 +309,7 @@ pub union MirExprInst {
     IntCast(MirIntCastExpr),
     UnionConstruct(MirUnionConstructExpr),
     StructLiteral(MirStructLiteralExpr),
+    TryUnwrap(MirTryUnwrapExpr),
 }
 
 pub enum MirIfThenKind {
@@ -433,6 +467,16 @@ pub struct MirLetTryCallStmt {
     pub try_index: i64,
     pub arg_insts: std::array::Array<MirExprInst>,
     pub call_args: std::array::Array<MirCallArg>,
+}
+
+pub union MirValueCursorLatch {
+    TryCall(MirLetTryCallStmt),
+    FieldRead(MirLetExprStmt),
+    // PlainCall backs a '<cursor> = <free-call>(.. <body-local> ..);' latch -- a non-try call that
+    // reassigns the carried cursor (parse_import_segments: 'token = next_token(text, segment)').
+    // It returns no error union, so like FieldRead it stays in the latch block (no fail/cont split)
+    // and binds %<cursor>_next via append_while_latch_call_body, the scalar plain-call latch renderer.
+    PlainCall(MirLetCallStmt),
 }
 
 // MirReturnArrayGetStmt backs a multi-statement 'return self.<field>.get(<expr>);'
@@ -951,18 +995,19 @@ pub struct MirGrammarLoopStmt {
 
 // MirValueCursorWhileStmt backs a value-carried append-while loop (the parse_call_with_args
 // argument loop, issue 1157 NEW-A): 'var <cursor> = <init>; while !<pred>(<cursor>) { <body
-// incl. try <arr>.append(x)>; <cursor> = try <latch>(..); }; return <cursor>;'. It is
+// incl. try <arr>.append(x)>; <cursor> = try <latch>(..); }; return <cursor>;'. Embedded loops
+// can also latch through '<cursor> = <prior-let>.next;'. It is
 // structurally distinct from the i64-induction While (whose condition compares a counter), the
 // value-array loop (whose condition is a struct-field sentinel) and the grammar loop (whose
 // condition is the bool literal 'true'): the condition is a prefix-not over a free bool-predicate
-// call and the latch reassigns the cursor through a free error-union try-call whose success value
-// is a struct, not an i64, so detecting it never diverts any of those. The renderer emits a
+// call and the latch reassigns the cursor through a free error-union try-call or a field read from
+// a prior body local, so detecting it never diverts any of those. The renderer emits a
 // head/body/latch/exit CFG: the head holds one loop-carried phi for the value cursor (named
 // <cursor_var> so plain Var reads in the condition, body and latch resolve to it) seeded from
-// init_name on the entry edge and from the latch try-call's success on its tryK_cont back-edge;
-// the body statements lower through the same per-statement machinery the top level uses (so a
-// borrowed '&var Array' append lowers as a void try-call), and the terminal exit wraps the cursor
-// into own_error_union and returns it. It owns the cond insts, body stmts and the latch try-call.
+// init_name on the entry edge and from %<cursor>_next on the latch back-edge; the body statements
+// lower through the same per-statement machinery the top level uses (so a borrowed '&var Array'
+// append lowers as a void try-call), and the terminal exit wraps the cursor into own_error_union
+// and returns it. It owns the cond insts, body stmts and the latch statement.
 pub struct MirValueCursorWhileStmt {
     pub cursor_var: []u8,
     pub cursor_type: []u8,
@@ -971,9 +1016,201 @@ pub struct MirValueCursorWhileStmt {
     pub cond_insts: std::array::Array<MirExprInst>,
     pub cond_result_id: i64,
     pub body_stmts: std::array::Array<MirStmt>,
-    pub latch: MirLetTryCallStmt,
+    pub latch: MirValueCursorLatch,
     pub label_base: []u8,
     pub terminal_return: bool,
+    // A call-seeded cursor init ('var <cursor> = next_token(text, token)') is materialized in the
+    // loop preheader as '%<init_name> = call <cursor_type> @<callee>(<args>)' so the loop-head phi
+    // seeds from that concrete SSA value instead of self-referencing %<cursor> on the entry edge (an
+    // undef cursor cycle the optimizer's GVN can crash on). init_call_callee_name is empty for the
+    // var-copy seed path (the phi seeds directly from the copied local/param), in which case no
+    // preheader call is rendered.
+    pub init_call_callee_name: []u8,
+    pub init_call_module_prefix: []u8,
+    pub init_call_args: std::array::Array<MirCallArg>,
+}
+
+// MirPrecedenceLoopStmt backs a two-carried-value precedence-climbing loop:
+// 'var <value> = try <init>(..); var <scalar> = <rank>(<value>.field); while
+// <scalar> >= <min> { <body>; <value> = try <latch>(..); <scalar> =
+// <rank>(<value>.field); }; return <value>;'. It is structurally distinct from the
+// i64-induction While (one scalar induction and an arithmetic latch), the grammar loop
+// (bool literal 'true' header), and the value-cursor loop (one carried value and a
+// prefix-not predicate): this loop has two phis, a comparison header, a try-call value
+// latch, and a plain-call scalar latch derived from the updated value. It owns the init
+// calls, condition insts, body statements, and latch calls.
+pub struct MirPrecedenceLoopStmt {
+    pub value_var: []u8,
+    pub value_type: []u8,
+    pub scalar_var: []u8,
+    pub scalar_type: []u8,
+    pub own_error_union: []u8,
+    pub value_init: MirLetTryCallStmt,
+    pub scalar_init: MirLetCallStmt,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub value_latch: MirLetTryCallStmt,
+    pub scalar_latch: MirLetCallStmt,
+    pub label_base: []u8,
+}
+
+// MirDualCursorLoopStmt backs a two-carried-value cursor loop that, unlike the
+// precedence loop, seeds its value cursor by copying a prior local/param rather
+// than a try-call: 'var <value> = <source>; var <scalar> = <plain>(<value>);
+// while <predicate>(<scalar>) { <prefix lets>; <value> = try <latch>(..);
+// <scalar> = <plain>(<value>); }; return <value>;' (parse_type_base_end's
+// '::' segment walk). The value phi takes its preheader incoming straight from
+// the copied source SSA value, so this shape carries no value-init call. The
+// scalar cursor is seeded and latched by plain calls and the header is a
+// side-effect-free predicate call, distinguishing it from the precedence loop
+// (try-call value init plus a '>=' comparison header) and the value-cursor loop
+// (a single carried value behind a prefix-not predicate). It owns the scalar
+// init call, condition insts, body statements, and latch calls.
+pub struct MirDualCursorLoopStmt {
+    pub value_var: []u8,
+    pub value_type: []u8,
+    pub value_source_var: []u8,
+    pub scalar_var: []u8,
+    pub scalar_type: []u8,
+    pub own_error_union: []u8,
+    pub scalar_init: MirLetCallStmt,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub value_latch: MirLetTryCallStmt,
+    pub scalar_latch: MirLetCallStmt,
+    pub label_base: []u8,
+}
+
+// MirTypeApplyLoopStmt backs parse_type_apply_expr_with_args' 'while true' loop:
+// a Token cursor seeded by a plain call, a per-iteration ParseNode try-call, a borrowed
+// Array append, a terminal '>' arm that builds children and returns a ParseNode, an error
+// guard for non-comma tokens, and a plain-call cursor latch. It is disjoint from the
+// existing cursor shapes: grammar-postfix has a Var seed plus nested reassignment arms,
+// value-cursor has a prefix-not header and try-call latch, and value-array has a
+// struct-field sentinel header. This shape keeps the bool-literal header but requires the
+// plain-call seed/latch and terminal construction arm.
+pub struct MirTypeApplyLoopStmt {
+    pub cursor_var: []u8,
+    pub cursor_type: []u8,
+    pub own_error_union: []u8,
+    pub init: MirLetCallStmt,
+    pub parse_arg: MirLetTryCallStmt,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub terminal_cond_insts: std::array::Array<MirExprInst>,
+    pub terminal_cond_result_id: i64,
+    pub terminal_stmts: std::array::Array<MirStmt>,
+    pub guard_stmts: std::array::Array<MirStmt>,
+    pub latch: MirLetCallStmt,
+    pub label_base: []u8,
+}
+
+// MirWhileMatchArm is one arm of a while-true + match-dispatch loop body (parse_generic_type_end,
+// worker-3 NEW-4). tag is the matched TokenKind variant's discriminant; is_default marks the
+// trailing exhaustive fallthrough (the final arm, which carries no icmp). A return arm carries its
+// lowered 'return <expr>' in arm_stmts and leaves is_latch false; the single latch arm
+// ('<cursor> = try <call>(..)') sets is_latch true and leaves arm_stmts empty -- the loop's shared
+// MirLetTryCallStmt latch renders it and branches back to the loop head. arm_stmts is a heap-backed
+// Array<MirStmt> exactly like MirEnumDispatchArm so the union stays fixed-size.
+pub struct MirWhileMatchArm {
+    pub tag: i64,
+    pub is_default: bool,
+    pub is_latch: bool,
+    pub arm_stmts: std::array::Array<MirStmt>,
+}
+
+// MirWhileMatchLoopStmt backs a 'while true' loop whose body is a few prefix lets followed by a
+// 'match <token>.kind' dispatch (parse_generic_type_end's generic-argument walk, worker-3 NEW-4):
+// 'var <cursor> = <plain init>; while true { <try-call/plain prefix lets>; match <next>.kind {
+// <variant> => return <expr>, <comma> => <cursor> = try <latch>(..), <others> => return error(..)
+// } }; return error(..)'. It is structurally distinct from the i64-induction While (whose body ends
+// in an arithmetic increment), the value-cursor / type-apply loops (whose body ends in an
+// if-chain + unconditional latch), and the bare EnumDispatch (whose every arm returns): here one
+// match arm latches the cursor and back-edges to the loop head while every other arm returns. The
+// renderer emits a head/body CFG: the head holds one loop-carried phi for the cursor seeded from
+// the plain init on the entry edge and from %<cursor>_next on the latch try-call's cont block; the
+// body lowers the prefix lets, evaluates the scrutinee discriminant, and runs an exhaustive icmp/br
+// dispatch chain whose return arms ret and whose latch arm reassigns the cursor and branches back.
+// The source's trailing 'return error(..)' is unreachable (the loop never exits normally) and is
+// not emitted, exactly like the type-apply loop's trailing error return. It owns the init, the
+// body stmts, the scrutinee insts, the arm Array, and the latch.
+pub struct MirWhileMatchLoopStmt {
+    pub cursor_var: []u8,
+    pub cursor_type: []u8,
+    pub own_error_union: []u8,
+    pub init: MirLetCallStmt,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub scrutinee_insts: std::array::Array<MirExprInst>,
+    pub scrutinee_result_id: i64,
+    pub arms: std::array::Array<MirWhileMatchArm>,
+    pub latch: MirLetTryCallStmt,
+    pub label_base: []u8,
+}
+
+// MirTrailingTokenLoopStmt backs a dual Token-cursor advance loop that tracks the trailing token
+// (generic_type_allows_const_arg's '<'-walk, NEW-3 second half): 'var <current> = <plain init>; var
+// <previous> = <current>; while <current>.<field> < <other>.<field> and <predicate>(<current>) {
+// <previous> = <current>; <current> = <plain latch>(<current>); }; <post stmts using previous>'. Two
+// Token cursors share one type: the head holds a phi for <current> seeded from the plain init on the
+// entry edge and from %<current>_next on the body edge, plus a phi for <previous> seeded from the
+// same init on entry (matching 'var previous = current') and from the <current> phi on the body edge
+// (the copy latch 'previous = current' is purely that back-edge, so it carries no instruction). The
+// compound-AND header is lowered eagerly into cond_insts; the body advances <current> through the
+// plain latch and back-edges to the head. The exit block falls through (no terminator) so the
+// post-loop statements -- lowered as ordinary trailing MirStmts on the owning function and using the
+// loop-carried <previous>/<current> phis -- render straight into it. It is disjoint from
+// MirDualCursorLoopStmt (whose value seed is a Var-copy at statement 0, whose header is a single
+// predicate call, and whose body ends in a try-call value latch plus a plain-call scalar latch, with
+// a bare 'return <value>' exit) because here statement 0 is the plain-call seed, statement 1 the
+// Var-copy seed, the header is a compound AND, both latches are Assigns (no try-call), and the exit
+// runs arbitrary post-loop statements. It owns the init call, the condition insts, and the latch
+// call.
+pub struct MirTrailingTokenLoopStmt {
+    pub current_var: []u8,
+    pub previous_var: []u8,
+    pub token_type: []u8,
+    pub init: MirLetCallStmt,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub latch: MirLetCallStmt,
+    pub label_base: []u8,
+}
+
+// MirGuardedCursorLoopStmt backs a value-carried cursor loop whose latch is reached only through a
+// terminal if/else (parse_type_params' '<T, U>' walk): 'var <cursor> = <plain init>(..); while
+// !<pred>(<cursor>) { <body lets/void-calls>; if <pred2>(<local>) { <cursor> = <plain latch>(..); }
+// else { <else lets>; return <expr>; } }; return <expr>;'. It is structurally distinct from the
+// value-cursor append loop (whose latch is the unconditional last body statement, an error-union
+// try-call, and whose exit returns the bare cursor), the type-apply / while-match loops (a
+// bool-literal 'while true' header with no normal exit), and the i64-induction While (whose body
+// ends in an arithmetic increment): here the header is a prefix-not predicate giving a normal exit,
+// the body's terminal If latches the cursor through a plain call in one arm and returns from the
+// other, and both the else arm and the post-loop trailing statement return a struct value reading
+// the loop-head phi. The renderer emits a head/body/latch/else/exit CFG: the head holds one
+// loop-carried phi for the cursor (named <cursor_var> so plain Var reads in the condition, body,
+// terminal condition and exit resolve to it) seeded from %<cursor>_init on the entry edge and from
+// %<cursor>_next on the latch back-edge; the body statements lower through the same per-statement
+// machinery the top level uses, the terminal condition branches to the plain-call latch or the else
+// arm, the latch reassigns the cursor and back-edges to the head, and the else and exit arms run
+// their lowered statements (each ending in a return). The pre-cursor lets (e.g. 'let start =
+// begin_children()') are emitted as ordinary top-level statements ahead of this one, so the cursor
+// init is the only preheader instruction this statement owns. It owns the init, the condition
+// insts, the body stmts, the terminal condition insts, the latch, and the else/exit stmts.
+pub struct MirGuardedCursorLoopStmt {
+    pub cursor_var: []u8,
+    pub cursor_type: []u8,
+    pub own_error_union: []u8,
+    pub init: MirLetCallStmt,
+    pub cond_insts: std::array::Array<MirExprInst>,
+    pub cond_result_id: i64,
+    pub body_stmts: std::array::Array<MirStmt>,
+    pub terminal_cond_insts: std::array::Array<MirExprInst>,
+    pub terminal_cond_result_id: i64,
+    pub latch: MirLetCallStmt,
+    pub else_stmts: std::array::Array<MirStmt>,
+    pub exit_stmts: std::array::Array<MirStmt>,
+    pub label_base: []u8,
 }
 
 // MirFirstTokenStmt backs first_token(source): 'return token_at(source, 0, position(1, 1));'
@@ -1302,6 +1539,12 @@ pub union MirStmt {
     ValueWhile(MirValueWhileStmt),
     GrammarLoop(MirGrammarLoopStmt),
     ValueCursorWhile(MirValueCursorWhileStmt),
+    PrecedenceLoop(MirPrecedenceLoopStmt),
+    DualCursorLoop(MirDualCursorLoopStmt),
+    TrailingTokenLoop(MirTrailingTokenLoopStmt),
+    TypeApplyLoop(MirTypeApplyLoopStmt),
+    WhileMatchLoop(MirWhileMatchLoopStmt),
+    GuardedCursorLoop(MirGuardedCursorLoopStmt),
     TokenKindPredicate(MirTokenKindPredicateStmt),
     ParserSpanPredicate(MirParserSpanPredicateStmt),
     ParserPostfixStart(MirParserPostfixStartStmt),
@@ -1430,6 +1673,13 @@ pub struct MirFunction {
     pub entry: MirBlock,
 }
 
+impl MirCallArg {
+    fn deinit(self: MirCallArg) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
 // MirStructField owns the call-argument Array of a call-valued field (Call kind);
 // non-call fields hold the empty array from empty_struct_call_args. It is only
 // ever stored in struct_fields Arrays, so this cleanup runs through structural
@@ -1479,6 +1729,7 @@ impl MirExprInst {
             IntCast(payload) => return;,
             UnionConstruct(payload) => return;,
             StructLiteral(payload) => payload.deinit(),
+            TryUnwrap(payload) => return;,
         }
     }
 }
@@ -1558,6 +1809,17 @@ impl MirLetTryCallStmt {
     fn deinit(self: MirLetTryCallStmt) -> void {
         self.arg_insts.deinit();
         self.call_args.deinit();
+        return;
+    }
+}
+
+impl MirValueCursorLatch {
+    fn deinit(self: MirValueCursorLatch) -> void {
+        match self {
+            TryCall(payload) => payload.deinit(),
+            FieldRead(payload) => payload.deinit(),
+            PlainCall(payload) => payload.deinit(),
+        }
         return;
     }
 }
@@ -1735,6 +1997,39 @@ impl MirValueCursorWhileStmt {
         self.cond_insts.deinit();
         self.body_stmts.deinit();
         self.latch.deinit();
+        self.init_call_args.deinit();
+        return;
+    }
+}
+
+impl MirPrecedenceLoopStmt {
+    fn deinit(self: MirPrecedenceLoopStmt) -> void {
+        self.value_init.deinit();
+        self.scalar_init.deinit();
+        self.cond_insts.deinit();
+        self.body_stmts.deinit();
+        self.value_latch.deinit();
+        self.scalar_latch.deinit();
+        return;
+    }
+}
+
+impl MirDualCursorLoopStmt {
+    fn deinit(self: MirDualCursorLoopStmt) -> void {
+        self.scalar_init.deinit();
+        self.cond_insts.deinit();
+        self.body_stmts.deinit();
+        self.value_latch.deinit();
+        self.scalar_latch.deinit();
+        return;
+    }
+}
+
+impl MirTrailingTokenLoopStmt {
+    fn deinit(self: MirTrailingTokenLoopStmt) -> void {
+        self.init.deinit();
+        self.cond_insts.deinit();
+        self.latch.deinit();
         return;
     }
 }
@@ -1856,6 +2151,50 @@ impl MirWhileStmt {
     }
 }
 
+impl MirTypeApplyLoopStmt {
+    fn deinit(self: MirTypeApplyLoopStmt) -> void {
+        self.init.deinit();
+        self.parse_arg.deinit();
+        self.body_stmts.deinit();
+        self.terminal_cond_insts.deinit();
+        self.terminal_stmts.deinit();
+        self.guard_stmts.deinit();
+        self.latch.deinit();
+        return;
+    }
+}
+
+impl MirWhileMatchArm {
+    fn deinit(self: MirWhileMatchArm) -> void {
+        self.arm_stmts.deinit();
+        return;
+    }
+}
+
+impl MirWhileMatchLoopStmt {
+    fn deinit(self: MirWhileMatchLoopStmt) -> void {
+        self.init.deinit();
+        self.body_stmts.deinit();
+        self.scrutinee_insts.deinit();
+        self.arms.deinit();
+        self.latch.deinit();
+        return;
+    }
+}
+
+impl MirGuardedCursorLoopStmt {
+    fn deinit(self: MirGuardedCursorLoopStmt) -> void {
+        self.init.deinit();
+        self.cond_insts.deinit();
+        self.body_stmts.deinit();
+        self.terminal_cond_insts.deinit();
+        self.latch.deinit();
+        self.else_stmts.deinit();
+        self.exit_stmts.deinit();
+        return;
+    }
+}
+
 impl MirStmt {
     fn deinit(self: MirStmt) -> void {
         match self {
@@ -1890,6 +2229,12 @@ impl MirStmt {
             ValueWhile(payload) => payload.deinit(),
             GrammarLoop(payload) => payload.deinit(),
             ValueCursorWhile(payload) => payload.deinit(),
+            PrecedenceLoop(payload) => payload.deinit(),
+            DualCursorLoop(payload) => payload.deinit(),
+            TrailingTokenLoop(payload) => payload.deinit(),
+            TypeApplyLoop(payload) => payload.deinit(),
+            WhileMatchLoop(payload) => payload.deinit(),
+            GuardedCursorLoop(payload) => payload.deinit(),
             TokenKindPredicate(payload) => payload.deinit(),
             ParserSpanPredicate(payload) => payload.deinit(),
             ParserPostfixStart(payload) => payload.deinit(),
@@ -2019,8 +2364,15 @@ pub fn var_call_arg(ty: []u8, name: []u8) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2038,8 +2390,15 @@ pub fn string_call_arg(ty: []u8, payload: []u8, string_index: i64) -> MirCallArg
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2057,8 +2416,15 @@ pub fn bool_call_arg(ty: []u8, value: bool) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2081,8 +2447,15 @@ pub fn field_access_call_arg(
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2112,8 +2485,15 @@ pub fn nested_field_access_call_arg(
         nested_field_index: nested_field_index,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2131,8 +2511,15 @@ pub fn empty_slice_call_arg(ty: []u8) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2141,8 +2528,12 @@ pub fn slice_call_arg(
     target: []u8,
     start_base: []u8,
     start_offset: i64,
+    start_source_type: []u8,
+    start_field_index: i64,
     end_base: []u8,
-    end_offset: i64
+    end_offset: i64,
+    end_source_type: []u8,
+    end_field_index: i64
 ) -> MirCallArg {
     return MirCallArg {
         ty: ty,
@@ -2157,8 +2548,15 @@ pub fn slice_call_arg(
         nested_field_index: -1,
         slice_start_base: start_base,
         slice_start_offset: start_offset,
+        slice_start_source_type: start_source_type,
+        slice_start_field_index: start_field_index,
         slice_end_base: end_base,
-        slice_end_offset: end_offset
+        slice_end_offset: end_offset,
+        slice_end_source_type: end_source_type,
+        slice_end_field_index: end_field_index,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2179,8 +2577,15 @@ pub fn int_literal_call_arg(ty: []u8, value: i64) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2204,8 +2609,48 @@ pub fn temp_call_arg(ty: []u8, temp_id: i64) -> MirCallArg {
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+// call_call_arg materializes a nested call argument inline in the enclosing call's
+// argument setup, then passes that call result as the operand.
+pub fn call_call_arg(
+    ty: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::Call,
+        value: "",
+        bool_value: false,
+        string_index: -1,
+        int_value: 0,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: "",
+        slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
+        slice_end_base: "",
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args
     };
 }
 
@@ -2234,8 +2679,15 @@ pub fn arith_field_call_arg(
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2261,8 +2713,15 @@ pub fn arith_var_call_arg(
         nested_field_index: -1,
         slice_start_base: "",
         slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
         slice_end_base: "",
-        slice_end_offset: 0
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
     };
 }
 
@@ -2492,6 +2951,39 @@ pub fn call_struct_field(
         call_module_prefix: call_module_prefix,
         call_callee_name: call_callee_name,
         call_args: call_args,
+        nested_fields: empty_struct_nested_fields()
+    };
+}
+
+// array_new_struct_field backs an owned-container constructor used as a struct
+// field value (e.g. 'Ast { nodes: std::arena::Arena<AstNode>(allocator), ... }').
+// Both std::array::Array<T>(alloc) and std::arena::Arena<T>(alloc) lower to the
+// element-size-generic @kizu_rt_array_new builtin returning the %kizu.owned handle,
+// so the field carries only the owned type (llvm_type), the allocator value name
+// (value), and the element LLVM type (source_type) the renderer needs for the
+// element-size constant expression. The renderer emits the kizu_rt_array_new call
+// before insertvalue-ing the owned handle into the struct, mirroring the standalone
+// var ArrayNew statement lowering.
+pub fn array_new_struct_field(
+    index: i64,
+    owned_type: []u8,
+    allocator_name: []u8,
+    element_llvm: []u8
+) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::ArrayNew,
+        llvm_type: owned_type,
+        value: allocator_name,
+        int_value: -1,
+        bool_value: false,
+        source_type: element_llvm,
+        source_field_index: -1,
+        nested_source_type: "",
+        computed_rhs_name: "",
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
         nested_fields: empty_struct_nested_fields()
     };
 }
@@ -2739,6 +3231,26 @@ pub fn int_cast_expr_inst(
     });
 }
 
+// try_unwrap_expr_inst builds a 'try <expr>' value-position instruction over the
+// already-lowered inner error-union temp 'operand' (called_error_union), unwrapping
+// its success value (llvm_type) on the continue path or propagating the re-wrapped
+// failure through own_error_union (issue 1157 big-bang).
+pub fn try_unwrap_expr_inst(
+    id: i64,
+    llvm_type: []u8,
+    operand: i64,
+    called_error_union: []u8,
+    own_error_union: []u8
+) -> MirExprInst {
+    return MirExprInst::TryUnwrap(MirTryUnwrapExpr {
+        id: id,
+        llvm_type: llvm_type,
+        operand: operand,
+        called_error_union: called_error_union,
+        own_error_union: own_error_union
+    });
+}
+
 // expr_inst_id and expr_inst_llvm_type read the result id and LLVM type that
 // every expr-inst variant carries, so result wiring (type-by-id lookups) does
 // not depend on the active variant.
@@ -2760,6 +3272,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         IntCast(payload) => payload.id,
         UnionConstruct(payload) => payload.id,
         StructLiteral(payload) => payload.id,
+        TryUnwrap(payload) => payload.id,
     };
 }
 
@@ -2781,10 +3294,12 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         IntCast(payload) => payload.llvm_type,
         UnionConstruct(payload) => payload.llvm_type,
         StructLiteral(payload) => payload.llvm_type,
+        TryUnwrap(payload) => payload.llvm_type,
     };
 }
 
-pub fn copy_call_arg(arg: &MirCallArg) -> MirCallArg {
+pub fn copy_call_arg(arg: &MirCallArg) -> !MirCallArg {
+    let copied_call_args = try copy_call_args(&arg.call_args);
     return MirCallArg {
         ty: arg.ty,
         kind: arg.kind,
@@ -2798,8 +3313,15 @@ pub fn copy_call_arg(arg: &MirCallArg) -> MirCallArg {
         nested_field_index: arg.nested_field_index,
         slice_start_base: arg.slice_start_base,
         slice_start_offset: arg.slice_start_offset,
+        slice_start_source_type: arg.slice_start_source_type,
+        slice_start_field_index: arg.slice_start_field_index,
         slice_end_base: arg.slice_end_base,
-        slice_end_offset: arg.slice_end_offset
+        slice_end_offset: arg.slice_end_offset,
+        slice_end_source_type: arg.slice_end_source_type,
+        slice_end_field_index: arg.slice_end_field_index,
+        call_module_prefix: arg.call_module_prefix,
+        call_callee_name: arg.call_callee_name,
+        call_args: copied_call_args
     };
 }
 
@@ -2808,7 +3330,7 @@ pub fn copy_call_args(args: &std::array::Array<MirCallArg>) -> !std::array::Arra
     var index = 0;
     while index < args.len() {
         let arg = try args.at(index);
-        try copied.append(copy_call_arg(arg));
+        try copied.append(try copy_call_arg(arg));
         index = index + 1;
     }
     return copied;
@@ -2941,6 +3463,13 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
             id: payload.id,
             llvm_type: payload.llvm_type,
             struct_fields: try copy_struct_fields(&payload.struct_fields)
+        }),
+        TryUnwrap(payload) => MirExprInst::TryUnwrap(MirTryUnwrapExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            operand: payload.operand,
+            called_error_union: payload.called_error_union,
+            own_error_union: payload.own_error_union
         }),
     };
 }
@@ -3557,7 +4086,7 @@ pub fn value_cursor_while_stmt(
     cond_insts: std::array::Array<MirExprInst>,
     cond_result_id: i64,
     body_stmts: std::array::Array<MirStmt>,
-    latch: MirLetTryCallStmt,
+    latch: MirValueCursorLatch,
     label_base: []u8,
     terminal_return: bool
 ) -> MirStmt {
@@ -3571,7 +4100,293 @@ pub fn value_cursor_while_stmt(
         body_stmts: body_stmts,
         latch: latch,
         label_base: label_base,
-        terminal_return: terminal_return
+        terminal_return: terminal_return,
+        init_call_callee_name: "",
+        init_call_module_prefix: "",
+        init_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    });
+}
+
+// value_cursor_while_stmt_with_init backs a value-cursor loop whose cursor is seeded by a plain
+// call ('var <cursor> = next_token(text, token)'). The init call is rendered into the loop
+// preheader binding %<init_name> (= %<cursor>_init), and the loop-head phi seeds from that concrete
+// value rather than self-referencing %<cursor> on the entry edge. Sharing the same MirStmt position
+// as the elided init keeps every body label and the rendering local_prefix unchanged.
+pub fn value_cursor_while_stmt_with_init(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    init_name: []u8,
+    own_error_union: []u8,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    latch: MirValueCursorLatch,
+    label_base: []u8,
+    terminal_return: bool,
+    init_call_module_prefix: []u8,
+    init_call_callee_name: []u8,
+    init_call_args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::ValueCursorWhile(MirValueCursorWhileStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        init_name: init_name,
+        own_error_union: own_error_union,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        latch: latch,
+        label_base: label_base,
+        terminal_return: terminal_return,
+        init_call_callee_name: init_call_callee_name,
+        init_call_module_prefix: init_call_module_prefix,
+        init_call_args: init_call_args
+    });
+}
+
+pub fn value_cursor_try_call_latch(
+    name: []u8,
+    called_error_union: []u8,
+    success_type: []u8,
+    own_error_union: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    string_index: i64,
+    try_index: i64,
+    arg_insts: std::array::Array<MirExprInst>,
+    args: std::array::Array<MirCallArg>
+) -> MirValueCursorLatch {
+    return MirValueCursorLatch::TryCall(MirLetTryCallStmt {
+        name: name,
+        called_error_union: called_error_union,
+        success_type: success_type,
+        own_error_union: own_error_union,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        string_index: string_index,
+        try_index: try_index,
+        arg_insts: arg_insts,
+        call_args: args
+    });
+}
+
+pub fn value_cursor_field_read_latch(
+    name: []u8,
+    string_index: i64,
+    result_id: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirValueCursorLatch {
+    return MirValueCursorLatch::FieldRead(MirLetExprStmt {
+        name: name,
+        string_index: string_index,
+        expr_result_id: result_id,
+        expr_insts: insts
+    });
+}
+
+pub fn value_cursor_plain_call_latch(
+    name: []u8,
+    llvm_type: []u8,
+    string_index: i64,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirValueCursorLatch {
+    return MirValueCursorLatch::PlainCall(MirLetCallStmt {
+        name: name,
+        llvm_type: llvm_type,
+        string_index: string_index,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args
+    });
+}
+
+pub fn precedence_loop_stmt(
+    value_var: []u8,
+    value_type: []u8,
+    scalar_var: []u8,
+    scalar_type: []u8,
+    own_error_union: []u8,
+    value_init: MirLetTryCallStmt,
+    scalar_init: MirLetCallStmt,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    value_latch: MirLetTryCallStmt,
+    scalar_latch: MirLetCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::PrecedenceLoop(MirPrecedenceLoopStmt {
+        value_var: value_var,
+        value_type: value_type,
+        scalar_var: scalar_var,
+        scalar_type: scalar_type,
+        own_error_union: own_error_union,
+        value_init: value_init,
+        scalar_init: scalar_init,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        value_latch: value_latch,
+        scalar_latch: scalar_latch,
+        label_base: label_base
+    });
+}
+
+pub fn dual_cursor_loop_stmt(
+    value_var: []u8,
+    value_type: []u8,
+    value_source_var: []u8,
+    scalar_var: []u8,
+    scalar_type: []u8,
+    own_error_union: []u8,
+    scalar_init: MirLetCallStmt,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    value_latch: MirLetTryCallStmt,
+    scalar_latch: MirLetCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::DualCursorLoop(MirDualCursorLoopStmt {
+        value_var: value_var,
+        value_type: value_type,
+        value_source_var: value_source_var,
+        scalar_var: scalar_var,
+        scalar_type: scalar_type,
+        own_error_union: own_error_union,
+        scalar_init: scalar_init,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        value_latch: value_latch,
+        scalar_latch: scalar_latch,
+        label_base: label_base
+    });
+}
+
+pub fn trailing_token_loop_stmt(
+    current_var: []u8,
+    previous_var: []u8,
+    token_type: []u8,
+    init: MirLetCallStmt,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    latch: MirLetCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::TrailingTokenLoop(MirTrailingTokenLoopStmt {
+        current_var: current_var,
+        previous_var: previous_var,
+        token_type: token_type,
+        init: init,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        latch: latch,
+        label_base: label_base
+    });
+}
+
+pub fn type_apply_loop_stmt(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    own_error_union: []u8,
+    init: MirLetCallStmt,
+    parse_arg: MirLetTryCallStmt,
+    body_stmts: std::array::Array<MirStmt>,
+    terminal_cond_insts: std::array::Array<MirExprInst>,
+    terminal_cond_result_id: i64,
+    terminal_stmts: std::array::Array<MirStmt>,
+    guard_stmts: std::array::Array<MirStmt>,
+    latch: MirLetCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::TypeApplyLoop(MirTypeApplyLoopStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        own_error_union: own_error_union,
+        init: init,
+        parse_arg: parse_arg,
+        body_stmts: body_stmts,
+        terminal_cond_insts: terminal_cond_insts,
+        terminal_cond_result_id: terminal_cond_result_id,
+        terminal_stmts: terminal_stmts,
+        guard_stmts: guard_stmts,
+        latch: latch,
+        label_base: label_base
+    });
+}
+
+pub fn while_match_arm(
+    tag: i64,
+    is_default: bool,
+    is_latch: bool,
+    arm_stmts: std::array::Array<MirStmt>
+) -> MirWhileMatchArm {
+    return MirWhileMatchArm {
+        tag: tag,
+        is_default: is_default,
+        is_latch: is_latch,
+        arm_stmts: arm_stmts
+    };
+}
+
+pub fn while_match_loop_stmt(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    own_error_union: []u8,
+    init: MirLetCallStmt,
+    body_stmts: std::array::Array<MirStmt>,
+    scrutinee_insts: std::array::Array<MirExprInst>,
+    scrutinee_result_id: i64,
+    arms: std::array::Array<MirWhileMatchArm>,
+    latch: MirLetTryCallStmt,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::WhileMatchLoop(MirWhileMatchLoopStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        own_error_union: own_error_union,
+        init: init,
+        body_stmts: body_stmts,
+        scrutinee_insts: scrutinee_insts,
+        scrutinee_result_id: scrutinee_result_id,
+        arms: arms,
+        latch: latch,
+        label_base: label_base
+    });
+}
+
+pub fn guarded_cursor_loop_stmt(
+    cursor_var: []u8,
+    cursor_type: []u8,
+    own_error_union: []u8,
+    init: MirLetCallStmt,
+    cond_insts: std::array::Array<MirExprInst>,
+    cond_result_id: i64,
+    body_stmts: std::array::Array<MirStmt>,
+    terminal_cond_insts: std::array::Array<MirExprInst>,
+    terminal_cond_result_id: i64,
+    latch: MirLetCallStmt,
+    else_stmts: std::array::Array<MirStmt>,
+    exit_stmts: std::array::Array<MirStmt>,
+    label_base: []u8
+) -> MirStmt {
+    return MirStmt::GuardedCursorLoop(MirGuardedCursorLoopStmt {
+        cursor_var: cursor_var,
+        cursor_type: cursor_type,
+        own_error_union: own_error_union,
+        init: init,
+        cond_insts: cond_insts,
+        cond_result_id: cond_result_id,
+        body_stmts: body_stmts,
+        terminal_cond_insts: terminal_cond_insts,
+        terminal_cond_result_id: terminal_cond_result_id,
+        latch: latch,
+        else_stmts: else_stmts,
+        exit_stmts: exit_stmts,
+        label_base: label_base
     });
 }
 

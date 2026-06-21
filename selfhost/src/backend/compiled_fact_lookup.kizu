@@ -265,7 +265,7 @@ fn lookup_struct_field_type_by_prefix_or_empty(
     return suffix_type;
 }
 
-fn lookup_struct_field_type_by_prefix_or_empty_indexed(
+pub fn lookup_struct_field_type_by_prefix_or_empty_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
     module_prefix: []u8,
@@ -291,6 +291,119 @@ fn lookup_struct_field_type_by_prefix_or_empty_indexed(
     return try lookup_struct_field_type_by_prefix_or_empty(
         ir_bytes, module_prefix, short_type, target_index
     );
+}
+
+// lookup_struct_field_name_by_prefix_indexed returns the field name recorded at target_index in the
+// 'struct-field <Type> <index> <name> <type>' facts for short_type. It mirrors the field-type
+// lookup so a fact-driven struct constructor emitter can read both the field name (for passthrough
+// SSA values) and the field type (for owned-container detection) without parsing the body. Returns
+// empty when target_index has no field, so callers can use it to count fields.
+pub fn lookup_struct_field_name_by_prefix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    target_index: i64
+) -> ![]u8 {
+    let prefix = "struct-field ";
+    var entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, module_prefix, short_type
+    );
+    while entry_index >= 0 and
+        ir_index::entry_matches_query(
+            index, ir_bytes, entry_index, prefix, module_prefix, short_type
+        ) {
+        let field_name = try extract_struct_field_name_at_index(
+            ir_bytes, ir_index::entry_key_end(index, entry_index), target_index
+        );
+        if std::mem::len(field_name) > 0 {
+            return field_name;
+        }
+        entry_index = entry_index + 1;
+    }
+    return try lookup_struct_field_name_by_prefix_or_empty(
+        ir_bytes, module_prefix, short_type, target_index
+    );
+}
+
+fn lookup_struct_field_name_by_prefix_or_empty(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    target_index: i64
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "struct-field ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let type_len = std::mem::len(short_type);
+    var suffix_name = ir_bytes[0..0];
+    var index = 0;
+    while index + prefix_len + mp_len + type_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let type_start = index + prefix_len;
+            let type_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), type_start);
+            let mp_start = type_start;
+            let mp_end = mp_start + mp_len;
+            let short_end = mp_end + type_len;
+            if short_end == type_end and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..short_end], short_type) {
+                let field_name = try extract_struct_field_name_at_index(
+                    ir_bytes, type_end, target_index
+                );
+                if std::mem::len(field_name) > 0 {
+                    return field_name;
+                }
+            } else {
+                if std::mem::len(suffix_name) == 0 and
+                    type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
+                    let field_name = try extract_struct_field_name_at_index(
+                        ir_bytes, type_end, target_index
+                    );
+                    if std::mem::len(field_name) > 0 {
+                        suffix_name = field_name;
+                    }
+                }
+            }
+        }
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return suffix_name;
+}
+
+// extract_struct_field_name_at_index parses the field name token from a 'struct-field <Type>'
+// fact body of the form '<index> <name> <type>', returning the name only when the leading index
+// matches target_index. It mirrors extract_struct_field_type_at_index but stops at the name token.
+pub fn extract_struct_field_name_at_index(
+    ir_bytes: []u8,
+    after_type: i64,
+    target_index: i64
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    var pos = after_type;
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    var field_index = 0;
+    var found_digit = false;
+    while pos < byte_len and ir_bytes[pos] >= cast<u8>(48) and ir_bytes[pos] <= cast<u8>(57) {
+        field_index = field_index * 10 + cast<i64>(ir_bytes[pos]) - 48;
+        found_digit = true;
+        pos = pos + 1;
+    }
+    if !found_digit or field_index != target_index {
+        return ir_bytes[0..0];
+    }
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    let name_start = pos;
+    while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
+        pos = pos + 1;
+    }
+    return ir_bytes[name_start..pos];
 }
 
 fn type_matches_suffix(full_type: []u8, short_type: []u8) -> bool {
