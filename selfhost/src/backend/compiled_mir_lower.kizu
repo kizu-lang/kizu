@@ -244,9 +244,7 @@ fn lower_multi_let_ast_get(
     // edge/kind) to the call node's body-node line via the index; the subtree sorts at-or-after
     // it, so a scan from cf is byte-identical to one from bs. The hoisted/single arg lowering
     // recurses into expr lowering, so it keeps bs.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, call_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, call_node, "callee", 0, cf
     );
@@ -474,15 +472,14 @@ fn lower_multi_let_arena_add(
     try_counter: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64,
-    ir_lookup_index: &ir_index::IrIndex
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
     // cf tightens this call's own structural facts (callee/receiver/field edges, kinds, tokens,
     // arg edge/kind) to the call node's body-node line via the index; the subtree sorts
     // at-or-after it, so a scan from cf is byte-identical to one from bs. Param type resolution
     // (find_param_*) and the struct-field lowering recursion keep bs.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, call_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, call_node, "callee", 0, cf
     );
@@ -7867,6 +7864,12 @@ pub fn lower_multi_statement_function(
     defer aliases.deinit();
     var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
     defer call_arg_type_cache.deinit();
+    // Build the per-function body-node position index once (pillar A): every per-node structural lookup
+    // below resolves its node->line offset through fn_node_line_start in O(1) instead of the global
+    // index binary search. Byte-identical (same offsets); only the lookup cost changes.
+    try compiled_mir_types::build_fn_node_index(
+        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
+    );
     // Top-level 'defer <receiver>.deinit();' statements register a cleanup that must run on every
     // exit path reached after the defer. We collect each defer body's inner expression node here and
     // re-lower it (via the owned-deinit expression path) immediately before each top-level Return,
@@ -7884,11 +7887,10 @@ pub fn lower_multi_statement_function(
         let statement = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, 0, "statement", stmt_index, stmt_scan_from
         );
-        // sf is this statement's body-node line via the index; its own structural facts (its kind
-        // here) sort at-or-after it, so a scan from sf is byte-identical to one from bs.
-        let sf = ir_index::body_node_line_start_for_sequence(
-            ir_lookup_index, ir_bytes, function_name, statement, bs
-        );
+        // sf is this statement's body-node line via the per-function index (pillar A, O(1)); its own
+        // structural facts (its kind here) sort at-or-after it, so a scan from sf is byte-identical
+        // to one from bs.
+        let sf = compiled_mir_types::fn_node_line_start(&call_arg_type_cache, statement, bs);
         stmt_scan_from = sf;
         let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, sf);
         if std::mem::equal_bytes(stmt_kind, "Let") {
@@ -8812,9 +8814,7 @@ fn lower_multi_expr_statement(
     // The statement-lowering recursion (owned-deinit / free-try-call / array-append / string-arg /
     // method-try-call) and receiver type resolution keep bs because they read facts that can
     // precede this node.
-    let sf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, statement, bs
-    );
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
     let expr = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "expr", 0, sf
     );
@@ -9422,9 +9422,7 @@ fn lower_multi_let_statement(
     // body-node line via the index; those facts sort at-or-after it, so a scan from sf is
     // byte-identical to one from bs. let_binding_is_shadowed scans for sibling bindings that can
     // precede this node, so it keeps bs, as does the named-lowering recursion below.
-    let sf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, statement, bs
-    );
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
     let let_name_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "name", 0, sf
     );
@@ -9470,9 +9468,7 @@ fn lower_multi_let_statement_named(
     // (method_call_info, ast_get_receiver_is_ast, struct-field/return-type resolvers) and the
     // expr/call lowering recursion keep bs because they read let/param facts that can precede
     // this node (the index-keyed return/struct-type resolvers tighten their own structural read).
-    let sf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, statement, bs
-    );
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
     let let_value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "value", 0, sf
     );
@@ -9637,7 +9633,7 @@ fn lower_multi_let_statement_named(
             return try lower_multi_let_arena_add(
                 ir_bytes, function_name, module_prefix, locals_spec,
                 let_name, let_value, string_counter, temp_counter, try_counter, stmts, bs,
-                ir_lookup_index
+                ir_lookup_index, call_arg_type_cache
             );
         }
         // 'var code = std::array::Array<T>(<allocator>);' is a standalone runtime-owned
@@ -9868,11 +9864,14 @@ fn lower_try_call_args_with_local_aliases_cached(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !TryCallArgsLowerResult {
+    // cf is this call node's body-node line via the per-function index (pillar A, O(1)); its callee
+    // detail and arg edges sort at-or-after it, so a scan from cf is byte-identical to one from bs.
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, module_prefix, callee_name, arg_count, ir_lookup_index, call_arg_type_cache
@@ -9895,10 +9894,14 @@ fn lower_try_call_args_with_local_aliases_cached(
     var string_idx = string_counter;
     while arg_index < arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
+        // af tightens this argument's own structural reads (its hoist-kind check and scalar
+        // lowering) to its body-node line; the expr-lowering recursion keeps bs (it re-tightens
+        // internally through its own per-function index lookup).
+        let af = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
         let arg_type = try arg_types.get(arg_index);
-        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, af) {
             let before = arg_insts.len();
             let temp_id = try lower_expr_with_local_aliases(
                 ir_bytes,
@@ -10244,9 +10247,7 @@ fn lower_multi_let_try_call(
     // node's body-node line via the index; lower_call_callee_name / module_prefix only scan the
     // callee, so passing cf is byte-identical to bs (the return/success-type resolvers above
     // tighten their own structural read internally and keep index-keyed type resolution on bs).
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, call_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_name = try compiled_mir_types::lower_call_callee_name(
         ir_bytes, function_name, module_prefix, call_node, cf
     );
@@ -10315,9 +10316,7 @@ fn lower_multi_assign_statement(
     // so a scan from sf is byte-identical to one from bs. The target type resolution reads back
     // across the function, and the let-try-call recursion / index-keyed success-type resolver keep
     // bs.
-    let sf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, statement, bs
-    );
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
     let target = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "target", 0, sf
     );
@@ -10329,9 +10328,9 @@ fn lower_multi_assign_statement(
     );
     // Resolving the target's type proves it is a bound local (an unbound name surfaces 'local type
     // not found' rather than being silently accepted) and yields the type the reassigned value carries.
-    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
         ir_lookup_index,
-        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs
+        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs, call_arg_type_cache
     );
     let value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "value", 0, sf
@@ -10397,9 +10396,7 @@ fn lower_multi_let_call(
     // node's body-node line via the index; lower_call_callee_name / module_prefix only scan the
     // callee, so passing cf is byte-identical to bs. The return-type resolver tightens its own
     // structural read internally and the cached arg lowering recurses, so both keep bs.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, call_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let call_type = try compiled_mir_types::lower_call_return_type_indexed(
         ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
@@ -10559,9 +10556,7 @@ fn lower_multi_let_array_get(
     // edge and kind/token, arg edge) to the call node's body-node line via the index; the subtree
     // sorts at-or-after it, so a scan from cf is byte-identical to one from bs. The receiver type
     // resolution reads back across the function and the index lowering recurses, so both keep bs.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, call_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, call_node, "callee", 0, cf
     );
@@ -10602,9 +10597,9 @@ fn lower_multi_let_array_get(
         ir_bytes, function_name, receiver_node, cf
     );
     let receiver_alias = try local_alias_current_name(aliases, receiver_name);
-    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed(
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed_cached(
         ir_lookup_index,
-        ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs
+        ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs, call_arg_type_cache
     );
     let lookup = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
     if !is_array_field_type(lookup) {
@@ -10665,9 +10660,9 @@ fn try_call_success_type(
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex
 ) -> ![]u8 {
-    // cf tightens the structural callee read to the call node's body-node line via the index
-    // (the 'body-call' detail sorts immediately after it); the signature-return lookup below is
-    // index-keyed by callee name, so it is unaffected. Byte-identical to a scan from bs.
+    // cf tightens the structural callee read to the call node's body-node line via the global
+    // index (this resolver is not threaded with the per-function index); the signature-return
+    // lookup below is index-keyed by callee name, so it is unaffected. Byte-identical to bs.
     let cf = ir_index::body_node_line_start_for_sequence(
         ir_lookup_index, ir_bytes, function_name, call_node, bs
     );
@@ -10926,14 +10921,14 @@ fn lower_try_call_void_if(
             let input_name = try local_alias_current_name(aliases, branch_state.source_name);
             if !std::mem::equal_bytes(input_name, branch_state.current_name) {
                 let output_name = try void_then_alias_name(merge_alias_counter);
-                let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+                let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
                     ir_lookup_index,
                     ir_bytes,
                     function_name,
                     module_prefix,
                     locals_spec,
                     branch_state.source_name,
-                    bs
+                    bs, call_arg_type_cache
                 );
                 try merge_vars.append(compiled_mir::if_merge_var(
                     branch_state.source_name,
@@ -11018,9 +11013,7 @@ fn lower_multi_return_statement(
     // at-or-after it, so a scan from sf is byte-identical to one from bs. Shape detection that
     // reads back across the function, the expr/call lowering recursion, and the index-keyed
     // return-type resolver keep bs.
-    let sf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, statement, bs
-    );
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
     let value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "value", 0, sf
     );
@@ -11449,9 +11442,7 @@ fn lower_multi_return_array_get(
     // arg edge) to the call node's body-node line via the index; the subtree sorts at-or-after it,
     // so a scan from cf is byte-identical to one from bs. Param type resolution (find_param_*) and
     // the index expression lowering recursion keep bs.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, call_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, call_node, "callee", 0, cf
     );
@@ -11825,9 +11816,9 @@ fn lower_void_then_body_assign(
     // Resolving the target's LLVM type proves it is a local bound before the then-body (an unbound
     // name surfaces 'local type not found' rather than being silently accepted) and yields the type
     // the reassigned value must carry.
-    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
         ir_lookup_index,
-        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs
+        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs, call_arg_type_cache
     );
     let value = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "value", 0, bs
@@ -11911,9 +11902,9 @@ fn lower_induction_init_alias(
             alias_counter: alias_counter
         };
     }
-    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
         ir_lookup_index,
-        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs
+        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs, call_arg_type_cache
     );
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let result_id = try lower_expr_with_local_aliases(
@@ -12476,14 +12467,14 @@ fn lower_void_if_no_else_statement(
             let input_name = try local_alias_current_name(aliases, branch_state.source_name);
             if !std::mem::equal_bytes(input_name, branch_state.current_name) {
                 let output_name = try void_then_alias_name(merge_alias_counter);
-                let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+                let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
                     ir_lookup_index,
                     ir_bytes,
                     function_name,
                     module_prefix,
                     locals_spec,
                     branch_state.source_name,
-                    bs
+                    bs, call_arg_type_cache
                 );
                 try merge_vars.append(compiled_mir::if_merge_var(
                     branch_state.source_name,
@@ -12641,9 +12632,7 @@ fn lower_multi_if_statement(
     // via the index; that subtree sorts at-or-after it, so a scan from sf is byte-identical to one
     // from bs. The try-call shape detectors that read back across the function, the then/else block
     // lowering recursion, and the index-keyed return-type resolver keep bs.
-    let sf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, statement, bs
-    );
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, sf
     );
@@ -13855,9 +13844,9 @@ fn validate_branch_merge_exit_assign(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !void {
-    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
         ir_lookup_index,
-        ir_bytes, function_name, module_prefix, locals_spec, induction_var, bs
+        ir_bytes, function_name, module_prefix, locals_spec, induction_var, bs, call_arg_type_cache
     );
     if !std::mem::equal_bytes(target_type, "i64") {
         return error("compiled mir: branch-merge induction target must be i64");
@@ -18057,9 +18046,7 @@ fn lower_expr_method_call_with_local_aliases(
     // to the call node's body-node line via the index; the args sort after it, so a scan from
     // cf reaches the byte-identical facts a scan from bs would. bs is kept for receiver/return
     // type resolution and lowering recursion, which read facts that can precede this node.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, call_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let info = try method_call_info(
         ir_bytes, function_name, module_prefix, params_spec, call_node, bs
     );
@@ -18151,9 +18138,7 @@ fn lower_expr_call_with_local_aliases(
     // from cf reaches the byte-identical facts a scan from bs would (perf only). bs is kept for
     // type/name resolution (return type, arg types) and lowering recursion, which read let/param
     // facts that can precede this node.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, expr_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, expr_node, bs);
     if try callee_is_field_expr(ir_bytes, function_name, expr_node, cf) {
         if try call_method_name_is(ir_bytes, function_name, expr_node, "len", cf) {
             let result = try lower_expr_value_len(
@@ -18224,9 +18209,7 @@ fn lower_expr_into_local_aliases(
     // from the function body start. This node's children sort after it, so a scan from nf
     // reaches the byte-identical facts a scan from bs would (perf only). bs is kept for
     // type/name resolution and lowering recursion, which read facts that can precede this node.
-    let nf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, expr_node, bs
-    );
+    let nf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, expr_node, bs);
     let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr_node, nf);
     let id = id_base + insts.len();
     if std::mem::equal_bytes(kind, "Var") {
@@ -18236,9 +18219,9 @@ fn lower_expr_into_local_aliases(
             expr_node,
             nf
         );
-        let var_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+        let var_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
             ir_lookup_index,
-            ir_bytes, function_name, module_prefix, params_spec, var_name, bs
+            ir_bytes, function_name, module_prefix, params_spec, var_name, bs, call_arg_type_cache
         );
         try insts.append(compiled_mir::var_expr_inst(
             id, var_type, try local_alias_current_name(aliases, var_name)
@@ -18571,9 +18554,9 @@ fn lower_expr_into(
             expr_node,
             bs
         );
-        let var_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
+        let var_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
             ir_lookup_index,
-            ir_bytes, function_name, module_prefix, params_spec, var_name, bs
+            ir_bytes, function_name, module_prefix, params_spec, var_name, bs, call_arg_type_cache
         );
         try insts.append(compiled_mir::var_expr_inst(id, var_type, var_name));
         return id;
@@ -19157,9 +19140,7 @@ fn lower_expr_field_with_local_aliases(
     // edge, receiver kind/token) to its body-node line via the index; the receiver sorts after
     // it, so a scan from nf reaches the byte-identical facts a scan from bs would. bs is kept
     // for the delegated namespace path, field-type resolution, and lowering recursion.
-    let nf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, expr_node, bs
-    );
+    let nf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, expr_node, bs);
     let mode = try ir_contract::sequence_fact_second_value_from(
         ir_bytes, "body-field-expr ", function_name, expr_node, nf
     );

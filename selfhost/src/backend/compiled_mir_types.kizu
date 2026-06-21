@@ -19,6 +19,20 @@ pub struct CallArgTypeCache {
     pub arg_counts: std::array::Array<i64>,
     pub type_starts: std::array::Array<i64>,
     pub types: std::array::Array<[]u8>,
+    // node_line_starts is the per-function body-node position index (pillar A): node_line_starts[seq]
+    // is the byte offset of this function's 'body-node <fn> <seq>' line in ir_bytes, built once at
+    // lowering start by build_fn_node_index. fn_node_line_start reads it in O(1) instead of the
+    // global index binary search. Empty (len 0) until built, in which case lookups fall back to bs.
+    pub node_line_starts: std::array::Array<i64>,
+    // local_names / local_types is the per-function local-binding type cache (pillar B): local_types[i]
+    // is the resolved kizu type of the let-bound local local_names[i]. resolve_local_kizu_type is a
+    // deterministic function of (function, name) (it scans block 0 direct-first then nested, the
+    // same order regardless of where the read sits), so memoizing it by name within this
+    // per-function cache returns the byte-identical type while collapsing the repeated O(function)
+    // body scans for a local referenced many times. Both slices borrow ir_bytes, which outlives the
+    // cache.
+    pub local_names: std::array::Array<[]u8>,
+    pub local_types: std::array::Array<[]u8>,
     pub lookups: i64,
     pub hits: i64,
 }
@@ -30,6 +44,9 @@ pub fn call_arg_type_cache() -> CallArgTypeCache {
         arg_counts: std::array::Array<i64>(std::mem::page_allocator()),
         type_starts: std::array::Array<i64>(std::mem::page_allocator()),
         types: std::array::Array<[]u8>(std::mem::page_allocator()),
+        node_line_starts: std::array::Array<i64>(std::mem::page_allocator()),
+        local_names: std::array::Array<[]u8>(std::mem::page_allocator()),
+        local_types: std::array::Array<[]u8>(std::mem::page_allocator()),
         lookups: 0,
         hits: 0
     };
@@ -37,12 +54,74 @@ pub fn call_arg_type_cache() -> CallArgTypeCache {
 
 impl CallArgTypeCache {
     fn deinit(self: CallArgTypeCache) -> void {
+        self.local_types.deinit();
+        self.local_names.deinit();
+        self.node_line_starts.deinit();
         self.types.deinit();
         self.type_starts.deinit();
         self.arg_counts.deinit();
         self.callee_names.deinit();
         self.module_prefixes.deinit();
     }
+}
+
+// resolve_local_kizu_type_cached memoizes resolve_local_kizu_type by name in the per-function cache
+// (pillar B). The result is a deterministic function of (function, name), so a cache hit returns the
+// byte-identical type a fresh scan would; a miss does the one full body scan and records it. This
+// turns O(references * function) local-type resolution into O(unique locals * function + references
+// * unique locals).
+pub fn resolve_local_kizu_type_cached(
+    cache: &var CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    name: []u8,
+    bs: i64
+) -> ![]u8 {
+    var i = 0;
+    while i < cache.local_names.len() {
+        if std::mem::equal_bytes(cache.local_names.get_or_panic(i), name) {
+            return cache.local_types.get_or_panic(i);
+        }
+        i = i + 1;
+    }
+    let resolved = try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
+    try cache.local_names.append(name);
+    try cache.local_types.append(resolved);
+    return resolved;
+}
+
+// build_fn_node_index populates cache.node_line_starts with the current function's body-node line
+// offsets (pillar A). It is called once at function lowering start; every per-node structural lookup
+// during that function's lowering then resolves its node->line offset through fn_node_line_start
+// (O(1)) instead of the global index binary search (O(log total) with a full function-name compare
+// per step). Byte-identical: the collected offsets equal body_node_line_start_for_sequence's.
+pub fn build_fn_node_index(
+    cache: &var CallArgTypeCache,
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8
+) -> !void {
+    let from = ir_index::body_node_facts_start(index, ir_bytes, function_name);
+    try ir_contract::collect_body_node_line_starts(
+        ir_bytes, function_name, from, &var cache.node_line_starts
+    );
+    return;
+}
+
+// fn_node_line_start returns the current function's 'body-node <fn> <sequence>' line offset from
+// the per-function index in O(1), or fallback (the function body start bs) when the index is not
+// built or has no entry for sequence -- the same fallback body_node_line_start_for_sequence uses,
+// so a downstream scan started here reads the byte-identical facts.
+pub fn fn_node_line_start(cache: &CallArgTypeCache, sequence: i64, fallback: i64) -> i64 {
+    if sequence < 0 or sequence >= cache.node_line_starts.len() {
+        return fallback;
+    }
+    let offset = cache.node_line_starts.get_or_panic(sequence);
+    if offset < 0 {
+        return fallback;
+    }
+    return offset;
 }
 
 pub fn resolve_value_llvm_type(
@@ -105,6 +184,29 @@ pub fn resolve_value_llvm_type_indexed(
     return try compiled_type_lower::kizu_type_to_llvm_indexed(index, ir_bytes, module_prefix, kizu_type);
 }
 
+// resolve_value_llvm_type_indexed_cached is resolve_value_llvm_type_indexed with the local-type
+// resolution routed through the per-function cache (pillar B). Hot callers that thread a cache use this
+// to collapse a local's repeated O(function) body scans; the result is byte-identical.
+pub fn resolve_value_llvm_type_indexed_cached(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    name: []u8,
+    bs: i64,
+    cache: &var CallArgTypeCache
+) -> ![]u8 {
+    let param_type = find_spec_llvm_type_or_empty(params_spec, name);
+    if std::mem::len(param_type) > 0 {
+        return param_type;
+    }
+    let kizu_type = try resolve_local_kizu_type_cached(
+        cache, ir_bytes, function_name, module_prefix, name, bs
+    );
+    return try compiled_type_lower::kizu_type_to_llvm_indexed(index, ir_bytes, module_prefix, kizu_type);
+}
+
 pub fn resolve_value_kizu_type_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
@@ -125,6 +227,33 @@ pub fn resolve_value_kizu_type_indexed(
         return fact_param;
     }
     return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
+}
+
+// resolve_value_kizu_type_indexed_cached mirrors resolve_value_kizu_type_indexed with the
+// local-type resolution routed through the per-function cache (pillar B); byte-identical.
+pub fn resolve_value_kizu_type_indexed_cached(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    name: []u8,
+    bs: i64,
+    cache: &var CallArgTypeCache
+) -> ![]u8 {
+    let param_type = find_spec_llvm_type_or_empty(params_spec, name);
+    if std::mem::len(param_type) > 0 {
+        return try find_function_param_kizu_type_indexed(index, ir_bytes, function_name, name);
+    }
+    let fact_param = try find_function_param_kizu_type_or_empty_indexed(
+        index, ir_bytes, function_name, name
+    );
+    if std::mem::len(fact_param) > 0 {
+        return fact_param;
+    }
+    return try resolve_local_kizu_type_cached(
+        cache, ir_bytes, function_name, module_prefix, name, bs
+    );
 }
 
 pub fn struct_lookup_kizu_type(kizu_type: []u8) -> []u8 {
