@@ -375,34 +375,42 @@ fn method_call_info(
     module_prefix: []u8,
     params_spec: []u8,
     call_node: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
 ) -> !MethodCallInfo {
+    // cf tightens this call's own structural reads (callee/receiver edges, field-expr mode/name,
+    // receiver kind/token) to the call node's body-node line via the index; the whole-IR
+    // type/signature resolutions below route through their _indexed twins. bs is kept for the
+    // receiver value resolution, which reads let/param facts that can precede this node.
+    let cf = ir_index::body_node_line_start_for_sequence(
+        ir_lookup_index, ir_bytes, function_name, call_node, bs
+    );
     let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "callee", 0, bs
+        ir_bytes, function_name, call_node, "callee", 0, cf
     );
     let mode = try ir_contract::sequence_fact_second_value_from(
-        ir_bytes, "body-field-expr ", function_name, callee_node, bs
+        ir_bytes, "body-field-expr ", function_name, callee_node, cf
     );
     if !std::mem::equal_bytes(mode, "field") {
         return error("compiled mir: method call callee must be field-mode");
     }
     let receiver_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, cf
     );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, cf
     );
     if !std::mem::equal_bytes(receiver_kind, "Var") {
         return error("compiled mir: method call receiver must be a local or parameter");
     }
     let receiver_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, cf
     );
-    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
-        ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
     );
-    let receiver_llvm = try compiled_type_lower::kizu_type_to_llvm(
-        ir_bytes, module_prefix, receiver_kizu
+    let receiver_llvm = try compiled_type_lower::kizu_type_to_llvm_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, receiver_kizu
     );
     let lookup_type = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
     let type_prefix = compiled_util::module_prefix_of(lookup_type);
@@ -412,7 +420,7 @@ fn method_call_info(
     }
     let type_name = lookup_type[std::mem::len(type_prefix)..std::mem::len(lookup_type)];
     let method_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, callee_node, "field", bs
+        ir_bytes, function_name, callee_node, "field", cf
     );
     var qualified = std::string::String(std::mem::page_allocator());
     try qualified.append_bytes(impl_prefix);
@@ -423,14 +431,14 @@ fn method_call_info(
     var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
     try copied.insert(qualified_name_view, qualified_name_view);
     let qualified_name = try copied.get(qualified_name_view);
-    let return_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified_name
+    let return_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+        ir_lookup_index, ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified_name
     );
     if std::mem::len(return_kizu) == 0 {
         return error("compiled mir: method call signature not found");
     }
-    let return_llvm = try compiled_type_lower::kizu_type_to_llvm(
-        ir_bytes, impl_prefix, return_kizu
+    let return_llvm = try compiled_type_lower::kizu_type_to_llvm_indexed(
+        ir_lookup_index, ir_bytes, impl_prefix, return_kizu
     );
     let callee_prefix = compiled_util::module_prefix_of(qualified_name);
     return MethodCallInfo {
@@ -8887,8 +8895,8 @@ fn lower_multi_expr_statement(
     // a plain i64 argument, the receiver's declared Array<T> type supplies the
     // element LLVM type, and both arguments lower through the shared method-arg path.
     if std::mem::equal_bytes(method_name, "set") {
-        let set_receiver_kizu = try compiled_mir_types::resolve_receiver_value_kizu_type(
-            ir_bytes, function_name, module_prefix, receiver_name, bs
+        let set_receiver_kizu = try compiled_mir_types::resolve_receiver_value_kizu_type_indexed(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, receiver_name, bs
         );
         let set_element_kizu = compiled_mir_types::array_value_element_kizu_type_or_empty(
             array_receiver_lookup_kizu_type(set_receiver_kizu)
@@ -8923,8 +8931,8 @@ fn lower_multi_expr_statement(
     // declared Array<T> type supplies the element LLVM type and the single value
     // argument lowers through the shared method-arg path.
     if std::mem::equal_bytes(method_name, "append") {
-        let receiver_kizu = try compiled_mir_types::resolve_receiver_value_kizu_type(
-            ir_bytes, function_name, module_prefix, receiver_name, bs
+        let receiver_kizu = try compiled_mir_types::resolve_receiver_value_kizu_type_indexed(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, receiver_name, bs
         );
         let element_kizu = compiled_mir_types::array_value_element_kizu_type_or_empty(
             array_receiver_lookup_kizu_type(receiver_kizu)
@@ -9162,7 +9170,7 @@ fn lower_void_method_try_call_statement(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiExprLowerResult {
     let info = try method_call_info(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs, ir_lookup_index
     );
     if !std::mem::equal_bytes(info.return_llvm_type, "%kizu.error.void") {
         return error("compiled mir: method try-call statement must return !void");
@@ -9563,7 +9571,7 @@ fn lower_multi_let_statement_named(
             if try call_method_receiver_is_var(ir_bytes, function_name, let_value, sf) {
                 if try call_has_try_arg(ir_bytes, function_name, let_value, sf) {
                     let info = try method_call_info(
-                        ir_bytes, function_name, module_prefix, locals_spec, let_value, bs
+                        ir_bytes, function_name, module_prefix, locals_spec, let_value, bs, ir_lookup_index
                     );
                     var method_arg_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
                     var method_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
@@ -10117,7 +10125,7 @@ fn lower_method_call_args_hoisting_try_args_with_local_aliases(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !TryArgCallArgsLowerResult {
     let info = try method_call_info(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs, ir_lookup_index
     );
     let explicit_arg_count = try compiled_mir_types::count_call_args(
         ir_bytes, function_name, call_node, bs
@@ -17980,7 +17988,7 @@ fn lower_expr_method_call(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let info = try method_call_info(
-        ir_bytes, function_name, module_prefix, params_spec, call_node, bs
+        ir_bytes, function_name, module_prefix, params_spec, call_node, bs, ir_lookup_index
     );
     let explicit_arg_count = try compiled_mir_types::count_call_args(
         ir_bytes, function_name, call_node, bs
@@ -18048,7 +18056,7 @@ fn lower_expr_method_call_with_local_aliases(
     // type resolution and lowering recursion, which read facts that can precede this node.
     let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let info = try method_call_info(
-        ir_bytes, function_name, module_prefix, params_spec, call_node, bs
+        ir_bytes, function_name, module_prefix, params_spec, call_node, bs, ir_lookup_index
     );
     let explicit_arg_count = try compiled_mir_types::count_call_args(
         ir_bytes, function_name, call_node, cf
