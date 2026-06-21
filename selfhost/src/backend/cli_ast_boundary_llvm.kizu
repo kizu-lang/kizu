@@ -200,72 +200,29 @@ fn append_unsupported_parse_result_function(out: &var std::string::String) -> !v
 }
 
 fn append_parse_validated_ast_function(out: &var std::string::String) -> !void {
+    // issue 1157: cli_parse_validated_ast is now a thin glue over the compiled parser. It builds a
+    // SourceFile {path, text} and calls the lowered std::kizu::parser::parse_program
+    // (@kizu_kizu__parser_parse_program, seeded into the parser closure), then unwraps the
+    // error-union result {i1 ok, parse_result value, msg}. The file is already diagnostic-validated
+    // before this is reached, so the ok path is the norm; the error edge falls back to
+    // unsupported_parse_result. The hand-written tokenize/parse_decl loop that previously lived here
+    // (and its cli_* AST-mutator/token helpers) is retired now that the real parser lowers natively.
     try append_line(out, "define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast(");
     try append_line(out, "  %kizu.owned %allocator,");
     try append_line(out, "  %kizu.slice.u8 %path,");
     try append_line(out, "  %kizu.slice.u8 %source");
     try append_line(out, ") {");
     try append_line(out, "entry:");
-    try append_line(out, "  %decl_slots = alloca [16 x %kizu.kizu.ast.node_id], align 8");
     try append_line(out,
-        "  %tokens_result = call %kizu.error.owned @kizu_kizu__lexer_tokenize(%kizu.owned %allocator, %kizu.slice.u8 %source)");
-    try append_line(out, "  %tokens_ok = extractvalue %kizu.error.owned %tokens_result, 0");
-    try append_line(out, "  br i1 %tokens_ok, label %parse, label %unsupported");
-    try append_line(out, "parse:");
-    try append_line(out, "  %tokens = extractvalue %kizu.error.owned %tokens_result, 1");
+        "  %file0 = insertvalue %kizu.kizu.ast.source_file poison, %kizu.slice.u8 %path, 0");
     try append_line(out,
-        "  %ast = call %kizu.kizu.ast.ast @kizu_selfhost__cli_ast_new(%kizu.owned %allocator, %kizu.slice.u8 %path, %kizu.slice.u8 %source)");
-    try append_line(out, "  br label %parse_loop");
-    try append_line(out, "parse_loop:");
-    try append_line(out, "  %index = phi i64 [ 0, %parse ], [ %decl_next, %store_decl ]");
-    try append_line(out, "  %decl_count = phi i64 [ 0, %parse ], [ %decl_count_next, %store_decl ]");
+        "  %file = insertvalue %kizu.kizu.ast.source_file %file0, %kizu.slice.u8 %source, 1");
     try append_line(out,
-        "  %token = call %kizu.kizu.lexer.token @kizu_selfhost__cli_token_at(%kizu.owned %tokens, i64 %index)");
-    try append_line(out, "  %kind = extractvalue %kizu.kizu.lexer.token %token, 0");
-    try append_line(out, "  %is_eof = icmp eq i64 %kind, 62");
-    try append_line(out, "  br i1 %is_eof, label %finish, label %parse_decl");
-    try append_line(out, "parse_decl:");
-    try append_line(out,
-        "  %decl = call %kizu.selfhost.cli.parse_node_result @kizu_selfhost__cli_parse_decl(%kizu.owned %allocator, %kizu.kizu.ast.ast %ast, %kizu.slice.u8 %source, %kizu.owned %tokens, i64 %index)");
-    try append_line(out, "  %decl_ok = extractvalue %kizu.selfhost.cli.parse_node_result %decl, 0");
-    try append_line(out, "  br i1 %decl_ok, label %decl_ok_block, label %unsupported");
-    try append_line(out, "decl_ok_block:");
-    try append_line(out, "  %decl_next = extractvalue %kizu.selfhost.cli.parse_node_result %decl, 1");
-    try append_line(out, "  %decl_node = extractvalue %kizu.selfhost.cli.parse_node_result %decl, 2");
-    try append_line(out, "  %advanced = icmp sgt i64 %decl_next, %index");
-    try append_line(out, "  %has_capacity = icmp slt i64 %decl_count, 16");
-    try append_line(out, "  %can_store = and i1 %advanced, %has_capacity");
-    try append_line(out, "  br i1 %can_store, label %store_decl, label %unsupported");
-    try append_line(out, "store_decl:");
-    try append_line(out,
-        "  %decl_slot = getelementptr inbounds [16 x %kizu.kizu.ast.node_id], ptr %decl_slots, i64 0, i64 %decl_count");
-    try append_line(out, "  store %kizu.kizu.ast.node_id %decl_node, ptr %decl_slot, align 8");
-    try append_line(out, "  %decl_count_next = add i64 %decl_count, 1");
-    try append_line(out, "  br label %parse_loop");
-    try append_line(out, "finish:");
-    try append_line(out, "  %decl_start = call i64 @kizu_selfhost__cli_ast_child_len(%kizu.kizu.ast.ast %ast)");
-    try append_line(out, "  br label %append_decls");
-    try append_line(out, "append_decls:");
-    try append_line(out, "  %append_index = phi i64 [ 0, %finish ], [ %append_next, %append_ok ]");
-    try append_line(out, "  %append_done = icmp eq i64 %append_index, %decl_count");
-    try append_line(out, "  br i1 %append_done, label %build_program, label %append_decl");
-    try append_line(out, "append_decl:");
-    try append_line(out,
-        "  %append_slot = getelementptr inbounds [16 x %kizu.kizu.ast.node_id], ptr %decl_slots, i64 0, i64 %append_index");
-    try append_line(out, "  %append_node = load %kizu.kizu.ast.node_id, ptr %append_slot, align 8");
-    try append_line(out,
-        "  %append_result = call %kizu.error.void @kizu_selfhost__cli_ast_append_child(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %append_node)");
-    try append_line(out, "  %append_result_ok = extractvalue %kizu.error.void %append_result, 0");
-    try append_line(out, "  br i1 %append_result_ok, label %append_ok, label %unsupported");
-    try append_line(out, "append_ok:");
-    try append_line(out, "  %append_next = add i64 %append_index, 1");
-    try append_line(out, "  br label %append_decls");
-    try append_line(out, "build_program:");
-    try append_line(out, "  %eof_end = extractvalue %kizu.kizu.lexer.token %token, 2");
-    try append_line(out,
-        "  %program = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_program(%kizu.kizu.ast.ast %ast, i64 0, i64 %eof_end, i64 %decl_start, i64 %decl_count)");
-    try append_line(out,
-        "  %parsed = call %kizu.kizu.ast.parse_result @kizu_kizu__ast_parse_result(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %program)");
+        "  %parsed_eu = call %kizu.error.parse_result @kizu_kizu__parser_parse_program(%kizu.owned %allocator, %kizu.kizu.ast.source_file %file)");
+    try append_line(out, "  %parse_ok = extractvalue %kizu.error.parse_result %parsed_eu, 0");
+    try append_line(out, "  br i1 %parse_ok, label %ok, label %unsupported");
+    try append_line(out, "ok:");
+    try append_line(out, "  %parsed = extractvalue %kizu.error.parse_result %parsed_eu, 1");
     try append_line(out, "  ret %kizu.kizu.ast.parse_result %parsed");
     try append_line(out, "unsupported:");
     try append_line(out,

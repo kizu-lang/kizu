@@ -413,7 +413,9 @@ func requiredLLVMExecutableFragments() []string {
 		"@.kizu.cli.codegen_metadata_line = private unnamed_addr constant",
 		"define %kizu.slice.u8 @kizu_selfhost__ir_codegen_metadata_line()",
 		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
-		"%tokens_result = call %kizu.error.owned @kizu_kizu__lexer_tokenize",
+		// issue 1157: cli_parse_validated_ast is now a thin glue that calls the compiled
+		// std::kizu::parser::parse_program instead of the retired hand-written tokenize/parse loop.
+		"%parsed_eu = call %kizu.error.parse_result @kizu_kizu__parser_parse_program(",
 		"@kizu_kizu__ast_ast_add_node",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_lower_program",
 		"define %kizu.error.owned @kizu_selfhost__ir_code_render_render_run_artifact",

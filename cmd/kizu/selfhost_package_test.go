@@ -1879,7 +1879,7 @@ func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
 
 	for _, fragment := range []string{
 		"@kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_kizu__lexer_tokenize",
+		"@kizu_kizu__parser_parse_program",
 		"@kizu_selfhost__ir_code_render_render_run_artifact",
 		"@kizu_selfhost__cli_lower_test_parse_result",
 	} {
@@ -2020,7 +2020,9 @@ func assertHostedRunLLVMResponsibilities(
 	}
 	requiredAstBoundary := []string{
 		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_kizu__lexer_tokenize",
+		// issue 1157: the AST boundary now delegates tokenizing + parsing to the compiled
+		// std::kizu::parser::parse_program rather than the retired hand-written tokenize loop.
+		"@kizu_kizu__parser_parse_program",
 		"@kizu_kizu__ast_ast_add_node",
 		"@kizu_kizu__ast_parse_result",
 	}
@@ -2565,7 +2567,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_parse_validated_ast_function(",
 		"fn append_parse_decl_function(",
 		"fn append_parse_block_function(",
-		"@kizu_kizu__lexer_tokenize",
+		"@kizu_kizu__parser_parse_program",
 		"@kizu_kizu__ast_ast_add_node",
 	},
 	"../../selfhost/src/backend/cli_codegen_llvm.kizu": {
@@ -3547,7 +3549,7 @@ func assertExecutableParserConsumers(
 func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"@kizu_kizu__lexer_tokenize",
+		"@kizu_kizu__parser_parse_program",
 		"@kizu_selfhost__cli_parse_validated_ast",
 		"@kizu_kizu__ast_ast_add_node",
 		"@kizu_kizu__ast_parse_result",
