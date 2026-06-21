@@ -7652,6 +7652,15 @@ fn lower_embedded_value_cursor_append_loop(
             let receiver_name = try ir_contract::body_token_or_empty_from(
                 ir_bytes, function_name, receiver, bs
             );
+            // Read the receiver through its current local-alias name, not its source spelling. When
+            // the body reassigns the receiver inside an if/else (parse_impl_decl: 'method' is
+            // reseated in both arms), the body-if lowering merges the branch values into a
+            // %void.then.alias.N load and rebinds 'method' to that alias. The latch must extract its
+            // field from that merged value; using the source name would read the receiver's loop-top
+            // let-init instead, so the carried cursor would never advance and the loop would spin
+            // forever. An un-reassigned receiver has no alias, so this resolves back to its source
+            // name and the single-binding (e.g. 'let statement = ...') latch is unchanged.
+            let receiver_alias = try local_alias_current_name(&body_aliases, receiver_name);
             let info = try compiled_mir_types::resolve_field_expr_indexed(
                 ir_lookup_index,
                 ir_bytes, function_name, module_prefix, body_locals, latch_value, bs
@@ -7659,7 +7668,7 @@ fn lower_embedded_value_cursor_append_loop(
             cursor_type = info.field_llvm_type;
             var latch_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             try latch_insts.append(compiled_mir::field_access_expr_inst(
-                0, cursor_type, receiver_name, info.receiver_llvm_type, info.field_index
+                0, cursor_type, receiver_alias, info.receiver_llvm_type, info.field_index
             ));
             latch = compiled_mir::value_cursor_field_read_latch(
                 cursor_var, body_string_counter, 0, latch_insts
@@ -8512,6 +8521,50 @@ fn lower_call_args_with_local_aliases_cached(
         &alias_currents,
         bs,
         ir_lookup_index, call_arg_type_cache
+    );
+}
+
+// lower_single_call_arg_with_local_aliases lowers a single call argument while resolving any local
+// alias on its operands -- the single-argument counterpart of lower_call_args_with_local_aliases. A
+// field-read or call argument whose receiver var was reassigned through a branch merge in the same
+// loop body (parse_impl_decl: 'methods.append(method.node)' after 'method' is reseated in an
+// if/else) must read the merged %void.then.alias.N value, not the receiver's loop-top let-init.
+// With no aliases the alias tables are empty and this is byte-identical to lower_single_call_arg.
+fn lower_single_call_arg_with_local_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    string_index: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64
+) -> !compiled_mir::MirCallArg {
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    var index = 0;
+    while index < aliases.len() {
+        let state = try aliases.at(index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try alias_sources.append(state.source_name);
+            try alias_currents.append(state.current_name);
+        }
+        index = index + 1;
+    }
+    return try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        params_spec,
+        arg_type,
+        arg_node,
+        string_index,
+        &alias_sources,
+        &alias_currents,
+        bs
     );
 }
 
@@ -9373,20 +9426,23 @@ fn lower_string_method_arg(
     }
     if std::mem::equal_bytes(arg_kind, "FieldExpr") {
         // A struct-field read argument (e.g. 'code.append(right_eval.next)') reuses the
-        // shared call-arg field lowering; it consumes no string slot.
-        try args.append(try compiled_mir_lower_call::lower_single_call_arg(
+        // shared call-arg field lowering; it consumes no string slot. It resolves through the
+        // local aliases so a receiver reassigned by a branch merge ('methods.append(method.node)'
+        // after 'method' is reseated in an if/else) reads the merged value, not the let-init.
+        try args.append(try lower_single_call_arg_with_local_aliases(
             ir_bytes, function_name, module_prefix, "", arg_type, arg_node,
-            string_index, bs
+            string_index, aliases, bs
         ));
         return 0;
     }
     if std::mem::equal_bytes(arg_kind, "Call") {
         // A nested call argument (e.g. 'tags.append(name_node_with_doc(ast, tag, ...))')
         // reuses the shared call-arg lowering, which emits a nested call descriptor whose
-        // own operands are non-literal here, so it consumes no string slot.
-        try args.append(try compiled_mir_lower_call::lower_single_call_arg(
+        // own operands are non-literal here, so it consumes no string slot. Its operands resolve
+        // through the local aliases for the same branch-merge reason as the field-read arg above.
+        try args.append(try lower_single_call_arg_with_local_aliases(
             ir_bytes, function_name, module_prefix, "", arg_type, arg_node,
-            string_index, bs
+            string_index, aliases, bs
         ));
         return 0;
     }
