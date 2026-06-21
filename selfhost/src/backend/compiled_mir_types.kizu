@@ -991,12 +991,18 @@ pub fn resolve_field_receiver_kizu_type_indexed(
     receiver_node: i64,
     bs: i64
 ) -> ![]u8 {
+    // rf tightens the receiver node's own structural reads (its kind / token / call-callee detail)
+    // to its body-node line via the index; bs is kept for the Var-receiver value resolution, which
+    // reads let/param facts that can precede this node. Byte-identical to a scan from bs.
+    let rf = ir_index::body_node_line_start_for_sequence(
+        index, ir_bytes, function_name, receiver_node, bs
+    );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, rf
     );
     if std::mem::equal_bytes(receiver_kind, "Var") {
         let receiver_name = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, receiver_node, bs
+            ir_bytes, function_name, receiver_node, rf
         );
         return try resolve_value_kizu_type_indexed(
             index, ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
@@ -1009,7 +1015,7 @@ pub fn resolve_field_receiver_kizu_type_indexed(
     }
     if std::mem::equal_bytes(receiver_kind, "Call") {
         let callee = try ir_contract::body_call_callee_or_empty_from(
-            ir_bytes, function_name, receiver_node, bs
+            ir_bytes, function_name, receiver_node, rf
         );
         let qualified = cross_module_callee_qualified_name_or_empty_indexed(index, ir_bytes, callee);
         if std::mem::len(qualified) > 0 {
@@ -1433,18 +1439,26 @@ fn resolve_local_in_block_or_empty(
     if std::mem::len(direct) > 0 {
         return direct;
     }
+    // scan_from advances to each statement's body-node line so the next statement edge / kind is
+    // found from a tight cursor instead of rescanning from bs every iteration (quadratic per local
+    // -> linear). The walk visits the exact same statements, so the result is byte-identical.
+    var scan_from = bs;
     var stmt_index = 0;
     while true {
         let statement = try ir_contract::body_child_sequence_or_minus_one_from(
-            ir_bytes, function_name, block_node, "statement", stmt_index, bs
+            ir_bytes, function_name, block_node, "statement", stmt_index, scan_from
         );
         if statement < 0 {
             return "";
         }
-        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        let sf = try ir_contract::body_node_line_offset_from(
+            ir_bytes, function_name, statement, scan_from
+        );
+        scan_from = sf;
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, sf);
         if std::mem::equal_bytes(stmt_kind, "While") {
             let body_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, statement, "body", 0, bs
+                ir_bytes, function_name, statement, "body", 0, sf
             );
             let nested = try resolve_local_in_block_or_empty(
                 ir_bytes, function_name, module_prefix, name, body_node, bs
@@ -1463,7 +1477,7 @@ fn resolve_local_in_block_or_empty(
         // statement to scan (issue 1199).
         if std::mem::equal_bytes(stmt_kind, "If") {
             let then_node = try ir_contract::body_child_sequence_or_minus_one_from(
-                ir_bytes, function_name, statement, "then", 0, bs
+                ir_bytes, function_name, statement, "then", 0, sf
             );
             if then_node >= 0 {
                 let then_nested = try resolve_local_in_block_or_empty(
@@ -1474,7 +1488,7 @@ fn resolve_local_in_block_or_empty(
                 }
             }
             let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
-                ir_bytes, function_name, statement, "else", 0, bs
+                ir_bytes, function_name, statement, "else", 0, sf
             );
             if else_node >= 0 {
                 let else_nested = try resolve_local_in_block_or_empty(
@@ -1502,21 +1516,29 @@ fn resolve_direct_let_in_block_or_empty(
     block_node: i64,
     bs: i64
 ) -> ![]u8 {
+    // Same body-node-line cursor as resolve_local_in_block_or_empty: advance scan_from to each
+    // statement so the direct-let scan is linear (not a from-bs rescan per statement).
+    // Byte-identical; resolve_let_value_kizu_type keeps bs.
+    var scan_from = bs;
     var stmt_index = 0;
     while true {
         let statement = try ir_contract::body_child_sequence_or_minus_one_from(
-            ir_bytes, function_name, block_node, "statement", stmt_index, bs
+            ir_bytes, function_name, block_node, "statement", stmt_index, scan_from
         );
         if statement < 0 {
             return "";
         }
-        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        let sf = try ir_contract::body_node_line_offset_from(
+            ir_bytes, function_name, statement, scan_from
+        );
+        scan_from = sf;
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, sf);
         if std::mem::equal_bytes(stmt_kind, "Let") {
             let name_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, statement, "name", 0, bs
+                ir_bytes, function_name, statement, "name", 0, sf
             );
             let local_name = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, name_node, bs
+                ir_bytes, function_name, name_node, sf
             );
             if std::mem::equal_bytes(local_name, name) {
                 return try resolve_let_value_kizu_type(
