@@ -5932,26 +5932,53 @@ fn lower_code_expect_equal_call(
     let kind_i64 = code_kind_i64();
     let expected_kind = try kinds.get(expected_eval.value_id);
     let actual_kind = try kinds.get(actual_eval.value_id);
-    if expected_kind != kind_i64 {
-        return code_eval_unsupported(actual_eval.next);
+    if expected_kind == kind_i64 {
+        if actual_kind == kind_i64 {
+            let op_binary = code_op_binary();
+            let cond_value = actual_eval.next;
+            try code.append(op_binary);
+            try code.append(cond_value);
+            try code.append(5);
+            try code.append(expected_eval.value_id);
+            try code.append(actual_eval.value_id);
+            let kind_bool = code_kind_bool();
+            try kinds.append(kind_bool);
+            let op_expect = code_op_expect();
+            try code.append(op_expect);
+            try code.append(cond_value);
+            let after_value = cond_value + 1;
+            return code_eval_value(0, after_value);
+        }
     }
-    if actual_kind != kind_i64 {
-        return code_eval_unsupported(actual_eval.next);
+    // Non-i64 operands lower as a '%kizu.slice.u8' byte equality: both operands
+    // materialize through the same str/[]u8 boundary as std::mem::equal_bytes
+    // (lower_code_arg_slice), MEM_EQUAL_BYTES produces a bool, and EXPECT
+    // consumes it. This unblocks 'expect_equal<[]u8>' purely from the resolved
+    // operand KIND, without inspecting the generic type-argument text.
+    let left_slice = try lower_code_arg_slice(text, code, kinds, expected_eval.value_id, actual_eval.next);
+    let kind_slice = code_kind_slice();
+    let left_kind = try kinds.get(left_slice.value_id);
+    if left_kind != kind_slice {
+        return code_eval_unsupported(left_slice.next);
     }
-    let op_binary = code_op_binary();
-    let cond_value = actual_eval.next;
-    try code.append(op_binary);
-    try code.append(cond_value);
-    try code.append(5);
-    try code.append(expected_eval.value_id);
-    try code.append(actual_eval.value_id);
-    let kind_bool = code_kind_bool();
-    try kinds.append(kind_bool);
-    let op_expect = code_op_expect();
-    try code.append(op_expect);
-    try code.append(cond_value);
-    let after_value = cond_value + 1;
-    return code_eval_value(0, after_value);
+    let right_slice = try lower_code_arg_slice(text, code, kinds, actual_eval.value_id, left_slice.next);
+    let right_kind = try kinds.get(right_slice.value_id);
+    if right_kind != kind_slice {
+        return code_eval_unsupported(right_slice.next);
+    }
+    let result_value = right_slice.next;
+    let op_mem_equal = code_op_mem_equal_bytes();
+    try code.append(op_mem_equal);
+    try code.append(result_value);
+    try code.append(left_slice.value_id);
+    try code.append(right_slice.value_id);
+    let slice_kind_bool = code_kind_bool();
+    try kinds.append(slice_kind_bool);
+    let op_expect_slice = code_op_expect();
+    try code.append(op_expect_slice);
+    try code.append(result_value);
+    let slice_after_value = result_value + 1;
+    return code_eval_value(0, slice_after_value);
 }
 
 // lower_code_user_call_statement lowers a statement-position call to a declared
