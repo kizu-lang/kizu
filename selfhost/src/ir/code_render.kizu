@@ -1675,6 +1675,10 @@ fn render_one_instruction(
     if op == storage_capacity {
         try render_storage_capacity(out, code, kinds, index);
     }
+    let storage_clear = codegen::code_op_storage_clear();
+    if op == storage_clear {
+        try render_storage_clear(out, code, index);
+    }
     let try_string_truncate = codegen::code_op_try_string_truncate();
     if op == try_string_truncate {
         try render_try_string_truncate(out, code, index, abi);
@@ -5198,6 +5202,39 @@ fn render_storage_capacity(
     return;
 }
 
+// render_storage_clear emits STORAGE_CLEAR: reset an owned String length to zero
+// while preserving its capacity and buffer. The tape layout matches
+// render_storage_deinit ('op receiver_value receiver_kind'); the renderer stores
+// i64 0 into the length field (struct index 2). No bounds check, fail block, or
+// destination value: clear cannot overflow and yields void. Only owned String is
+// emitted by the lowering (the Go reference exposes no Array.clear), so the
+// renderer handles the String layout only.
+fn render_storage_clear(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let kind = try code.get(index + 2);
+    let string_kind = codegen::code_kind_owned_string();
+    if kind == string_kind {
+        try w(out, "  %sc");
+        try wi(out, index);
+        try w(out, "_raw = extractvalue %kizu.owned %v");
+        try wi(out, receiver);
+        try wl(out, ", 0");
+        try w(out, "  %sc");
+        try wi(out, index);
+        try w(out, "_len_field = getelementptr inbounds %kizu.rt.string, ptr %sc");
+        try wi(out, index);
+        try wl(out, "_raw, i32 0, i32 2");
+        try w(out, "  store i64 0, ptr %sc");
+        try wi(out, index);
+        try wl(out, "_len_field");
+    }
+    return;
+}
+
 fn render_try_string_truncate(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
@@ -7574,6 +7611,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let storage_capacity = codegen::code_op_storage_capacity();
     if op == storage_capacity {
+        return index + 3;
+    }
+    let storage_clear = codegen::code_op_storage_clear();
+    if op == storage_clear {
         return index + 3;
     }
     let try_string_truncate = codegen::code_op_try_string_truncate();
