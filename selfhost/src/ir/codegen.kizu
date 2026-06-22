@@ -2869,7 +2869,11 @@ fn code_param_kind(
     if enum_kind >= 0 {
         return enum_kind;
     }
-    let struct_kind = try code_return_struct_kind(text, ast, type_node, code);
+    // A by-value struct param resolves to its STRUCT_DECL record, and a read
+    // borrow '&Struct' resolves to the same record kind: the borrow flows on the
+    // value tape with identity semantics, so field reads share the struct
+    // metadata. code_param_struct_kind skips the borrow's leading '&'.
+    let struct_kind = try code_param_struct_kind(text, ast, type_node, code);
     if struct_kind >= 0 {
         return struct_kind;
     }
@@ -3116,6 +3120,30 @@ fn code_return_struct_kind(
     return record_base + pos;
 }
 
+// code_param_struct_kind resolves a struct-typed parameter to its STRUCT_DECL
+// record kind (record_base + position). A read borrow '&MyStruct' resolves to the
+// same kind as the by-value 'MyStruct' param: a read borrow flows on the value
+// tape with identity value semantics (the borrow operand is the referent value
+// itself), so field reads resolve from the same struct metadata. The leading '&'
+// is skipped via borrow_param_name_start so the name span matches the struct
+// declaration; a by-value param has no '&' and resolves unchanged. The struct is
+// identified structurally by matching its STRUCT_DECL record, not by name.
+fn code_param_struct_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !i64 {
+    let span = code_node_span(text, ast, type_node);
+    let name_start = borrow_param_name_start(text, span.start);
+    let pos = try struct_decl_pos_by_span(text, code, name_start, span.end, 0);
+    if pos < 0 {
+        return 0 - 1;
+    }
+    let record_base = code_kind_struct_base();
+    return record_base + pos;
+}
+
 // code_param_union_kind resolves a union-typed parameter ('Shape' or the
 // '&Shape' borrow, passed by value as the runtime aggregate) against the
 // UNION_DECL records: the kind stores record_base + <record position>.
@@ -3126,7 +3154,7 @@ fn code_param_union_kind(
     code: &var std::array::Array<i64>
 ) -> !i64 {
     let span = code_node_span(text, ast, type_node);
-    let name_start = union_param_name_start(text, span.start);
+    let name_start = borrow_param_name_start(text, span.start);
     let pos = try union_decl_pos_by_span(text, code, name_start, span.end, 0);
     if pos < 0 {
         return 0 - 1;
@@ -3135,9 +3163,10 @@ fn code_param_union_kind(
     return record_base + pos;
 }
 
-// union_param_name_start skips a borrow's leading '&' so the union name span
-// matches the declaration.
-fn union_param_name_start(text: []u8, start: i64) -> i64 {
+// borrow_param_name_start skips a borrow's leading '&' so a borrowed parameter's
+// type name span ('&Shape', '&MyStruct') matches the by-value declaration name.
+// A by-value parameter has no '&' and the span start is returned unchanged.
+fn borrow_param_name_start(text: []u8, start: i64) -> i64 {
     let amp = cast<u8>(38);
     if text[start] == amp {
         return start + 1;
