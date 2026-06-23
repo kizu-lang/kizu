@@ -836,6 +836,16 @@ pub fn code_op_box_borrow_i64() -> i64 {
     return 144;
 }
 
+// TRY_CALL_OWNED_STRING calls a user '!std::string::String' function and unwraps
+// its '%kizu.error.owned' result: 'op dst callee_start callee_end arg_count' with
+// the args copied into scratch (the same record shape as TRY_CALL_I64). The
+// renderer branches on the ok flag -- propagating the message on failure and
+// extracting the owned-String payload (struct index 1) on success. 146 is the
+// next free op after STORAGE_CLEAR (145).
+pub fn code_op_try_call_owned_string() -> i64 {
+    return 146;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -912,6 +922,16 @@ pub fn code_return_kind_bool() -> i64 {
 // result value-kind is code_kind_slice().
 pub fn code_return_kind_slice() -> i64 {
     return 901;
+}
+
+// code_return_kind_owned_string_err marks a '!std::string::String' error-union
+// owned-String return on FUNC_BEGIN records. Like the bool/slice return kinds it
+// stays in the high return-kind band (902, after bool 900 and slice 901) so it
+// never collides with the scalar/struct/union value-kind codes; its success
+// value-kind is code_kind_owned_string() and its render ABI is the
+// '%kizu.error.owned' aggregate.
+pub fn code_return_kind_owned_string_err() -> i64 {
+    return 902;
 }
 
 // code_kind_owned marks a '%kizu.owned' runtime handle value (e.g. the io handle
@@ -1344,6 +1364,9 @@ fn code_return_kind(
     if std::mem::equal_bytes(type_text, "std::string::String") {
         return code_kind_owned_string();
     }
+    if std::mem::equal_bytes(type_text, "!std::string::String") {
+        return code_return_kind_owned_string_err();
+    }
     let union_kind = try code_param_union_kind(text, ast, type_node, code);
     if union_kind >= 0 {
         return union_kind;
@@ -1367,6 +1390,9 @@ fn code_return_kind_result_kind(ret_kind: i64) -> i64 {
     let slice_ret = code_return_kind_slice();
     if ret_kind == slice_ret {
         return code_kind_slice();
+    }
+    if ret_kind == code_return_kind_owned_string_err() {
+        return code_kind_owned_string();
     }
     return ret_kind;
 }
@@ -6845,6 +6871,49 @@ fn emit_code_try_call_i64(
     return code_eval_value(result_value, after_value);
 }
 
+// emit_code_try_call_owned_string lowers 'try <!std::string::String callee>(...)'
+// in value position: it lays down the same call record as TRY_CALL_I64 but tags
+// the op TRY_CALL_OWNED_STRING and the result value-kind owned-String, so the
+// renderer unwraps the '%kizu.error.owned' result and the binding takes sole
+// ownership of the moved-out String handle.
+fn emit_code_try_call_owned_string(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let callee_span = code_node_span(text, ast, callee);
+    let scratch_base = try args_scratch.get(0);
+    let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_span.start, callee_span.end, 0, next_value);
+    if !args_eval.ok {
+        return code_eval_unsupported(args_eval.next);
+    }
+    let op_try_call_owned_string = code_op_try_call_owned_string();
+    try code.append(op_try_call_owned_string);
+    try code.append(args_eval.next);
+    try code.append(callee_span.start);
+    try code.append(callee_span.end);
+    try code.append(args.len);
+    let arg_count = args.len;
+    let scratch_bound = scratch_base + arg_count;
+    try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
+    try args_scratch.set(0, scratch_base);
+    let kind_owned_string = code_kind_owned_string();
+    try kinds.append(kind_owned_string);
+    let result_value = args_eval.next;
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
 fn lower_code_print_call(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -11867,6 +11936,11 @@ fn lower_code_try_call_expr(
     let callee_kind = try code_callee_return_kind(text, ast, decls, code, callee_span.start, callee_span.end, 0);
     if callee_kind == 3 {
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    // A 'try <callee>(...)' of a declared '!std::string::String' function yields
+    // the moved-out owned-String success payload.
+    if callee_kind == code_return_kind_owned_string_err() {
+        return try emit_code_try_call_owned_string(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
 }
