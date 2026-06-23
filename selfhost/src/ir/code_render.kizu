@@ -784,12 +784,26 @@ fn ret_abi_user_slice() -> i64 {
     return 5;
 }
 
+fn ret_abi_user_err_owned() -> i64 {
+    return 6;
+}
+
 fn return_kind_bool() -> i64 {
     return 900;
 }
 
 fn return_kind_slice() -> i64 {
     return 901;
+}
+
+// return_kind_owned_string_err mirrors codegen::code_return_kind_owned_string_err
+// (902) as a code_render-local constant, like return_kind_bool/return_kind_slice
+// above. Referencing the codegen accessor directly is a 'code_return_kind_'
+// qualified callee the code_render closure does not whitelist (only code_op_/
+// code_kind_/code_loop_kind_/code_io_stream_), so it stays local to keep the
+// native self-compile closure happy.
+fn return_kind_owned_string_err() -> i64 {
+    return 902;
 }
 
 // user_ret_abi maps a user function's declared return kind (0 void, 1 i64, 2
@@ -808,6 +822,9 @@ fn user_ret_abi(ret_kind: i64) -> i64 {
     let slice_ret = return_kind_slice();
     if ret_kind == slice_ret {
         return ret_abi_user_slice();
+    }
+    if ret_kind == return_kind_owned_string_err() {
+        return ret_abi_user_err_owned();
     }
     return ret_abi_user_i64();
 }
@@ -927,6 +944,7 @@ fn render_user_define_head(
     let is_union_ret = try value_kind_is_union(code, ret_kind);
     let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     let is_owned_string = ret_kind == codegen::code_kind_owned_string();
+    let is_owned_string_err = ret_kind == return_kind_owned_string_err();
     if is_err_void {
         try w(out, "define %kizu.error.void @kizu_run_user_");
     }
@@ -948,7 +966,10 @@ fn render_user_define_head(
     if is_owned_string {
         try w(out, "define %kizu.owned @kizu_run_user_");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret and !is_owned_string;
+    if is_owned_string_err {
+        try w(out, "define %kizu.error.owned @kizu_run_user_");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret and !is_owned_string and !is_owned_string_err;
     if is_word_ret {
         try w(out, "define i64 @kizu_run_user_");
     }
@@ -995,6 +1016,7 @@ fn render_user_return_type(
     let is_union_ret = try value_kind_is_union(code, ret_kind);
     let is_struct_ret = try value_kind_is_struct_decl(code, ret_kind);
     let is_owned_string = ret_kind == codegen::code_kind_owned_string();
+    let is_owned_string_err = ret_kind == return_kind_owned_string_err();
     if is_err_void {
         try w(out, "%kizu.error.void");
     }
@@ -1016,7 +1038,10 @@ fn render_user_return_type(
     if is_owned_string {
         try w(out, "%kizu.owned");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret and !is_owned_string;
+    if is_owned_string_err {
+        try w(out, "%kizu.error.owned");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret and !is_owned_string and !is_owned_string_err;
     if is_word_ret {
         try w(out, "i64");
     }
@@ -1042,6 +1067,8 @@ fn render_user_tail(
     let err_i64 = ret_abi_user_err_i64();
     let is_err_void = abi == err_void;
     let is_err_i64 = abi == err_i64;
+    let err_owned = ret_abi_user_err_owned();
+    let is_err_owned = abi == err_owned;
     let bool_ret = return_kind_bool();
     let is_bool = ret_kind == bool_ret;
     let slice_ret = return_kind_slice();
@@ -1072,7 +1099,10 @@ fn render_user_tail(
     if is_owned_string {
         try wl(out, "  ret %kizu.owned zeroinitializer");
     }
-    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret and !is_owned_string;
+    if is_err_owned {
+        try wl(out, "  ret %kizu.error.owned { i1 true, %kizu.owned zeroinitializer, %kizu.slice.u8 zeroinitializer }");
+    }
+    let is_word_ret = !is_err_void and !is_err_i64 and !is_bool and !is_slice and !is_union_ret and !is_struct_ret and !is_owned_string and !is_err_owned;
     if is_word_ret {
         try wl(out, "  ret i64 0");
     }
@@ -1542,6 +1572,10 @@ fn render_one_instruction(
     let try_call_i64 = codegen::code_op_try_call_i64();
     if op == try_call_i64 {
         try render_try_call_i64(out, text, code, kinds, index, abi);
+    }
+    let try_call_owned_string = codegen::code_op_try_call_owned_string();
+    if op == try_call_owned_string {
+        try render_try_call_owned_string(out, text, code, kinds, index, abi);
     }
     let expect_op = codegen::code_op_expect();
     if op == expect_op {
@@ -2523,15 +2557,21 @@ fn render_ret_value(
     let value_id = try code.get(index + 1);
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
+    let err_owned = ret_abi_user_err_owned();
     if abi == main_abi {
         try wl(out, "  ret i64 0");
     }
     if abi == err_i64 {
         try render_ret_value_err_i64(out, index, value_id);
     }
+    if abi == err_owned {
+        try render_ret_value_err_owned(out, index, value_id);
+    }
     if abi != main_abi {
         if abi != err_i64 {
-            try render_ret_value_plain(out, code, kinds, value_id);
+            if abi != err_owned {
+                try render_ret_value_plain(out, code, kinds, value_id);
+            }
         }
     }
     try render_dead_label(out, index);
@@ -2568,6 +2608,25 @@ fn render_ret_value_err_i64(
     try wi(out, value_id);
     try wl(out, ", 1");
     try w(out, "  ret %kizu.error.i64 %rv");
+    try wi(out, index);
+    try nl(out);
+    return;
+}
+
+// render_ret_value_err_owned wraps an owned-String return value into the ok
+// '%kizu.error.owned' union through an index-suffixed temp: the moved-out handle
+// becomes the success payload at struct index 1.
+fn render_ret_value_err_owned(
+    out: &var std::string::String,
+    index: i64,
+    value_id: i64
+) -> !void {
+    try w(out, "  %rv");
+    try wi(out, index);
+    try w(out, " = insertvalue %kizu.error.owned { i1 true, %kizu.owned zeroinitializer, %kizu.slice.u8 zeroinitializer }, %kizu.owned %v");
+    try wi(out, value_id);
+    try wl(out, ", 1");
+    try w(out, "  ret %kizu.error.owned %rv");
     try wi(out, index);
     try nl(out);
     return;
@@ -2613,15 +2672,21 @@ fn render_ret_err_fail(
     let value_id = try code.get(index + 1);
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
+    let err_owned = ret_abi_user_err_owned();
     if abi == main_abi {
         try render_ret_err_fail_exit(out, index);
     }
     if abi == err_i64 {
         try render_ret_err_fail_i64(out, code, value_id);
     }
+    if abi == err_owned {
+        try render_ret_err_fail_owned(out, code, value_id);
+    }
     if abi != main_abi {
         if abi != err_i64 {
-            try render_ret_err_fail_void(out, code, value_id);
+            if abi != err_owned {
+                try render_ret_err_fail_void(out, code, value_id);
+            }
         }
     }
     try render_dead_label(out, index);
@@ -2661,6 +2726,24 @@ fn render_ret_err_fail_i64(
 ) -> !void {
     let byte_len = try tape_string_length(code, value_id, 0);
     try w(out, "  ret %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 { ptr @.kizu.run.s");
+    try wi(out, value_id);
+    try w(out, ", i64 ");
+    try wi(out, byte_len);
+    try wl(out, " } }");
+    return;
+}
+
+// render_ret_err_fail_owned maps a 'return error("msg")' in a
+// '!std::string::String' function to its failed '%kizu.error.owned' union: the ok
+// flag is false, the owned payload is left zero, and the message slice points at
+// the CONST_STR global.
+fn render_ret_err_fail_owned(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    value_id: i64
+) -> !void {
+    let byte_len = try tape_string_length(code, value_id, 0);
+    try w(out, "  ret %kizu.error.owned { i1 false, %kizu.owned zeroinitializer, %kizu.slice.u8 { ptr @.kizu.run.s");
     try wi(out, value_id);
     try w(out, ", i64 ");
     try wi(out, byte_len);
@@ -2997,6 +3080,64 @@ fn render_try_call_i64(
     return;
 }
 
+// render_try_call_owned_string emits a value-position 'try <callee>(...)' of an
+// error-union owned-String function: call the '%kizu.error.owned' callee, branch
+// on its ok flag, propagate the message on failure (the shared runtime message
+// propagate), and extract the owned-String success payload (struct index 1) into
+// the result on the cont path. Temps/labels are suffixed with the tape index so
+// they stay unique.
+fn render_try_call_owned_string(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let callee_start = try code.get(index + 2);
+    let callee_end = try code.get(index + 3);
+    let arg_count = try code.get(index + 4);
+    let callee = text[callee_start..callee_end];
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.owned @kizu_run_user_");
+    try w(out, callee);
+    try w(out, "(");
+    try render_call_args(out, code, kinds, index, arg_count, 0);
+    try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.owned %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.owned %tc");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try render_runtime_message_propagate(out, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.owned %tc");
+    try wi(out, index);
+    try wl(out, ", 1");
+    return;
+}
+
 // render_try_i64_propagate emits the fail-block terminator for a try over an
 // error-union-i64 callee: kizu_run_main exits 1, an error-union-void function
 // re-wraps the message into its own union, and an error-union-i64 function
@@ -3004,15 +3145,21 @@ fn render_try_call_i64(
 fn render_try_i64_propagate(out: &var std::string::String, index: i64, abi: i64) -> !void {
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
+    let err_owned = ret_abi_user_err_owned();
     if abi == main_abi {
         try render_try_propagate_exit(out, index);
     }
     if abi == err_i64 {
         try render_try_i64_propagate_err_i64(out, index);
     }
+    if abi == err_owned {
+        try render_try_i64_propagate_err_owned(out, index);
+    }
     if abi != main_abi {
         if abi != err_i64 {
-            try render_try_i64_propagate_err_void(out, index);
+            if abi != err_owned {
+                try render_try_i64_propagate_err_void(out, index);
+            }
         }
     }
     return;
@@ -3051,6 +3198,25 @@ fn render_try_i64_propagate_err_void(out: &var std::string::String, index: i64) 
     try wi(out, index);
     try wl(out, "_pm, 1");
     try w(out, "  ret %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, "_pv");
+    return;
+}
+
+// render_try_i64_propagate_err_owned re-wraps a failed error-union-i64 try into
+// the surrounding '!std::string::String' function's own '%kizu.error.owned' union.
+fn render_try_i64_propagate_err_owned(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pv = insertvalue %kizu.error.owned { i1 false, %kizu.owned zeroinitializer, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_pm, 2");
+    try w(out, "  ret %kizu.error.owned %tc");
     try wi(out, index);
     try wl(out, "_pv");
     return;
@@ -3124,11 +3290,17 @@ fn render_try_propagate_exit(out: &var std::string::String, index: i64) -> !void
 
 fn render_try_propagate_error(out: &var std::string::String, index: i64, abi: i64) -> !void {
     let err_i64 = ret_abi_user_err_i64();
+    let err_owned = ret_abi_user_err_owned();
     if abi == err_i64 {
         try render_try_propagate_error_i64(out, index);
     }
+    if abi == err_owned {
+        try render_try_propagate_error_owned(out, index);
+    }
     if abi != err_i64 {
-        try render_try_propagate_error_void(out, index);
+        if abi != err_owned {
+            try render_try_propagate_error_void(out, index);
+        }
     }
     return;
 }
@@ -3147,6 +3319,26 @@ fn render_try_propagate_error_i64(out: &var std::string::String, index: i64) -> 
     try wi(out, index);
     try wl(out, "_emsg, 2");
     try w(out, "  ret %kizu.error.i64 %tc");
+    try wi(out, index);
+    try wl(out, "_eu");
+    return;
+}
+
+// render_try_propagate_error_owned re-wraps a failed '%kizu.error.void' try into
+// the surrounding '!std::string::String' function's own failed '%kizu.error.owned'
+// union.
+fn render_try_propagate_error_owned(out: &var std::string::String, index: i64) -> !void {
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_emsg = extractvalue %kizu.error.void %tc");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_eu = insertvalue %kizu.error.owned { i1 false, %kizu.owned zeroinitializer, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+    try wi(out, index);
+    try wl(out, "_emsg, 2");
+    try w(out, "  ret %kizu.error.owned %tc");
     try wi(out, index);
     try wl(out, "_eu");
     return;
@@ -5704,6 +5896,7 @@ fn render_try_array_get_kind(
 fn render_array_get_propagate(out: &var std::string::String, index: i64, abi: i64) -> !void {
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
+    let err_owned = ret_abi_user_err_owned();
     if abi == main_abi {
         try render_try_propagate_exit(out, index);
     }
@@ -5717,16 +5910,28 @@ fn render_array_get_propagate(out: &var std::string::String, index: i64, abi: i6
         try wi(out, index);
         try wl(out, "_pv");
     }
+    if abi == err_owned {
+        try w(out, "  %tc");
+        try wi(out, index);
+        try w(out, "_pv = insertvalue %kizu.error.owned { i1 false, %kizu.owned zeroinitializer, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+        try wi(out, index);
+        try wl(out, "_pm, 2");
+        try w(out, "  ret %kizu.error.owned %tc");
+        try wi(out, index);
+        try wl(out, "_pv");
+    }
     if abi != main_abi {
         if abi != err_i64 {
-            try w(out, "  %tc");
-            try wi(out, index);
-            try w(out, "_pv = insertvalue %kizu.error.void { i1 false, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
-            try wi(out, index);
-            try wl(out, "_pm, 1");
-            try w(out, "  ret %kizu.error.void %tc");
-            try wi(out, index);
-            try wl(out, "_pv");
+            if abi != err_owned {
+                try w(out, "  %tc");
+                try wi(out, index);
+                try w(out, "_pv = insertvalue %kizu.error.void { i1 false, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
+                try wi(out, index);
+                try wl(out, "_pm, 1");
+                try w(out, "  ret %kizu.error.void %tc");
+                try wi(out, index);
+                try wl(out, "_pv");
+            }
         }
     }
     return;
@@ -6400,15 +6605,21 @@ fn render_arena_get_struct_field_load(
 fn render_fs_read_propagate(out: &var std::string::String, dst: i64, abi: i64) -> !void {
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
+    let err_owned = ret_abi_user_err_owned();
     if abi == main_abi {
         try render_fs_read_propagate_exit(out, dst);
     }
     if abi == err_i64 {
         try wl(out, "  ret %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }");
     }
+    if abi == err_owned {
+        try wl(out, "  ret %kizu.error.owned { i1 false, %kizu.owned zeroinitializer, %kizu.slice.u8 zeroinitializer }");
+    }
     if abi != main_abi {
         if abi != err_i64 {
-            try render_ret_err_void_fail(out);
+            if abi != err_owned {
+                try render_ret_err_void_fail(out);
+            }
         }
     }
     return;
@@ -7779,6 +7990,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     }
     let try_call_i64 = codegen::code_op_try_call_i64();
     if op == try_call_i64 {
+        return try tape_call_record_end(code, index);
+    }
+    let try_call_owned_string = codegen::code_op_try_call_owned_string();
+    if op == try_call_owned_string {
         return try tape_call_record_end(code, index);
     }
     let expect_op = codegen::code_op_expect();
