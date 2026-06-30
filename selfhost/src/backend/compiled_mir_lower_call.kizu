@@ -35,18 +35,11 @@ fn aliased_name_or_original(
     return name;
 }
 
-// call_arg_nodes_bounded collects a call's "arg" child nodes by scanning only the call node's
-// own subtree instead of call_arg_nodes' scan over every body-edge fact of the whole function.
-// The call node's body-node line is located via the index, and the scan starts there: a Call
-// emits every callee/arg edge (parent == call_node) interleaved with those children's subtrees
-// (append_body_one_range_ir / append_body_range_ir), and all of those facts carry sequences
-// inside the call node's subtree. Because facts are emitted in pre-order DFS, the first
-// body-edge whose parent sequence is < call_node marks the point where the scan has left the
-// subtree, so no further parent == call_node edge can follow and the scan stops. The collected
-// (ordinal, child) set is byte-identical to call_arg_nodes' -- both route matching lines through
-// append_call_arg_node_from_line, which keeps only parent == call_node "arg" edges and dedups by
-// ordinal -- so the result is unchanged; only the O(function body-edge count) scan becomes
-// O(call subtree). An index miss falls back to the full linear scan so behaviour is preserved.
+// call_arg_nodes_bounded collects a call's "arg" child nodes by walking only indexed
+// 'body-edge <function_name>' entries whose source line is at or after the call node's
+// body-node line. Facts for one key are sorted by original line order, so the existing
+// pre-order subtree exit condition (first parent < call_node) still bounds the walk without
+// repeatedly scanning raw IR lines for newlines.
 fn call_arg_nodes_bounded(
     ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
@@ -60,33 +53,27 @@ fn call_arg_nodes_bounded(
     if entry < 0 {
         return try call_arg_nodes(ir_bytes, function_name, call_node, bs);
     }
-    let byte_len = std::mem::len(ir_bytes);
     let prefix = "body-edge ";
-    let prefix_len = std::mem::len(prefix);
-    let name_len = std::mem::len(function_name);
     var nodes = std::array::Array<i64>(std::mem::page_allocator());
-    var index = ir_index::entry_line_start(ir_lookup_index, entry);
+    var edge_entry = ir_index::first_matching_entry_at_or_after_line(
+        ir_lookup_index,
+        ir_bytes,
+        prefix,
+        "",
+        function_name,
+        ir_index::entry_line_start(ir_lookup_index, entry)
+    );
     var done = false;
-    while !done and index + prefix_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let name_start = index + prefix_len;
-            let name_end = name_start + name_len;
-            if std::mem::equal_bytes(ir_bytes[name_start..name_end], function_name) and
-                call_arg_is_space(ir_bytes[name_end]) {
-                let parent_start = call_arg_skip_spaces(ir_bytes, name_end);
-                let parent = try call_arg_parse_i64_token(ir_bytes, parent_start);
-                if parent < call_node {
-                    done = true;
-                } else {
-                    try append_call_arg_node_from_line(ir_bytes, name_end, call_node, &var nodes);
-                }
-            } else {
-                done = true;
-            }
-        }
-        if !done {
-            index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    while !done and ir_index::entry_matches_query(
+        ir_lookup_index, ir_bytes, edge_entry, prefix, "", function_name
+    ) {
+        let name_end = ir_index::entry_key_end(ir_lookup_index, edge_entry);
+        let parent = try call_arg_parent_from_line(ir_bytes, name_end);
+        if parent < call_node {
+            done = true;
+        } else {
+            try append_call_arg_node_from_line(ir_bytes, name_end, call_node, &var nodes);
+            edge_entry = edge_entry + 1;
         }
     }
     return nodes;
@@ -134,12 +121,12 @@ fn append_call_arg_node_from_line(
     call_node: i64,
     nodes: &var std::array::Array<i64>
 ) -> !void {
-    let parent_start = call_arg_skip_spaces(ir_bytes, name_end);
-    let parent = try call_arg_parse_i64_token(ir_bytes, parent_start);
+    let parent = try call_arg_parent_from_line(ir_bytes, name_end);
     if parent != call_node {
         return;
     }
 
+    let parent_start = call_arg_skip_spaces(ir_bytes, name_end);
     let parent_end = call_arg_token_end(ir_bytes, parent_start);
     let edge_start = call_arg_skip_spaces(ir_bytes, parent_end);
     let edge_end = call_arg_token_end(ir_bytes, edge_start);
@@ -159,6 +146,11 @@ fn append_call_arg_node_from_line(
         try nodes.set(ordinal, child);
     }
     return;
+}
+
+fn call_arg_parent_from_line(ir_bytes: []u8, name_end: i64) -> !i64 {
+    let parent_start = call_arg_skip_spaces(ir_bytes, name_end);
+    return try call_arg_parse_i64_token(ir_bytes, parent_start);
 }
 
 fn require_contiguous_call_args(nodes: &std::array::Array<i64>) -> !void {
