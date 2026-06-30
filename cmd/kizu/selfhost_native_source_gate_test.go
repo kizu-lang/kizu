@@ -782,6 +782,7 @@ func appendNativeSourceCommandResult(
 	fmt.Fprintf(out, "%s.exit %d\n", label, result.code)
 	fmt.Fprintf(out, "%s.stdout.sha256 %s\n", label, textFingerprint(result.stdout))
 	fmt.Fprintf(out, "%s.stderr.sha256 %s\n", label, textFingerprint(result.stderr))
+	fmt.Fprintf(out, "%s.elapsed.ms %d\n", label, result.elapsed.Milliseconds())
 }
 
 // finishNativeSourceExecutableReport writes the native-source report.

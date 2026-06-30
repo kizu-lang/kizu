@@ -363,9 +363,11 @@ func appendBootstrapStage(out *strings.Builder, label string, stage bootstrapSta
 	fmt.Fprintf(out, "%s.check.exit %d\n", label, stage.check.code)
 	fmt.Fprintf(out, "%s.check.stdout.sha256 %s\n", label, textFingerprint(stage.check.stdout))
 	fmt.Fprintf(out, "%s.check.stderr.sha256 %s\n", label, textFingerprint(stage.check.stderr))
+	fmt.Fprintf(out, "%s.check.elapsed.ms %d\n", label, stage.check.elapsed.Milliseconds())
 	fmt.Fprintf(out, "%s.stage.exit %d\n", label, stage.stageRun.code)
 	fmt.Fprintf(out, "%s.stage.stdout.sha256 %s\n", label, textFingerprint(stage.stageRun.stdout))
 	fmt.Fprintf(out, "%s.stage.stderr.sha256 %s\n", label, textFingerprint(stage.stageRun.stderr))
+	fmt.Fprintf(out, "%s.stage.elapsed.ms %d\n", label, stage.stageRun.elapsed.Milliseconds())
 	for _, name := range bootstrapArtifactFiles {
 		fmt.Fprintf(out, "%s.artifact.%s.sha256 %s\n", label, name, stage.fingerprint[name])
 	}
