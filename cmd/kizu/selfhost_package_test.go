@@ -1011,7 +1011,8 @@ func assertCompiledClosureParamsDerivation(t *testing.T, cli string) {
 	closureRequired := []string{
 		"var params_spec = std::string::String(std::mem::page_allocator());",
 		"defer params_spec.deinit();",
-		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name)",
+		"compiled_abi_params::append_params_spec_indexed(",
+		"lookup_index, &var params_spec, ir_bytes, name",
 		"if params_spec.len() == 0 and !allow_empty_params {",
 		"compiled closure: missing signature params",
 		"let params_spec_bytes = params_spec.as_bytes();",
