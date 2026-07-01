@@ -2277,9 +2277,103 @@ fn resolve_let_value_kizu_type_for_value_cached(
         );
         return info.field_kizu_type;
     }
+    if std::mem::equal_bytes(value_kind, "Call") {
+        return try resolve_let_call_value_kizu_type_indexed_cached(
+            index, cache, ir_bytes, function_name, module_prefix, value, value_sf, bs
+        );
+    }
     return try resolve_let_value_kizu_type_for_value_with_kind(
         ir_bytes, function_name, module_prefix, value, value_sf, bs, value_kind
     );
+}
+
+// Indexed twin of the Call arm in resolve_let_value_kizu_type_for_value_with_kind. Keep the
+// structural method-call cases identical, but avoid whole-IR signature/suffix scans on the hot
+// local-type path.
+fn resolve_let_call_value_kizu_type_indexed_cached(
+    index: &ir_index::IrIndex,
+    cache: &var CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    value: i64,
+    value_sf: i64,
+    bs: i64
+) -> ![]u8 {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, value, value_sf
+    );
+    if compiled_fact_lookup::is_stdlib_callee(callee_name) {
+        if std::mem::len(
+            cross_module_callee_qualified_name_or_empty_indexed(index, ir_bytes, callee_name)
+        ) == 0 {
+            return try compiled_fact_lookup::lookup_stdlib_return_indexed(
+                index, ir_bytes, callee_name
+            );
+        }
+    }
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value, "callee", 0, value_sf
+    );
+    let callee_sf = fn_node_line_start(cache, callee_node, value_sf);
+    let callee_kind = try fn_node_kind(cache, ir_bytes, function_name, callee_node, callee_sf);
+    var callee_field_mode = false;
+    if std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        let callee_mode = try ir_contract::sequence_fact_second_value_from(
+            ir_bytes, "body-field-expr ", function_name, callee_node, callee_sf
+        );
+        callee_field_mode = std::mem::equal_bytes(callee_mode, "field");
+    }
+    if callee_field_mode {
+        let method_name = try ir_contract::body_field_expr_name_from(
+            ir_bytes, function_name, callee_node, "field", callee_sf
+        );
+        if std::mem::equal_bytes(method_name, "get") {
+            let get_receiver = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, callee_node, "receiver", 0, callee_sf
+            );
+            let get_receiver_sf = fn_node_line_start(cache, get_receiver, value_sf);
+            let get_receiver_kind = try fn_node_kind(
+                cache, ir_bytes, function_name, get_receiver, get_receiver_sf
+            );
+            if std::mem::equal_bytes(get_receiver_kind, "Var") {
+                let get_receiver_name = try ir_contract::body_token_or_empty_from(
+                    ir_bytes, function_name, get_receiver, get_receiver_sf
+                );
+                let get_receiver_kizu = try resolve_receiver_value_kizu_type(
+                    ir_bytes, function_name, module_prefix, get_receiver_name, bs
+                );
+                if std::mem::equal_bytes(
+                    struct_lookup_kizu_type(get_receiver_kizu), "std::kizu::ast::Ast"
+                ) {
+                    return "std::kizu::ast::AstNode";
+                }
+            }
+        }
+        let method_ret = try value_receiver_method_return_kizu_or_empty(
+            ir_bytes, function_name, module_prefix, callee_node, method_name, bs
+        );
+        if std::mem::len(method_ret) > 0 {
+            return method_ret;
+        }
+        return "i64";
+    }
+    let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+        index, ir_bytes, "function-signature-return ", module_prefix, callee_name
+    );
+    if std::mem::len(ret_type) > 0 {
+        return ret_type;
+    }
+    let qualified = cross_module_callee_qualified_name_or_empty_indexed(index, ir_bytes, callee_name);
+    if std::mem::len(qualified) > 0 {
+        let cross_ret = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+            index, ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified
+        );
+        if std::mem::len(cross_ret) > 0 {
+            return cross_ret;
+        }
+    }
+    return error("compiled mir: local call return type not found");
 }
 
 fn resolve_let_value_kizu_type_for_value_with_kind(
