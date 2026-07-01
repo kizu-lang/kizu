@@ -154,6 +154,60 @@ pub fn callee_is_field_expr(
     return std::mem::equal_bytes(callee_mode, "field");
 }
 
+pub fn callee_is_field_expr_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !bool {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, cf
+    );
+    let callee_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, callee_node, bs);
+    let callee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, callee_node, callee_sf
+    );
+    if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        return false;
+    }
+    let callee_mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, callee_sf
+    );
+    return std::mem::equal_bytes(callee_mode, "field");
+}
+
+fn call_callee_field_expr_mode_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !i64 {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, cf
+    );
+    let callee_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, callee_node, bs);
+    let callee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, callee_node, callee_sf
+    );
+    if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        return 0;
+    }
+    let callee_mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, callee_sf
+    );
+    if std::mem::equal_bytes(callee_mode, "field") {
+        return 1;
+    }
+    if std::mem::equal_bytes(callee_mode, "namespace") {
+        return 2;
+    }
+    return 0;
+}
+
 // is_array_field_type reports whether a recorded struct-field type token is a
 // std::array::Array<T>. The read-only Ast.len accessor only lowers Array.len(),
 // so this gates the array_len builtin call; any other receiver field type is
@@ -326,6 +380,25 @@ pub fn call_method_name_is(
     return std::mem::equal_bytes(method_name, name);
 }
 
+pub fn call_method_name_is_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    name: []u8,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !bool {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, cf
+    );
+    let callee_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, callee_node, bs);
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", callee_sf
+    );
+    return std::mem::equal_bytes(method_name, name);
+}
+
 fn call_method_receiver_is_var(
     ir_bytes: []u8,
     function_name: []u8,
@@ -376,41 +449,43 @@ fn method_call_info(
     params_spec: []u8,
     call_node: i64,
     bs: i64,
-    ir_lookup_index: &ir_index::IrIndex
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MethodCallInfo {
     // cf tightens this call's own structural reads (callee/receiver edges, field-expr mode/name,
     // receiver kind/token) to the call node's body-node line via the index; the whole-IR
     // type/signature resolutions below route through their _indexed twins. bs is kept for the
     // receiver value resolution, which reads let/param facts that can precede this node.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        ir_lookup_index, ir_bytes, function_name, call_node, bs
-    );
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, call_node, "callee", 0, cf
     );
+    let callee_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, callee_node, bs);
     let mode = try ir_contract::sequence_fact_second_value_from(
-        ir_bytes, "body-field-expr ", function_name, callee_node, cf
+        ir_bytes, "body-field-expr ", function_name, callee_node, callee_sf
     );
     if !std::mem::equal_bytes(mode, "field") {
         return error("compiled mir: method call callee must be field-mode");
     }
     let receiver_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, cf
+        ir_bytes, function_name, callee_node, "receiver", 0, callee_sf
     );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, receiver_node, bs);
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, cf
+        ir_bytes, function_name, receiver_node, receiver_sf
     );
     if !std::mem::equal_bytes(receiver_kind, "Var") {
         return error("compiled mir: method call receiver must be a local or parameter");
     }
     let receiver_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, receiver_node, cf
+        ir_bytes, function_name, receiver_node, receiver_sf
     );
-    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed(
-        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed_cached(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        receiver_name, bs, call_arg_type_cache
     );
-    let receiver_llvm = try compiled_type_lower::kizu_type_to_llvm_indexed(
-        ir_lookup_index, ir_bytes, module_prefix, receiver_kizu
+    let receiver_llvm = try compiled_mir_types::kizu_type_to_llvm_indexed_cached(
+        ir_lookup_index, ir_bytes, module_prefix, receiver_kizu, call_arg_type_cache
     );
     let lookup_type = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
     let type_prefix = compiled_util::module_prefix_of(lookup_type);
@@ -420,7 +495,7 @@ fn method_call_info(
     }
     let type_name = lookup_type[std::mem::len(type_prefix)..std::mem::len(lookup_type)];
     let method_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, callee_node, "field", cf
+        ir_bytes, function_name, callee_node, "field", callee_sf
     );
     var qualified = std::string::String(std::mem::page_allocator());
     try qualified.append_bytes(impl_prefix);
@@ -437,8 +512,8 @@ fn method_call_info(
     if std::mem::len(return_kizu) == 0 {
         return error("compiled mir: method call signature not found");
     }
-    let return_llvm = try compiled_type_lower::kizu_type_to_llvm_indexed(
-        ir_lookup_index, ir_bytes, impl_prefix, return_kizu
+    let return_llvm = try compiled_mir_types::kizu_type_to_llvm_indexed_cached(
+        ir_lookup_index, ir_bytes, impl_prefix, return_kizu, call_arg_type_cache
     );
     let callee_prefix = compiled_util::module_prefix_of(qualified_name);
     return MethodCallInfo {
@@ -6834,7 +6909,7 @@ fn lower_while_match_loop(
     );
     let enum_kizu = try resolve_dispatch_enum_kizu_type(
         ir_bytes, function_name, module_prefix, body_locals, scrutinee, scrutinee_kind, bs,
-        ir_lookup_index
+        ir_lookup_index, &var call_arg_type_cache
     );
     var scrutinee_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let scrutinee_result_id = try lower_expr_into(
@@ -7690,9 +7765,10 @@ fn lower_embedded_value_cursor_append_loop(
             // forever. An un-reassigned receiver has no alias, so this resolves back to its source
             // name and the single-binding (e.g. 'let statement = ...') latch is unchanged.
             let receiver_alias = try local_alias_current_name(&body_aliases, receiver_name);
-            let info = try compiled_mir_types::resolve_field_expr_indexed(
+            let info = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
                 ir_lookup_index,
-                ir_bytes, function_name, module_prefix, body_locals, latch_value, bs
+                ir_bytes, function_name, module_prefix, body_locals, latch_value, bs,
+                call_arg_type_cache
             );
             cursor_type = info.field_llvm_type;
             var latch_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
@@ -7806,98 +7882,81 @@ pub fn lower_multi_statement_function(
     if statement_count < 2 {
         return error("compiled mir: multi-statement function requires multiple statements");
     }
-    // A value-carried array-append loop (struct value threaded through a phi, appended into a
-    // runtime array until a sentinel tag) lowers through the generic ArrayNew + ValueWhile path
-    // rather than the i64-induction While machinery (issue 1165).
-    if try is_value_array_loop_shape(ir_bytes, function_name, statement_count, bs) {
-        return try lower_value_array_loop(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, statement_count, bs,
-            ir_lookup_index
-        );
-    }
-    // A value-carried 'while true' grammar loop (the parse_postfix_expr shape: a struct value
-    // threaded through a loop-head phi, reassigned through a free try-call in each guarded arm, and
-    // returned from the terminal else) lowers through the GrammarLoop CFG rather than the
-    // i64-induction While machinery, whose trailing-increment latch this shape has no analogue for
-    // (issue 1157).
-    if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
-        return try lower_grammar_postfix_loop(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-    }
-    // A type-apply parser loop also uses a bool-literal 'while true' header, but its carried value
-    // is a Token cursor seeded and latched by plain calls, with a terminal child-construction return
-    // arm and a comma error guard. Route it before scalar/generic loop lowering.
-    if try is_type_apply_loop_shape(ir_bytes, function_name, statement_count, bs) {
-        return try lower_type_apply_loop(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-    }
-    // A 'while true' + match-dispatch loop (parse_generic_type_end's generic-argument walk) also
-    // uses a plain-call Token seed and a bool-literal header, but its body is [free try-call let,
-    // plain-call let, match <token>.kind { .. }] where one match arm latches the cursor through a
-    // try-call and back-edges while every other arm returns. Its match-terminated body has no
-    // analogue in the type-apply loop's if/guard/latch tail, so route it here (worker-3 NEW-4).
-    if try is_while_match_loop_shape(ir_bytes, function_name, statement_count, bs) {
-        return try lower_while_match_loop(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-    }
-    // A precedence-climbing expression loop carries both a ParseNode-like value and an i64
-    // precedence through phis. Its header is a scalar comparison, and its body closes with a
-    // try-call value latch followed by a plain-call scalar refresh from the updated value, so it
-    // cannot use the one-carried-value ValueCursorWhile or scalar induction renderers.
-    if try is_precedence_loop_shape(ir_bytes, function_name, params_spec, statement_count, bs) {
-        return try lower_precedence_loop(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-    }
-    // A copy-seeded two-carried-value cursor loop (parse_type_base_end's '::' segment walk) threads
-    // a value cursor copied from a prior local plus a plain-call scalar cursor through loop-head
-    // phis, guarded by a side-effect-free predicate call. It closes with a try-call value latch and
-    // a plain-call scalar refresh derived from the updated value, and returns the value. Its Var-copy
-    // value seed has no analogue in the precedence loop's try-call init, so route it here.
-    if try is_dual_cursor_loop_shape(ir_bytes, function_name, statement_count, bs) {
-        return try lower_dual_cursor_loop(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-    }
-    // A dual Token-cursor advance loop (generic_type_allows_const_arg's '<'-walk, NEW-3 second half)
-    // also threads two carried values, but seeds the first cursor by a plain call (statement 0) and
-    // the second by a Var-copy of it (statement 1), drives a compound-AND header ('<current>.<field>
-    // < <other>.<field> and <predicate>(<current>)'), latches '<previous> = <current>' (a copy carried
-    // purely by the back-edge phi) plus '<current> = <plain>(<current>)', and runs post-loop
-    // statements that consume <previous>. The dual-cursor loop's Var-copy-at-statement-0 / single
-    // predicate header / try-call value latch / bare value return have no analogue here, so route it.
-    if try is_trailing_token_loop_shape(ir_bytes, function_name, statement_count, bs) {
-        return try lower_trailing_token_loop(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-            statement_count, bs
-        );
-    }
-    // A value-carried append-while loop (the parse_call_with_args argument loop: a value cursor
-    // threaded through a loop-head phi, a borrowed '&var Array' append in the body, and a
-    // free-try-call latch that reassigns the cursor with a struct success value) lowers through the
-    // dedicated ValueCursorWhile CFG rather than the i64-induction While machinery, whose latch
-    // try-call requires an i64 success value this shape has no analogue for (issue 1157 NEW-A).
-    if try is_value_cursor_append_loop_shape(ir_bytes, function_name, statement_count, bs) {
-        return try lower_value_cursor_append_loop(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-    }
-    // A guarded-cursor loop (parse_type_params' '<T, U>' walk) threads a plain-call Token cursor
-    // through a prefix-not predicate header and latches it only through a terminal if/else: the then
-    // arm advances the cursor by a plain call and back-edges, while the else arm and the post-loop
-    // trailing statement each return a struct value reading the loop-head phi. Its conditional latch
-    // and normal exit have no analogue in the value-cursor append loop (an unconditional terminal
-    // try-call latch plus a bare cursor return) or the bool-literal type-apply / while-match loops,
-    // so route it before the generic i64-induction While machinery, whose trailing-Assign latch this
-    // shape's terminal If has no analogue for.
-    if try is_guarded_cursor_return_loop_shape(ir_bytes, function_name, statement_count, bs) {
-        return try lower_guarded_cursor_return_loop(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-            statement_count, bs
-        );
+    // The specialized loop/parser shapes below are compact structural forms. Huge dispatcher
+    // functions such as code_render.tape_record_end and render_one_instruction are ordinary
+    // top-level if chains; probing every shape against them turns into repeated full body-fact
+    // scans before the generic path. Gate the probes by statement count so large dispatchers go
+    // straight to the generic multi-statement lowerer.
+    if statement_count <= 24 {
+        // A value-carried array-append loop (struct value threaded through a phi, appended into a
+        // runtime array until a sentinel tag) lowers through the generic ArrayNew + ValueWhile path
+        // rather than the i64-induction While machinery (issue 1165).
+        if try is_value_array_loop_shape(ir_bytes, function_name, statement_count, bs) {
+            return try lower_value_array_loop(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, statement_count, bs,
+                ir_lookup_index
+            );
+        }
+        // A value-carried 'while true' grammar loop (the parse_postfix_expr shape: a struct value
+        // threaded through a loop-head phi, reassigned through a free try-call in each guarded arm,
+        // and returned from the terminal else) lowers through the GrammarLoop CFG rather than the
+        // i64-induction While machinery.
+        if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
+            return try lower_grammar_postfix_loop(
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+        }
+        // A type-apply parser loop also uses a bool-literal 'while true' header, but its carried
+        // value is a Token cursor seeded and latched by plain calls.
+        if try is_type_apply_loop_shape(ir_bytes, function_name, statement_count, bs) {
+            return try lower_type_apply_loop(
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+        }
+        // A 'while true' + match-dispatch loop (parse_generic_type_end's generic-argument walk)
+        // uses a plain-call Token seed and a bool-literal header.
+        if try is_while_match_loop_shape(ir_bytes, function_name, statement_count, bs) {
+            return try lower_while_match_loop(
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+        }
+        // A precedence-climbing expression loop carries both a ParseNode-like value and an i64
+        // precedence through phis.
+        if try is_precedence_loop_shape(ir_bytes, function_name, params_spec, statement_count, bs) {
+            return try lower_precedence_loop(
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+        }
+        // A copy-seeded two-carried-value cursor loop threads a value cursor and scalar cursor
+        // through loop-head phis.
+        if try is_dual_cursor_loop_shape(ir_bytes, function_name, statement_count, bs) {
+            return try lower_dual_cursor_loop(
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+        }
+        // A dual Token-cursor advance loop threads previous/current Token cursors and consumes the
+        // previous token after the loop.
+        if try is_trailing_token_loop_shape(ir_bytes, function_name, statement_count, bs) {
+            return try lower_trailing_token_loop(
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                statement_count, bs
+            );
+        }
+        // A value-carried append-while loop threads a value cursor through a loop-head phi and a
+        // free-try-call latch.
+        if try is_value_cursor_append_loop_shape(ir_bytes, function_name, statement_count, bs) {
+            return try lower_value_cursor_append_loop(
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+        }
+        // A guarded-cursor loop threads a plain-call Token cursor through a prefix-not predicate
+        // header and conditional latch.
+        if try is_guarded_cursor_return_loop_shape(ir_bytes, function_name, statement_count, bs) {
+            return try lower_guarded_cursor_return_loop(
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                statement_count, bs
+            );
+        }
     }
     let module_prefix = compiled_util::module_prefix_of(function_name);
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
@@ -7915,6 +7974,9 @@ pub fn lower_multi_statement_function(
     // index binary search. Byte-identical (same offsets); only the lookup cost changes.
     try compiled_mir_types::build_fn_node_index(
         &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
+    );
+    let has_top_level_while = try top_level_has_statement_kind(
+        ir_bytes, function_name, statement_count, "While", bs, &call_arg_type_cache
     );
     // Top-level 'defer <receiver>.deinit();' statements register a cleanup that must run on every
     // exit path reached after the defer. We collect each defer body's inner expression node here and
@@ -7944,9 +8006,13 @@ pub fn lower_multi_statement_function(
             // induction initializer: it is not emitted as a let because the loop-head
             // phi supplies the initial value on the preheader edge, so emitting it
             // would redefine the induction SSA name (tracker 961).
-            if try statement_is_induction_init(
-                ir_bytes, function_name, statement, statement_count, bs
-            ) {
+            var is_induction_init = false;
+            if has_top_level_while {
+                is_induction_init = try statement_is_induction_init(
+                    ir_bytes, function_name, statement, statement_count, bs
+                );
+            }
+            if is_induction_init {
                 if try induction_init_needs_prewhile_alias(
                     ir_bytes, function_name, statement, stmt_index, statement_count, bs
                 ) {
@@ -8228,6 +8294,31 @@ pub fn lower_single_match_statement_function(
         params_spec,
         stmts
     );
+}
+
+fn top_level_has_statement_kind(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement_count: i64,
+    kind: []u8,
+    bs: i64,
+    call_arg_type_cache: &compiled_mir_types::CallArgTypeCache
+) -> !bool {
+    var stmt_index = 0;
+    var stmt_scan_from = bs;
+    while stmt_index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", stmt_index, stmt_scan_from
+        );
+        let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
+        stmt_scan_from = sf;
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, sf);
+        if std::mem::equal_bytes(stmt_kind, kind) {
+            return true;
+        }
+        stmt_index = stmt_index + 1;
+    }
+    return false;
 }
 pub struct MultiLowerResult {
     pub locals_spec: []u8,
@@ -8597,6 +8688,47 @@ fn lower_single_call_arg_with_local_aliases(
     );
 }
 
+fn lower_single_call_arg_with_local_aliases_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    string_index: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !compiled_mir::MirCallArg {
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    var index = 0;
+    while index < aliases.len() {
+        let state = try aliases.at(index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try alias_sources.append(state.source_name);
+            try alias_currents.append(state.current_name);
+        }
+        index = index + 1;
+    }
+    return try compiled_mir_lower_call::lower_single_call_arg_with_aliases_cached(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        params_spec,
+        arg_type,
+        arg_node,
+        string_index,
+        &alias_sources,
+        &alias_currents,
+        bs,
+        ir_lookup_index, call_arg_type_cache
+    );
+}
+
 fn carried_scalar_alias_name(source_name: []u8, loop_index: i64, slot: i64) -> ![]u8 {
     if slot == 0 {
         return "carried.scalar.0";
@@ -8832,20 +8964,27 @@ fn lower_field_array_append_try_call_statement(
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiExprLowerResult {
-    let root = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, receiver_node, "receiver", 0, bs
+    let receiver_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, receiver_node, bs
     );
-    let root_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, root, bs);
+    let root = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, receiver_node, "receiver", 0, receiver_sf
+    );
+    let root_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, root, bs);
+    let root_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, root, root_sf);
     if !std::mem::equal_bytes(root_kind, "Var") {
         return error("compiled mir: array append field receiver must start with Var");
     }
     let root_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, root, bs
+        ir_bytes, function_name, root, root_sf
     );
-    let field = try compiled_mir_types::resolve_field_expr(
-        ir_bytes, function_name, module_prefix, params_spec, receiver_node, bs
+    let field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec, receiver_node, bs,
+        call_arg_type_cache
     );
     let element_kizu = compiled_mir_types::array_value_element_kizu_type_or_empty(
         compiled_mir_types::struct_lookup_kizu_type(field.field_kizu_type)
@@ -8853,13 +8992,13 @@ fn lower_field_array_append_try_call_statement(
     if std::mem::len(element_kizu) == 0 {
         return error("compiled mir: append receiver field is not a std::array::Array");
     }
-    let element_llvm = try compiled_type_lower::kizu_type_to_llvm(
-        ir_bytes, module_prefix, element_kizu
+    let element_llvm = try compiled_mir_types::kizu_type_to_llvm_indexed_cached(
+        ir_lookup_index, ir_bytes, module_prefix, element_kizu, call_arg_type_cache
     );
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     let consumed_string = try lower_string_method_arg(
         ir_bytes, function_name, module_prefix, element_llvm,
-        arg_node, string_counter, aliases, &var args, bs
+        arg_node, string_counter, aliases, &var args, bs, ir_lookup_index, call_arg_type_cache
     );
     try stmts.append(compiled_mir::array_field_try_append_stmt(
         try local_alias_current_name(aliases, root_name),
@@ -8960,7 +9099,9 @@ fn lower_multi_expr_statement(
             try_counter,
             aliases,
             stmts,
-            bs
+            bs,
+            ir_lookup_index,
+            call_arg_type_cache
         );
     }
     if !std::mem::equal_bytes(receiver_kind, "Var") {
@@ -8992,7 +9133,7 @@ fn lower_multi_expr_statement(
         );
         let consumed_index = try lower_string_method_arg(
             ir_bytes, function_name, module_prefix, "i64",
-            arg_node, string_counter, aliases, &var args, bs
+            arg_node, string_counter, aliases, &var args, bs, ir_lookup_index, call_arg_type_cache
         );
         let set_value_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, inner, "arg", 1, bs
@@ -9000,7 +9141,8 @@ fn lower_multi_expr_statement(
         let set_value_string_counter = string_counter + consumed_index;
         let consumed_value = try lower_string_method_arg(
             ir_bytes, function_name, module_prefix, set_element_llvm,
-            set_value_node, set_value_string_counter, aliases, &var args, bs
+            set_value_node, set_value_string_counter, aliases, &var args, bs,
+            ir_lookup_index, call_arg_type_cache
         );
         consumed_string = consumed_index + consumed_value;
         try stmts.append(compiled_mir::array_try_set_stmt(
@@ -9028,7 +9170,7 @@ fn lower_multi_expr_statement(
         );
         consumed_string = try lower_string_method_arg(
             ir_bytes, function_name, module_prefix, element_llvm,
-            arg_node, string_counter, aliases, &var args, bs
+            arg_node, string_counter, aliases, &var args, bs, ir_lookup_index, call_arg_type_cache
         );
         try stmts.append(compiled_mir::array_try_append_stmt(
             receiver_alias, element_llvm, llvm_return_type,
@@ -9038,7 +9180,7 @@ fn lower_multi_expr_statement(
     if std::mem::equal_bytes(method_name, "append_bytes") {
         consumed_string = try lower_string_method_arg(
             ir_bytes, function_name, module_prefix, "%kizu.slice.u8",
-            arg_node, string_counter, aliases, &var args, bs
+            arg_node, string_counter, aliases, &var args, bs, ir_lookup_index, call_arg_type_cache
         );
         try stmts.append(compiled_mir::string_try_append_stmt(
             receiver_alias, "kizu_rt_string_append_bytes", llvm_return_type,
@@ -9048,7 +9190,8 @@ fn lower_multi_expr_statement(
         if std::mem::equal_bytes(method_name, "append_byte") {
             consumed_string = try lower_string_method_arg(
                 ir_bytes, function_name, module_prefix, "i8",
-                arg_node, string_counter, aliases, &var args, bs
+                arg_node, string_counter, aliases, &var args, bs, ir_lookup_index,
+                call_arg_type_cache
             );
             try stmts.append(compiled_mir::string_try_append_stmt(
                 receiver_alias, "kizu_rt_string_append_byte", llvm_return_type,
@@ -9251,17 +9394,20 @@ fn lower_void_method_try_call_statement(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiExprLowerResult {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let info = try method_call_info(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs, ir_lookup_index
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs,
+        ir_lookup_index, call_arg_type_cache
     );
     if !std::mem::equal_bytes(info.return_llvm_type, "%kizu.error.void") {
         return error("compiled mir: method try-call statement must return !void");
     }
     let explicit_arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
-    var arg_types = try compiled_mir_types::lower_call_arg_types(
-        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
+    var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
+        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1,
+        ir_lookup_index, call_arg_type_cache
     );
     defer arg_types.deinit();
     var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
@@ -9295,16 +9441,22 @@ fn lower_void_method_try_call_statement(
     var arg_index = 0;
     while arg_index < explicit_arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
+        let arg_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
         let arg_type = try arg_types.get(arg_index + 1);
-        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        let arg_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, arg_node, arg_sf
+        );
         if std::mem::equal_bytes(arg_kind, "TryExpr") {
             let inner = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, arg_node, "value", 0, bs
+                ir_bytes, function_name, arg_node, "value", 0, arg_sf
+            );
+            let inner_sf = compiled_mir_types::fn_node_line_start(
+                call_arg_type_cache, inner, bs
             );
             let inner_kind = try ir_contract::body_node_kind_from(
-                ir_bytes, function_name, inner, bs
+                ir_bytes, function_name, inner, inner_sf
             );
             if !std::mem::equal_bytes(inner_kind, "Call") {
                 return error("compiled mir: method try-call statement try arg must wrap a call");
@@ -9316,7 +9468,7 @@ fn lower_void_method_try_call_statement(
                 temp_counter: cur_temp,
                 try_counter: cur_try
             };
-            if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+            if try callee_is_field_expr(ir_bytes, function_name, inner, inner_sf) {
                 hoist_result = try lower_multi_let_array_get(
                     ir_bytes, function_name, module_prefix, llvm_return_type, cur_locals,
                     hoist_name, inner, cur_string, cur_temp, cur_try, aliases, stmts, bs,
@@ -9335,7 +9487,7 @@ fn lower_void_method_try_call_statement(
             cur_try = hoist_result.try_counter;
             try args.append(compiled_mir::var_call_arg(arg_type, hoist_name));
         } else {
-            if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+            if try call_arg_must_hoist(ir_bytes, function_name, arg_node, arg_sf) {
                 // A bare Call argument returns a non-error-union value and has no inline call-arg
                 // descriptor, so hoist it ahead of the statement into 'let __try_arg<slot> = <call>;'
                 // and pass the bound local by Var (the non-try mirror of the TryExpr branch above).
@@ -9357,7 +9509,7 @@ fn lower_void_method_try_call_statement(
                 cur_try = hoist_result.try_counter + 1;
                 try args.append(compiled_mir::var_call_arg(arg_type, hoist_name));
             } else {
-                let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+                let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases_cached(
                     ir_bytes,
                     function_name,
                     module_prefix,
@@ -9367,7 +9519,9 @@ fn lower_void_method_try_call_statement(
                     cur_string,
                     &alias_sources,
                     &alias_currents,
-                    bs
+                    bs,
+                    ir_lookup_index,
+                    call_arg_type_cache
                 );
                 if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
                     cur_string = cur_string + 1;
@@ -9402,12 +9556,15 @@ fn lower_string_method_arg(
     string_index: i64,
     aliases: &std::array::Array<LocalAliasState>,
     args: &var std::array::Array<compiled_mir::MirCallArg>,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
-    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
+    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, sf);
     if std::mem::equal_bytes(arg_kind, "Var") {
         let var_name = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, arg_node, bs
+            ir_bytes, function_name, arg_node, sf
         );
         try args.append(compiled_mir::var_call_arg(
             arg_type, try local_alias_current_name(aliases, var_name)
@@ -9416,7 +9573,7 @@ fn lower_string_method_arg(
     }
     if std::mem::equal_bytes(arg_kind, "String") {
         let token = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, arg_node, bs
+            ir_bytes, function_name, arg_node, sf
         );
         let _payload_len = try compiled_util::string_token_decoded_len(
             token,
@@ -9427,28 +9584,34 @@ fn lower_string_method_arg(
     }
     if std::mem::equal_bytes(arg_kind, "CastExpr") {
         let type_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, arg_node, "type", 0, bs
+            ir_bytes, function_name, arg_node, "type", 0, sf
+        );
+        let type_sf = compiled_mir_types::fn_node_line_start(
+            call_arg_type_cache, type_node, bs
         );
         let type_text = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, type_node, bs
+            ir_bytes, function_name, type_node, type_sf
         );
-        let target_llvm = try compiled_type_lower::kizu_type_to_llvm(
-            ir_bytes, module_prefix, type_text
+        let target_llvm = try compiled_type_lower::kizu_type_to_llvm_indexed(
+            ir_lookup_index, ir_bytes, module_prefix, type_text
         );
         if !std::mem::equal_bytes(target_llvm, arg_type) {
             return error("compiled mir: string method cast argument type mismatch");
         }
         let value_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, arg_node, "value", 0, bs
+            ir_bytes, function_name, arg_node, "value", 0, sf
+        );
+        let value_sf = compiled_mir_types::fn_node_line_start(
+            call_arg_type_cache, value_node, bs
         );
         let value_kind = try ir_contract::body_node_kind_from(
-            ir_bytes, function_name, value_node, bs
+            ir_bytes, function_name, value_node, value_sf
         );
         if !std::mem::equal_bytes(value_kind, "Int") {
             return error("compiled mir: unsupported string method cast operand");
         }
         let literal = try ir_contract::body_int_value_from(
-            ir_bytes, function_name, value_node, bs
+            ir_bytes, function_name, value_node, value_sf
         );
         try args.append(compiled_mir::int_literal_call_arg(arg_type, literal));
         return 0;
@@ -9458,9 +9621,9 @@ fn lower_string_method_arg(
         // shared call-arg field lowering; it consumes no string slot. It resolves through the
         // local aliases so a receiver reassigned by a branch merge ('methods.append(method.node)'
         // after 'method' is reseated in an if/else) reads the merged value, not the let-init.
-        try args.append(try lower_single_call_arg_with_local_aliases(
+        try args.append(try lower_single_call_arg_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, "", arg_type, arg_node,
-            string_index, aliases, bs
+            string_index, aliases, bs, ir_lookup_index, call_arg_type_cache
         ));
         return 0;
     }
@@ -9469,9 +9632,9 @@ fn lower_string_method_arg(
         // reuses the shared call-arg lowering, which emits a nested call descriptor whose
         // own operands are non-literal here, so it consumes no string slot. Its operands resolve
         // through the local aliases for the same branch-merge reason as the field-read arg above.
-        try args.append(try lower_single_call_arg_with_local_aliases(
+        try args.append(try lower_single_call_arg_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, "", arg_type, arg_node,
-            string_index, aliases, bs
+            string_index, aliases, bs, ir_lookup_index, call_arg_type_cache
         ));
         return 0;
     }
@@ -9480,7 +9643,7 @@ fn lower_string_method_arg(
     // to an inline literal; it consumes no string slot.
     if std::mem::equal_bytes(arg_kind, "Int") {
         let literal = try ir_contract::body_int_value_from(
-            ir_bytes, function_name, arg_node, bs
+            ir_bytes, function_name, arg_node, sf
         );
         try args.append(compiled_mir::int_literal_call_arg(arg_type, literal));
         return 0;
@@ -9656,7 +9819,8 @@ fn lower_multi_let_statement_named(
             if try call_method_receiver_is_var(ir_bytes, function_name, let_value, sf) {
                 if try call_has_try_arg(ir_bytes, function_name, let_value, sf) {
                     let info = try method_call_info(
-                        ir_bytes, function_name, module_prefix, locals_spec, let_value, bs, ir_lookup_index
+                        ir_bytes, function_name, module_prefix, locals_spec, let_value, bs,
+                        ir_lookup_index, call_arg_type_cache
                     );
                     var method_arg_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
                     var method_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
@@ -9827,7 +9991,9 @@ fn lower_multi_let_statement_named(
                 };
             }
         }
-        if try call_has_hoisted_arg(ir_bytes, function_name, let_value, sf) {
+        if try call_has_hoisted_arg_cached(
+            ir_bytes, function_name, let_value, bs, call_arg_type_cache
+        ) {
             var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             let nested_result_id = try lower_expr_with_local_aliases(
                 ir_bytes,
@@ -10013,7 +10179,7 @@ fn lower_try_call_args_with_local_aliases_cached(
             string_idx = string_idx + try count_strings_in_insts_from(arg_insts, before);
             try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
         } else {
-            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases_cached(
                 ir_bytes,
                 function_name,
                 module_prefix,
@@ -10023,7 +10189,9 @@ fn lower_try_call_args_with_local_aliases_cached(
                 string_idx,
                 &alias_sources,
                 &alias_currents,
-                bs
+                bs,
+                ir_lookup_index,
+                call_arg_type_cache
             );
             let is_string_arg = scalar_arg.kind == compiled_mir::MirCallArgKind::String;
             try args.append(scalar_arg);
@@ -10057,14 +10225,20 @@ fn lower_hoisted_try_arg(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
+    let arg_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
     let inner = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, arg_node, "value", 0, bs
+        ir_bytes, function_name, arg_node, "value", 0, arg_sf
     );
-    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
+    let inner_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, inner, bs
+    );
+    let inner_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, inner, inner_sf
+    );
     if !std::mem::equal_bytes(inner_kind, "Call") {
         return error("compiled mir: try call argument must wrap a call");
     }
-    if try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
+    if try callee_is_field_expr(ir_bytes, function_name, inner, inner_sf) {
         return try lower_multi_let_array_get(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
             hoist_name, inner, string_counter, temp_counter, try_counter, aliases, stmts, bs,
@@ -10096,11 +10270,12 @@ fn lower_call_args_hoisting_try_args_with_local_aliases_cached(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !TryArgCallArgsLowerResult {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, module_prefix, callee_name, arg_count, ir_lookup_index, call_arg_type_cache
@@ -10126,10 +10301,13 @@ fn lower_call_args_hoisting_try_args_with_local_aliases_cached(
     var arg_index = 0;
     while arg_index < arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
+        let arg_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
         let arg_type = try arg_types.get(arg_index);
-        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        let arg_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, arg_node, arg_sf
+        );
         if std::mem::equal_bytes(arg_kind, "TryExpr") {
             let hoist_name = try hoisted_try_arg_name(cur_try);
             let hoist_result = try lower_hoisted_try_arg(
@@ -10143,7 +10321,7 @@ fn lower_call_args_hoisting_try_args_with_local_aliases_cached(
             cur_try = hoist_result.try_counter;
             try out_args.append(compiled_mir::var_call_arg(arg_type, hoist_name));
         } else {
-            if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+            if try call_arg_must_hoist(ir_bytes, function_name, arg_node, arg_sf) {
                 let before = arg_insts.len();
                 let temp_id = try lower_expr_with_local_aliases(
                     ir_bytes,
@@ -10163,7 +10341,7 @@ fn lower_call_args_hoisting_try_args_with_local_aliases_cached(
                 cur_temp = cur_temp + arg_insts.len() - before;
                 try out_args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
             } else {
-                let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+                let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases_cached(
                     ir_bytes,
                     function_name,
                     module_prefix,
@@ -10173,7 +10351,9 @@ fn lower_call_args_hoisting_try_args_with_local_aliases_cached(
                     cur_string,
                     &alias_sources,
                     &alias_currents,
-                    bs
+                    bs,
+                    ir_lookup_index,
+                    call_arg_type_cache
                 );
                 if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
                     cur_string = cur_string + 1;
@@ -10209,14 +10389,17 @@ fn lower_method_call_args_hoisting_try_args_with_local_aliases(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !TryArgCallArgsLowerResult {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let info = try method_call_info(
-        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs, ir_lookup_index
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs,
+        ir_lookup_index, call_arg_type_cache
     );
     let explicit_arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
-    var arg_types = try compiled_mir_types::lower_call_arg_types(
-        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
+    var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
+        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1,
+        ir_lookup_index, call_arg_type_cache
     );
     defer arg_types.deinit();
     var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
@@ -10242,10 +10425,13 @@ fn lower_method_call_args_hoisting_try_args_with_local_aliases(
     var arg_index = 0;
     while arg_index < explicit_arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
+        let arg_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
         let arg_type = try arg_types.get(arg_index + 1);
-        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        let arg_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, arg_node, arg_sf
+        );
         if std::mem::equal_bytes(arg_kind, "TryExpr") {
             let hoist_name = try hoisted_try_arg_name(cur_try);
             let hoist_result = try lower_hoisted_try_arg(
@@ -10259,7 +10445,7 @@ fn lower_method_call_args_hoisting_try_args_with_local_aliases(
             cur_try = hoist_result.try_counter;
             try out_args.append(compiled_mir::var_call_arg(arg_type, hoist_name));
         } else {
-            if try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs) {
+            if try call_arg_must_hoist(ir_bytes, function_name, arg_node, arg_sf) {
                 let before = arg_insts.len();
                 let temp_id = try lower_expr_with_local_aliases(
                     ir_bytes,
@@ -10279,7 +10465,7 @@ fn lower_method_call_args_hoisting_try_args_with_local_aliases(
                 cur_temp = cur_temp + arg_insts.len() - before;
                 try out_args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
             } else {
-                let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+                let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases_cached(
                     ir_bytes,
                     function_name,
                     module_prefix,
@@ -10289,7 +10475,9 @@ fn lower_method_call_args_hoisting_try_args_with_local_aliases(
                     cur_string,
                     &alias_sources,
                     &alias_currents,
-                    bs
+                    bs,
+                    ir_lookup_index,
+                    call_arg_type_cache
                 );
                 if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
                     cur_string = cur_string + 1;
@@ -10538,30 +10726,39 @@ fn lower_multi_let_ast_child_at(
     try_counter: i64,
     aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiLowerResult {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
+    let callee_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, callee_node, bs);
     let receiver_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, callee_sf
+    );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, receiver_node, bs
     );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, receiver_sf
     );
     if !std::mem::equal_bytes(receiver_kind, "Var") {
         return error("compiled mir: child_at receiver must be a local or parameter");
     }
     let receiver_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, receiver_sf
     );
     let receiver_alias = try local_alias_current_name(aliases, receiver_name);
-    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
-        ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed_cached(
+        ir_lookup_index,
+        ir_bytes, function_name, module_prefix, locals_spec, receiver_name, bs,
+        call_arg_type_cache
     );
     let receiver_lookup = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
     if !std::mem::equal_bytes(receiver_lookup, "std::kizu::ast::Ast") {
         return error("compiled mir: child_at receiver is not a std::kizu::ast::Ast");
     }
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     if arg_count != 2 {
         return error("compiled mir: child_at takes a range and an index argument");
@@ -10570,6 +10767,11 @@ fn lower_multi_let_ast_child_at(
     let accessor_name = "ast_child_at";
     let called_error_union = "%kizu.error.node_id";
     let success_type = "%kizu.kizu.ast.node_id";
+    var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
+        ir_bytes, accessor_prefix, accessor_name, arg_count + 1,
+        ir_lookup_index, call_arg_type_cache
+    );
+    defer arg_types.deinit();
     var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
     defer alias_sources.deinit();
     var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
@@ -10589,14 +10791,13 @@ fn lower_multi_let_ast_child_at(
     var arg_index = 0;
     while arg_index < arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
-        let arg_type = try compiled_signature::resolve_call_arg_type(
-            ir_bytes, accessor_prefix, accessor_name, arg_index + 1
-        );
-        let arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+        let arg_type = try arg_types.get(arg_index + 1);
+        let arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases_cached(
             ir_bytes, function_name, module_prefix, locals_spec, arg_type, arg_node,
-            string_counter + consumed_strings, &alias_sources, &alias_currents, bs
+            string_counter + consumed_strings, &alias_sources, &alias_currents, bs,
+            ir_lookup_index, call_arg_type_cache
         );
         if arg.kind == compiled_mir::MirCallArgKind::String {
             consumed_strings = consumed_strings + 1;
@@ -10665,7 +10866,7 @@ fn lower_multi_let_array_get(
         return try lower_multi_let_ast_child_at(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
             let_name, call_node, callee_node, string_counter, temp_counter,
-            try_counter, aliases, stmts, bs
+            try_counter, aliases, stmts, bs, ir_lookup_index, call_arg_type_cache
         );
     }
     if !std::mem::equal_bytes(method_name, "get") {
@@ -10680,14 +10881,17 @@ fn lower_multi_let_array_get(
     let receiver_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, callee_node, "receiver", 0, cf
     );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, receiver_node, bs
+    );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, cf
+        ir_bytes, function_name, receiver_node, receiver_sf
     );
     if !std::mem::equal_bytes(receiver_kind, "Var") {
         return error("compiled mir: Array.get value receiver must be a local or parameter");
     }
     let receiver_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, receiver_node, cf
+        ir_bytes, function_name, receiver_node, receiver_sf
     );
     let receiver_alias = try local_alias_current_name(aliases, receiver_name);
     let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed_cached(
@@ -10766,8 +10970,8 @@ fn try_call_success_type(
     // '!T' signature-return fact is keyed under the callee's real owning module rather than
     // the caller's module prefix. Resolve the fully-qualified name generically (the same
     // resolver lower_call_return_type uses) and read the fact with an empty prefix.
-    let qualified = compiled_mir_types::cross_module_callee_qualified_name_or_empty(
-        ir_bytes, callee_name
+    let qualified = compiled_mir_types::cross_module_callee_qualified_name_or_empty_indexed(
+        ir_lookup_index, ir_bytes, callee_name
     );
     var lookup_prefix = module_prefix;
     var lookup_name = callee_name;
@@ -10792,7 +10996,9 @@ fn try_call_success_type(
         return error("compiled mir: try-call callee must return an error union");
     }
     let success_kizu = ret_kizu[1..std::mem::len(ret_kizu)];
-    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, lookup_prefix, success_kizu);
+    return try compiled_type_lower::kizu_type_to_llvm_indexed(
+        ir_lookup_index, ir_bytes, lookup_prefix, success_kizu
+    );
 }
 // prefix_not_try_call_inner_or_minus_one recognizes a '!(try <callee>(<args>))' expression: a
 // prefix 'not' whose operand is a 'try <call>' over a free function returning an error-union bool
@@ -10960,7 +11166,8 @@ fn lower_try_call_void_if(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
-    try require_void_then_block_no_else(ir_bytes, function_name, statement, bs);
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
+    try require_void_then_block_no_else(ir_bytes, function_name, statement, sf);
 
     let called_error_union = try compiled_mir_types::lower_call_return_type_indexed(
         ir_lookup_index,
@@ -11215,7 +11422,9 @@ fn lower_multi_return_statement(
         // generic expression path (which materializes the nested call or checked byte load into a
         // preceding temp) as a return-expr statement instead of an inline return-call (issue 1165 /
         // 1162).
-        if try call_has_hoisted_arg(ir_bytes, function_name, value, sf) {
+        if try call_has_hoisted_arg_cached(
+            ir_bytes, function_name, value, bs, call_arg_type_cache
+        ) {
             var nested_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
             let nested_result_id = try lower_expr_with_local_aliases(
                 ir_bytes,
@@ -11236,11 +11445,13 @@ fn lower_multi_return_statement(
             ir_lookup_index,
             ir_bytes, function_name, module_prefix, value, bs
         );
-        let callee_name = try compiled_mir_types::lower_call_callee_name(
-            ir_bytes, function_name, module_prefix, value, sf
+        let callee_name = try compiled_mir_types::lower_call_callee_name_indexed(
+            ir_lookup_index,
+            ir_bytes, function_name, module_prefix, value, bs
         );
-        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-            ir_bytes, function_name, module_prefix, value, sf
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix_indexed(
+            ir_lookup_index,
+            ir_bytes, function_name, module_prefix, value, bs
         );
         let args = try lower_call_args_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, locals_spec, value, string_counter, aliases, bs,
@@ -11373,7 +11584,7 @@ fn lower_multi_match_statement(
     );
     let enum_kizu = try resolve_dispatch_enum_kizu_type(
         ir_bytes, function_name, module_prefix, locals_spec, scrutinee, scrutinee_kind, bs,
-        ir_lookup_index
+        ir_lookup_index, call_arg_type_cache
     );
     var scrutinee_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let scrutinee_result_id = try lower_expr_into(
@@ -11456,21 +11667,24 @@ fn resolve_dispatch_enum_kizu_type(
     scrutinee: i64,
     scrutinee_kind: []u8,
     bs: i64,
-    ir_lookup_index: &ir_index::IrIndex
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> ![]u8 {
     if std::mem::equal_bytes(scrutinee_kind, "Var") {
         let var_name = try ir_contract::body_token_or_empty_from(
             ir_bytes, function_name, scrutinee, bs
         );
-        let kizu = try compiled_mir_types::resolve_value_kizu_type_indexed(
+        let kizu = try compiled_mir_types::resolve_value_kizu_type_indexed_cached(
             ir_lookup_index,
-            ir_bytes, function_name, module_prefix, locals_spec, var_name, bs
+            ir_bytes, function_name, module_prefix, locals_spec, var_name, bs,
+            call_arg_type_cache
         );
         return compiled_mir_types::struct_lookup_kizu_type(kizu);
     }
     if std::mem::equal_bytes(scrutinee_kind, "FieldExpr") {
-        let field = try compiled_mir_types::resolve_field_expr_indexed(
-            ir_lookup_index, ir_bytes, function_name, module_prefix, locals_spec, scrutinee, bs
+        let field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, locals_spec, scrutinee, bs,
+            call_arg_type_cache
         );
         return compiled_mir_types::struct_lookup_kizu_type(field.field_kizu_type);
     }
@@ -12159,14 +12373,23 @@ fn lower_void_then_body(
     let child_namespace = try reserved_nested_base(if_index, ir_bytes, function_name, bs);
     var body_index = 0;
     var body_returns = false;
+    var body_scan_from = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, then_node, bs
+    );
     while true {
         let statement = try ir_contract::body_child_sequence_or_minus_one_from(
-            ir_bytes, function_name, then_node, "statement", body_index, bs
+            ir_bytes, function_name, then_node, "statement", body_index, body_scan_from
         );
         if statement < 0 {
             break;
         }
-        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        let stmt_sf = compiled_mir_types::fn_node_line_start(
+            call_arg_type_cache, statement, bs
+        );
+        body_scan_from = stmt_sf;
+        let stmt_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, statement, stmt_sf
+        );
         if std::mem::equal_bytes(stmt_kind, "Let") {
             let let_result = try lower_multi_let_statement(
                 ir_bytes,
@@ -12260,7 +12483,8 @@ fn lower_void_then_body(
                     } else {
                         if std::mem::equal_bytes(stmt_kind, "Return") {
                             let after_return = try ir_contract::body_child_sequence_or_minus_one_from(
-                                ir_bytes, function_name, then_node, "statement", body_index + 1, bs
+                                ir_bytes, function_name, then_node, "statement",
+                                body_index + 1, body_scan_from
                             );
                             if after_return >= 0 {
                                 return error("compiled mir: void then-body return must be final");
@@ -12672,12 +12896,16 @@ fn lower_void_if_body_statement(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !MultiIfLowerResult {
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
     let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
-        ir_bytes, function_name, statement, "else", 0, bs
+        ir_bytes, function_name, statement, "else", 0, sf
     );
     if else_node >= 0 {
+        let else_sf = compiled_mir_types::fn_node_line_start(
+            call_arg_type_cache, else_node, bs
+        );
         let else_kind = try ir_contract::body_node_kind_from(
-            ir_bytes, function_name, else_node, bs
+            ir_bytes, function_name, else_node, else_sf
         );
         if !std::mem::equal_bytes(else_kind, "Empty") {
             if !std::mem::equal_bytes(else_kind, "Block") {
@@ -12766,13 +12994,21 @@ fn lower_multi_if_statement(
     let then_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "then", 0, sf
     );
+    let cond_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, cond_node, bs);
+    let then_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, then_node, bs);
+    let cond_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, cond_node, cond_sf
+    );
     // Prefix-not try-call conditions hoist the sub-expression try-call (issue 1165 / 1162). The
     // existing return-bool guard keeps its dedicated renderer; void then-bodies share the positive
     // try-call if lowering with inverted branch polarity, so failure propagation and alias merging
     // stay on the same path.
-    let guard_not_try = try prefix_not_try_call_inner_or_minus_one(
-        ir_bytes, function_name, module_prefix, cond_node, bs, ir_lookup_index
-    );
+    var guard_not_try = -1;
+    if std::mem::equal_bytes(cond_kind, "Prefix") {
+        guard_not_try = try prefix_not_try_call_inner_or_minus_one(
+            ir_bytes, function_name, module_prefix, cond_node, cond_sf, ir_lookup_index
+        );
+    }
     if guard_not_try >= 0 {
         let guard_then_extra = try ir_contract::body_child_sequence_or_minus_one_from(
             ir_bytes, function_name, then_node, "statement", 1, sf
@@ -12849,9 +13085,12 @@ fn lower_multi_if_statement(
             ir_lookup_index, call_arg_type_cache
         );
     }
-    let positive_try = try positive_try_call_condition_inner_or_minus_one(
-        ir_bytes, function_name, module_prefix, cond_node, bs, ir_lookup_index
-    );
+    var positive_try = -1;
+    if std::mem::equal_bytes(cond_kind, "TryExpr") {
+        positive_try = try positive_try_call_condition_inner_or_minus_one(
+            ir_bytes, function_name, module_prefix, cond_node, cond_sf, ir_lookup_index
+        );
+    }
     if positive_try >= 0 {
         return try lower_try_call_void_if(
             ir_bytes,
@@ -12874,7 +13113,10 @@ fn lower_multi_if_statement(
             ir_lookup_index, call_arg_type_cache
         );
     }
-    let cond_short_circuit = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    var cond_short_circuit = 0;
+    if std::mem::equal_bytes(cond_kind, "Binary") {
+        cond_short_circuit = try short_circuit_kind(ir_bytes, function_name, cond_node, cond_sf);
+    }
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var cond_rhs_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var cond_extra_operands = std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator());
@@ -13060,9 +13302,14 @@ fn lower_multi_if_statement(
     let then_string_base = string_counter + cond_strings;
     let then_base = last_cond_result + 1;
     let then_stmt = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, then_node, "statement", 0, bs
+        ir_bytes, function_name, then_node, "statement", 0, then_sf
     );
-    let then_stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, then_stmt, bs);
+    let then_stmt_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, then_stmt, bs
+    );
+    let then_stmt_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, then_stmt, then_stmt_sf
+    );
     // A continue-latch then-block ('{ <induction> = <induction> + <step>; continue; }') carries no
     // return value: it folds its increment into the loop's shared constant-step latch and branches
     // back to the loop head, so it lowers to a ContinueLatch if whose then-block the renderer turns
@@ -13071,17 +13318,20 @@ fn lower_multi_if_statement(
     // temp / string counters do not advance.
     var is_continue_latch_then = false;
     let then_continue = try ir_contract::body_child_sequence_or_minus_one_from(
-        ir_bytes, function_name, then_node, "statement", 1, bs
+        ir_bytes, function_name, then_node, "statement", 1, then_sf
     );
     if then_continue >= 0 {
+        let then_continue_sf = compiled_mir_types::fn_node_line_start(
+            call_arg_type_cache, then_continue, bs
+        );
         let then_continue_kind = try ir_contract::body_node_kind_from(
-            ir_bytes, function_name, then_continue, bs
+            ir_bytes, function_name, then_continue, then_continue_sf
         );
         if std::mem::equal_bytes(then_stmt_kind, "Assign") and
             std::mem::equal_bytes(then_continue_kind, "Continue") {
             is_continue_latch_then = true;
             let then_extra = try ir_contract::body_child_sequence_or_minus_one_from(
-                ir_bytes, function_name, then_node, "statement", 2, bs
+                ir_bytes, function_name, then_node, "statement", 2, then_continue_sf
             );
             if then_extra >= 0 {
                 return error("compiled mir: continue-latch then-block must be '<increment>; continue;'");
@@ -13156,9 +13406,14 @@ fn lower_multi_if_statement(
     var new_alias_counter = alias_counter;
     if !is_continue_latch_then {
         let ret_value = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, then_stmt, "value", 0, bs
+            ir_bytes, function_name, then_stmt, "value", 0, then_stmt_sf
         );
-        let ret_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, ret_value, bs);
+        let ret_value_sf = compiled_mir_types::fn_node_line_start(
+            call_arg_type_cache, ret_value, bs
+        );
+        let ret_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, ret_value, ret_value_sf
+        );
         then_kind = compiled_mir::MirIfThenKind::ReturnExpr;
         // 'if <cond> { return try <callee>(<args>); }' whose callee shares this
         // function's error-union return is an identity tail: unwrap it to the inner
@@ -17866,6 +18121,31 @@ pub fn call_has_hoisted_arg(
     return false;
 }
 
+pub fn call_has_hoisted_arg_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !bool {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, cf
+    );
+    var index = 0;
+    while index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", index, cf
+        );
+        let arg_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
+        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, arg_sf) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 // lower_expr_value_len lowers value-receiver len() calls in expression context.
 // Array<T>.len() and std::string::String.len() both read a local/param %kizu.owned handle and
 // return i64, but they dispatch to different runtime helpers, so the receiver Kizu type chooses
@@ -17878,37 +18158,43 @@ fn lower_expr_value_len(
     call_node: i64,
     id_base: i64,
     insts: &var std::array::Array<compiled_mir::MirExprInst>,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "callee", 0, bs
+        ir_bytes, function_name, call_node, "callee", 0, cf
     );
+    let callee_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, callee_node, bs);
     let method_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, callee_node, "field", bs
+        ir_bytes, function_name, callee_node, "field", callee_sf
     );
     if !std::mem::equal_bytes(method_name, "len") {
         return error("compiled mir: only value-receiver len is supported in expression position");
     }
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     if arg_count != 0 {
         return error("compiled mir: value-receiver len takes no arguments");
     }
     let receiver_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, callee_sf
     );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, receiver_node, bs);
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, receiver_sf
     );
     if !std::mem::equal_bytes(receiver_kind, "Var") {
         return error("compiled mir: value-receiver len receiver must be a local or parameter");
     }
     let receiver_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, receiver_node, bs
+        ir_bytes, function_name, receiver_node, receiver_sf
     );
-    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type(
-        ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs
+    let receiver_kizu = try compiled_mir_types::resolve_value_kizu_type_indexed_cached(
+        ir_lookup_index,
+        ir_bytes, function_name, module_prefix, params_spec, receiver_name, bs, call_arg_type_cache
     );
     let lookup = compiled_mir_types::struct_lookup_kizu_type(receiver_kizu);
     if is_array_field_type(lookup) {
@@ -17944,21 +18230,24 @@ fn lower_expr_call_with_nested_args(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     let call_type = try compiled_mir_types::lower_call_return_type_indexed(
         ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
+    let lowered_callee_name = try compiled_mir_types::lower_call_callee_name_indexed(
+        ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix_indexed(
+        ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
     );
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, module_prefix, callee_name, arg_count, ir_lookup_index, call_arg_type_cache
@@ -17969,10 +18258,11 @@ fn lower_expr_call_with_nested_args(
     var string_idx = string_index;
     while arg_index < arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
+        let arg_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
         let arg_type = try arg_types.get(arg_index);
-        let hoist_arg = try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs);
+        let hoist_arg = try call_arg_must_hoist(ir_bytes, function_name, arg_node, arg_sf);
         if hoist_arg {
             let before = insts.len();
             let temp_id = try lower_expr_into(
@@ -18015,17 +18305,20 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     let call_type = try compiled_mir_types::lower_call_return_type_indexed(
         ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
+    let lowered_callee_name = try compiled_mir_types::lower_call_callee_name_indexed(
+        ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
     );
-    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix_indexed(
+        ir_lookup_index,
         ir_bytes, function_name, module_prefix, call_node, bs
     );
     var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
@@ -18042,7 +18335,7 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
         alias_index = alias_index + 1;
     }
     let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+        ir_bytes, function_name, call_node, cf
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, module_prefix, callee_name, arg_count, ir_lookup_index, call_arg_type_cache
@@ -18053,10 +18346,11 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
     var string_idx = string_index;
     while arg_index < arg_count {
         let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, call_node, "arg", arg_index, bs
+            ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
+        let arg_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
         let arg_type = try arg_types.get(arg_index);
-        let hoist_arg = try call_arg_must_hoist(ir_bytes, function_name, arg_node, bs);
+        let hoist_arg = try call_arg_must_hoist(ir_bytes, function_name, arg_node, arg_sf);
         if hoist_arg {
             let before = insts.len();
             let temp_id = try lower_expr_with_local_aliases(
@@ -18066,7 +18360,7 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
             string_idx = string_idx + try count_strings_in_insts_from(insts, before);
             try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
         } else {
-            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases_cached(
                 ir_bytes,
                 function_name,
                 module_prefix,
@@ -18076,7 +18370,9 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
                 string_idx,
                 &alias_sources,
                 &alias_currents,
-                bs
+                bs,
+                ir_lookup_index,
+                call_arg_type_cache
             );
             let is_string_arg = scalar_arg.kind == compiled_mir::MirCallArgKind::String;
             try args.append(scalar_arg);
@@ -18107,7 +18403,8 @@ fn lower_expr_method_call(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let info = try method_call_info(
-        ir_bytes, function_name, module_prefix, params_spec, call_node, bs, ir_lookup_index
+        ir_bytes, function_name, module_prefix, params_spec, call_node, bs,
+        ir_lookup_index, call_arg_type_cache
     );
     let explicit_arg_count = try compiled_mir_types::count_call_args(
         ir_bytes, function_name, call_node, bs
@@ -18175,13 +18472,15 @@ fn lower_expr_method_call_with_local_aliases(
     // type resolution and lowering recursion, which read facts that can precede this node.
     let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let info = try method_call_info(
-        ir_bytes, function_name, module_prefix, params_spec, call_node, bs, ir_lookup_index
+        ir_bytes, function_name, module_prefix, params_spec, call_node, bs,
+        ir_lookup_index, call_arg_type_cache
     );
     let explicit_arg_count = try compiled_mir_types::count_call_args(
         ir_bytes, function_name, call_node, cf
     );
-    var arg_types = try compiled_mir_types::lower_call_arg_types(
-        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
+    var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
+        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1,
+        ir_lookup_index, call_arg_type_cache
     );
     defer arg_types.deinit();
     var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
@@ -18207,8 +18506,9 @@ fn lower_expr_method_call_with_local_aliases(
         let arg_node = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, call_node, "arg", arg_index, cf
         );
+        let arg_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
         let arg_type = try arg_types.get(arg_index + 1);
-        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, cf) {
+        if try call_arg_must_hoist(ir_bytes, function_name, arg_node, arg_sf) {
             let before = insts.len();
             let temp_id = try lower_expr_with_local_aliases(
                 ir_bytes, function_name, module_prefix, params_spec, arg_node,
@@ -18217,7 +18517,7 @@ fn lower_expr_method_call_with_local_aliases(
             string_idx = string_idx + try count_strings_in_insts_from(insts, before);
             try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
         } else {
-            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases(
+            let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_with_aliases_cached(
                 ir_bytes,
                 function_name,
                 module_prefix,
@@ -18227,7 +18527,9 @@ fn lower_expr_method_call_with_local_aliases(
                 string_idx,
                 &alias_sources,
                 &alias_currents,
-                bs
+                bs,
+                ir_lookup_index,
+                call_arg_type_cache
             );
             let is_string_arg = scalar_arg.kind == compiled_mir::MirCallArgKind::String;
             try args.append(scalar_arg);
@@ -18259,17 +18561,19 @@ fn lower_expr_call_with_local_aliases(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
     let id = id_base + insts.len();
-    // cf tightens the body-fact scan for this call's own structural facts (its callee, arg
-    // edges, field-expr mode/name) to the call node's body-node line via the index instead of
-    // rescanning from the function body start; the call's children sort after it, so a scan
-    // from cf reaches the byte-identical facts a scan from bs would (perf only). bs is kept for
-    // type/name resolution (return type, arg types) and lowering recursion, which read let/param
-    // facts that can precede this node.
-    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, expr_node, bs);
-    if try callee_is_field_expr(ir_bytes, function_name, expr_node, cf) {
-        if try call_method_name_is(ir_bytes, function_name, expr_node, "len", cf) {
+    // The call-shape probes below use the per-function node-line cache for this call's own
+    // structural facts; type resolution and lowering recursion keep bs because they read
+    // let/param facts that can precede this node.
+    let callee_mode = try call_callee_field_expr_mode_cached(
+        ir_bytes, function_name, expr_node, bs, call_arg_type_cache
+    );
+    if callee_mode == 1 {
+        if try call_method_name_is_cached(
+            ir_bytes, function_name, expr_node, "len", bs, call_arg_type_cache
+        ) {
             let result = try lower_expr_value_len(
-                ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+                ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs,
+                ir_lookup_index, call_arg_type_cache
             );
             try rename_local_aliases_in_insts(insts, aliases);
             return result;
@@ -18279,29 +18583,28 @@ fn lower_expr_call_with_local_aliases(
             string_index, id_base, insts, aliases, bs, ir_lookup_index, call_arg_type_cache
         );
     }
-    if try callee_is_namespace_union_ctor(
-        ir_bytes, function_name, module_prefix, expr_node, cf, ir_lookup_index
-    ) {
-        return try lower_expr_union_ctor_call(
-            ir_bytes, function_name, module_prefix, params_spec, expr_node,
-            string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
-        );
+    if callee_mode == 2 {
+        if try callee_is_namespace_union_ctor_cached(
+            ir_bytes, function_name, module_prefix, expr_node, bs,
+            ir_lookup_index, call_arg_type_cache
+        ) {
+            return try lower_expr_union_ctor_call(
+                ir_bytes, function_name, module_prefix, params_spec, expr_node,
+                string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
+            );
+        }
     }
-    if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, cf) {
+    if try call_has_hoisted_arg_cached(
+        ir_bytes, function_name, expr_node, bs, call_arg_type_cache
+    ) {
         return try lower_expr_call_with_nested_args_with_local_aliases(
             ir_bytes, function_name, module_prefix, params_spec, expr_node,
             string_index, id_base, insts, aliases, bs, ir_lookup_index, call_arg_type_cache
         );
     }
-    let call_type = try compiled_mir_types::lower_call_return_type_indexed(
+    let call_info = try compiled_mir_types::lower_call_info_indexed_cached(
         ir_lookup_index,
-        ir_bytes, function_name, module_prefix, expr_node, bs
-    );
-    let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
-        ir_bytes, function_name, module_prefix, expr_node, cf
-    );
-    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-        ir_bytes, function_name, module_prefix, expr_node, cf
+        ir_bytes, function_name, module_prefix, expr_node, bs, call_arg_type_cache
     );
     let args = try lower_call_args_with_local_aliases_cached(
         ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, aliases, bs,
@@ -18309,9 +18612,9 @@ fn lower_expr_call_with_local_aliases(
     );
     try insts.append(compiled_mir::call_expr_inst(
         id,
-        call_type,
-        callee_module_prefix,
-        lowered_callee_name,
+        call_info.return_llvm_type,
+        call_info.module_prefix,
+        call_info.callee_name,
         args
     ));
     return id;
@@ -18936,10 +19239,16 @@ fn lower_expr_into(
         // A field-mode len() call on a value receiver reads a supported %kizu.owned
         // param/local (Array<T> or std::string::String) through its matching runtime helper.
         // get() returns !T and only appears in let-try position, so it is rejected here.
-        if try callee_is_field_expr(ir_bytes, function_name, expr_node, bs) {
-            if try call_method_name_is(ir_bytes, function_name, expr_node, "len", bs) {
+        let callee_mode = try call_callee_field_expr_mode_cached(
+            ir_bytes, function_name, expr_node, bs, call_arg_type_cache
+        );
+        if callee_mode == 1 {
+            if try call_method_name_is_cached(
+                ir_bytes, function_name, expr_node, "len", bs, call_arg_type_cache
+            ) {
                 return try lower_expr_value_len(
-                    ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs
+                    ir_bytes, function_name, module_prefix, params_spec, expr_node, id_base, insts, bs,
+                    ir_lookup_index, call_arg_type_cache
                 );
             }
             return try lower_expr_method_call(
@@ -18951,34 +19260,33 @@ fn lower_expr_into(
         // single-payload union constructor (Union::Variant(payload), issue 1157 PR-P2).
         // Field-mode callees (.len()) were handled above; enum and free/namespaced function
         // calls fall through to the regular call path below.
-        if try callee_is_namespace_union_ctor(
-            ir_bytes, function_name, module_prefix, expr_node, bs, ir_lookup_index
-        ) {
-            return try lower_expr_union_ctor_call(
-                ir_bytes, function_name, module_prefix, params_spec, expr_node,
-                string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
-            );
+        if callee_mode == 2 {
+            if try callee_is_namespace_union_ctor_cached(
+                ir_bytes, function_name, module_prefix, expr_node, bs,
+                ir_lookup_index, call_arg_type_cache
+            ) {
+                return try lower_expr_union_ctor_call(
+                    ir_bytes, function_name, module_prefix, params_spec, expr_node,
+                    string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
+                );
+            }
         }
         // A call whose argument list contains a nested call (equal_bytes(token_text(...),
         // expected)) or a single-element byte index load (is_line_break(source[index])) lowers
         // each such argument into a preceding expr temp and references it through a Temp call
         // arg, since inline call-arg descriptors cannot carry a computed call result or a
         // checked byte load (issue 1165 / 1162).
-        if try call_has_hoisted_arg(ir_bytes, function_name, expr_node, bs) {
+        if try call_has_hoisted_arg_cached(
+            ir_bytes, function_name, expr_node, bs, call_arg_type_cache
+        ) {
             return try lower_expr_call_with_nested_args(
                 ir_bytes, function_name, module_prefix, params_spec, expr_node,
                 string_index, id_base, insts, bs, ir_lookup_index, call_arg_type_cache
             );
         }
-        let call_type = try compiled_mir_types::lower_call_return_type_indexed(
+        let call_info = try compiled_mir_types::lower_call_info_indexed_cached(
             ir_lookup_index,
-            ir_bytes, function_name, module_prefix, expr_node, bs
-        );
-        let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
-            ir_bytes, function_name, module_prefix, expr_node, bs
-        );
-        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-            ir_bytes, function_name, module_prefix, expr_node, bs
+            ir_bytes, function_name, module_prefix, expr_node, bs, call_arg_type_cache
         );
         let args = try compiled_mir_lower_call::lower_call_args_cached(
             ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, bs,
@@ -18986,9 +19294,9 @@ fn lower_expr_into(
         );
         try insts.append(compiled_mir::call_expr_inst(
             id,
-            call_type,
-            callee_module_prefix,
-            lowered_callee_name,
+            call_info.return_llvm_type,
+            call_info.module_prefix,
+            call_info.callee_name,
             args
         ));
         return id;
@@ -19025,34 +19333,38 @@ fn lower_expr_into(
 // FieldExpr (Union::Variant) whose receiver names a tagged-union type, i.e. a union
 // constructor. It is non-erroring on a non-union receiver so enum/function namespaced
 // calls fall through to the regular call path (issue 1157 PR-P2).
-fn callee_is_namespace_union_ctor(
+fn callee_is_namespace_union_ctor_cached(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
     call_node: i64,
     bs: i64,
-    ir_lookup_index: &ir_index::IrIndex
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !bool {
+    let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, call_node, "callee", 0, bs
+        ir_bytes, function_name, call_node, "callee", 0, cf
     );
+    let callee_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, callee_node, bs);
     let callee_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, callee_node, bs
+        ir_bytes, function_name, callee_node, callee_sf
     );
     if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
         return false;
     }
     let callee_mode = try ir_contract::sequence_fact_second_value_from(
-        ir_bytes, "body-field-expr ", function_name, callee_node, bs
+        ir_bytes, "body-field-expr ", function_name, callee_node, callee_sf
     );
     if !std::mem::equal_bytes(callee_mode, "namespace") {
         return false;
     }
     let receiver = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, bs
+        ir_bytes, function_name, callee_node, "receiver", 0, callee_sf
     );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, receiver, bs);
     let receiver_token = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, receiver, bs
+        ir_bytes, function_name, receiver, receiver_sf
     );
     return compiled_fact_lookup::is_union_type_indexed(
         ir_lookup_index, ir_bytes, module_prefix, receiver_token
@@ -19131,8 +19443,9 @@ fn lower_expr_field(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
+    let nf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, expr_node, bs);
     let mode = try ir_contract::sequence_fact_second_value_from(
-        ir_bytes, "body-field-expr ", function_name, expr_node, bs
+        ir_bytes, "body-field-expr ", function_name, expr_node, nf
     );
     if std::mem::equal_bytes(mode, "namespace") {
         let id = id_base + insts.len();
@@ -19141,7 +19454,7 @@ fn lower_expr_field(
             function_name,
             expr_node,
             "namespace",
-            bs
+            nf
         );
         let receiver = try ir_contract::body_child_sequence_from(
             ir_bytes,
@@ -19149,13 +19462,16 @@ fn lower_expr_field(
             expr_node,
             "receiver",
             0,
-            bs
+            nf
+        );
+        let receiver_sf = compiled_mir_types::fn_node_line_start(
+            call_arg_type_cache, receiver, bs
         );
         let receiver_token = try ir_contract::body_token_or_empty_from(
             ir_bytes,
             function_name,
             receiver,
-            bs
+            receiver_sf
         );
         if compiled_fact_lookup::is_enum_type_indexed(
             ir_lookup_index, ir_bytes, module_prefix, receiver_token
@@ -19188,25 +19504,25 @@ fn lower_expr_field(
         ));
         return id;
     }
-    let field_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, expr_node, "field", bs
-    );
     let receiver = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, expr_node, "receiver", 0, bs
+        ir_bytes, function_name, expr_node, "receiver", 0, nf
+    );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, receiver, bs
     );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver, bs
+        ir_bytes, function_name, receiver, receiver_sf
     );
     if std::mem::equal_bytes(receiver_kind, "Var") {
         let receiver_name = try ir_contract::body_token_or_empty_from(
             ir_bytes,
             function_name,
             receiver,
-            bs
+            receiver_sf
         );
-        let field = try compiled_mir_types::resolve_field_expr_indexed(
-            ir_lookup_index,
-            ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+        let field = try compiled_mir_types::resolve_var_receiver_field_expr_indexed_cached(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+            expr_node, nf, receiver_name, bs, call_arg_type_cache
         );
         let id = id_base + insts.len();
         try insts.append(compiled_mir::field_access_expr_inst(
@@ -19234,9 +19550,10 @@ fn lower_expr_field(
         bs,
         ir_lookup_index, call_arg_type_cache
     );
-    let field = try compiled_mir_types::resolve_field_expr_indexed(
+    let field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
         ir_lookup_index,
-        ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+        ir_bytes, function_name, module_prefix, params_spec, expr_node, bs,
+        call_arg_type_cache
     );
     let id = id_base + insts.len();
     try insts.append(compiled_mir::field_access_temp_expr_inst(
@@ -19280,19 +19597,22 @@ fn lower_expr_field_with_local_aliases(
     let receiver = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, expr_node, "receiver", 0, nf
     );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, receiver, bs
+    );
     let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver, nf
+        ir_bytes, function_name, receiver, receiver_sf
     );
     if std::mem::equal_bytes(receiver_kind, "Var") {
         let receiver_name = try ir_contract::body_token_or_empty_from(
             ir_bytes,
             function_name,
             receiver,
-            nf
+            receiver_sf
         );
-        let field = try compiled_mir_types::resolve_field_expr_indexed(
-            ir_lookup_index,
-            ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+        let field = try compiled_mir_types::resolve_var_receiver_field_expr_indexed_cached(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+            expr_node, nf, receiver_name, bs, call_arg_type_cache
         );
         let id = id_base + insts.len();
         try insts.append(compiled_mir::field_access_expr_inst(
@@ -19321,9 +19641,10 @@ fn lower_expr_field_with_local_aliases(
         bs,
         ir_lookup_index, call_arg_type_cache
     );
-    let field = try compiled_mir_types::resolve_field_expr_indexed(
+    let field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
         ir_lookup_index,
-        ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+        ir_bytes, function_name, module_prefix, params_spec, expr_node, bs,
+        call_arg_type_cache
     );
     let id = id_base + insts.len();
     try insts.append(compiled_mir::field_access_temp_expr_inst(

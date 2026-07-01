@@ -1483,6 +1483,22 @@ fn render_one_instruction(
     // both the Go reference compiler and the compiled-MIR void if-lowering accept (a
     // 'return try <void call>;' identity tail is rejected by the former).
     let op = try code.get(index);
+    try render_one_instruction_core(out, text, code, kinds, index, abi, op);
+    try render_one_instruction_runtime(out, text, code, kinds, index, abi, op);
+    try render_one_instruction_storage(out, text, code, kinds, index, abi, op);
+    try render_one_instruction_control(out, text, code, kinds, index, abi, op);
+    return;
+}
+
+fn render_one_instruction_core(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    abi: i64,
+    op: i64
+) -> !void {
     let const_int = codegen::code_op_const_int();
     if op == const_int {
         try render_const_int(out, code, index);
@@ -1577,6 +1593,18 @@ fn render_one_instruction(
     if op == try_call_owned_string {
         try render_try_call_owned_string(out, text, code, kinds, index, abi);
     }
+    return;
+}
+
+fn render_one_instruction_runtime(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    abi: i64,
+    op: i64
+) -> !void {
     let expect_op = codegen::code_op_expect();
     if op == expect_op {
         try render_expect(out, code, index);
@@ -1777,6 +1805,18 @@ fn render_one_instruction(
     if op == try_map_get {
         try render_try_map_get_i64(out, code, kinds, index, abi);
     }
+    return;
+}
+
+fn render_one_instruction_storage(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    abi: i64,
+    op: i64
+) -> !void {
     let arena_add = codegen::code_op_arena_add_slice_struct();
     if op == arena_add {
         try render_arena_add_slice_struct(out, code, index);
@@ -1793,6 +1833,18 @@ fn render_one_instruction(
     if op == arena_get_struct {
         try render_arena_get_struct_field(out, code, index);
     }
+    return;
+}
+
+fn render_one_instruction_control(
+    out: &var std::string::String,
+    text: []u8,
+    code: &std::array::Array<i64>,
+    kinds: &std::array::Array<i64>,
+    index: i64,
+    abi: i64,
+    op: i64
+) -> !void {
     let if_begin = codegen::code_op_if_begin();
     if op == if_begin {
         try render_if_begin(out, code, index);
@@ -7712,6 +7764,26 @@ fn tape_struct_pack_record_end(code: &std::array::Array<i64>, index: i64) -> !i6
 
 fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     let op = try code.get(index);
+    let core_end = try tape_record_end_core(code, index, op);
+    if core_end >= 0 {
+        return core_end;
+    }
+    let storage_end = try tape_record_end_storage(code, index, op);
+    if storage_end >= 0 {
+        return storage_end;
+    }
+    let call_end = try tape_record_end_call_fs(code, index, op);
+    if call_end >= 0 {
+        return call_end;
+    }
+    let control_end = try tape_record_end_control(code, index, op);
+    if control_end >= 0 {
+        return control_end;
+    }
+    return code.len();
+}
+
+fn tape_record_end_core(code: &std::array::Array<i64>, index: i64, op: i64) -> !i64 {
     let const_int = codegen::code_op_const_int();
     if op == const_int {
         return index + 3;
@@ -7828,6 +7900,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     if op == try_string_append {
         return index + 3;
     }
+    return -1;
+}
+
+fn tape_record_end_storage(code: &std::array::Array<i64>, index: i64, op: i64) -> !i64 {
     let array_len = codegen::code_op_array_len();
     if op == array_len {
         return index + 3;
@@ -7976,6 +8052,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     if op == sc_end {
         return index + 4;
     }
+    return -1;
+}
+
+fn tape_record_end_call_fs(code: &std::array::Array<i64>, index: i64, op: i64) -> !i64 {
     let call = codegen::code_op_call();
     if op == call {
         return try tape_call_record_end(code, index);
@@ -8044,6 +8124,10 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     if op == struct_param {
         return try tape_struct_param_record_end(code, index);
     }
+    return -1;
+}
+
+fn tape_record_end_control(code: &std::array::Array<i64>, index: i64, op: i64) -> !i64 {
     let func_end = codegen::code_op_func_end();
     if op == func_end {
         return index + 1;
@@ -8160,7 +8244,7 @@ fn tape_record_end(code: &std::array::Array<i64>, index: i64) -> !i64 {
     if op == continue_op {
         return index + 3;
     }
-    return code.len();
+    return -1;
 }
 
 fn render_llvm_c_bytes(out: &var std::string::String, payload: []u8) -> !void {

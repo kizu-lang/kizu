@@ -435,6 +435,120 @@ pub fn lower_single_call_arg_with_aliases(
     return error("compiled mir: unsupported call arg kind");
 }
 
+pub fn lower_single_call_arg_with_aliases_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    string_index: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !compiled_mir::MirCallArg {
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
+    let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, sf);
+    if std::mem::equal_bytes(arg_kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, arg_node, sf
+        );
+        return compiled_mir::var_call_arg(
+            arg_type, try aliased_name_or_original(alias_sources, alias_currents, var_name)
+        );
+    }
+    if std::mem::equal_bytes(arg_kind, "Call") {
+        let callee_name = try compiled_mir_types::lower_call_callee_name_indexed(
+            ir_lookup_index,
+            ir_bytes, function_name, module_prefix, arg_node, bs
+        );
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix_indexed(
+            ir_lookup_index,
+            ir_bytes, function_name, module_prefix, arg_node, bs
+        );
+        let args = try lower_call_args_with_aliases_cached(
+            ir_bytes, function_name, module_prefix, params_spec, arg_node, string_index,
+            alias_sources, alias_currents, bs, ir_lookup_index, call_arg_type_cache
+        );
+        return compiled_mir::call_call_arg(arg_type, callee_module_prefix, callee_name, args);
+    }
+    if std::mem::equal_bytes(arg_kind, "FieldExpr") {
+        return try lower_call_field_arg_with_aliases_cached(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec, arg_type,
+            arg_node, alias_sources, alias_currents, bs, call_arg_type_cache
+        );
+    }
+    if std::mem::equal_bytes(arg_kind, "IndexExpr") {
+        return try lower_call_index_arg_with_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node,
+            alias_sources, alias_currents, bs
+        );
+    }
+    if std::mem::equal_bytes(arg_kind, "String") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, arg_node, sf
+        );
+        let _payload_len = try compiled_util::string_token_decoded_len(
+            token,
+            "compiled mir: invalid call string token"
+        );
+        return compiled_mir::string_call_arg(arg_type, token, string_index);
+    }
+    if std::mem::equal_bytes(arg_kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, arg_node, sf
+        );
+        return compiled_mir::bool_call_arg(arg_type, std::mem::equal_bytes(token, "true"));
+    }
+    if std::mem::equal_bytes(arg_kind, "Int") {
+        let literal = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, arg_node, sf
+        );
+        return compiled_mir::int_literal_call_arg(arg_type, literal);
+    }
+    if std::mem::equal_bytes(arg_kind, "Binary") {
+        return try lower_call_arith_arg_with_aliases_cached(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec, arg_type,
+            arg_node, alias_sources, alias_currents, bs, call_arg_type_cache
+        );
+    }
+    if std::mem::equal_bytes(arg_kind, "Prefix") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-prefix ", function_name, arg_node, sf
+        );
+        if std::mem::equal_bytes(op, "borrow") or std::mem::equal_bytes(op, "mut-borrow") {
+            let operand_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, arg_node, "right", 0, sf
+            );
+            return try lower_single_call_arg_with_aliases_cached(
+                ir_bytes, function_name, module_prefix, params_spec, arg_type, operand_node,
+                string_index, alias_sources, alias_currents, bs, ir_lookup_index,
+                call_arg_type_cache
+            );
+        }
+    }
+    if std::mem::equal_bytes(arg_kind, "CastExpr") {
+        let value_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, arg_node, "value", 0, sf
+        );
+        let value_sf = compiled_mir_types::fn_node_line_start(
+            call_arg_type_cache, value_node, bs
+        );
+        let value_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, value_node, value_sf
+        );
+        if std::mem::equal_bytes(value_kind, "Int") {
+            let literal = try ir_contract::body_int_value_from(
+                ir_bytes, function_name, value_node, value_sf
+            );
+            return compiled_mir::int_literal_call_arg(arg_type, literal);
+        }
+    }
+    return error("compiled mir: unsupported call arg kind");
+}
+
 pub fn lower_call_args(
     ir_bytes: []u8,
     function_name: []u8,
@@ -510,14 +624,20 @@ pub fn lower_call_args_cached(
         ir_lookup_index, call_arg_type_cache
     );
     defer arg_types.deinit();
+    var empty_alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer empty_alias_sources.deinit();
+    var empty_alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer empty_alias_currents.deinit();
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     var arg_index = 0;
     var string_index = first_string_index;
     while arg_index < arg_nodes.len() {
         let arg_node = try arg_nodes.get(arg_index);
         let arg_type = try arg_types.get(arg_index);
-        let arg = try lower_single_call_arg(
-            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, string_index, bs
+        let arg = try lower_single_call_arg_with_aliases_cached(
+            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node,
+            string_index, &empty_alias_sources, &empty_alias_currents, bs, ir_lookup_index,
+            call_arg_type_cache
         );
         let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
         var string_arg_count = 0;
@@ -621,9 +741,10 @@ pub fn lower_call_args_with_aliases_cached(
     while arg_index < arg_nodes.len() {
         let arg_node = try arg_nodes.get(arg_index);
         let arg_type = try arg_types.get(arg_index);
-        let arg = try lower_single_call_arg_with_aliases(
+        let arg = try lower_single_call_arg_with_aliases_cached(
             ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node,
-            string_index, alias_sources, alias_currents, bs
+            string_index, alias_sources, alias_currents, bs, ir_lookup_index,
+            call_arg_type_cache
         );
         let is_string_arg = arg.kind == compiled_mir::MirCallArgKind::String;
         var string_arg_count = 0;
@@ -1067,6 +1188,94 @@ fn lower_call_arith_arg_with_aliases(
     );
 }
 
+fn lower_call_arith_arg_with_aliases_cached(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !compiled_mir::MirCallArg {
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, arg_node, sf
+    );
+    var subtract = false;
+    if std::mem::equal_bytes(op, "sub") {
+        subtract = true;
+    } else {
+        if !std::mem::equal_bytes(op, "add") {
+            return error("compiled mir: unsupported arith call arg op");
+        }
+    }
+    let left_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "left", 0, sf
+    );
+    let right_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "right", 0, sf
+    );
+    let right_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, right_node, bs);
+    let right_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, right_node, right_sf
+    );
+    if !std::mem::equal_bytes(right_kind, "Int") {
+        return error("compiled mir: arith call arg right operand must be an int literal");
+    }
+    let literal = try ir_contract::body_int_value_from(
+        ir_bytes, function_name, right_node, right_sf
+    );
+    let left_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, left_node, bs);
+    let left_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, left_node, left_sf
+    );
+    if std::mem::equal_bytes(left_kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, left_node, left_sf
+        );
+        return compiled_mir::arith_var_call_arg(
+            arg_type,
+            try aliased_name_or_original(alias_sources, alias_currents, var_name),
+            literal,
+            subtract
+        );
+    }
+    if !std::mem::equal_bytes(left_kind, "FieldExpr") {
+        return error("compiled mir: arith call arg base must be a var or field access");
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, left_node, "receiver", 0, left_sf
+    );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, receiver, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver, receiver_sf
+    );
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: arith call arg field receiver must be a var");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, receiver_sf
+    );
+    let field = try compiled_mir_types::resolve_var_receiver_field_expr_indexed_cached(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        left_node, left_sf, receiver_name, bs, call_arg_type_cache
+    );
+    return compiled_mir::arith_field_call_arg(
+        arg_type,
+        field.receiver_llvm_type,
+        try aliased_name_or_original(alias_sources, alias_currents, receiver_name),
+        field.field_index,
+        literal,
+        subtract
+    );
+}
+
 fn lower_call_field_arg(
     ir_bytes: []u8,
     function_name: []u8,
@@ -1132,6 +1341,53 @@ fn lower_call_field_arg_with_aliases(
     );
     let field = try compiled_mir_types::resolve_field_expr(
         ir_bytes, function_name, module_prefix, params_spec, arg_node, bs
+    );
+    return compiled_mir::field_access_call_arg(
+        arg_type,
+        field.receiver_llvm_type,
+        try aliased_name_or_original(alias_sources, alias_currents, receiver_name),
+        field.field_index
+    );
+}
+
+fn lower_call_field_arg_with_aliases_cached(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !compiled_mir::MirCallArg {
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, arg_node, bs);
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "receiver", 0, sf
+    );
+    let receiver_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, receiver, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver, receiver_sf
+    );
+    if std::mem::equal_bytes(receiver_kind, "FieldExpr") {
+        return try lower_nested_call_field_arg_with_aliases_cached(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec, arg_type,
+            arg_node, receiver, alias_sources, alias_currents, bs, call_arg_type_cache
+        );
+    }
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: call field arg receiver must be Var");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, receiver_sf
+    );
+    let field = try compiled_mir_types::resolve_var_receiver_field_expr_indexed_cached(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        arg_node, sf, receiver_name, bs, call_arg_type_cache
     );
     return compiled_mir::field_access_call_arg(
         arg_type,
@@ -1209,6 +1465,56 @@ fn lower_nested_call_field_arg_with_aliases(
     );
     let second_field = try compiled_mir_types::resolve_field_expr(
         ir_bytes, function_name, module_prefix, params_spec, arg_node, bs
+    );
+    return compiled_mir::nested_field_access_call_arg(
+        arg_type,
+        first_field.receiver_llvm_type,
+        try aliased_name_or_original(alias_sources, alias_currents, root_name),
+        first_field.field_index,
+        first_field.field_llvm_type,
+        second_field.field_index
+    );
+}
+
+fn lower_nested_call_field_arg_with_aliases_cached(
+    ir_lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    receiver: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !compiled_mir::MirCallArg {
+    let receiver_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, receiver, bs
+    );
+    let root_receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, receiver, "receiver", 0, receiver_sf
+    );
+    let root_sf = compiled_mir_types::fn_node_line_start(
+        call_arg_type_cache, root_receiver, bs
+    );
+    let root_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, root_receiver, root_sf
+    );
+    if !std::mem::equal_bytes(root_kind, "Var") {
+        return error("compiled mir: nested call field arg receiver must start with Var");
+    }
+    let root_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, root_receiver, root_sf
+    );
+    let first_field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        receiver, bs, call_arg_type_cache
+    );
+    let second_field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        arg_node, bs, call_arg_type_cache
     );
     return compiled_mir::nested_field_access_call_arg(
         arg_type,

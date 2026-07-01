@@ -519,6 +519,28 @@ pub fn lookup_qualified_function_name_by_callee_suffix(
     return ir_bytes[0..0];
 }
 
+pub fn lookup_qualified_function_name_by_callee_suffix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    callee_name: []u8
+) -> []u8 {
+    let prefix = "function-signature-return ";
+    let prefix_len = std::mem::len(prefix);
+    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
+    while entry_index >= 0 and
+        ir_index::entry_key_starts_with(index, ir_bytes, entry_index, prefix) {
+        let name_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
+        let name_end = ir_index::entry_key_end(index, entry_index);
+        let name = ir_bytes[name_start..name_end];
+        if !std::mem::equal_bytes(name, callee_name) and
+            type_matches_suffix(name, callee_name) {
+            return name;
+        }
+        entry_index = entry_index + 1;
+    }
+    return ir_bytes[0..0];
+}
+
 pub fn lookup_stdlib_symbol(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "stdlib-symbol ";
@@ -1239,20 +1261,16 @@ pub fn is_union_type_indexed(
     if entry_index >= 0 {
         return true;
     }
-    let byte_len = std::mem::len(ir_bytes);
     let marker = "union-variant ";
     let marker_len = std::mem::len(marker);
-    var scan = 0;
-    while scan + marker_len + std::mem::len(short_name) < byte_len {
-        if compiled_util::is_line_start(ir_bytes, scan) and
-            std::mem::equal_bytes(ir_bytes[scan..scan + marker_len], marker) {
-            let name_start = scan + marker_len;
-            let name_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), name_start);
-            if type_matches_suffix(ir_bytes[name_start..name_end], short_name) {
-                return true;
-            }
+    var scan = ir_index::first_entry_with_fact_prefix(index, ir_bytes, marker);
+    while scan >= 0 and ir_index::entry_key_starts_with(index, ir_bytes, scan, marker) {
+        let name_start = ir_index::entry_line_start(index, scan) + marker_len;
+        let name_end = ir_index::entry_key_end(index, scan);
+        if type_matches_suffix(ir_bytes[name_start..name_end], short_name) {
+            return true;
         }
-        scan = compiled_util::find_line_end(ir_bytes, scan) + 1;
+        scan = scan + 1;
     }
     return false;
 }
