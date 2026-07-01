@@ -7888,6 +7888,7 @@ pub fn lower_multi_statement_function(
     // scans before the generic path. Gate the probes by statement count so large dispatchers go
     // straight to the generic multi-statement lowerer.
     if statement_count <= 24 {
+        let is_parser_component = compiled_mir_lower_is_parser_component(function_name);
         // A value-carried array-append loop (struct value threaded through a phi, appended into a
         // runtime array until a sentinel tag) lowers through the generic ArrayNew + ValueWhile path
         // rather than the i64-induction While machinery (issue 1165).
@@ -7897,67 +7898,69 @@ pub fn lower_multi_statement_function(
                 ir_lookup_index
             );
         }
-        // A value-carried 'while true' grammar loop (the parse_postfix_expr shape: a struct value
-        // threaded through a loop-head phi, reassigned through a free try-call in each guarded arm,
-        // and returned from the terminal else) lowers through the GrammarLoop CFG rather than the
-        // i64-induction While machinery.
-        if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
-            return try lower_grammar_postfix_loop(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-            );
-        }
-        // A type-apply parser loop also uses a bool-literal 'while true' header, but its carried
-        // value is a Token cursor seeded and latched by plain calls.
-        if try is_type_apply_loop_shape(ir_bytes, function_name, statement_count, bs) {
-            return try lower_type_apply_loop(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-            );
-        }
-        // A 'while true' + match-dispatch loop (parse_generic_type_end's generic-argument walk)
-        // uses a plain-call Token seed and a bool-literal header.
-        if try is_while_match_loop_shape(ir_bytes, function_name, statement_count, bs) {
-            return try lower_while_match_loop(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-            );
-        }
-        // A precedence-climbing expression loop carries both a ParseNode-like value and an i64
-        // precedence through phis.
-        if try is_precedence_loop_shape(ir_bytes, function_name, params_spec, statement_count, bs) {
-            return try lower_precedence_loop(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-            );
-        }
-        // A copy-seeded two-carried-value cursor loop threads a value cursor and scalar cursor
-        // through loop-head phis.
-        if try is_dual_cursor_loop_shape(ir_bytes, function_name, statement_count, bs) {
-            return try lower_dual_cursor_loop(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-            );
-        }
-        // A dual Token-cursor advance loop threads previous/current Token cursors and consumes the
-        // previous token after the loop.
-        if try is_trailing_token_loop_shape(ir_bytes, function_name, statement_count, bs) {
-            return try lower_trailing_token_loop(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                statement_count, bs
-            );
-        }
-        // A value-carried append-while loop threads a value cursor through a loop-head phi and a
-        // free-try-call latch.
-        if try is_value_cursor_append_loop_shape(ir_bytes, function_name, statement_count, bs) {
-            return try lower_value_cursor_append_loop(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-            );
-        }
-        // A guarded-cursor loop threads a plain-call Token cursor through a prefix-not predicate
-        // header and conditional latch.
-        if try is_guarded_cursor_return_loop_shape(ir_bytes, function_name, statement_count, bs) {
-            return try lower_guarded_cursor_return_loop(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                statement_count, bs
-            );
+        if is_parser_component {
+            // A value-carried 'while true' grammar loop (the parse_postfix_expr shape: a struct
+            // value threaded through a loop-head phi, reassigned through a free try-call in each
+            // guarded arm, and returned from the terminal else) lowers through the GrammarLoop CFG.
+            if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
+                return try lower_grammar_postfix_loop(
+                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                );
+            }
+            // A type-apply parser loop also uses a bool-literal 'while true' header, but its carried
+            // value is a Token cursor seeded and latched by plain calls.
+            if try is_type_apply_loop_shape(ir_bytes, function_name, statement_count, bs) {
+                return try lower_type_apply_loop(
+                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                );
+            }
+            // A 'while true' + match-dispatch loop (parse_generic_type_end's generic-argument walk)
+            // uses a plain-call Token seed and a bool-literal header.
+            if try is_while_match_loop_shape(ir_bytes, function_name, statement_count, bs) {
+                return try lower_while_match_loop(
+                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                );
+            }
+            // A precedence-climbing expression loop carries both a ParseNode-like value and an i64
+            // precedence through phis.
+            if try is_precedence_loop_shape(ir_bytes, function_name, params_spec, statement_count, bs) {
+                return try lower_precedence_loop(
+                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                );
+            }
+            // A copy-seeded two-carried-value cursor loop threads a value cursor and scalar cursor
+            // through loop-head phis.
+            if try is_dual_cursor_loop_shape(ir_bytes, function_name, statement_count, bs) {
+                return try lower_dual_cursor_loop(
+                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                );
+            }
+            // A dual Token-cursor advance loop threads previous/current Token cursors and consumes
+            // the previous token after the loop.
+            if try is_trailing_token_loop_shape(ir_bytes, function_name, statement_count, bs) {
+                return try lower_trailing_token_loop(
+                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                    statement_count, bs
+                );
+            }
+            // A value-carried append-while loop threads a value cursor through a loop-head phi and a
+            // free-try-call latch.
+            if try is_value_cursor_append_loop_shape(ir_bytes, function_name, statement_count, bs) {
+                return try lower_value_cursor_append_loop(
+                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                );
+            }
+            // A guarded-cursor loop threads a plain-call Token cursor through a prefix-not predicate
+            // header and conditional latch.
+            if try is_guarded_cursor_return_loop_shape(ir_bytes, function_name, statement_count, bs) {
+                return try lower_guarded_cursor_return_loop(
+                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                    statement_count, bs
+                );
+            }
         }
     }
+    let is_parser_component = compiled_mir_lower_is_parser_component(function_name);
     let module_prefix = compiled_util::module_prefix_of(function_name);
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var locals_spec = params_spec;
@@ -8068,7 +8071,7 @@ pub fn lower_multi_statement_function(
                 try pending_defers.append(defer_body);
             } else {
             if std::mem::equal_bytes(stmt_kind, "While") {
-                if try is_embedded_value_cursor_append_loop_shape(
+                if is_parser_component and try is_embedded_value_cursor_append_loop_shape(
                     ir_bytes, function_name, stmt_index, statement, bs
                 ) {
                     let cursor_result = try lower_embedded_value_cursor_append_loop(
@@ -8256,6 +8259,10 @@ pub fn lower_multi_statement_function(
         params_spec,
         stmts
     );
+}
+
+fn compiled_mir_lower_is_parser_component(function_name: []u8) -> bool {
+    return std::mem::starts_with(function_name, "std::kizu::parser::");
 }
 
 pub fn lower_single_match_statement_function(
