@@ -117,7 +117,7 @@ func (l *lowerer) lowerMatchArms(
 			nextCheck = l.newBlock(l.nextBlockName("match.check"))
 		}
 		l.block = check
-		if err := l.lowerMatchCheck(subject, arm, armBlock, nextCheck, endLabel); err != nil {
+		if err := l.lowerMatchCheck(subject, arm, armBlock, nextCheck); err != nil {
 			return nil, err
 		}
 		result, err := l.lowerMatchArmBody(subject, arm, armBlock, endLabel, saved, wantValue)
@@ -138,7 +138,6 @@ func (l *lowerer) lowerMatchCheck(
 	arm ast.MatchArm,
 	armBlock *Block,
 	nextCheck *Block,
-	endLabel string,
 ) error {
 	if arm.IsWildcard() {
 		l.block.Terminator = Terminator{Op: "jump", Target: armBlock.Name}
@@ -150,9 +149,13 @@ func (l *lowerer) lowerMatchCheck(
 	}
 	tag := Value{Name: strconv.Itoa(index), Type: subject.value.Type}
 	cond := l.emit("binary.==", "bool", []Value{subject.value, tag}, "")
-	elseLabel := endLabel
+	var elseLabel string
 	if nextCheck != nil {
 		elseLabel = nextCheck.Name
+	} else {
+		unreachable := l.newBlock(l.nextBlockName("match.unreachable"))
+		unreachable.Terminator = Terminator{Op: "unreachable"}
+		elseLabel = unreachable.Name
 	}
 	l.block.Terminator = Terminator{Op: "branch", Cond: cond, Target: armBlock.Name, Else: elseLabel}
 	return nil
