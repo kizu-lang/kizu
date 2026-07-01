@@ -30,6 +30,7 @@ pub struct CallArgTypeCache {
     // lowering start by build_fn_node_index. fn_node_line_start reads it in O(1) instead of the
     // global index binary search. Empty (len 0) until built, in which case lookups fall back to bs.
     pub node_line_starts: std::array::Array<i64>,
+    pub node_kinds: std::array::Array<[]u8>,
     // local_names / local_types is the per-function local-binding type cache (pillar B): local_types[i]
     // is the resolved kizu type of the let-bound local local_names[i]. resolve_local_kizu_type is a
     // deterministic function of (function, name) (it scans block 0 direct-first then nested, the
@@ -68,6 +69,7 @@ pub fn call_arg_type_cache() -> CallArgTypeCache {
         type_starts: std::array::Array<i64>(std::mem::page_allocator()),
         types: std::array::Array<[]u8>(std::mem::page_allocator()),
         node_line_starts: std::array::Array<i64>(std::mem::page_allocator()),
+        node_kinds: std::array::Array<[]u8>(std::mem::page_allocator()),
         local_names: std::array::Array<[]u8>(std::mem::page_allocator()),
         local_types: std::array::Array<[]u8>(std::mem::page_allocator()),
         local_binding_names: std::array::Array<[]u8>(std::mem::page_allocator()),
@@ -112,6 +114,7 @@ impl CallArgTypeCache {
         self.local_names.deinit();
         self.local_binding_statements.deinit();
         self.local_binding_names.deinit();
+        self.node_kinds.deinit();
         self.node_line_starts.deinit();
         self.types.deinit();
         self.type_starts.deinit();
@@ -191,7 +194,7 @@ fn collect_local_bindings_in_block(
         }
         let sf = fn_node_line_start(cache, statement, bs);
         scan_from = sf;
-        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, sf);
+        let stmt_kind = try fn_node_kind(cache, ir_bytes, function_name, statement, sf);
         if std::mem::equal_bytes(stmt_kind, "While") {
             let body_node = try ir_contract::body_child_sequence_from(
                 ir_bytes, function_name, statement, "body", 0, sf
@@ -235,7 +238,7 @@ fn collect_direct_local_bindings(
         }
         let sf = fn_node_line_start(cache, statement, bs);
         scan_from = sf;
-        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, sf);
+        let stmt_kind = try fn_node_kind(cache, ir_bytes, function_name, statement, sf);
         if std::mem::equal_bytes(stmt_kind, "Let") {
             let name_node = try ir_contract::body_child_sequence_from(
                 ir_bytes, function_name, statement, "name", 0, sf
@@ -266,6 +269,18 @@ pub fn build_fn_node_index(
     try ir_contract::collect_body_node_line_starts(
         ir_bytes, function_name, from, &var cache.node_line_starts
     );
+    var sequence = 0;
+    while sequence < cache.node_line_starts.len() {
+        let line_start = cache.node_line_starts.get_or_panic(sequence);
+        if line_start < 0 {
+            try cache.node_kinds.append(ir_bytes[0..0]);
+        } else {
+            try cache.node_kinds.append(
+                try ir_contract::body_node_kind_from(ir_bytes, function_name, sequence, line_start)
+            );
+        }
+        sequence = sequence + 1;
+    }
     return;
 }
 
@@ -282,6 +297,22 @@ pub fn fn_node_line_start(cache: &CallArgTypeCache, sequence: i64, fallback: i64
         return fallback;
     }
     return offset;
+}
+
+pub fn fn_node_kind(
+    cache: &CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    sequence: i64,
+    fallback: i64
+) -> ![]u8 {
+    if sequence >= 0 and sequence < cache.node_kinds.len() {
+        let kind = cache.node_kinds.get_or_panic(sequence);
+        if std::mem::len(kind) > 0 {
+            return kind;
+        }
+    }
+    return try ir_contract::body_node_kind_from(ir_bytes, function_name, sequence, fallback);
 }
 
 pub fn kizu_type_to_llvm_indexed_cached(
@@ -1284,9 +1315,7 @@ pub fn resolve_field_receiver_kizu_type_indexed_cached(
     cache: &var CallArgTypeCache
 ) -> ![]u8 {
     let rf = fn_node_line_start(cache, receiver_node, bs);
-    let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, rf
-    );
+    let receiver_kind = try fn_node_kind(cache, ir_bytes, function_name, receiver_node, rf);
     if std::mem::equal_bytes(receiver_kind, "Var") {
         let receiver_name = try ir_contract::body_token_or_empty_from(
             ir_bytes, function_name, receiver_node, rf
@@ -2208,8 +2237,8 @@ fn resolve_let_value_kizu_type_cached(
         ir_bytes, function_name, statement, "value", 0, statement_sf
     );
     let value_sf = fn_node_line_start(cache, value, bs);
-    return try resolve_let_value_kizu_type_for_value(
-        ir_bytes, function_name, module_prefix, value, value_sf, bs
+    return try resolve_let_value_kizu_type_for_value_cached(
+        cache, ir_bytes, function_name, module_prefix, value, value_sf, bs
     );
 }
 
@@ -2224,6 +2253,35 @@ fn resolve_let_value_kizu_type_for_value(
     let value_kind = try ir_contract::body_node_kind_from(
         ir_bytes, function_name, value, value_sf
     );
+    return try resolve_let_value_kizu_type_for_value_with_kind(
+        ir_bytes, function_name, module_prefix, value, value_sf, bs, value_kind
+    );
+}
+
+fn resolve_let_value_kizu_type_for_value_cached(
+    cache: &CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    value: i64,
+    value_sf: i64,
+    bs: i64
+) -> ![]u8 {
+    let value_kind = try fn_node_kind(cache, ir_bytes, function_name, value, value_sf);
+    return try resolve_let_value_kizu_type_for_value_with_kind(
+        ir_bytes, function_name, module_prefix, value, value_sf, bs, value_kind
+    );
+}
+
+fn resolve_let_value_kizu_type_for_value_with_kind(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    value: i64,
+    value_sf: i64,
+    bs: i64,
+    value_kind: []u8
+) -> ![]u8 {
     if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
         return try resolve_struct_literal_kizu_type_from(ir_bytes, function_name, value, value_sf);
     }
