@@ -130,6 +130,7 @@ impl CallArgTypeCache {
 // turns O(references * function) local-type resolution into O(unique locals * function + references
 // * unique locals).
 pub fn resolve_local_kizu_type_cached(
+    index: &ir_index::IrIndex,
     cache: &var CallArgTypeCache,
     ir_bytes: []u8,
     function_name: []u8,
@@ -150,7 +151,7 @@ pub fn resolve_local_kizu_type_cached(
         if std::mem::equal_bytes(cache.local_binding_names.get_or_panic(binding_index), name) {
             let statement = cache.local_binding_statements.get_or_panic(binding_index);
             let found = try resolve_let_value_kizu_type_cached(
-                cache, ir_bytes, function_name, module_prefix, statement, bs
+                index, cache, ir_bytes, function_name, module_prefix, statement, bs
             );
             try cache.local_names.append(name);
             try cache.local_types.append(found);
@@ -453,7 +454,7 @@ pub fn resolve_value_llvm_type_indexed_cached(
         return param_type;
     }
     let kizu_type = try resolve_local_kizu_type_cached(
-        cache, ir_bytes, function_name, module_prefix, name, bs
+        index, cache, ir_bytes, function_name, module_prefix, name, bs
     );
     return try kizu_type_to_llvm_indexed_cached(index, ir_bytes, module_prefix, kizu_type, cache);
 }
@@ -503,7 +504,7 @@ pub fn resolve_value_kizu_type_indexed_cached(
         return fact_param;
     }
     return try resolve_local_kizu_type_cached(
-        cache, ir_bytes, function_name, module_prefix, name, bs
+        index, cache, ir_bytes, function_name, module_prefix, name, bs
     );
 }
 
@@ -2225,7 +2226,8 @@ fn resolve_let_value_kizu_type(
 }
 
 fn resolve_let_value_kizu_type_cached(
-    cache: &CallArgTypeCache,
+    index: &ir_index::IrIndex,
+    cache: &var CallArgTypeCache,
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
@@ -2238,7 +2240,7 @@ fn resolve_let_value_kizu_type_cached(
     );
     let value_sf = fn_node_line_start(cache, value, bs);
     return try resolve_let_value_kizu_type_for_value_cached(
-        cache, ir_bytes, function_name, module_prefix, value, value_sf, bs
+        index, cache, ir_bytes, function_name, module_prefix, value, value_sf, bs
     );
 }
 
@@ -2259,7 +2261,8 @@ fn resolve_let_value_kizu_type_for_value(
 }
 
 fn resolve_let_value_kizu_type_for_value_cached(
-    cache: &CallArgTypeCache,
+    index: &ir_index::IrIndex,
+    cache: &var CallArgTypeCache,
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
@@ -2268,6 +2271,12 @@ fn resolve_let_value_kizu_type_for_value_cached(
     bs: i64
 ) -> ![]u8 {
     let value_kind = try fn_node_kind(cache, ir_bytes, function_name, value, value_sf);
+    if std::mem::equal_bytes(value_kind, "FieldExpr") {
+        let info = try resolve_field_expr_indexed_with_cache(
+            index, ir_bytes, function_name, module_prefix, "", value, bs, cache
+        );
+        return info.field_kizu_type;
+    }
     return try resolve_let_value_kizu_type_for_value_with_kind(
         ir_bytes, function_name, module_prefix, value, value_sf, bs, value_kind
     );
