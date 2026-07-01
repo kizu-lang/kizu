@@ -148,6 +148,7 @@ func buildNativeSelfhost(
 		"build",
 		"--target",
 		"native",
+		"--opt",
 		"--libc",
 		"on",
 		"--runtime",

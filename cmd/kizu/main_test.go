@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1562,6 +1563,36 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildTargetNativeOptCommandSmoke checks --opt reaches the native linker
+// command and still produces a runnable executable.
+func TestBuildTargetNativeOptCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	output := filepath.Join(t.TempDir(), "hello-opt")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native", "--opt",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, "../../examples/hello.kizu",
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native opt build failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != output {
+		t.Fatalf("got %q, want output path %q", out, output)
+	}
+	assertNativeMetadata(t, output+".kizu-build.json", output)
+	run := exec.Command(output)
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native opt executable failed: %v\n%s", err, out)
+	}
+	if string(out) != "hello, kizu\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
 // TestBuildTargetNativeErrorUnionCommandSmoke checks native builds preserve try control flow.
 func TestBuildTargetNativeErrorUnionCommandSmoke(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {
@@ -1903,6 +1934,7 @@ func assertNativeMetadata(t *testing.T, path string, output string) {
 		Runtime string   `json:"runtime"`
 		Emit    string   `json:"emit"`
 		Linker  string   `json:"linker"`
+		OptMode string   `json:"optimization_mode"`
 		Output  string   `json:"output"`
 		Command []string `json:"command"`
 	}
@@ -1915,8 +1947,18 @@ func assertNativeMetadata(t *testing.T, path string, output string) {
 	if got.Emit != "exe" || got.Linker != "clang" || got.Output != output {
 		t.Fatalf("unexpected metadata: %+v", got)
 	}
+	if got.OptMode != "debug" && got.OptMode != "opt" {
+		t.Fatalf("unexpected optimization metadata: %+v", got)
+	}
 	if len(got.Command) == 0 || got.Command[0] != "clang" {
 		t.Fatalf("unexpected command metadata: %+v", got.Command)
+	}
+	wantFlag := "-O0"
+	if got.OptMode == "opt" {
+		wantFlag = "-O2"
+	}
+	if !slices.Contains(got.Command, wantFlag) {
+		t.Fatalf("metadata command %v missing %s", got.Command, wantFlag)
 	}
 }
 

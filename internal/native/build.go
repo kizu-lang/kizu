@@ -20,6 +20,7 @@ type Options struct {
 	Runtime string
 	Emit    string
 	Linker  string
+	Opt     bool
 }
 
 // Build writes transient inputs and links them into a native executable.
@@ -98,13 +99,21 @@ func runClang(irPath string, runtimePath string, options Options) ([]string, err
 	if runtime.GOOS == "darwin" {
 		args = append(args, "-Wl,-stack_size,0x20000000")
 	}
-	args = append(args, "-O0", irPath, runtimePath, "-o", options.Output)
+	args = append(args, clangOptimizationFlag(options.Opt), irPath, runtimePath, "-o", options.Output)
 	cmd := exec.Command(options.Linker, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("native error: %s failed: %w\n%s", options.Linker, err, out)
 	}
 	return append([]string{options.Linker}, args...), nil
+}
+
+// clangOptimizationFlag selects the native toolchain optimization level.
+func clangOptimizationFlag(opt bool) string {
+	if opt {
+		return "-O2"
+	}
+	return "-O0"
 }
 
 // Metadata records explicit native build inputs next to the output artifact.
@@ -117,6 +126,7 @@ type Metadata struct {
 	Runtime string   `json:"runtime"`
 	Emit    string   `json:"emit"`
 	Linker  string   `json:"linker"`
+	OptMode string   `json:"optimization_mode"`
 	Output  string   `json:"output"`
 	Command []string `json:"command"`
 }
@@ -126,13 +136,22 @@ func writeMetadata(options Options, command []string) error {
 	metadata := Metadata{
 		Target: "native", Triple: options.Triple, CPU: options.CPU, ABI: options.ABI,
 		LibC: options.LibC, Runtime: options.Runtime, Emit: options.Emit,
-		Linker: options.Linker, Output: options.Output, Command: command,
+		Linker: options.Linker, OptMode: optimizationModeName(options.Opt),
+		Output: options.Output, Command: command,
 	}
 	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(options.Output+".kizu-build.json", append(data, '\n'), 0o644)
+}
+
+// optimizationModeName records the native optimization mode in artifact metadata.
+func optimizationModeName(opt bool) string {
+	if opt {
+		return "opt"
+	}
+	return "debug"
 }
 
 const runtimeSource = `
