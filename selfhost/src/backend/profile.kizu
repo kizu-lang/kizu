@@ -1,20 +1,21 @@
 pub struct Profile {
     enabled: bool,
+    flush_each: bool,
     started_ms: i64,
     path: []u8,
 }
 
 pub fn start(out: &var std::string::String) -> !Profile {
     let backend_enabled = std::process::env_or_empty("KIZU_SELFHOST_BACKEND_PROFILE");
-    let stage_enabled = std::process::env_or_empty("KIZU_SELFHOST_STAGE_PROFILE");
+    let flush_each_value = std::process::env_or_empty("KIZU_SELFHOST_BACKEND_PROFILE_FLUSH_EACH");
     let path_value = std::process::env_or_empty("KIZU_SELFHOST_BACKEND_PROFILE_PATH");
     var path = "target/selfhost/reports/backend-profile.txt";
     if std::mem::len(path_value) > 0 {
         path = path_value;
     }
     let now = std::process::monotonic_millis();
-    let enabled = std::mem::equal_bytes(backend_enabled, "1") or
-        std::mem::equal_bytes(stage_enabled, "1");
+    let enabled = std::mem::equal_bytes(backend_enabled, "1");
+    let flush_each = std::mem::equal_bytes(flush_each_value, "1");
     if enabled {
         try out.append_bytes("kizu-selfhost-backend-profile-v0");
         try out.append_byte(cast<u8>(10));
@@ -22,6 +23,7 @@ pub fn start(out: &var std::string::String) -> !Profile {
     }
     return Profile {
         enabled: enabled,
+        flush_each: flush_each,
         started_ms: now,
         path: path
     };
@@ -38,7 +40,7 @@ pub fn begin(
     }
     let now = std::process::monotonic_millis();
     try phase_i64(out, name, ".start.ms", now - profile.started_ms);
-    try flush(profile, out, io);
+    try flush_incremental(profile, out, io);
     return now;
 }
 
@@ -55,7 +57,7 @@ pub fn end(
     let now = std::process::monotonic_millis();
     try phase_i64(out, name, ".end.ms", now - profile.started_ms);
     try phase_i64(out, name, ".elapsed.ms", now - phase_started_ms);
-    try flush(profile, out, io);
+    try flush_incremental(profile, out, io);
     return;
 }
 
@@ -72,7 +74,7 @@ pub fn begin_component_member(
     }
     let now = std::process::monotonic_millis();
     try component_phase_i64(out, component, member, suffix, ".start.ms", now - profile.started_ms);
-    try flush(profile, out, io);
+    try flush_incremental(profile, out, io);
     return now;
 }
 
@@ -91,7 +93,7 @@ pub fn end_component_member(
     let now = std::process::monotonic_millis();
     try component_phase_i64(out, component, member, suffix, ".end.ms", now - profile.started_ms);
     try component_phase_i64(out, component, member, suffix, ".elapsed.ms", now - phase_started_ms);
-    try flush(profile, out, io);
+    try flush_incremental(profile, out, io);
     return;
 }
 
@@ -120,6 +122,18 @@ pub fn flush(
     try ensure_dir(io);
     let bytes = out.as_bytes();
     try std::fs::write_file(io, profile.path, bytes);
+    return;
+}
+
+fn flush_incremental(
+    profile: &Profile,
+    out: &var std::string::String,
+    io: Io
+) -> !void {
+    if !profile.flush_each {
+        return;
+    }
+    try flush(profile, out, io);
     return;
 }
 
