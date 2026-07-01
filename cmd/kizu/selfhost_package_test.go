@@ -3809,7 +3809,7 @@ func assertExecutableIRThreading(
 		}
 	}
 	for _, fragment := range []string{
-		"try cli_llvm::append_functions(out, lookup_index, ir_bytes)",
+		"try cli_llvm::append_functions(\n        out,\n        lookup_index,\n        ir_bytes,",
 		"try cli_ast_boundary_llvm::append_functions(out)",
 		"try cli_test_ast_llvm::append_functions(out)",
 		"try cli_test_llvm::append_functions(out, ir_bytes)",

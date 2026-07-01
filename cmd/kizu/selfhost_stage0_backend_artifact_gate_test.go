@@ -15,6 +15,7 @@ const (
 	stage0BackendArtifactCacheDir   = "target/selfhost/stage0-native-cache"
 	stage0BackendArtifactReportPath = "target/selfhost/reports/backend-artifact-stage0-native.txt"
 	stage0StageProfilePath          = "target/selfhost/reports/stage0-stage-profile.txt"
+	stage0BackendProfilePath        = "target/selfhost/reports/stage0-backend-profile.txt"
 )
 
 var backendArtifactContractInventory = []string{
@@ -156,6 +157,7 @@ func appendStage0BackendArtifactHeader(out *strings.Builder) {
 	fmt.Fprintf(out, "stage0.runner %s\n", stage0BackendArtifactRunnerPath)
 	fmt.Fprintf(out, "stage0.cache %s\n", stage0BackendArtifactCacheDir)
 	fmt.Fprintf(out, "stage0.stage.profile.path %s\n", stage0StageProfilePath)
+	fmt.Fprintf(out, "stage0.backend.profile.path %s\n", stage0BackendProfilePath)
 	fmt.Fprintf(out, "validation.path stage0-native-stage-selfhost\n")
 	fmt.Fprintf(out, "interpreter.backend-artifact-gate none\n")
 	fmt.Fprintf(out, "go.production none\n")

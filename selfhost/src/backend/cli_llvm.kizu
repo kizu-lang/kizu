@@ -16,6 +16,7 @@ import selfhost::backend::compiled_llvm;
 import selfhost::backend::compiled_signature;
 import selfhost::backend::ir_contract;
 import selfhost::backend::ir_index;
+import selfhost::backend::profile;
 
 pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_llvm_constant(out, "check", "5", "check");
@@ -919,8 +920,13 @@ fn append_unsupported_run_ast_success_return(out: &var std::string::String, valu
 pub fn append_functions(
     out: &var std::string::String,
     lookup_index: &ir_index::IrIndex,
-    ir_bytes: []u8
+    ir_bytes: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
 ) -> !void {
+    let static_helpers_started =
+        try profile::begin(backend_profile, profile_out, io, "append_static_cli_helpers");
     try append_slice_equal_function(out);
     try append_slice_len_function(out);
     try append_slice_starts_with_dash_function(out);
@@ -935,17 +941,44 @@ pub fn append_functions(
     try cli_match_llvm::append_functions(out);
     try cli_test_ast_llvm::append_functions(out);
     try cli_test_llvm::append_functions(out, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_static_cli_helpers",
+        static_helpers_started
+    );
     // The selfhost::ir::codegen run codegen IR v1 tape closure compiled into stage2:
     // the shared BFS walks the cluster from the tape lowering root lower_code_module
     // plus the code_op_mem_page_allocator opcode accessor, deriving each member's llvm
     // symbol and params_spec from signature facts. The hosted per-shape Program builder
     // roots were severed once shape emit became closure-excluded (issue 1255 slice4 PR-1).
+    let codegen_started =
+        try profile::begin(backend_profile, profile_out, io, "append_codegen_reachable");
     try append_codegen_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_codegen_reachable",
+        codegen_started
+    );
     // The selfhost::ir::code_render run tape renderer closure compiled into stage2:
     // render_run_artifact lowers a parsed run source to the tape (via the codegen
     // closure's lower_code_module) and renders it to the executable LLVM module text,
     // the generic replacement for the per-shape hosted run renderers.
+    let code_render_started =
+        try profile::begin(backend_profile, profile_out, io, "append_code_render_reachable");
     try append_code_render_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_code_render_reachable",
+        code_render_started
+    );
+    let ast_stdlib_roots_started =
+        try profile::begin(backend_profile, profile_out, io, "append_ast_stdlib_roots");
     // artifact_path is the first selfhost std::string::String builder compiled into
     // stage2 (issue 1165 slice 1): it lowers through the generic multi-statement path,
     // calling the runtime string intrinsics to concatenate the directory, the borrowed
@@ -1523,7 +1556,25 @@ pub fn append_functions(
     // let-try / return-try arithmetic). The shared BFS walks the whole cluster from
     // these two seeds and links selfhost.ll with no undefined symbol; each member's
     // llvm symbol and params_spec are derived from signature facts.
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_ast_stdlib_roots",
+        ast_stdlib_roots_started
+    );
+    let ast_reachable_started =
+        try profile::begin(backend_profile, profile_out, io, "append_ast_reachable");
     try append_ast_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_ast_reachable",
+        ast_reachable_started
+    );
+    let std_mem_roots_started =
+        try profile::begin(backend_profile, profile_out, io, "append_std_mem_roots");
     // std::mem::is_ascii_space backs the ast_node_text span accessor's trim (tracker 961):
     // an or-chain byte classifier returning i1. It lowers through the single-statement
     // expression-return path (the binary renderer already handles or / eq).
@@ -1562,11 +1613,36 @@ pub fn append_functions(
         "kizu_std__mem_slice",
         "%kizu.slice.u8 bytes;i64 start;i64 end"
     );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_std_mem_roots",
+        std_mem_roots_started
+    );
+    let types_checker_started =
+        try profile::begin(backend_profile, profile_out, io, "append_types_checker_reachable");
     try append_types_checker_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_types_checker_reachable",
+        types_checker_started
+    );
     // first_token / next_token seed the std::kizu::lexer tokenizer helper closure. The closure
     // reaches token_at, raw_token_at, scan helpers, Token constructors, position tracking, and byte
     // classifiers while leaving tokenize manual because it contains method calls on Array.
+    let kizu_lexer_started =
+        try profile::begin(backend_profile, profile_out, io, "append_kizu_lexer_reachable");
     try append_kizu_lexer_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_kizu_lexer_reachable",
+        kizu_lexer_started
+    );
     // tokenize(allocator, source) -> !Array<Token> builds the token stream feeding the parser
     // (tracker 961, scope 4 prerequisite). Its body now lowers through the generic multi-statement
     // path: lower_multi_statement_function recognises the value-carried array-append loop shape
@@ -1574,12 +1650,21 @@ pub fn append_functions(
     // MirTokenizeStmt (issue 1165). Its return type is derived from the signature fact like every
     // other compiled closure member: the compiled type lowering maps every !std::array::Array<T>
     // to %kizu.error.owned via a single prefix rule (issue 1165 slice 2).
+    let lexer_tokenize_started =
+        try profile::begin(backend_profile, profile_out, io, "append_lexer_tokenize");
     try compiled_llvm::append_compiled_function_auto_indexed(
         lookup_index,
         out, ir_bytes,
         "std::kizu::lexer::tokenize",
         "kizu_kizu__lexer_tokenize",
         "%kizu.owned allocator;%kizu.slice.u8 source"
+    );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_lexer_tokenize",
+        lexer_tokenize_started
     );
     // The std::kizu::parser predicate / byte / span helper closure compiled into
     // stage2 (tracker 961, scope 4 prerequisite). The TokenKind predicates match a
@@ -1593,11 +1678,31 @@ pub fn append_functions(
     // accessor (spelled ast.get). Each member's llvm symbol and params_spec are
     // derived from signature facts, so the cluster no longer needs a handwritten
     // append_compiled_function_auto per helper.
+    let kizu_parser_started =
+        try profile::begin(backend_profile, profile_out, io, "append_kizu_parser_reachable");
     try append_kizu_parser_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_kizu_parser_reachable",
+        kizu_parser_started
+    );
     // ast_node_text is emitted by the codegen closure BFS (reached from the run
     // tape descent seed lower_code_expr), so it no longer needs an explicit
     // registration here.
+    let lexer_started =
+        try profile::begin(backend_profile, profile_out, io, "append_lexer_reachable");
     try append_lexer_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_lexer_reachable",
+        lexer_started
+    );
+    let hosted_output_started =
+        try profile::begin(backend_profile, profile_out, io, "append_hosted_output_len");
     try compiled_llvm::append_compiled_function_auto_indexed(
         lookup_index,
         out, ir_bytes,
@@ -1605,8 +1710,33 @@ pub fn append_functions(
         "kizu_selfhost__hosted_output_len",
         "%kizu.slice.u8 output_payload;i1 append_newline"
     );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_hosted_output_len",
+        hosted_output_started
+    );
+    let source_started =
+        try profile::begin(backend_profile, profile_out, io, "append_source_reachable");
     try append_source_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_source_reachable",
+        source_started
+    );
+    let loader_started =
+        try profile::begin(backend_profile, profile_out, io, "append_loader_reachable");
     try append_loader_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_loader_reachable",
+        loader_started
+    );
     // The selfhost::parser::format read-only helper closure compiled into stage2
     // (issue 1165 / issue 1162): the TokenKind predicates that classify a single
     // token and token_text, the span-slice accessor. They lower through the shared
@@ -1615,8 +1745,20 @@ pub fn append_functions(
     // is the first formatter component on the compiled path, exercising the read-only
     // helpers ahead of the token-array loop / import-sort helpers that still wait on
     // local/param Array<T> read lowering.
+    let format_started =
+        try profile::begin(backend_profile, profile_out, io, "append_format_reachable");
     try append_format_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_format_reachable",
+        format_started
+    );
+    let cli_main_started =
+        try profile::begin(backend_profile, profile_out, io, "append_cli_main");
     try append_cli_main_function(out, ir_bytes);
+    try profile::end(backend_profile, profile_out, io, "append_cli_main", cli_main_started);
     return;
 }
 

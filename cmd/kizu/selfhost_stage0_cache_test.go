@@ -255,6 +255,8 @@ func runStage0StageCommand(t *testing.T, report *strings.Builder) int {
 		[]string{
 			"KIZU_SELFHOST_STAGE_PROFILE=1",
 			"KIZU_SELFHOST_STAGE_PROFILE_PATH=" + stage0StageProfilePath,
+			"KIZU_SELFHOST_BACKEND_PROFILE=1",
+			"KIZU_SELFHOST_BACKEND_PROFILE_PATH=" + stage0BackendProfilePath,
 		},
 		[]string{"stage", "selfhost"},
 		bootstrapStageStdout(),

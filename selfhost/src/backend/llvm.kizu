@@ -2,6 +2,7 @@ import selfhost::backend::cli_llvm;
 import selfhost::backend::data;
 import selfhost::backend::ir_contract;
 import selfhost::backend::ir_index;
+import selfhost::backend::profile;
 import selfhost::backend::runtime;
 
 pub fn consume_ir_artifact(io: Io, path: &[]u8) -> !data::BackendSummary {
@@ -18,79 +19,250 @@ pub fn emit_llvm_artifact(
     ir_path: []u8,
     manifest_path: []u8
 ) -> !data::LlvmArtifact {
+    var profile_out = std::string::String(allocator);
+    defer profile_out.deinit();
+    let backend_profile = try profile::start(&var profile_out);
+    try profile::flush(&backend_profile, &var profile_out, io);
+
+    let read_ir_started = try profile::begin(&backend_profile, &var profile_out, io, "read_ir_file");
     let ir_bytes = try std::fs::read_file(io, ir_path);
+    try profile::end(&backend_profile, &var profile_out, io, "read_ir_file", read_ir_started);
+
+    let validate_ir_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "validate_ir_artifact");
     try validate_ir_artifact(ir_bytes);
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "validate_ir_artifact",
+        validate_ir_started
+    );
+
+    let build_index_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "build_ir_index");
     var lookup_index = try ir_index::build(ir_bytes);
     defer lookup_index.deinit();
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "build_ir_index",
+        build_index_started
+    );
 
+    let read_manifest_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "read_manifest_file");
     let manifest_bytes = try std::fs::read_file(io, manifest_path);
-    try validate_shape_manifest(manifest_bytes);
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "read_manifest_file",
+        read_manifest_started
+    );
 
-    var module = try render_llvm_module(allocator, &lookup_index, ir_bytes, ir_path);
+    let validate_manifest_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "validate_shape_manifest");
+    try validate_shape_manifest(manifest_bytes);
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "validate_shape_manifest",
+        validate_manifest_started
+    );
+
+    let render_module_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "render_llvm_module");
+    var module = try render_llvm_module(
+        allocator,
+        &lookup_index,
+        ir_bytes,
+        ir_path,
+        &backend_profile,
+        &var profile_out,
+        io
+    );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "render_llvm_module",
+        render_module_started
+    );
     let module_view = module.as_bytes();
+    let write_module_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "write_llvm_module");
     let module_len = try write_backend_bytes(
         io,
         "target/selfhost/selfhost.ll",
         module_view,
         module.len()
     );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "write_llvm_module",
+        write_module_started
+    );
     module.deinit();
 
+    let render_metadata_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "render_llvm_metadata");
     var metadata = try render_llvm_metadata(allocator, ir_bytes, ir_path, manifest_path);
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "render_llvm_metadata",
+        render_metadata_started
+    );
     let metadata_view = metadata.as_bytes();
+    let write_metadata_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "write_llvm_metadata");
     let metadata_len = try write_backend_bytes(
         io,
         "target/selfhost/selfhost.ll.meta",
         metadata_view,
         metadata.len()
     );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "write_llvm_metadata",
+        write_metadata_started
+    );
     metadata.deinit();
 
+    let load_storage_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "load_storage_module");
     let storage = try runtime::load_storage_module(io);
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "load_storage_module",
+        load_storage_started
+    );
+    let write_storage_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "write_storage_module");
     let storage_len = try write_backend_bytes(
         io,
         "target/selfhost/selfhost.storage.ll",
         storage,
         std::mem::len(storage)
     );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "write_storage_module",
+        write_storage_started
+    );
 
+    let render_storage_metadata_started = try profile::begin(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "render_storage_metadata"
+    );
     var storage_metadata = try runtime::render_storage_metadata(
         allocator,
         io,
         ir_path,
         manifest_path
     );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "render_storage_metadata",
+        render_storage_metadata_started
+    );
     let storage_metadata_view = storage_metadata.as_bytes();
+    let write_storage_metadata_started = try profile::begin(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "write_storage_metadata"
+    );
     let storage_metadata_len = try write_backend_bytes(
         io,
         "target/selfhost/selfhost.storage.ll.meta",
         storage_metadata_view,
         storage_metadata.len()
     );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "write_storage_metadata",
+        write_storage_metadata_started
+    );
     storage_metadata.deinit();
 
+    let load_host_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "load_host_module");
     let host = try runtime::load_host_module(io);
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "load_host_module",
+        load_host_started
+    );
+    let write_host_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "write_host_module");
     let host_len = try write_backend_bytes(
         io,
         "target/selfhost/selfhost.host.ll",
         host,
         std::mem::len(host)
     );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "write_host_module",
+        write_host_started
+    );
 
+    let render_host_metadata_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "render_host_metadata");
     var host_metadata = try runtime::render_host_metadata(
         allocator,
         io,
         ir_path,
         manifest_path
     );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "render_host_metadata",
+        render_host_metadata_started
+    );
     let host_metadata_view = host_metadata.as_bytes();
+    let write_host_metadata_started =
+        try profile::begin(&backend_profile, &var profile_out, io, "write_host_metadata");
     let host_metadata_len = try write_backend_bytes(
         io,
         "target/selfhost/selfhost.host.ll.meta",
         host_metadata_view,
         host_metadata.len()
     );
+    try profile::end(
+        &backend_profile,
+        &var profile_out,
+        io,
+        "write_host_metadata",
+        write_host_metadata_started
+    );
     host_metadata.deinit();
+    try profile::finish(&backend_profile, &var profile_out, io);
 
     return data::LlvmArtifact {
         ll_path: "target/selfhost/selfhost.ll",
@@ -390,9 +562,14 @@ fn render_llvm_module(
     allocator: Allocator,
     lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
-    ir_path: []u8
+    ir_path: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
 ) -> !std::string::String {
     var out = std::string::String(allocator);
+    let preamble_started =
+        try profile::begin(backend_profile, profile_out, io, "render_module_preamble");
     try append_line(out, "; kizu selfhost bootstrap ll v0");
     try out.append_bytes("source_filename = ");
     try out.append_byte(cast<u8>(34));
@@ -1006,13 +1183,54 @@ fn render_llvm_module(
     try append_line(out, "  ret %kizu.error.slice.u8 %invalid_result");
     try append_line(out, "}");
     try append_line(out, "");
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "render_module_preamble",
+        preamble_started
+    );
+    let string_runtime_started =
+        try profile::begin(backend_profile, profile_out, io, "render_string_runtime");
     try append_string_runtime(out);
-    try cli_llvm::append_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "render_string_runtime",
+        string_runtime_started
+    );
+    let append_functions_started =
+        try profile::begin(backend_profile, profile_out, io, "append_functions");
+    try cli_llvm::append_functions(
+        out,
+        lookup_index,
+        ir_bytes,
+        backend_profile,
+        profile_out,
+        io
+    );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_functions",
+        append_functions_started
+    );
+    let smoke_started =
+        try profile::begin(backend_profile, profile_out, io, "render_smoke_function");
     try append_line(out, "");
     try append_line(out, "define i64 @kizu_selfhost__smoke() {");
     try append_line(out, "entry:");
     try append_line(out, "  ret i64 0");
     try append_line(out, "}");
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "render_smoke_function",
+        smoke_started
+    );
     return out;
 }
 
