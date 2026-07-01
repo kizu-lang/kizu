@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -27,6 +28,7 @@ type Interpreter struct {
 	typeArgs       map[string]string
 	qualified      map[ast.Expression]string
 	processArgs    []string
+	startedAt      time.Time
 	blockScopes    map[*ast.BlockStmt]bool
 	compiledBodies map[*ast.FunctionDecl]stmtEval
 }
@@ -72,6 +74,7 @@ func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 		typeArgs:       map[string]string{},
 		qualified:      map[ast.Expression]string{},
 		processArgs:    append([]string{}, args...),
+		startedAt:      time.Now(),
 		blockScopes:    map[*ast.BlockStmt]bool{},
 		compiledBodies: map[*ast.FunctionDecl]stmtEval{},
 	}
@@ -1773,6 +1776,16 @@ func (i *Interpreter) evalProcessBuiltin(
 	case "std.builtin.process_env":
 		value, err := i.evalProcessEnv(args, env)
 		return value, true, err
+	case "std.builtin.process_env_or_empty":
+		value, err := i.evalProcessEnvOrEmpty(args, env)
+		return value, true, err
+	case "std.builtin.process_monotonic_millis":
+		if len(args) != 0 {
+			return voidValue(), true, fmt.Errorf(
+				"runtime error: std::process::monotonic_millis expects 0 args",
+			)
+		}
+		return intValue(time.Since(i.startedAt).Milliseconds()), true, nil
 	case "std.builtin.process_spawn_wait8":
 		value, err := i.evalProcessSpawnWait8(args, env)
 		return value, true, err
@@ -2113,6 +2126,18 @@ func (i *Interpreter) evalProcessEnv(args []ast.Expression, env *Env) (Value, er
 		return errorUnionValue("environment variable not found"), nil
 	}
 	return stringValue(value), nil
+}
+
+// evalProcessEnvOrEmpty reads one environment variable and returns an empty slice when absent.
+func (i *Interpreter) evalProcessEnvOrEmpty(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std::process::env_or_empty expected name")
+	}
+	name, err := i.evalPathArg(args[0], env, "std::process::env_or_empty")
+	if err != nil {
+		return voidValue(), err
+	}
+	return stringValue(os.Getenv(name)), nil
 }
 
 // evalProcessSpawnWait8 runs a fixed-arity host process command.

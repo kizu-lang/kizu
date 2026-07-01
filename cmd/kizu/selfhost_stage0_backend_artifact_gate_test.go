@@ -14,6 +14,7 @@ const (
 	stage0BackendArtifactRunnerPath = "target/selfhost/stage0-native/selfhost"
 	stage0BackendArtifactCacheDir   = "target/selfhost/stage0-native-cache"
 	stage0BackendArtifactReportPath = "target/selfhost/reports/backend-artifact-stage0-native.txt"
+	stage0StageProfilePath          = "target/selfhost/reports/stage0-stage-profile.txt"
 )
 
 var backendArtifactContractInventory = []string{
@@ -106,10 +107,24 @@ func runStage0BackendArtifactCommand(
 	wantStdout string,
 ) int {
 	t.Helper()
-	result := runNativeSelfhostCommand(
+	return runStage0BackendArtifactCommandWithEnv(t, report, label, nil, args, wantStdout)
+}
+
+// runStage0BackendArtifactCommandWithEnv runs one stage0 command with opt-in diagnostics.
+func runStage0BackendArtifactCommandWithEnv(
+	t *testing.T,
+	report *strings.Builder,
+	label string,
+	extraEnv []string,
+	args []string,
+	wantStdout string,
+) int {
+	t.Helper()
+	result := runNativeSelfhostCommandWithEnv(
 		t,
 		stage0BackendArtifactRunnerPath,
 		stage0BackendArtifactCacheDir,
+		extraEnv,
 		args...,
 	)
 	appendNativeSourceCommandResult(report, label, result)
@@ -140,6 +155,7 @@ func appendStage0BackendArtifactHeader(out *strings.Builder) {
 	fmt.Fprintf(out, "stage0.mode explicit-bootstrap\n")
 	fmt.Fprintf(out, "stage0.runner %s\n", stage0BackendArtifactRunnerPath)
 	fmt.Fprintf(out, "stage0.cache %s\n", stage0BackendArtifactCacheDir)
+	fmt.Fprintf(out, "stage0.stage.profile.path %s\n", stage0StageProfilePath)
 	fmt.Fprintf(out, "validation.path stage0-native-stage-selfhost\n")
 	fmt.Fprintf(out, "interpreter.backend-artifact-gate none\n")
 	fmt.Fprintf(out, "go.production none\n")

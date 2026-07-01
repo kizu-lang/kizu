@@ -144,6 +144,7 @@ const runtimeSource = `
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct {
@@ -522,6 +523,27 @@ static KizuErrorSliceU8 kizu_std_builtin_process_env_result(KizuSliceU8 name) {
 
 void std_builtin_process_env(KizuErrorSliceU8 *out, const KizuSliceU8 *name) {
     *out = kizu_std_builtin_process_env_result(*name);
+}
+
+KizuSliceU8 std_builtin_process_env_or_empty(KizuSliceU8 name) {
+    char *key = kizu_slice_to_cstr(name);
+    if (!key) {
+        return kizu_slice_from_cstr("");
+    }
+    char *value = getenv(key);
+    free(key);
+    if (!value) {
+        return kizu_slice_from_cstr("");
+    }
+    return kizu_slice_from_cstr(value);
+}
+
+int64_t std_builtin_process_monotonic_millis(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return ((int64_t)ts.tv_sec * 1000) + ((int64_t)ts.tv_nsec / 1000000);
 }
 
 static int kizu_run_child_process(char *const argv[]) {

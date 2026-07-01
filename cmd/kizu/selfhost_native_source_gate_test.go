@@ -199,6 +199,18 @@ func runNativeSelfhostCommand(
 	args ...string,
 ) bootstrapCommandResult {
 	t.Helper()
+	return runNativeSelfhostCommandWithEnv(t, exePath, cacheDir, nil, args...)
+}
+
+// runNativeSelfhostCommandWithEnv runs one command with explicit extra env vars.
+func runNativeSelfhostCommandWithEnv(
+	t *testing.T,
+	exePath string,
+	cacheDir string,
+	extraEnv []string,
+	args ...string,
+) bootstrapCommandResult {
+	t.Helper()
 	start := time.Now()
 	absExe, err := filepath.Abs(exePath)
 	if err != nil {
@@ -206,6 +218,7 @@ func runNativeSelfhostCommand(
 	}
 	run := exec.Command(absExe, args...)
 	run.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	run.Env = append(run.Env, extraEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	run.Stdout = &stdout

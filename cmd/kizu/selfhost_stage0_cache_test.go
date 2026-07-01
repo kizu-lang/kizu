@@ -248,10 +248,14 @@ func runStage0SeedStageStep(t *testing.T, report *strings.Builder) int {
 // user-visible output, identical to the pre-cache gate behavior.
 func runStage0StageCommand(t *testing.T, report *strings.Builder) int {
 	t.Helper()
-	return runStage0BackendArtifactCommand(
+	return runStage0BackendArtifactCommandWithEnv(
 		t,
 		report,
 		"stage0.stage",
+		[]string{
+			"KIZU_SELFHOST_STAGE_PROFILE=1",
+			"KIZU_SELFHOST_STAGE_PROFILE_PATH=" + stage0StageProfilePath,
+		},
 		[]string{"stage", "selfhost"},
 		bootstrapStageStdout(),
 	)
