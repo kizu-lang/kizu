@@ -138,9 +138,9 @@ func TestSelfhostParserCompiledClosureDerivedFromSharedBFS(t *testing.T) {
 	assertSharedCompiledClosurePath(t, cli)
 	assertNoPerComponentCompiledClosureHelpers(t, cli)
 
-	// The append_functions entry point delegates to the shared walk rather than
+	// The append_functions entry point delegates to the profiled shared walk rather than
 	// re-listing the cluster members.
-	delegation := "try append_kizu_parser_reachable_compiled_functions(out, lookup_index, ir_bytes);"
+	delegation := "try append_kizu_parser_reachable_compiled_functions_profiled("
 	if !strings.Contains(cli, delegation) {
 		t.Fatalf("append_functions missing shared parser closure delegation")
 	}

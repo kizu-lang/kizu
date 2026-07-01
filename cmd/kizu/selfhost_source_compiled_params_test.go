@@ -8,9 +8,8 @@ import (
 // assertComponentReachableCompiledClosure pins that one component's compiled
 // closure entry point seeds its BFS queue and delegates to the shared
 // append_component_reachable_compiled_functions walk with the component prefix
-// and the allow_empty_params flag. Keeping the seeds inline guarantees the
-// closure is not widened by a hand-seeded supported list, and routing through the
-// shared walk guarantees the per-component BFS duplicates stay collapsed.
+// and the allow_empty_params flag. Roots may live in a helper shared by profiled
+// and unprofiled emitters, but they must still be the narrow explicit seed list.
 func assertComponentReachableCompiledClosure(
 	t *testing.T,
 	cli string,
@@ -21,9 +20,23 @@ func assertComponentReachableCompiledClosure(
 ) {
 	t.Helper()
 	body := selfhostKizuFunctionBody(t, cli, fn)
+	seedBody := body
+	if len(seeds) > 0 && !strings.Contains(seedBody, "try pending.append(\""+seeds[0]+"\");") {
+		rootFn := ""
+		switch prefix {
+		case "std::kizu::parser::":
+			rootFn = "fn append_kizu_parser_reachable_roots("
+		case "selfhost::ir::codegen::":
+			rootFn = "fn append_codegen_reachable_roots("
+		}
+		if rootFn == "" {
+			t.Fatalf("%s seeds moved but no root helper is known for prefix %q", fn, prefix)
+		}
+		seedBody = selfhostKizuFunctionBody(t, cli, rootFn)
+	}
 	for _, seed := range seeds {
 		fragment := "try pending.append(\"" + seed + "\");"
-		if !strings.Contains(body, fragment) {
+		if !strings.Contains(seedBody, fragment) {
 			t.Fatalf("%s seed changed, missing %q", fn, fragment)
 		}
 	}

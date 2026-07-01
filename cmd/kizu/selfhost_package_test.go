@@ -2343,7 +2343,7 @@ func assertCompiledMirPaths(t *testing.T, compiled string) {
 // lowered_main_print_program, plus the unsupported_program / none_value /
 // main_print_payload / metadata_for_program roots) is now derived through the
 // shared compiled closure BFS, so cli_llvm delegates to
-// append_codegen_reachable_compiled_functions instead of carrying a handwritten
+// append_codegen_reachable_compiled_functions_profiled instead of carrying a handwritten
 // mangled symbol per member. The dedicated derivation is pinned in
 // selfhost_codegen_compiled_closure_test.go.
 func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
@@ -2351,7 +2351,7 @@ func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
 	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto_indexed(") {
 		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto_indexed")
 	}
-	delegation := "try append_codegen_reachable_compiled_functions(out, lookup_index, ir_bytes);"
+	delegation := "try append_codegen_reachable_compiled_functions_profiled("
 	if !strings.Contains(cliLlvm, delegation) {
 		t.Fatal("cli_llvm does not delegate to the shared codegen compiled closure")
 	}
