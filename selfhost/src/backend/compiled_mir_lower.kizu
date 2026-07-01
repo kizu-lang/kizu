@@ -52,6 +52,7 @@ pub fn lower_int_return_function(
     return compiled_mir_function::single_const_int_return_function(llvm_symbol, value);
 }
 pub fn lower_enum_field_return_function(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -84,7 +85,8 @@ pub fn lower_enum_field_return_function(
         bs
     );
     let module_prefix = compiled_util::module_prefix_of(function_name);
-    let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+    let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+        ir_lookup_index,
         ir_bytes,
         module_prefix,
         receiver_token,
@@ -2021,6 +2023,7 @@ pub fn function_is_bool_token_kind_predicate(
 // scrutinee and records every arm whose body returns true; the renderer emits an i1 compare/OR
 // chain. The field index comes from the Token facts and variant tags from TokenKind facts.
 pub fn lower_token_kind_predicate_function(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -2068,8 +2071,8 @@ pub fn lower_token_kind_predicate_function(
             if std::mem::equal_bytes(variant_name, "_") {
                 return error("compiled mir: token-kind predicate wildcard true arm unsupported");
             }
-            let variant_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
-                ir_bytes, "std::kizu::lexer::", "TokenKind", variant_name
+            let variant_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+                ir_lookup_index, ir_bytes, "std::kizu::lexer::", "TokenKind", variant_name
             );
             try variant_tags.append(variant_tag);
         }
@@ -2286,6 +2289,7 @@ pub fn lower_token_at_function(
 // source[end] != 10' condition, and call-in-loop the generic while machinery does not model, so it
 // is dispatched by name. The TokenKind::Eof tag is resolved from the enum-variant facts.
 pub fn lower_skip_line_comment_function(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -2297,8 +2301,8 @@ pub fn lower_skip_line_comment_function(
     let start_name = try nth_param_field(params_spec, 1, true);
     let initial_name = try nth_param_field(params_spec, 2, true);
     let position_type = try nth_param_field(params_spec, 2, false);
-    let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
-        ir_bytes, "std::kizu::lexer::", "TokenKind", "Eof"
+    let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, "std::kizu::lexer::", "TokenKind", "Eof"
     );
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::skip_line_comment_stmt(
@@ -2334,13 +2338,14 @@ pub fn lower_is_doc_comment_start_function(
 // append_word_keyword resolves a keyword's TokenKind discriminant from the enum-variant facts and
 // appends it to word_token's keyword table (tracker 961, scope 4 prerequisite).
 fn append_word_keyword(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     keywords: &var std::array::Array<compiled_mir::MirKeyword>,
     text: []u8,
     variant: []u8
 ) -> !void {
-    let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
-        ir_bytes, "std::kizu::lexer::", "TokenKind", variant
+    let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, "std::kizu::lexer::", "TokenKind", variant
     );
     try keywords.append(compiled_mir::keyword(text, tag));
     return;
@@ -2352,6 +2357,7 @@ fn append_word_keyword(
 // keyword-comparison chain over string constants the generic path does not model, so it is
 // dispatched by name. The keyword and Ident discriminants come from the enum-variant facts.
 pub fn lower_word_token_function(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
@@ -2363,37 +2369,37 @@ pub fn lower_word_token_function(
     let start_name = try nth_param_field(params_spec, 1, true);
     let current_name = try nth_param_field(params_spec, 2, true);
     let position_type = try nth_param_field(params_spec, 2, false);
-    let ident_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
-        ir_bytes, "std::kizu::lexer::", "TokenKind", "Ident"
+    let ident_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, "std::kizu::lexer::", "TokenKind", "Ident"
     );
     var keywords = std::array::Array<compiled_mir::MirKeyword>(std::mem::page_allocator());
-    try append_word_keyword(ir_bytes, &var keywords, "fn", "Fn");
-    try append_word_keyword(ir_bytes, &var keywords, "import", "Import");
-    try append_word_keyword(ir_bytes, &var keywords, "pub", "Pub");
-    try append_word_keyword(ir_bytes, &var keywords, "struct", "Struct");
-    try append_word_keyword(ir_bytes, &var keywords, "enum", "Enum");
-    try append_word_keyword(ir_bytes, &var keywords, "union", "Union");
-    try append_word_keyword(ir_bytes, &var keywords, "extern", "Extern");
-    try append_word_keyword(ir_bytes, &var keywords, "dyn", "Dyn");
-    try append_word_keyword(ir_bytes, &var keywords, "let", "Let");
-    try append_word_keyword(ir_bytes, &var keywords, "var", "Var");
-    try append_word_keyword(ir_bytes, &var keywords, "return", "Return");
-    try append_word_keyword(ir_bytes, &var keywords, "defer", "Defer");
-    try append_word_keyword(ir_bytes, &var keywords, "if", "If");
-    try append_word_keyword(ir_bytes, &var keywords, "else", "Else");
-    try append_word_keyword(ir_bytes, &var keywords, "while", "While");
-    try append_word_keyword(ir_bytes, &var keywords, "for", "For");
-    try append_word_keyword(ir_bytes, &var keywords, "break", "Break");
-    try append_word_keyword(ir_bytes, &var keywords, "continue", "Continue");
-    try append_word_keyword(ir_bytes, &var keywords, "match", "Match");
-    try append_word_keyword(ir_bytes, &var keywords, "unsafe", "Unsafe");
-    try append_word_keyword(ir_bytes, &var keywords, "comptime", "Comptime");
-    try append_word_keyword(ir_bytes, &var keywords, "try", "Try");
-    try append_word_keyword(ir_bytes, &var keywords, "true", "True");
-    try append_word_keyword(ir_bytes, &var keywords, "false", "False");
-    try append_word_keyword(ir_bytes, &var keywords, "and", "And");
-    try append_word_keyword(ir_bytes, &var keywords, "or", "Or");
-    try append_word_keyword(ir_bytes, &var keywords, "mut", "Mut");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "fn", "Fn");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "import", "Import");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "pub", "Pub");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "struct", "Struct");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "enum", "Enum");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "union", "Union");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "extern", "Extern");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "dyn", "Dyn");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "let", "Let");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "var", "Var");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "return", "Return");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "defer", "Defer");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "if", "If");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "else", "Else");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "while", "While");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "for", "For");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "break", "Break");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "continue", "Continue");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "match", "Match");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "unsafe", "Unsafe");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "comptime", "Comptime");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "try", "Try");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "true", "True");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "false", "False");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "and", "And");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "or", "Or");
+    try append_word_keyword(ir_lookup_index, ir_bytes, &var keywords, "mut", "Mut");
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::word_token_stmt(
         llvm_symbol, source_name, start_name, current_name, position_type,
@@ -3541,8 +3547,8 @@ pub fn lower_value_array_loop(
     let variant_name = try ir_contract::body_field_expr_name_from(
         ir_bytes, function_name, right_node, "namespace", bs
     );
-    let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
-        ir_bytes, module_prefix, enum_name, variant_name
+    let eof_tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, enum_name, variant_name
     );
     // The statement directly before the loop must seed the array: 'try <array>.append(<loop_var>);'.
     let seed_statement = try ir_contract::body_child_sequence_from(
