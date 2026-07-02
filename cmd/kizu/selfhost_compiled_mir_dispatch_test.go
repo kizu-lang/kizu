@@ -46,3 +46,44 @@ func TestSelfhostCompiledMIRGuardsParserOnlyLoopProbes(t *testing.T) {
 		t.Fatal("parser component guard must be prefix-limited to std::kizu::parser")
 	}
 }
+
+// TestSelfhostCompiledMIRUsesPerFunctionStructuralCache keeps hot top-level
+// statement and call-argument lookups on the per-function lowering cache.
+func TestSelfhostCompiledMIRUsesPerFunctionStructuralCache(t *testing.T) {
+	lower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
+	multi := selfhostKizuFunctionBody(t, lower, "pub fn lower_multi_statement_function(")
+	for _, fragment := range []string{
+		"try compiled_mir_types::build_fn_node_index(",
+		"compiled_mir_types::fn_body_child_sequence_from(",
+		"compiled_mir_types::fn_node_kind(",
+	} {
+		if !strings.Contains(multi, fragment) {
+			t.Fatalf("lower_multi_statement_function missing cached lookup %q", fragment)
+		}
+	}
+	if strings.Contains(multi, "let stmt_kind = try ir_contract::body_node_kind_from(") {
+		t.Fatal("top-level statement dispatch should use the cached node kind table")
+	}
+
+	topLevelHasKind := selfhostKizuFunctionBody(t, lower, "fn top_level_has_statement_kind(")
+	for _, fragment := range []string{
+		"compiled_mir_types::fn_body_child_sequence_from(",
+		"compiled_mir_types::fn_node_kind(",
+	} {
+		if !strings.Contains(topLevelHasKind, fragment) {
+			t.Fatalf("top_level_has_statement_kind missing cached lookup %q", fragment)
+		}
+	}
+
+	types := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_types.kizu")
+	countArgs := selfhostKizuFunctionBody(t, types, "pub fn count_call_args_cached(")
+	cachedArgCount := `return try fn_body_edge_count_from(` +
+		`cache, ir_bytes, function_name, call_node, "arg", bs` +
+		`);`
+	if !strings.Contains(countArgs, cachedArgCount) {
+		t.Fatal("cached call-argument count should use one edge-count lookup")
+	}
+	if strings.Contains(countArgs, "while true") {
+		t.Fatal("cached call-argument count should not rescan once per ordinal")
+	}
+}
