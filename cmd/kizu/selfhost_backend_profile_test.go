@@ -121,3 +121,23 @@ func TestSelfhostBackendProfileRecordsIRFactMetricsOnlyWhenEnabled(t *testing.T)
 		}
 	}
 }
+
+// TestSelfhostLLVMRenderReservesModuleOutput keeps the large selfhost LLVM
+// module render from growing its byte buffer one small append at a time.
+func TestSelfhostLLVMRenderReservesModuleOutput(t *testing.T) {
+	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
+	render := selfhostKizuFunctionBody(t, llvm, "fn render_llvm_module(")
+	reserve := "try out.reserve(std::mem::len(ir_bytes) / 3);"
+	preamble := `profile::begin(backend_profile, profile_out, io, "render_module_preamble")`
+	reserveIndex := strings.Index(render, reserve)
+	if reserveIndex < 0 {
+		t.Fatalf("render_llvm_module missing output reserve %q", reserve)
+	}
+	preambleIndex := strings.Index(render, preamble)
+	if preambleIndex < 0 {
+		t.Fatalf("render_llvm_module missing preamble profile marker %q", preamble)
+	}
+	if reserveIndex > preambleIndex {
+		t.Fatal("render_llvm_module should reserve before the first large append phase")
+	}
+}
