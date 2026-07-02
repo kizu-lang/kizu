@@ -311,8 +311,8 @@ fn lower_multi_let_ast_get(
         ir_bytes, function_name, receiver_node, cf
     );
     let receiver_alias = try local_alias_current_name(aliases, receiver_name);
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     if arg_count != 1 {
         return error("compiled mir: Ast.get takes one node id argument");
@@ -574,8 +574,8 @@ fn lower_multi_let_arena_add(
     if !std::mem::equal_bytes(method_name, "add") {
         return error("compiled mir: only Arena.add method let is supported");
     }
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     if arg_count != 1 {
         return error("compiled mir: Arena.add accessor takes one element argument");
@@ -8013,7 +8013,8 @@ pub fn lower_multi_statement_function(
     // begins at that line, so the walk stays byte-identical while the loop becomes O(function).
     var stmt_scan_from = bs;
     while stmt_index < statement_count {
-        let statement = try ir_contract::body_child_sequence_from(
+        let statement = try compiled_mir_types::fn_body_child_sequence_from(
+            &call_arg_type_cache,
             ir_bytes, function_name, 0, "statement", stmt_index, stmt_scan_from
         );
         // sf is this statement's body-node line via the per-function index (pillar A, O(1)); its own
@@ -8083,7 +8084,8 @@ pub fn lower_multi_statement_function(
             if std::mem::equal_bytes(stmt_kind, "Defer") {
                 // The defer body is the single 'expr' child of the Defer node (a '<receiver>.deinit()'
                 // call). Record it for emission at each subsequent top-level exit; emit nothing here.
-                let defer_body = try ir_contract::body_child_sequence_from(
+                let defer_body = try compiled_mir_types::fn_body_child_sequence_from(
+                    &call_arg_type_cache,
                     ir_bytes, function_name, statement, "expr", 0, bs
                 );
                 try pending_defers.append(defer_body);
@@ -8332,7 +8334,8 @@ fn top_level_has_statement_kind(
     var stmt_index = 0;
     var stmt_scan_from = bs;
     while stmt_index < statement_count {
-        let statement = try ir_contract::body_child_sequence_from(
+        let statement = try compiled_mir_types::fn_body_child_sequence_from(
+            call_arg_type_cache,
             ir_bytes, function_name, 0, "statement", stmt_index, stmt_scan_from
         );
         let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
@@ -9427,8 +9430,8 @@ fn lower_void_method_try_call_statement(
     if !std::mem::equal_bytes(info.return_llvm_type, "%kizu.error.void") {
         return error("compiled mir: method try-call statement must return !void");
     }
-    let explicit_arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let explicit_arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1,
@@ -9937,8 +9940,8 @@ fn lower_multi_let_statement_named(
                 ir_lookup_index,
                 ir_bytes, module_prefix, element_kizu
             );
-            let ctor_arg_count = try compiled_mir_types::count_call_args(
-                ir_bytes, function_name, let_value, sf
+            let ctor_arg_count = try compiled_mir_types::count_call_args_cached(
+                ir_bytes, function_name, let_value, sf, call_arg_type_cache
             );
             if ctor_arg_count != 1 {
                 return error("compiled mir: array constructor takes exactly the allocator argument");
@@ -10154,8 +10157,8 @@ fn lower_try_call_args_with_local_aliases_cached(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, cf
     );
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, module_prefix, callee_name, arg_count, ir_lookup_index, call_arg_type_cache
@@ -10299,8 +10302,8 @@ fn lower_call_args_hoisting_try_args_with_local_aliases_cached(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, cf
     );
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, module_prefix, callee_name, arg_count, ir_lookup_index, call_arg_type_cache
@@ -10419,8 +10422,8 @@ fn lower_method_call_args_hoisting_try_args_with_local_aliases(
         ir_bytes, function_name, module_prefix, locals_spec, call_node, bs,
         ir_lookup_index, call_arg_type_cache
     );
-    let explicit_arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let explicit_arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1,
@@ -10782,8 +10785,8 @@ fn lower_multi_let_ast_child_at(
     if !std::mem::equal_bytes(receiver_lookup, "std::kizu::ast::Ast") {
         return error("compiled mir: child_at receiver is not a std::kizu::ast::Ast");
     }
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     if arg_count != 2 {
         return error("compiled mir: child_at takes a range and an index argument");
@@ -10897,8 +10900,8 @@ fn lower_multi_let_array_get(
     if !std::mem::equal_bytes(method_name, "get") {
         return error("compiled mir: only Array.get is supported in let-try position on a value receiver");
     }
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     if arg_count != 1 {
         return error("compiled mir: Array.get accessor takes one index argument");
@@ -11784,8 +11787,8 @@ fn lower_multi_return_array_get(
     if !std::mem::equal_bytes(method_name, "get") {
         return error("compiled mir: only Array.get method return is supported");
     }
-    let arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     if arg_count != 1 {
         return error("compiled mir: Array.get accessor takes one index argument");
@@ -18431,8 +18434,8 @@ fn lower_expr_method_call(
         ir_bytes, function_name, module_prefix, params_spec, call_node, bs,
         ir_lookup_index, call_arg_type_cache
     );
-    let explicit_arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, bs
+    let explicit_arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, bs, call_arg_type_cache
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1,
@@ -18501,8 +18504,8 @@ fn lower_expr_method_call_with_local_aliases(
         ir_bytes, function_name, module_prefix, params_spec, call_node, bs,
         ir_lookup_index, call_arg_type_cache
     );
-    let explicit_arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, call_node, cf
+    let explicit_arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, cf, call_arg_type_cache
     );
     var arg_types = try compiled_mir_types::lower_call_arg_types_cached(
         ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1,

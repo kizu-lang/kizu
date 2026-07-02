@@ -31,6 +31,11 @@ pub struct CallArgTypeCache {
     // global index binary search. Empty (len 0) until built, in which case lookups fall back to bs.
     pub node_line_starts: std::array::Array<i64>,
     pub node_kinds: std::array::Array<[]u8>,
+    pub edge_parents: std::array::Array<i64>,
+    pub edge_names: std::array::Array<[]u8>,
+    pub edge_ordinals: std::array::Array<i64>,
+    pub edge_children: std::array::Array<i64>,
+    pub edges_built: bool,
     // local_names / local_types is the per-function local-binding type cache (pillar B): local_types[i]
     // is the resolved kizu type of the let-bound local local_names[i]. resolve_local_kizu_type is a
     // deterministic function of (function, name) (it scans block 0 direct-first then nested, the
@@ -70,6 +75,11 @@ pub fn call_arg_type_cache() -> CallArgTypeCache {
         types: std::array::Array<[]u8>(std::mem::page_allocator()),
         node_line_starts: std::array::Array<i64>(std::mem::page_allocator()),
         node_kinds: std::array::Array<[]u8>(std::mem::page_allocator()),
+        edge_parents: std::array::Array<i64>(std::mem::page_allocator()),
+        edge_names: std::array::Array<[]u8>(std::mem::page_allocator()),
+        edge_ordinals: std::array::Array<i64>(std::mem::page_allocator()),
+        edge_children: std::array::Array<i64>(std::mem::page_allocator()),
+        edges_built: false,
         local_names: std::array::Array<[]u8>(std::mem::page_allocator()),
         local_types: std::array::Array<[]u8>(std::mem::page_allocator()),
         local_binding_names: std::array::Array<[]u8>(std::mem::page_allocator()),
@@ -114,6 +124,10 @@ impl CallArgTypeCache {
         self.local_names.deinit();
         self.local_binding_statements.deinit();
         self.local_binding_names.deinit();
+        self.edge_children.deinit();
+        self.edge_ordinals.deinit();
+        self.edge_names.deinit();
+        self.edge_parents.deinit();
         self.node_kinds.deinit();
         self.node_line_starts.deinit();
         self.types.deinit();
@@ -282,7 +296,160 @@ pub fn build_fn_node_index(
         }
         sequence = sequence + 1;
     }
+    try build_fn_edge_index(cache, index, ir_bytes, function_name);
     return;
+}
+
+fn build_fn_edge_index(
+    cache: &var CallArgTypeCache,
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8
+) -> !void {
+    let prefix = "body-edge ";
+    var entry = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, ir_bytes[0..0], function_name
+    );
+    while entry >= 0 and
+        ir_index::entry_matches_query(index, ir_bytes, entry, prefix, ir_bytes[0..0], function_name) {
+        let name_end = ir_index::entry_key_end(index, entry);
+        let parent_start = cache_skip_spaces(ir_bytes, name_end);
+        let parent = try cache_parse_i64_token(ir_bytes, parent_start);
+        let parent_end = cache_token_end(ir_bytes, parent_start);
+        let edge_start = cache_skip_spaces(ir_bytes, parent_end);
+        let edge_end = cache_token_end(ir_bytes, edge_start);
+        let ordinal_start = cache_skip_spaces(ir_bytes, edge_end);
+        let ordinal = try cache_parse_i64_token(ir_bytes, ordinal_start);
+        let ordinal_end = cache_token_end(ir_bytes, ordinal_start);
+        let child_start = cache_skip_spaces(ir_bytes, ordinal_end);
+        let child = try cache_parse_i64_token(ir_bytes, child_start);
+        try cache.edge_parents.append(parent);
+        try cache.edge_names.append(ir_bytes[edge_start..edge_end]);
+        try cache.edge_ordinals.append(ordinal);
+        try cache.edge_children.append(child);
+        entry = entry + 1;
+    }
+    cache.edges_built = true;
+    return;
+}
+
+pub fn fn_body_child_sequence_from(
+    cache: &CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    parent_sequence: i64,
+    edge: []u8,
+    ordinal: i64,
+    from: i64
+) -> !i64 {
+    let child = try fn_body_child_sequence_or_minus_one_from(
+        cache, ir_bytes, function_name, parent_sequence, edge, ordinal, from
+    );
+    if child >= 0 {
+        return child;
+    }
+    return error("missing IR artifact fact");
+}
+
+pub fn fn_body_child_sequence_or_minus_one_from(
+    cache: &CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    parent_sequence: i64,
+    edge: []u8,
+    ordinal: i64,
+    from: i64
+) -> !i64 {
+    if !cache.edges_built {
+        return try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, parent_sequence, edge, ordinal, from
+        );
+    }
+    var index = 0;
+    let end = cache.edge_children.len();
+    while index < end {
+        if cache.edge_parents.get_or_panic(index) == parent_sequence and
+            cache.edge_ordinals.get_or_panic(index) == ordinal and
+            std::mem::equal_bytes(cache.edge_names.get_or_panic(index), edge) {
+            return cache.edge_children.get_or_panic(index);
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+pub fn fn_body_edge_count_from(
+    cache: &CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    parent_sequence: i64,
+    edge: []u8,
+    from: i64
+) -> !i64 {
+    if !cache.edges_built {
+        return try ir_contract::body_edge_count_from(
+            ir_bytes, function_name, parent_sequence, edge, from
+        );
+    }
+    var count = 0;
+    var index = 0;
+    let end = cache.edge_children.len();
+    while index < end {
+        if cache.edge_parents.get_or_panic(index) == parent_sequence and
+            std::mem::equal_bytes(cache.edge_names.get_or_panic(index), edge) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+fn cache_skip_spaces(bytes: []u8, start: i64) -> i64 {
+    let byte_len = std::mem::len(bytes);
+    var index = start;
+    while index < byte_len and cache_is_space(bytes[index]) {
+        index = index + 1;
+    }
+    return index;
+}
+
+fn cache_token_end(bytes: []u8, start: i64) -> i64 {
+    let byte_len = std::mem::len(bytes);
+    var index = start;
+    while index < byte_len and !cache_is_space(bytes[index]) {
+        index = index + 1;
+    }
+    return index;
+}
+
+fn cache_parse_i64_token(bytes: []u8, start: i64) -> !i64 {
+    let byte_len = std::mem::len(bytes);
+    if start >= byte_len {
+        return error("invalid IR artifact fact");
+    }
+    var value = 0;
+    var index = start;
+    var found = false;
+    while index < byte_len {
+        let byte = bytes[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            break;
+        }
+        value = (value * 10) + cast<i64>(byte - cast<u8>(48));
+        found = true;
+        index = index + 1;
+    }
+    if !found {
+        return error("invalid IR artifact fact");
+    }
+    if index < byte_len and !cache_is_space(bytes[index]) {
+        return error("invalid IR artifact fact");
+    }
+    return value;
+}
+
+fn cache_is_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(10) or byte == cast<u8>(13) or byte == cast<u8>(9);
 }
 
 // fn_node_line_start returns the current function's 'body-node <fn> <sequence>' line offset from
@@ -529,6 +696,26 @@ pub fn count_call_args(ir_bytes: []u8, function_name: []u8, call_node: i64, bs: 
     while true {
         let child = try ir_contract::body_child_sequence_or_minus_one_from(
             ir_bytes, function_name, call_node, "arg", count, bs
+        );
+        if child < 0 {
+            return count;
+        }
+        count = count + 1;
+    }
+    return count;
+}
+
+pub fn count_call_args_cached(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64,
+    cache: &CallArgTypeCache
+) -> !i64 {
+    var count = 0;
+    while true {
+        let child = try fn_body_child_sequence_or_minus_one_from(
+            cache, ir_bytes, function_name, call_node, "arg", count, bs
         );
         if child < 0 {
             return count;
