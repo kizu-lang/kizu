@@ -262,6 +262,24 @@ pub fn kizu_type_to_llvm_indexed(
     if std::mem::starts_with(kizu_type, "var_") {
         return try kizu_type_to_llvm_indexed(index, ir_bytes, module_prefix, kizu_type[4..type_len]);
     }
+    if kizu_type[0] == cast<u8>(33) {
+        let inner = kizu_type[1..type_len];
+        let direct = error_union_type_llvm_direct_or_empty(inner);
+        if std::mem::len(direct) > 0 {
+            return direct;
+        }
+        let enum_error_union = error_union_enum_abi_or_empty_indexed(
+            index, ir_bytes, module_prefix, inner
+        );
+        if std::mem::len(enum_error_union) > 0 {
+            return enum_error_union;
+        }
+        return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
+    }
+    let direct = non_error_type_llvm_direct_or_empty(kizu_type);
+    if std::mem::len(direct) > 0 {
+        return direct;
+    }
     if type_is_qualified(kizu_type) {
         if compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, ir_bytes[0..0], kizu_type) {
             return "i64";
@@ -284,6 +302,118 @@ pub fn kizu_type_to_llvm_indexed(
         }
     }
     return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
+}
+
+// The indexed lowerer uses these direct maps before falling back to the non-indexed scanner.
+// Keep them byte-equivalent to the direct branches in kizu_type_to_llvm.
+fn error_union_type_llvm_direct_or_empty(inner: []u8) -> []u8 {
+    if std::mem::equal_bytes(inner, "void") {
+        return "%kizu.error.void";
+    }
+    if std::mem::equal_bytes(inner, "[]u8") {
+        return "%kizu.error.slice.u8";
+    }
+    if std::mem::equal_bytes(inner, "std::kizu::diagnostic::RelatedSpan") {
+        return "%kizu.error.related_span";
+    }
+    if std::mem::equal_bytes(inner, "std::kizu::ast::NodeId") {
+        return "%kizu.error.node_id";
+    }
+    if std::mem::equal_bytes(inner, "NodeId") {
+        return "%kizu.error.node_id";
+    }
+    if std::mem::equal_bytes(inner, "i64") {
+        return "%kizu.error.i64";
+    }
+    if std::mem::equal_bytes(inner, "bool") {
+        return "%kizu.error.bool";
+    }
+    if std::mem::equal_bytes(inner, "std::string::String") {
+        return "%kizu.error.owned";
+    }
+    if std::mem::equal_bytes(inner, "String") {
+        return "%kizu.error.owned";
+    }
+    if std::mem::starts_with(inner, "std::array::Array<") {
+        return "%kizu.error.owned";
+    }
+    if std::mem::equal_bytes(inner, "CommentFormatState") {
+        return "%kizu.error.comment_format_state";
+    }
+    if std::mem::equal_bytes(inner, "CodeEval") {
+        return "%kizu.error.code_eval";
+    }
+    if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeEval") {
+        return "%kizu.error.code_eval";
+    }
+    if std::mem::equal_bytes(inner, "std::kizu::ast::ParseResult") {
+        return "%kizu.error.parse_result";
+    }
+    if std::mem::equal_bytes(inner, "std::kizu::parser::ParseNode") {
+        return "%kizu.error.parse_node";
+    }
+    if std::mem::equal_bytes(inner, "std::kizu::parser::ParseRange") {
+        return "%kizu.error.parse_range";
+    }
+    if std::mem::equal_bytes(inner, "ParseNode") {
+        return "%kizu.error.parse_node";
+    }
+    if std::mem::equal_bytes(inner, "ParseRange") {
+        return "%kizu.error.parse_range";
+    }
+    if std::mem::equal_bytes(inner, "std::kizu::lexer::Token") {
+        return "%kizu.error.token";
+    }
+    if std::mem::equal_bytes(inner, "Token") {
+        return "%kizu.error.token";
+    }
+    return "";
+}
+
+fn non_error_type_llvm_direct_or_empty(kizu_type: []u8) -> []u8 {
+    if std::mem::equal_bytes(kizu_type, "i64") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(kizu_type, "bool") {
+        return "i1";
+    }
+    if std::mem::equal_bytes(kizu_type, "u8") {
+        return "i8";
+    }
+    if std::mem::equal_bytes(kizu_type, "[]u8") {
+        return "%kizu.slice.u8";
+    }
+    if std::mem::equal_bytes(kizu_type, "void") {
+        return "void";
+    }
+    if std::mem::equal_bytes(kizu_type, "std::string::String") {
+        return "%kizu.owned";
+    }
+    if std::mem::equal_bytes(kizu_type, "String") {
+        return "%kizu.owned";
+    }
+    if std::mem::starts_with(kizu_type, "std::array::Array<") {
+        return "%kizu.owned";
+    }
+    if std::mem::equal_bytes(kizu_type, "Allocator") {
+        return "%kizu.owned";
+    }
+    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::SourceFile") {
+        return "%kizu.kizu.ast.source_file";
+    }
+    if std::mem::equal_bytes(kizu_type, "std::kizu::parser::ParseNode") {
+        return "%kizu.kizu.parser.parse_node";
+    }
+    if std::mem::equal_bytes(kizu_type, "std::kizu::parser::ParseRange") {
+        return "%kizu.kizu.parser.parse_range";
+    }
+    if std::mem::equal_bytes(kizu_type, "ParseRange") {
+        return "%kizu.kizu.parser.parse_range";
+    }
+    if std::mem::equal_bytes(kizu_type, "CommentFormatState") {
+        return "%kizu.selfhost.parser.format.comment_format_state";
+    }
+    return "";
 }
 
 // type_is_qualified reports whether a kizu type spelling carries a '::' module path, i.e. it
@@ -311,6 +441,32 @@ fn error_union_enum_abi_or_empty(
         }
     } else {
         if !compiled_fact_lookup::is_enum_type(ir_bytes, module_prefix, inner) {
+            return ir_bytes[0..0];
+        }
+    }
+    if std::mem::equal_bytes(inner, "std::kizu::ast::PrefixOp") or
+        std::mem::equal_bytes(inner, "PrefixOp") {
+        return "%kizu.error.prefix_op";
+    }
+    if std::mem::equal_bytes(inner, "std::kizu::ast::BinaryOp") or
+        std::mem::equal_bytes(inner, "BinaryOp") {
+        return "%kizu.error.binary_op";
+    }
+    return ir_bytes[0..0];
+}
+
+fn error_union_enum_abi_or_empty_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    inner: []u8
+) -> []u8 {
+    if type_is_qualified(inner) {
+        if !compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, ir_bytes[0..0], inner) {
+            return ir_bytes[0..0];
+        }
+    } else {
+        if !compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, module_prefix, inner) {
             return ir_bytes[0..0];
         }
     }

@@ -258,3 +258,36 @@ func TestSelfhostMIRLetCallLoweringKeepsCalleeResolutionIndexed(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfhostIndexedTypeLoweringAvoidsKnownFallbackScans keeps the indexed
+// type lowerer from bouncing known ABI shapes through the whole-IR fallback.
+func TestSelfhostIndexedTypeLoweringAvoidsKnownFallbackScans(t *testing.T) {
+	typeLower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_type_lower.kizu")
+	indexed := selfhostKizuFunctionBody(t, typeLower, "pub fn kizu_type_to_llvm_indexed(")
+	for _, fragment := range []string{
+		"error_union_type_llvm_direct_or_empty(inner)",
+		"error_union_enum_abi_or_empty_indexed(",
+		"non_error_type_llvm_direct_or_empty(kizu_type)",
+	} {
+		if !strings.Contains(indexed, fragment) {
+			t.Fatalf("indexed type lowering missing %q", fragment)
+		}
+	}
+
+	enumIndexed := selfhostKizuFunctionBody(t, typeLower, "fn error_union_enum_abi_or_empty_indexed(")
+	if !strings.Contains(enumIndexed, "compiled_fact_lookup::is_enum_type_indexed(") {
+		t.Fatal("indexed error-union enum lowering should use indexed enum lookup")
+	}
+
+	errorDirect := selfhostKizuFunctionBody(t, typeLower, "fn error_union_type_llvm_direct_or_empty(")
+	for _, fragment := range []string{
+		`"ParseNode"`,
+		`"%kizu.error.parse_node"`,
+		`"Token"`,
+		`"%kizu.error.token"`,
+	} {
+		if !strings.Contains(errorDirect, fragment) {
+			t.Fatalf("direct error-union lowering missing %q", fragment)
+		}
+	}
+}
