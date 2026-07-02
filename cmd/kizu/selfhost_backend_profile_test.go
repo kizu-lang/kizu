@@ -141,3 +141,39 @@ func TestSelfhostLLVMRenderReservesModuleOutput(t *testing.T) {
 		t.Fatal("render_llvm_module should reserve before the first large append phase")
 	}
 }
+
+// TestSelfhostBackendProfileSplitsCompiledLowerRender keeps the profiled
+// component path from hiding return-type lookup inside the lower/render bucket.
+func TestSelfhostBackendProfileSplitsCompiledLowerRender(t *testing.T) {
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	emit := selfhostKizuFunctionBody(t, cli, "fn emit_compiled_closure_member_profiled(")
+	for _, fragment := range []string{
+		`"derive_return"`,
+		`compiled_signature::derive_return_type_indexed(`,
+		`"lower_render_body"`,
+		`compiled_llvm::append_compiled_function_auto_return_indexed(`,
+	} {
+		if !strings.Contains(emit, fragment) {
+			t.Fatalf("profiled compiled closure emission missing %q", fragment)
+		}
+	}
+	if strings.Contains(emit, `"lower_render"`) {
+		t.Fatal("profiled compiled closure emission should split lower_render into narrower buckets")
+	}
+
+	compiledLLVM := readSelfhostFile(t, "../../selfhost/src/backend/compiled_llvm.kizu")
+	wrapper := selfhostKizuFunctionBody(
+		t,
+		compiledLLVM,
+		"pub fn append_compiled_function_auto_return_indexed(",
+	)
+	for _, fragment := range []string{
+		"let llvm_symbol_value = llvm_symbol.*;",
+		"let params_spec_value = params_spec.*;",
+		"try append_compiled_function_params_indexed(",
+	} {
+		if !strings.Contains(wrapper, fragment) {
+			t.Fatalf("append_compiled_function_auto_return_indexed missing %q", fragment)
+		}
+	}
+}
