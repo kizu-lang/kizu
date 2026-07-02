@@ -87,3 +87,27 @@ func TestSelfhostCompiledMIRUsesPerFunctionStructuralCache(t *testing.T) {
 		t.Fatal("cached call-argument count should not rescan once per ordinal")
 	}
 }
+
+// TestSelfhostReachabilityCollectUsesNodeLineIndex keeps the component BFS collector
+// from rescanning a function's body-node facts from the body start for every sequence.
+func TestSelfhostReachabilityCollectUsesNodeLineIndex(t *testing.T) {
+	cliLLVM := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	collect := selfhostKizuFunctionBody(t, cliLLVM, "fn collect_component_compiled_body_callees(")
+	for _, fragment := range []string{
+		"std::array::Array<i64>",
+		"ir_contract::collect_body_node_line_starts(",
+		"let line_start = try node_line_starts.get(sequence);",
+		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, line_start)",
+		"ir_contract::body_call_callee_or_empty_from(",
+	} {
+		if !strings.Contains(collect, fragment) {
+			t.Fatalf("collect_component_compiled_body_callees missing %q", fragment)
+		}
+	}
+	if strings.Contains(collect, "ir_contract::body_node_count_from(") {
+		t.Fatal("reachability collect should use the node line index, not a count plus repeated scans")
+	}
+	if strings.Contains(collect, "sequence, body_start") {
+		t.Fatal("reachability collect should not read each node from the function body start")
+	}
+}

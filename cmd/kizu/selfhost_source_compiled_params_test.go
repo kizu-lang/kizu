@@ -79,8 +79,9 @@ func assertSharedCompiledClosurePath(t *testing.T, cli string) {
 	collector := selfhostKizuFunctionBody(t, cli, "fn collect_component_compiled_body_callees(")
 	for _, fragment := range []string{
 		"let body_start = ir_index::body_node_facts_start(lookup_index, ir_bytes, name);",
-		"ir_contract::body_node_count_from(ir_bytes, name, body_start)",
-		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, body_start)",
+		"ir_contract::collect_body_node_line_starts(",
+		"let line_start = try node_line_starts.get(sequence);",
+		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, line_start)",
 		"ir_contract::body_call_callee_or_empty_from(",
 	} {
 		if !strings.Contains(collector, fragment) {
@@ -91,6 +92,8 @@ func assertSharedCompiledClosurePath(t *testing.T, cli string) {
 		"ir_contract::body_node_count(ir_bytes, name)",
 		"ir_contract::body_node_kind(ir_bytes, name, sequence)",
 		"ir_contract::body_call_callee_or_empty(",
+		"ir_contract::body_node_count_from(ir_bytes, name, body_start)",
+		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, body_start)",
 	} {
 		if strings.Contains(collector, fragment) {
 			t.Fatalf("shared compiled closure collector keeps full-artifact scan %q", fragment)
