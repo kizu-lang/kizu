@@ -58,3 +58,66 @@ func TestSelfhostBackendProfileFlushesIncrementallyOnlyWhenRequested(t *testing.
 		t.Fatal("backend profile finish must write the final profile")
 	}
 }
+
+// TestSelfhostBackendProfileRecordsIRFactMetricsOnlyWhenEnabled keeps fact-size
+// diagnostics available without adding work to normal backend profile-off runs.
+func TestSelfhostBackendProfileRecordsIRFactMetricsOnlyWhenEnabled(t *testing.T) {
+	profile := readSelfhostFile(t, "../../selfhost/src/backend/profile.kizu")
+	isEnabled := selfhostKizuFunctionBody(t, profile, "pub fn is_enabled(")
+	if !strings.Contains(isEnabled, "return profile.enabled;") {
+		t.Fatal("backend profile should expose a cheap enabled predicate")
+	}
+
+	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
+	emit := selfhostKizuFunctionBody(t, llvm, "pub fn emit_llvm_artifact(")
+	for _, fragment := range []string{
+		"if profile::is_enabled(&backend_profile) {",
+		`"record_ir_fact_metrics"`,
+		"try record_ir_fact_profile_metrics(",
+	} {
+		if !strings.Contains(emit, fragment) {
+			t.Fatalf("emit_llvm_artifact missing profile guard %q", fragment)
+		}
+	}
+
+	recordFacts := selfhostKizuFunctionBody(t, llvm, "fn record_ir_fact_profile_metrics(")
+	for _, fragment := range []string{
+		`"ir.fact.body_node.entries"`,
+		`"ir.fact.body_node.line_bytes"`,
+		`"ir.fact.body_edge.entries"`,
+		`"ir.fact.body_edge.line_bytes"`,
+		`"ir.fact.function_signature_param.entries"`,
+		`"ir.fact.struct_field.entries"`,
+		`"ir.fact.stdlib_return.entries"`,
+	} {
+		if !strings.Contains(recordFacts, fragment) {
+			t.Fatalf("record_ir_fact_profile_metrics missing %q", fragment)
+		}
+	}
+
+	recordPrefix := selfhostKizuFunctionBody(t, llvm, "fn record_fact_prefix_metrics(")
+	for _, fragment := range []string{
+		"ir_index::fact_prefix_entry_count(lookup_index, ir_bytes, fact_prefix)",
+		"ir_index::fact_prefix_line_bytes(lookup_index, ir_bytes, fact_prefix)",
+	} {
+		if !strings.Contains(recordPrefix, fragment) {
+			t.Fatalf("record_fact_prefix_metrics missing %q", fragment)
+		}
+	}
+
+	irIndex := readSelfhostFile(t, "../../selfhost/src/backend/ir_index.kizu")
+	for _, signature := range []string{
+		"pub fn fact_prefix_entry_count(",
+		"pub fn fact_prefix_line_bytes(",
+	} {
+		body := selfhostKizuFunctionBody(t, irIndex, signature)
+		for _, fragment := range []string{
+			"first_entry_with_fact_prefix(index, ir_bytes, fact_prefix)",
+			"entry_key_starts_with(index, ir_bytes, entry, fact_prefix)",
+		} {
+			if !strings.Contains(body, fragment) {
+				t.Fatalf("%s missing %q", signature, fragment)
+			}
+		}
+	}
+}
