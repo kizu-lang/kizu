@@ -177,3 +177,56 @@ func TestSelfhostBackendProfileSplitsCompiledLowerRender(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfhostMIRCachedLetTypeResolutionUsesIndexedHelpers keeps the hot
+// per-function let-type cache from falling back to whole-IR fact scans.
+func TestSelfhostMIRCachedLetTypeResolutionUsesIndexedHelpers(t *testing.T) {
+	mirTypes := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_types.kizu")
+	cached := selfhostKizuFunctionBody(t, mirTypes, "fn resolve_let_value_kizu_type_for_value_cached(")
+	for _, fragment := range []string{
+		"resolve_value_kizu_type_indexed_cached(",
+		"resolve_value_array_get_element_or_empty_indexed_cached(",
+		"resolve_try_call_success_kizu_type_indexed(",
+	} {
+		if !strings.Contains(cached, fragment) {
+			t.Fatalf("cached let type resolution missing %q", fragment)
+		}
+	}
+
+	callCached := selfhostKizuFunctionBody(
+		t,
+		mirTypes,
+		"fn resolve_let_call_value_kizu_type_indexed_cached(",
+	)
+	for _, fragment := range []string{
+		"resolve_receiver_value_kizu_type_indexed_cached(",
+		"value_receiver_method_return_kizu_or_empty_indexed_cached(",
+	} {
+		if !strings.Contains(callCached, fragment) {
+			t.Fatalf("cached call type resolution missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"try resolve_receiver_value_kizu_type(",
+		"try value_receiver_method_return_kizu_or_empty(",
+	} {
+		if strings.Contains(callCached, forbidden) {
+			t.Fatalf("cached call type resolution still uses non-indexed helper %q", forbidden)
+		}
+	}
+
+	tryIndexed := selfhostKizuFunctionBody(
+		t,
+		mirTypes,
+		"fn resolve_try_call_success_kizu_type_indexed(",
+	)
+	for _, fragment := range []string{
+		"cross_module_callee_qualified_name_or_empty_indexed(",
+		"lookup_fact_value_by_prefix_or_empty_indexed(",
+		"lookup_stdlib_return_indexed(",
+	} {
+		if !strings.Contains(tryIndexed, fragment) {
+			t.Fatalf("indexed try-call type resolution missing %q", fragment)
+		}
+	}
+}

@@ -971,6 +971,36 @@ fn resolve_try_call_success_kizu_type(
     return ret_kizu[1..std::mem::len(ret_kizu)];
 }
 
+fn resolve_try_call_success_kizu_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    callee_name: []u8
+) -> ![]u8 {
+    let qualified = cross_module_callee_qualified_name_or_empty_indexed(index, ir_bytes, callee_name);
+    var lookup_prefix = module_prefix;
+    var lookup_name = callee_name;
+    if std::mem::len(qualified) > 0 {
+        lookup_prefix = ir_bytes[0..0];
+        lookup_name = qualified;
+    }
+    var ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+        index, ir_bytes, "function-signature-return ", lookup_prefix, lookup_name
+    );
+    if std::mem::len(ret_kizu) == 0 and compiled_fact_lookup::is_stdlib_callee(callee_name) {
+        ret_kizu = try compiled_fact_lookup::lookup_stdlib_return_indexed(
+            index, ir_bytes, callee_name
+        );
+    }
+    if std::mem::len(ret_kizu) == 0 {
+        return error("compiled mir: local try-call return type not found");
+    }
+    if ret_kizu[0] != cast<u8>(33) {
+        return error("compiled mir: local try-call callee must return an error union");
+    }
+    return ret_kizu[1..std::mem::len(ret_kizu)];
+}
+
 pub fn lower_call_module_prefix(
     ir_bytes: []u8,
     function_name: []u8,
@@ -1838,6 +1868,54 @@ fn resolve_value_array_get_element_or_empty(
     return array_value_element_kizu_type_or_empty(lookup);
 }
 
+fn resolve_value_array_get_element_or_empty_indexed_cached(
+    index: &ir_index::IrIndex,
+    cache: &var CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    call_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let call_sf = fn_node_line_start(cache, call_node, bs);
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, call_sf
+    );
+    let callee_sf = fn_node_line_start(cache, callee_node, call_sf);
+    let callee_kind = try fn_node_kind(cache, ir_bytes, function_name, callee_node, callee_sf);
+    if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        return "";
+    }
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, callee_sf
+    );
+    if !std::mem::equal_bytes(mode, "field") {
+        return "";
+    }
+    let method_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, callee_node, "field", callee_sf
+    );
+    if !std::mem::equal_bytes(method_name, "get") {
+        return "";
+    }
+    let receiver_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, callee_sf
+    );
+    let receiver_sf = fn_node_line_start(cache, receiver_node, callee_sf);
+    let receiver_kind = try fn_node_kind(cache, ir_bytes, function_name, receiver_node, receiver_sf);
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return "";
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver_node, receiver_sf
+    );
+    let receiver_kizu = try resolve_receiver_value_kizu_type_indexed_cached(
+        index, cache, ir_bytes, function_name, module_prefix, receiver_name, bs
+    );
+    let lookup = struct_lookup_kizu_type(receiver_kizu);
+    return array_value_element_kizu_type_or_empty(lookup);
+}
+
 // array_value_element_kizu_type_or_empty strips the std::array::Array<...> wrapper and
 // returns the element type token, or "" when the type is not an Array<T> (issue 1165).
 pub fn array_value_element_kizu_type_or_empty(kizu_type: []u8) -> []u8 {
@@ -1888,6 +1966,26 @@ pub fn resolve_receiver_value_kizu_type_indexed(
         return param;
     }
     return try resolve_local_kizu_type(ir_bytes, function_name, module_prefix, name, bs);
+}
+
+fn resolve_receiver_value_kizu_type_indexed_cached(
+    index: &ir_index::IrIndex,
+    cache: &var CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    name: []u8,
+    bs: i64
+) -> ![]u8 {
+    let param = try find_function_param_kizu_type_or_empty_indexed(
+        index, ir_bytes, function_name, name
+    );
+    if std::mem::len(param) > 0 {
+        return param;
+    }
+    return try resolve_local_kizu_type_cached(
+        index, cache, ir_bytes, function_name, module_prefix, name, bs
+    );
 }
 
 // find_function_param_kizu_type_or_empty_indexed mirrors find_function_param_kizu_type_or_empty
@@ -2271,6 +2369,73 @@ fn value_receiver_method_return_kizu_or_empty(
     return requalified_name;
 }
 
+fn value_receiver_method_return_kizu_or_empty_indexed_cached(
+    index: &ir_index::IrIndex,
+    cache: &var CallArgTypeCache,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    callee_node: i64,
+    method_name: []u8,
+    callee_sf: i64,
+    bs: i64
+) -> ![]u8 {
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, callee_node, "receiver", 0, callee_sf
+    );
+    let receiver_sf = fn_node_line_start(cache, receiver, callee_sf);
+    let receiver_kind = try fn_node_kind(cache, ir_bytes, function_name, receiver, receiver_sf);
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return ir_bytes[0..0];
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, receiver_sf
+    );
+    let receiver_kizu = try resolve_receiver_value_kizu_type_indexed_cached(
+        index, cache, ir_bytes, function_name, module_prefix, receiver_name, bs
+    );
+    let lookup_type = struct_lookup_kizu_type(receiver_kizu);
+    let type_prefix = compiled_util::module_prefix_of(lookup_type);
+    var impl_prefix = type_prefix;
+    if std::mem::len(impl_prefix) == 0 {
+        impl_prefix = module_prefix;
+    }
+    let type_name = lookup_type[std::mem::len(type_prefix)..std::mem::len(lookup_type)];
+    var qualified = std::string::String(std::mem::page_allocator());
+    try qualified.append_bytes(impl_prefix);
+    try append_lower_snake_type_name(&var qualified, type_name);
+    try qualified.append_byte(cast<u8>(95));
+    try qualified.append_bytes(method_name);
+    let qualified_view = qualified.as_bytes();
+    var copied_qualified = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied_qualified.insert(qualified_view, qualified_view);
+    let qualified_name = try copied_qualified.get(qualified_view);
+    let return_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+        index, ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified_name
+    );
+    if std::mem::len(return_kizu) == 0 {
+        return ir_bytes[0..0];
+    }
+    let colon = compiled_util::find_byte(return_kizu, cast<u8>(58), 0);
+    if colon < std::mem::len(return_kizu) {
+        return return_kizu;
+    }
+    var requalified = std::string::String(std::mem::page_allocator());
+    try requalified.append_bytes(impl_prefix);
+    try requalified.append_bytes(return_kizu);
+    let requalified_view = requalified.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(requalified_view, requalified_view);
+    let requalified_name = try copied.get(requalified_view);
+    let type_llvm = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+        index, ir_bytes, "type-llvm ", ir_bytes[0..0], requalified_name
+    );
+    if std::mem::len(type_llvm) == 0 {
+        return return_kizu;
+    }
+    return requalified_name;
+}
+
 pub struct MethodCallResolved {
     pub receiver_name: []u8,
     pub receiver_llvm_type: []u8,
@@ -2459,6 +2624,35 @@ fn resolve_let_value_kizu_type_for_value_cached(
             index, cache, ir_bytes, function_name, module_prefix, value, value_sf, bs
         );
     }
+    if std::mem::equal_bytes(value_kind, "Var") {
+        let ref_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, value, value_sf
+        );
+        return try resolve_value_kizu_type_indexed_cached(
+            index, ir_bytes, function_name, module_prefix, "", ref_name, bs, cache
+        );
+    }
+    if std::mem::equal_bytes(value_kind, "TryExpr") {
+        let inner = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, value, "value", 0, value_sf
+        );
+        let inner_sf = fn_node_line_start(cache, inner, value_sf);
+        let inner_kind = try fn_node_kind(cache, ir_bytes, function_name, inner, inner_sf);
+        if std::mem::equal_bytes(inner_kind, "Call") {
+            let array_get_element = try resolve_value_array_get_element_or_empty_indexed_cached(
+                index, cache, ir_bytes, function_name, module_prefix, inner, bs
+            );
+            if std::mem::len(array_get_element) > 0 {
+                return array_get_element;
+            }
+            let try_callee = try ir_contract::body_call_callee_or_empty_from(
+                ir_bytes, function_name, inner, inner_sf
+            );
+            return try resolve_try_call_success_kizu_type_indexed(
+                index, ir_bytes, module_prefix, try_callee
+            );
+        }
+    }
     return try resolve_let_value_kizu_type_for_value_with_kind(
         ir_bytes, function_name, module_prefix, value, value_sf, bs, value_kind
     );
@@ -2517,8 +2711,8 @@ fn resolve_let_call_value_kizu_type_indexed_cached(
                 let get_receiver_name = try ir_contract::body_token_or_empty_from(
                     ir_bytes, function_name, get_receiver, get_receiver_sf
                 );
-                let get_receiver_kizu = try resolve_receiver_value_kizu_type(
-                    ir_bytes, function_name, module_prefix, get_receiver_name, bs
+                let get_receiver_kizu = try resolve_receiver_value_kizu_type_indexed_cached(
+                    index, cache, ir_bytes, function_name, module_prefix, get_receiver_name, bs
                 );
                 if std::mem::equal_bytes(
                     struct_lookup_kizu_type(get_receiver_kizu), "std::kizu::ast::Ast"
@@ -2527,8 +2721,9 @@ fn resolve_let_call_value_kizu_type_indexed_cached(
                 }
             }
         }
-        let method_ret = try value_receiver_method_return_kizu_or_empty(
-            ir_bytes, function_name, module_prefix, callee_node, method_name, bs
+        let method_ret = try value_receiver_method_return_kizu_or_empty_indexed_cached(
+            index, cache, ir_bytes, function_name, module_prefix, callee_node, method_name,
+            callee_sf, bs
         );
         if std::mem::len(method_ret) > 0 {
             return method_ret;
