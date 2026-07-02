@@ -230,3 +230,31 @@ func TestSelfhostMIRCachedLetTypeResolutionUsesIndexedHelpers(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfhostMIRLetCallLoweringKeepsCalleeResolutionIndexed covers the hot
+// let-call lowering path sampled under lower_multi_let_statement_named.
+func TestSelfhostMIRLetCallLoweringKeepsCalleeResolutionIndexed(t *testing.T) {
+	mirLower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
+	for _, signature := range []string{
+		"fn lower_multi_let_try_call(",
+		"fn lower_multi_let_call(",
+	} {
+		body := selfhostKizuFunctionBody(t, mirLower, signature)
+		for _, fragment := range []string{
+			"lower_call_callee_name_indexed(",
+			"lower_call_module_prefix_indexed(",
+		} {
+			if !strings.Contains(body, fragment) {
+				t.Fatalf("%s missing %q", signature, fragment)
+			}
+		}
+		for _, forbidden := range []string{
+			"try compiled_mir_types::lower_call_callee_name(",
+			"try compiled_mir_types::lower_call_module_prefix(",
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("%s still uses non-indexed helper %q", signature, forbidden)
+			}
+		}
+	}
+}
