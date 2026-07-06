@@ -14,9 +14,11 @@ import (
 // runRenderCase is one end-to-end tape-render case: a kizu source that lowers onto
 // the run codegen IR v1 tape, renders to LLVM, links, runs, and prints wantStdout.
 type runRenderCase struct {
-	name       string
-	source     string
-	wantStdout string
+	name              string
+	source            string
+	wantStdout        string
+	wantExit          int
+	wantLLVMFragments []string
 }
 
 // TestSelfhostRunRenderGate drives the tape renderer end to end: it lowers a kizu
@@ -479,9 +481,11 @@ func runRenderStringBuilderCases() []runRenderCase {
 func runRenderOwnedArrayCases() []runRenderCase {
 	return []runRenderCase{
 		{
-			name: "try_returns_owned_array_i64",
+			name: "errdefer_returns_owned_array_i64",
 			source: "fn make_values(allocator: Allocator) -> !std::array::Array<i64> {\n" +
 				"    let values = std::array::Array<i64>(allocator);\n" +
+				"    errdefer values.deinit();\n" +
+				"\n" +
 				"    try values.append(1);\n" +
 				"    try values.append(2);\n" +
 				"    return values;\n}\n\n" +
@@ -496,6 +500,26 @@ func runRenderOwnedArrayCases() []runRenderCase {
 				"    print(\"ok\");\n" +
 				"    return;\n}\n",
 			wantStdout: "ok\n",
+			wantLLVMFragments: []string{
+				"_fail:\n  call void @kizu_rt_array_deinit(%kizu.owned %v",
+			},
+		},
+		{
+			name: "errdefer_return_error_deinits_array_i64",
+			source: "fn fail_values(allocator: Allocator) -> !void {\n" +
+				"    let values = std::array::Array<i64>(allocator);\n" +
+				"    errdefer values.deinit();\n" +
+				"    return error(\"boom\");\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    try fail_values(allocator);\n" +
+				"    print(\"unreachable\");\n" +
+				"    return;\n}\n",
+			wantExit: 1,
+			wantLLVMFragments: []string{
+				"call void @kizu_rt_array_deinit(%kizu.owned %v",
+				"ret %kizu.error.void { i1 false",
+			},
 		},
 	}
 }
@@ -677,6 +701,15 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 		t.Fatalf("render gate did not report success:\n%s", out.String())
 	}
 	llPath := "target/selfhost/run_render.ll"
+	llText, err := os.ReadFile(llPath)
+	if err != nil {
+		t.Fatalf("read rendered module: %v", err)
+	}
+	for _, fragment := range item.wantLLVMFragments {
+		if !bytes.Contains(llText, []byte(fragment)) {
+			t.Fatalf("rendered module missing fragment %q\n--- module ---\n%s", fragment, llText)
+		}
+	}
 	exePath := filepath.Join("target/selfhost", item.name+".render")
 	compile := exec.Command(
 		clang,
@@ -690,7 +723,6 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 		exePath,
 	)
 	if linkOut, err := compile.CombinedOutput(); err != nil {
-		llText, _ := os.ReadFile(llPath)
 		t.Fatalf("link rendered module: %v\n%s\n--- module ---\n%s", err, linkOut, llText)
 	}
 	absExe, err := filepath.Abs(exePath)
@@ -703,8 +735,13 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 	run.Stdout = &stdout
 	run.Stderr = &stderr
 	runErr := run.Run()
-	if exitCode(runErr) != 0 {
-		t.Fatalf("rendered program exit=%d stderr=%q", exitCode(runErr), stderr.String())
+	if exitCode(runErr) != item.wantExit {
+		t.Fatalf(
+			"rendered program exit=%d want %d stderr=%q",
+			exitCode(runErr),
+			item.wantExit,
+			stderr.String(),
+		)
 	}
 	if stdout.String() != item.wantStdout {
 		t.Fatalf("rendered program stdout=%q want %q", stdout.String(), item.wantStdout)
