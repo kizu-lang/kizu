@@ -14,11 +14,12 @@ import (
 // runRenderCase is one end-to-end tape-render case: a kizu source that lowers onto
 // the run codegen IR v1 tape, renders to LLVM, links, runs, and prints wantStdout.
 type runRenderCase struct {
-	name              string
-	source            string
-	wantStdout        string
-	wantExit          int
-	wantLLVMFragments []string
+	name                     string
+	source                   string
+	wantStdout               string
+	wantExit                 int
+	wantLLVMFragments        []string
+	wantLLVMOrderedFragments []string
 }
 
 // TestSelfhostRunRenderGate drives the tape renderer end to end: it lowers a kizu
@@ -64,6 +65,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderIoWriteCases()...)
 	cases = append(cases, runRenderStringBuilderCases()...)
 	cases = append(cases, runRenderOwnedArrayCases()...)
+	cases = append(cases, runRenderCleanupCases()...)
 	cases = append(cases, runRenderStructCases()...)
 	cases = append(cases, runRenderEnumMatchCases()...)
 	cases = append(cases, runRenderVarStructCases()...)
@@ -524,6 +526,53 @@ func runRenderOwnedArrayCases() []runRenderCase {
 	}
 }
 
+// runRenderCleanupCases covers SPEC cleanup stack behavior across error exits:
+// normal defer runs on error paths, errdefer is error-only, and both share LIFO.
+func runRenderCleanupCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "defer_try_error_deinits_array_i64",
+			source: "fn failer() -> !void {\n" +
+				"    return error(\"boom\");\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    let values = std::array::Array<i64>(allocator);\n" +
+				"    defer values.deinit();\n" +
+				"    try failer();\n" +
+				"    print(\"unreachable\");\n" +
+				"    return;\n}\n",
+			wantExit: 1,
+			wantLLVMFragments: []string{
+				"_fail:\n  call void @kizu_rt_array_deinit(%kizu.owned %v",
+			},
+		},
+		{
+			name: "defer_errdefer_return_error_lifo_order",
+			source: "fn fail_mixed(allocator: Allocator) -> !void {\n" +
+				"    let first = std::array::Array<i64>(allocator);\n" +
+				"    defer first.deinit();\n" +
+				"    let second = std::array::Array<i64>(allocator);\n" +
+				"    errdefer second.deinit();\n" +
+				"    let third = std::array::Array<i64>(allocator);\n" +
+				"    defer third.deinit();\n" +
+				"    return error(\"boom\");\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    try fail_mixed(allocator);\n" +
+				"    print(\"unreachable\");\n" +
+				"    return;\n}\n",
+			wantExit: 1,
+			wantLLVMOrderedFragments: []string{
+				"define %kizu.error.void @kizu_run_user_fail_mixed",
+				"call void @kizu_rt_array_deinit(%kizu.owned %v3)",
+				"call void @kizu_rt_array_deinit(%kizu.owned %v2)",
+				"call void @kizu_rt_array_deinit(%kizu.owned %v1)",
+				"ret %kizu.error.void { i1 false",
+			},
+		},
+	}
+}
+
 // runRenderStructCases is the struct-scalarization corpus (let-bound struct
 // literals, scalar and slice field reads, nested struct fields, and a field
 // read as a user-call argument).
@@ -705,11 +754,7 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 	if err != nil {
 		t.Fatalf("read rendered module: %v", err)
 	}
-	for _, fragment := range item.wantLLVMFragments {
-		if !bytes.Contains(llText, []byte(fragment)) {
-			t.Fatalf("rendered module missing fragment %q\n--- module ---\n%s", fragment, llText)
-		}
-	}
+	assertRunRenderLLVM(t, llText, item)
 	exePath := filepath.Join("target/selfhost", item.name+".render")
 	compile := exec.Command(
 		clang,
@@ -745,5 +790,31 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 	}
 	if stdout.String() != item.wantStdout {
 		t.Fatalf("rendered program stdout=%q want %q", stdout.String(), item.wantStdout)
+	}
+}
+
+// assertRunRenderLLVM checks unordered and ordered LLVM fragments requested by a
+// render case before the module is linked and executed.
+func assertRunRenderLLVM(t *testing.T, llText []byte, item runRenderCase) {
+	t.Helper()
+	for _, fragment := range item.wantLLVMFragments {
+		if !bytes.Contains(llText, []byte(fragment)) {
+			t.Fatalf("rendered module missing fragment %q\n--- module ---\n%s", fragment, llText)
+		}
+	}
+	if len(item.wantLLVMOrderedFragments) > 0 {
+		offset := 0
+		for _, fragment := range item.wantLLVMOrderedFragments {
+			found := bytes.Index(llText[offset:], []byte(fragment))
+			if found < 0 {
+				t.Fatalf(
+					"rendered module missing ordered fragment %q after byte %d\n--- module ---\n%s",
+					fragment,
+					offset,
+					llText,
+				)
+			}
+			offset += found + len(fragment)
+		}
 	}
 }

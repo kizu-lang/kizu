@@ -3019,7 +3019,7 @@ fn render_ret_err_fail(
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
     let err_owned = ret_abi_user_err_owned();
-    try render_errdefer_cleanup(out, code, index);
+    try render_error_cleanup(out, code, index);
     if abi == main_abi {
         try render_ret_err_fail_exit(out, index);
     }
@@ -3495,7 +3495,7 @@ fn render_try_i64_propagate(
     index: i64,
     abi: i64
 ) -> !void {
-    try render_errdefer_cleanup(out, code, index);
+    try render_error_cleanup(out, code, index);
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
     let err_owned = ret_abi_user_err_owned();
@@ -3626,7 +3626,7 @@ fn render_try_propagate(
     index: i64,
     abi: i64
 ) -> !void {
-    try render_errdefer_cleanup(out, code, index);
+    try render_error_cleanup(out, code, index);
     let main_abi = ret_abi_main();
     if abi == main_abi {
         try render_try_propagate_exit(out, index);
@@ -5491,16 +5491,16 @@ fn render_storage_deinit(
     return;
 }
 
-fn render_errdefer_cleanup(
+fn render_error_cleanup(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     current_index: i64
 ) -> !void {
     let body_start = try tape_current_body_start(code, current_index, 0, 0);
-    return try render_errdefer_cleanup_before(out, code, body_start, current_index, current_index);
+    return try render_error_cleanup_before(out, code, body_start, current_index, current_index);
 }
 
-fn render_errdefer_cleanup_before(
+fn render_error_cleanup_before(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     lower: i64,
@@ -5508,15 +5508,15 @@ fn render_errdefer_cleanup_before(
     current_index: i64
 ) -> !void {
     let none = 0 - 1;
-    let last = try last_active_errdefer_before(code, lower, upper, current_index, lower, none);
+    let last = try last_active_error_cleanup_before(code, lower, upper, current_index, lower, none);
     if last < 0 {
         return;
     }
     try render_storage_deinit(out, code, last);
-    return try render_errdefer_cleanup_before(out, code, lower, last, current_index);
+    return try render_error_cleanup_before(out, code, lower, last, current_index);
 }
 
-fn last_active_errdefer_before(
+fn last_active_error_cleanup_before(
     code: &std::array::Array<i64>,
     lower: i64,
     upper: i64,
@@ -5529,17 +5529,25 @@ fn last_active_errdefer_before(
     }
     let op = try code.get(scan);
     let next = try tape_record_end(code, scan);
-    let errdefer_deinit = codegen::code_op_errdefer_deinit();
-    if op == errdefer_deinit {
-        let active = try errdefer_deinit_active_at(code, scan, current_index, next);
+    if code_op_is_error_cleanup_deinit(op) {
+        let active = try cleanup_deinit_active_at(code, scan, current_index, next);
         if active {
-            return try last_active_errdefer_before(code, lower, upper, current_index, next, scan);
+            return try last_active_error_cleanup_before(code, lower, upper, current_index, next, scan);
         }
     }
-    return try last_active_errdefer_before(code, lower, upper, current_index, next, best);
+    return try last_active_error_cleanup_before(code, lower, upper, current_index, next, best);
 }
 
-fn errdefer_deinit_active_at(
+fn code_op_is_error_cleanup_deinit(op: i64) -> bool {
+    let defer_deinit = codegen::code_op_defer_deinit();
+    if op == defer_deinit {
+        return true;
+    }
+    let errdefer_deinit = codegen::code_op_errdefer_deinit();
+    return op == errdefer_deinit;
+}
+
+fn cleanup_deinit_active_at(
     code: &std::array::Array<i64>,
     record_index: i64,
     current_index: i64,
@@ -5557,7 +5565,7 @@ fn errdefer_deinit_active_at(
             return false;
         }
     }
-    return try errdefer_deinit_active_at(code, record_index, current_index, next);
+    return try cleanup_deinit_active_at(code, record_index, current_index, next);
 }
 
 fn tape_current_body_start(
@@ -6366,7 +6374,7 @@ fn render_array_get_propagate(
     index: i64,
     abi: i64
 ) -> !void {
-    try render_errdefer_cleanup(out, code, index);
+    try render_error_cleanup(out, code, index);
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
     let err_owned = ret_abi_user_err_owned();
@@ -7082,7 +7090,7 @@ fn render_fs_read_propagate(
     dst: i64,
     abi: i64
 ) -> !void {
-    try render_errdefer_cleanup(out, code, index);
+    try render_error_cleanup(out, code, index);
     let main_abi = ret_abi_main();
     let err_i64 = ret_abi_user_err_i64();
     let err_owned = ret_abi_user_err_owned();
@@ -8322,6 +8330,10 @@ fn tape_record_end_core_owned(code: &std::array::Array<i64>, index: i64, op: i64
     }
     let storage_deinit = codegen::code_op_storage_deinit();
     if op == storage_deinit {
+        return index + 3;
+    }
+    let defer_deinit = codegen::code_op_defer_deinit();
+    if op == defer_deinit {
         return index + 3;
     }
     let errdefer_deinit = codegen::code_op_errdefer_deinit();

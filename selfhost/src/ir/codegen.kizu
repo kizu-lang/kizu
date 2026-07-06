@@ -846,16 +846,20 @@ pub fn code_op_try_call_owned_string() -> i64 {
     return 146;
 }
 
-// ERRDEFER_DEINIT records an error-path-only cleanup. It is inert in normal
-// render flow; error propagation renderers scan active records and emit the
-// deinit calls inside their fail blocks. ERRDEFER_SCOPE_END closes the active
-// interval for records declared at or after its lower-bound tape index.
+// DEFER_DEINIT / ERRDEFER_DEINIT record cleanup stack entries. They are inert
+// in normal render flow; error propagation renderers scan active records and
+// emit the deinit calls inside their fail blocks. ERRDEFER_SCOPE_END closes the
+// active interval for records declared at or after its lower-bound tape index.
 pub fn code_op_errdefer_deinit() -> i64 {
     return 147;
 }
 
 pub fn code_op_errdefer_scope_end() -> i64 {
     return 148;
+}
+
+pub fn code_op_defer_deinit() -> i64 {
+    return 149;
 }
 
 fn code_defer_runtime_deinit_tag() -> i64 {
@@ -2517,6 +2521,10 @@ fn append_code_defer_runtime_deinit_field(
     if !code_kind_is_owned_resource(receiver_kind) {
         return code_eval_unsupported(receiver_eval.next);
     }
+    let op_defer_deinit = code_op_defer_deinit();
+    try code.append(op_defer_deinit);
+    try code.append(receiver_eval.value_id);
+    try code.append(receiver_kind);
     let tag = code_defer_runtime_deinit_tag();
     try defer_records.append(tag);
     try defer_records.append(0);
@@ -7173,11 +7181,57 @@ fn lower_code_return_with_defers(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    if code_return_value_is_error_call(text, ast, value) {
+        try deactivate_code_defer_range(defer_records, 0);
+        return try lower_code_return(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     let defer_eval = try lower_code_defer_range(text, ast, decls, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, 0, next_value);
     if !defer_eval.ok {
         return code_eval_unsupported(defer_eval.next);
     }
     return try lower_code_return(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, defer_eval.next);
+}
+
+fn code_return_value_is_error_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(value);
+    return match node.data {
+        Call(call_node) => std::mem::equal_bytes(ast_node_text(text, ast, call_node.callee), "error"),
+        _ => false,
+    };
+}
+
+fn deactivate_code_defer_range(
+    defer_records: &var std::array::Array<i64>,
+    lower_bound: i64
+) -> !void {
+    let count = defer_records.len();
+    if count <= lower_bound {
+        return;
+    }
+    return try deactivate_code_defer_range_from(defer_records, lower_bound, count);
+}
+
+fn deactivate_code_defer_range_from(
+    defer_records: &var std::array::Array<i64>,
+    lower_bound: i64,
+    upper_bound: i64
+) -> !void {
+    if upper_bound <= lower_bound {
+        return;
+    }
+    let size_pos = upper_bound - 1;
+    let record_size = try defer_records.get(size_pos);
+    let record_index = upper_bound - record_size;
+    if record_index < lower_bound {
+        return;
+    }
+    let active_pos = record_index + 4;
+    try defer_records.set(active_pos, 0);
+    return try deactivate_code_defer_range_from(defer_records, lower_bound, record_index);
 }
 
 fn lower_code_return(
