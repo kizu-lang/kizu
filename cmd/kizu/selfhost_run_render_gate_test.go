@@ -66,6 +66,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderStringBuilderCases()...)
 	cases = append(cases, runRenderOwnedArrayCases()...)
 	cases = append(cases, runRenderCleanupCases()...)
+	cases = append(cases, runRenderCleanupControlFlowCases()...)
 	cases = append(cases, runRenderPathJoinCleanCases()...)
 	cases = append(cases, runRenderStructCases()...)
 	cases = append(cases, runRenderEnumMatchCases()...)
@@ -570,6 +571,114 @@ func runRenderCleanupCases() []runRenderCase {
 				"call void @kizu_rt_array_deinit(%kizu.owned %v1)",
 				"ret %kizu.error.void { i1 false",
 			},
+		},
+	}
+}
+
+const runRenderCleanupMarkerPrelude = "struct Marker {\n" +
+	"    label: []u8,\n" +
+	"}\n\n" +
+	"impl Marker {\n" +
+	"    fn deinit(self: Marker) -> void {\n" +
+	"        print(self.label);\n" +
+	"    }\n" +
+	"}\n\n"
+
+// runRenderCleanupControlFlowCases covers normal defer cleanup on non-local
+// control-flow exits: return, break, continue, and labeled break.
+func runRenderCleanupControlFlowCases() []runRenderCase {
+	cases := append(runRenderCleanupLoopExitCases(), runRenderCleanupBranchExitCases()...)
+	return cases
+}
+
+// runRenderCleanupLoopExitCases covers break/continue paths inside a loop body.
+func runRenderCleanupLoopExitCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "defer_runs_before_break",
+			source: runRenderCleanupMarkerPrelude +
+				"fn main() {\n" +
+				"    while true {\n" +
+				"        let marker = Marker { label: \"cleanup\" };\n" +
+				"        defer marker.deinit();\n" +
+				"        print(\"before\");\n" +
+				"        break;\n" +
+				"    }\n" +
+				"    print(\"after\");\n" +
+				"}\n",
+			wantStdout: "before\ncleanup\nafter\n",
+		},
+		{
+			name: "defer_runs_before_continue",
+			source: runRenderCleanupMarkerPrelude +
+				"fn main() {\n" +
+				"    var i = 0;\n" +
+				"    while i < 2 {\n" +
+				"        i = i + 1;\n" +
+				"        let marker = Marker { label: \"cleanup\" };\n" +
+				"        defer marker.deinit();\n" +
+				"        print(i);\n" +
+				"        continue;\n" +
+				"    }\n" +
+				"    print(\"done\");\n" +
+				"}\n",
+			wantStdout: "1\ncleanup\n2\ncleanup\ndone\n",
+		},
+	}
+}
+
+// runRenderCleanupBranchExitCases covers branch exits that must preserve or run defers.
+func runRenderCleanupBranchExitCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "defer_after_non_taken_return_branch",
+			source: runRenderCleanupMarkerPrelude +
+				"fn maybe(flag: bool) {\n" +
+				"    let marker = Marker { label: \"cleanup\" };\n" +
+				"    defer marker.deinit();\n" +
+				"    if flag {\n" +
+				"        return;\n" +
+				"    }\n" +
+				"    print(\"body\");\n" +
+				"}\n\n" +
+				"fn main() {\n" +
+				"    maybe(false);\n" +
+				"}\n",
+			wantStdout: "body\ncleanup\n",
+		},
+		{
+			name: "outer_defer_not_run_before_break",
+			source: runRenderCleanupMarkerPrelude +
+				"fn main() {\n" +
+				"    let outer = Marker { label: \"outer\" };\n" +
+				"    defer outer.deinit();\n" +
+				"    while true {\n" +
+				"        let inner = Marker { label: \"inner\" };\n" +
+				"        defer inner.deinit();\n" +
+				"        print(\"before\");\n" +
+				"        break;\n" +
+				"    }\n" +
+				"    print(\"after\");\n" +
+				"}\n",
+			wantStdout: "before\ninner\nafter\nouter\n",
+		},
+		{
+			name: "labeled_break_runs_exited_defers_lifo",
+			source: runRenderCleanupMarkerPrelude +
+				"fn main() {\n" +
+				"    outer_loop: while true {\n" +
+				"        let outer = Marker { label: \"outer\" };\n" +
+				"        defer outer.deinit();\n" +
+				"        while true {\n" +
+				"            let inner = Marker { label: \"inner\" };\n" +
+				"            defer inner.deinit();\n" +
+				"            print(\"before\");\n" +
+				"            break :outer_loop;\n" +
+				"        }\n" +
+				"    }\n" +
+				"    print(\"after\");\n" +
+				"}\n",
+			wantStdout: "before\ninner\nouter\nafter\n",
 		},
 	}
 }

@@ -536,6 +536,9 @@ pub fn code_op_ptr_store_slice() -> i64 {
 // or past the loop, WHILE_END closes the body back to the condition block. Each
 // carries the WHILE_BEGIN tape index so the renderer's labels match without a
 // render-time block stack.
+// WHILE_BEGIN carries the loop begin index and the defer-stack lower bound for
+// break/continue cleanup. WHILE_COND / WHILE_END carry the begin index so labels
+// stay stable after condition/body records are inserted.
 pub fn code_op_while_begin() -> i64 {
     return 60;
 }
@@ -552,7 +555,8 @@ pub fn code_op_while_end() -> i64 {
 // seeds the induction slot from the start value and opens the condition block
 // (loading the slot and comparing against the end value), FOR_END emits the
 // latch (increment the slot) and closes the loop. FOR_BEGIN carries the temp
-// value ids its load/compare use; FOR_END carries the temp ids its latch uses.
+// value ids its load/compare use plus the defer-stack lower bound for loop exits;
+// FOR_END carries the temp ids its latch uses.
 pub fn code_op_for_begin() -> i64 {
     return 70;
 }
@@ -561,9 +565,9 @@ pub fn code_op_for_end() -> i64 {
     return 73;
 }
 
-// Break/continue opcodes carry the enclosing loop's begin index and its loop
-// kind (0 = while, 1 = for) so the renderer targets the right exit/continue
-// label; for loops continue at their latch, while loops at their condition.
+// Break/continue opcodes carry the target loop's begin index and its loop kind
+// (0 = while, 1 = for). Lowering emits any normal defers whose scopes are exited
+// before the branch, and the renderer targets the right exit/continue label.
 pub fn code_op_break() -> i64 {
     return 80;
 }
@@ -2699,7 +2703,7 @@ fn lower_code_defer_range_from(
     if record_index < lower_bound {
         return code_eval_unsupported(next_value);
     }
-    let eval = try emit_code_defer_record(code, kinds, defer_records, record_index, next_value);
+    let eval = try emit_code_defer_record(code, kinds, defer_records, record_index, next_value, true);
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
@@ -2711,7 +2715,8 @@ fn emit_code_defer_record(
     kinds: &var std::array::Array<i64>,
     defer_records: &var std::array::Array<i64>,
     record_index: i64,
-    next_value: i64
+    next_value: i64,
+    deactivate: bool
 ) -> !CodeEval {
     let active_pos = record_index + 4;
     let active = try defer_records.get(active_pos);
@@ -2721,7 +2726,7 @@ fn emit_code_defer_record(
     let name_start = try defer_records.get(record_index);
     let runtime_tag = code_defer_runtime_deinit_tag();
     if name_start == runtime_tag {
-        return try emit_code_defer_runtime_deinit(code, defer_records, record_index, next_value);
+        return try emit_code_defer_runtime_deinit(code, defer_records, record_index, next_value, deactivate);
     }
     let op_method_call = code_op_method_call();
     try code.append(op_method_call);
@@ -2744,7 +2749,9 @@ fn emit_code_defer_record(
     let args_start = record_index + 7;
     let args_end = args_start + arg_count;
     try copy_code_defer_args(code, defer_records, args_start, args_end);
-    try defer_records.set(active_pos, 0);
+    if deactivate {
+        try defer_records.set(active_pos, 0);
+    }
     try kinds.append(result_kind);
     let after_value = next_value + 1;
     return code_eval_value(next_value, after_value);
@@ -2754,7 +2761,8 @@ fn emit_code_defer_runtime_deinit(
     code: &var std::array::Array<i64>,
     defer_records: &var std::array::Array<i64>,
     record_index: i64,
-    next_value: i64
+    next_value: i64,
+    deactivate: bool
 ) -> !CodeEval {
     let receiver_kind_pos = record_index + 2;
     let receiver_kind = try defer_records.get(receiver_kind_pos);
@@ -2770,9 +2778,52 @@ fn emit_code_defer_runtime_deinit(
         try code.append(receiver_value);
         try code.append(receiver_kind);
     }
-    let active_pos = record_index + 4;
-    try defer_records.set(active_pos, 0);
+    if deactivate {
+        let active_pos = record_index + 4;
+        try defer_records.set(active_pos, 0);
+    }
     return code_eval_value(0, next_value);
+}
+
+// Early exits need the same LIFO cleanup instructions as lexical scope end, but
+// must not consume the compile-time active flags: a sibling branch may still fall
+// through and need the original defer record at the normal scope end.
+fn lower_code_defer_range_for_exit(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
+    lower_bound: i64,
+    next_value: i64
+) -> !CodeEval {
+    let count = defer_records.len();
+    if count <= lower_bound {
+        return code_eval_value(0, next_value);
+    }
+    return try lower_code_defer_range_for_exit_from(code, kinds, defer_records, lower_bound, count, next_value);
+}
+
+fn lower_code_defer_range_for_exit_from(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
+    lower_bound: i64,
+    upper_bound: i64,
+    next_value: i64
+) -> !CodeEval {
+    if upper_bound <= lower_bound {
+        return code_eval_value(0, next_value);
+    }
+    let size_pos = upper_bound - 1;
+    let record_size = try defer_records.get(size_pos);
+    let record_index = upper_bound - record_size;
+    if record_index < lower_bound {
+        return code_eval_unsupported(next_value);
+    }
+    let eval = try emit_code_defer_record(code, kinds, defer_records, record_index, next_value, false);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    return try lower_code_defer_range_for_exit_from(code, kinds, defer_records, lower_bound, record_index, eval.next);
 }
 
 fn copy_code_defer_args(
@@ -3460,8 +3511,8 @@ fn lower_code_statement(
         Match(match_node) => try lower_code_match(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, loop_begin, loop_kind, next_value),
         While(while_node) => try lower_code_while(text, ast, decls, while_node.label, while_node.condition, while_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, next_value),
         For(for_node) => try lower_code_for(text, ast, decls, for_node.label, for_node.name, for_node.start, for_node.end, for_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, next_value),
-        Break(break_node) => try lower_code_break(text, ast, break_node.label, code, local_starts, local_ends, local_values, locals_base, loop_begin, loop_kind, next_value),
-        Continue(continue_node) => try lower_code_continue(text, ast, continue_node.label, code, local_starts, local_ends, local_values, locals_base, loop_begin, loop_kind, next_value),
+        Break(break_node) => try lower_code_break(text, ast, break_node.label, code, kinds, local_starts, local_ends, local_values, defer_records, locals_base, loop_begin, loop_kind, next_value),
+        Continue(continue_node) => try lower_code_continue(text, ast, continue_node.label, code, kinds, local_starts, local_ends, local_values, defer_records, locals_base, loop_begin, loop_kind, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -5722,6 +5773,8 @@ fn lower_code_while(
     let op_while_begin = code_op_while_begin();
     try code.append(op_while_begin);
     try code.append(while_begin_index);
+    let loop_defer_base = defer_records.len();
+    try code.append(loop_defer_base);
     let cond_eval = try lower_code_expr(text, ast, decls, condition, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !cond_eval.ok {
         return code_eval_unsupported(cond_eval.next);
@@ -5800,6 +5853,8 @@ fn lower_code_for(
     try code.append(end_eval.value_id);
     try code.append(cond_load_value);
     try code.append(cond_cmp_value);
+    let loop_defer_base = defer_records.len();
+    try code.append(loop_defer_base);
     let kind_for = code_loop_kind_for();
     try bind_code_loop_label(text, ast, label, local_starts, local_ends, local_values, for_begin_index, kind_for);
     let body_next = cond_cmp_value + 1;
@@ -5832,9 +5887,11 @@ fn lower_code_break(
     ast: std::kizu::ast::Ast,
     label: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
     locals_base: i64,
     loop_begin: i64,
     loop_kind: i64,
@@ -5842,7 +5899,7 @@ fn lower_code_break(
 ) -> !CodeEval {
     let op_break = code_op_break();
     if is_empty_node(ast, label) {
-        return try emit_code_loop_exit(code, op_break, loop_begin, loop_kind, next_value);
+        return try emit_code_loop_exit_with_defers(code, kinds, defer_records, op_break, loop_begin, loop_kind, next_value);
     }
     let target = try code_loop_label_target(text, ast, label, local_starts, local_ends, local_values, locals_base);
     if target < 0 {
@@ -5850,7 +5907,7 @@ fn lower_code_break(
     }
     let target_begin = code_loop_label_target_begin(target);
     let target_kind = code_loop_label_target_kind(target, target_begin);
-    return try emit_code_loop_exit(code, op_break, target_begin, target_kind, next_value);
+    return try emit_code_loop_exit_with_defers(code, kinds, defer_records, op_break, target_begin, target_kind, next_value);
 }
 
 fn lower_code_continue(
@@ -5858,9 +5915,11 @@ fn lower_code_continue(
     ast: std::kizu::ast::Ast,
     label: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
     locals_base: i64,
     loop_begin: i64,
     loop_kind: i64,
@@ -5868,7 +5927,7 @@ fn lower_code_continue(
 ) -> !CodeEval {
     let op_continue = code_op_continue();
     if is_empty_node(ast, label) {
-        return try emit_code_loop_exit(code, op_continue, loop_begin, loop_kind, next_value);
+        return try emit_code_loop_exit_with_defers(code, kinds, defer_records, op_continue, loop_begin, loop_kind, next_value);
     }
     let target = try code_loop_label_target(text, ast, label, local_starts, local_ends, local_values, locals_base);
     if target < 0 {
@@ -5876,7 +5935,27 @@ fn lower_code_continue(
     }
     let target_begin = code_loop_label_target_begin(target);
     let target_kind = code_loop_label_target_kind(target, target_begin);
-    return try emit_code_loop_exit(code, op_continue, target_begin, target_kind, next_value);
+    return try emit_code_loop_exit_with_defers(code, kinds, defer_records, op_continue, target_begin, target_kind, next_value);
+}
+
+fn emit_code_loop_exit_with_defers(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
+    op: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    if loop_begin < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let defer_base = try code_loop_defer_base(code, loop_begin, loop_kind);
+    let defer_eval = try lower_code_defer_range_for_exit(code, kinds, defer_records, defer_base, next_value);
+    if !defer_eval.ok {
+        return code_eval_unsupported(defer_eval.next);
+    }
+    return try emit_code_loop_exit(code, op, loop_begin, loop_kind, defer_eval.next);
 }
 
 // emit_code_loop_exit appends one BREAK or CONTINUE record targeting the loop
@@ -5895,6 +5974,18 @@ fn emit_code_loop_exit(
     try code.append(loop_begin);
     try code.append(loop_kind);
     return code_eval_value(0, next_value);
+}
+
+fn code_loop_defer_base(
+    code: &std::array::Array<i64>,
+    loop_begin: i64,
+    loop_kind: i64
+) -> !i64 {
+    let kind_while = code_loop_kind_while();
+    if loop_kind == kind_while {
+        return try code.get(loop_begin + 2);
+    }
+    return try code.get(loop_begin + 7);
 }
 
 // bind_code_loop_label registers a loop's label (when present) as a scoped
@@ -7193,10 +7284,9 @@ fn lower_code_return_with_defers(
     next_value: i64
 ) -> !CodeEval {
     if code_return_value_is_error_call(text, ast, value) {
-        try deactivate_code_defer_range(defer_records, 0);
         return try lower_code_return(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
-    let defer_eval = try lower_code_defer_range(text, ast, decls, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, 0, next_value);
+    let defer_eval = try lower_code_defer_range_for_exit(code, kinds, defer_records, 0, next_value);
     if !defer_eval.ok {
         return code_eval_unsupported(defer_eval.next);
     }
@@ -7213,36 +7303,6 @@ fn code_return_value_is_error_call(
         Call(call_node) => std::mem::equal_bytes(ast_node_text(text, ast, call_node.callee), "error"),
         _ => false,
     };
-}
-
-fn deactivate_code_defer_range(
-    defer_records: &var std::array::Array<i64>,
-    lower_bound: i64
-) -> !void {
-    let count = defer_records.len();
-    if count <= lower_bound {
-        return;
-    }
-    return try deactivate_code_defer_range_from(defer_records, lower_bound, count);
-}
-
-fn deactivate_code_defer_range_from(
-    defer_records: &var std::array::Array<i64>,
-    lower_bound: i64,
-    upper_bound: i64
-) -> !void {
-    if upper_bound <= lower_bound {
-        return;
-    }
-    let size_pos = upper_bound - 1;
-    let record_size = try defer_records.get(size_pos);
-    let record_index = upper_bound - record_size;
-    if record_index < lower_bound {
-        return;
-    }
-    let active_pos = record_index + 4;
-    try defer_records.set(active_pos, 0);
-    return try deactivate_code_defer_range_from(defer_records, lower_bound, record_index);
 }
 
 fn lower_code_return(
