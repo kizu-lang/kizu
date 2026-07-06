@@ -81,7 +81,8 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	}
 
 	const supported = "selfhost/tests/cli/run_hello.kizu"
-	const unsupported = "examples/arena.kizu"
+	const unsupported = "examples/atomic_flag.kizu"
+	const unsupportedGoOutput = "false\ntrue\n"
 
 	// Gate on: the supported shape is selfhost-owned end to end. The printed
 	// output comes from executing the linked native artifact, not the Go
@@ -95,12 +96,14 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	}
 
 	// Gate on: the unsupported shape is an explicit selfhost diagnostic, never the
-	// Go interpreter output ("alice"). This is the no-Go-fallback guarantee.
+	// Go interpreter output. This is the no-Go-fallback guarantee.
 	badStdout, badStderr, badCode := runCliSwitchCommand(t, bin, repoRoot, true, unsupported)
 	if badCode == 0 {
 		t.Fatalf("selfhost run %s exit = 0, want explicit diagnostic", unsupported)
 	}
-	if strings.Contains(badStdout, "alice") || strings.Contains(badStderr, "alice") {
+	leakedStdout := strings.Contains(badStdout, unsupportedGoOutput)
+	leakedStderr := strings.Contains(badStderr, unsupportedGoOutput)
+	if leakedStdout || leakedStderr {
 		t.Fatalf("selfhost run %s leaked Go interpreter output:\nstdout=%q\nstderr=%q",
 			unsupported, badStdout, badStderr)
 	}
@@ -116,7 +119,7 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	if offCode != 0 {
 		t.Fatalf("default Go run %s exit = %d, want 0", unsupported, offCode)
 	}
-	if !strings.Contains(offStdout, "alice") {
+	if offStdout != unsupportedGoOutput {
 		t.Fatalf("default Go run %s stdout = %q, want Go interpreter output", unsupported, offStdout)
 	}
 
