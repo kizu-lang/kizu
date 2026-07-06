@@ -261,6 +261,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try nl(out);
     try render_i64_decimal_helper(out);
     try render_string_format_helpers(out);
+    try render_path_string_helpers(out);
     return;
 }
 
@@ -489,6 +490,302 @@ fn render_string_format_helpers(out: &var std::string::String) -> !void {
     try wl(out, "  ret %kizu.error.void %open");
     try wl(out, "step_fail:");
     try wl(out, "  ret %kizu.error.void %step_result");
+    try wl(out, "}");
+    try nl(out);
+    return;
+}
+
+fn render_path_string_helpers(out: &var std::string::String) -> !void {
+    try wl(out, "define i64 @kizu_run_path_parent_len(%kizu.owned %out, i1 %absolute) {");
+    try wl(out, "entry:");
+    try wl(out, "  %bytes = call %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %out)");
+    try wl(out, "  %ptr = extractvalue %kizu.slice.u8 %bytes, 0");
+    try wl(out, "  %len = extractvalue %kizu.slice.u8 %bytes, 1");
+    try wl(out, "  %start = sub i64 %len, 1");
+    try wl(out, "  br label %loop");
+    try wl(out, "loop:");
+    try wl(out, "  %i = phi i64 [ %start, %entry ], [ %prev, %step ]");
+    try wl(out, "  %below_zero = icmp slt i64 %i, 0");
+    try wl(out, "  br i1 %below_zero, label %none, label %check");
+    try wl(out, "check:");
+    try wl(out, "  %byte_ptr = getelementptr i8, ptr %ptr, i64 %i");
+    try wl(out, "  %byte = load i8, ptr %byte_ptr");
+    try wl(out, "  %is_slash = icmp eq i8 %byte, 47");
+    try wl(out, "  br i1 %is_slash, label %found, label %step");
+    try wl(out, "step:");
+    try wl(out, "  %prev = sub i64 %i, 1");
+    try wl(out, "  br label %loop");
+    try wl(out, "found:");
+    try wl(out, "  %at_root = icmp eq i64 %i, 0");
+    try wl(out, "  %root_len = select i1 %absolute, i64 1, i64 0");
+    try wl(out, "  %result = select i1 %at_root, i64 %root_len, i64 %i");
+    try wl(out, "  ret i64 %result");
+    try wl(out, "none:");
+    try wl(out, "  ret i64 0");
+    try wl(out, "}");
+    try nl(out);
+    try wl(out, "define %kizu.error.i64 @kizu_run_path_append_components(%kizu.owned %out, %kizu.slice.u8 %path, i1 %absolute, i64 %initial_depth) {");
+    try wl(out, "entry:");
+    try wl(out, "  %ptr = extractvalue %kizu.slice.u8 %path, 0");
+    try wl(out, "  %len = extractvalue %kizu.slice.u8 %path, 1");
+    try wl(out, "  br label %loop");
+    try wl(out, "loop:");
+    try wl(out, "  %index = phi i64 [ 0, %entry ], [ %seg_i, %dot_continue ], [ %seg_i, %pop_parent ], [ %seg_i, %leading_abs_continue ], [ %seg_i, %leading_done ], [ %seg_i, %normal_done ]");
+    try wl(out, "  %depth = phi i64 [ %initial_depth, %entry ], [ %depth, %dot_continue ], [ %next_depth_pop, %pop_parent ], [ %depth, %leading_abs_continue ], [ %depth, %leading_done ], [ %next_depth_normal, %normal_done ]");
+    try wl(out, "  %loop_done = icmp sge i64 %index, %len");
+    try wl(out, "  br i1 %loop_done, label %success, label %skip_head");
+    try wl(out, "skip_head:");
+    try wl(out, "  %skip_i = phi i64 [ %index, %loop ], [ %skip_next, %skip_body ]");
+    try wl(out, "  %skip_end = icmp sge i64 %skip_i, %len");
+    try wl(out, "  br i1 %skip_end, label %success, label %skip_check");
+    try wl(out, "skip_check:");
+    try wl(out, "  %skip_ptr = getelementptr i8, ptr %ptr, i64 %skip_i");
+    try wl(out, "  %skip_byte = load i8, ptr %skip_ptr");
+    try wl(out, "  %skip_is_slash = icmp eq i8 %skip_byte, 47");
+    try wl(out, "  br i1 %skip_is_slash, label %skip_body, label %segment_head");
+    try wl(out, "skip_body:");
+    try wl(out, "  %skip_next = add i64 %skip_i, 1");
+    try wl(out, "  br label %skip_head");
+    try wl(out, "segment_head:");
+    try wl(out, "  %seg_i = phi i64 [ %skip_i, %skip_check ], [ %seg_next, %segment_body ]");
+    try wl(out, "  %seg_end = icmp sge i64 %seg_i, %len");
+    try wl(out, "  br i1 %seg_end, label %segment_done, label %segment_check");
+    try wl(out, "segment_check:");
+    try wl(out, "  %seg_ptr = getelementptr i8, ptr %ptr, i64 %seg_i");
+    try wl(out, "  %seg_byte = load i8, ptr %seg_ptr");
+    try wl(out, "  %seg_is_slash = icmp eq i8 %seg_byte, 47");
+    try wl(out, "  br i1 %seg_is_slash, label %segment_done, label %segment_body");
+    try wl(out, "segment_body:");
+    try wl(out, "  %seg_next = add i64 %seg_i, 1");
+    try wl(out, "  br label %segment_head");
+    try wl(out, "segment_done:");
+    try wl(out, "  %seg_len = sub i64 %seg_i, %skip_i");
+    try wl(out, "  %len_is_one = icmp eq i64 %seg_len, 1");
+    try wl(out, "  br i1 %len_is_one, label %check_dot, label %check_dotdot_len");
+    try wl(out, "check_dot:");
+    try wl(out, "  %dot_ptr = getelementptr i8, ptr %ptr, i64 %skip_i");
+    try wl(out, "  %dot_byte = load i8, ptr %dot_ptr");
+    try wl(out, "  %is_dot = icmp eq i8 %dot_byte, 46");
+    try wl(out, "  br i1 %is_dot, label %dot_continue, label %normal");
+    try wl(out, "dot_continue:");
+    try wl(out, "  br label %loop");
+    try wl(out, "check_dotdot_len:");
+    try wl(out, "  %len_is_two = icmp eq i64 %seg_len, 2");
+    try wl(out, "  br i1 %len_is_two, label %check_dotdot, label %normal");
+    try wl(out, "check_dotdot:");
+    try wl(out, "  %dd0_ptr = getelementptr i8, ptr %ptr, i64 %skip_i");
+    try wl(out, "  %dd1_index = add i64 %skip_i, 1");
+    try wl(out, "  %dd1_ptr = getelementptr i8, ptr %ptr, i64 %dd1_index");
+    try wl(out, "  %dd0 = load i8, ptr %dd0_ptr");
+    try wl(out, "  %dd1 = load i8, ptr %dd1_ptr");
+    try wl(out, "  %dd0_ok = icmp eq i8 %dd0, 46");
+    try wl(out, "  %dd1_ok = icmp eq i8 %dd1, 46");
+    try wl(out, "  %is_dotdot = and i1 %dd0_ok, %dd1_ok");
+    try wl(out, "  br i1 %is_dotdot, label %dotdot, label %normal");
+    try wl(out, "dotdot:");
+    try wl(out, "  %has_depth = icmp sgt i64 %depth, 0");
+    try wl(out, "  br i1 %has_depth, label %pop_parent, label %leading_parent");
+    try wl(out, "pop_parent:");
+    try wl(out, "  %parent_len = call i64 @kizu_run_path_parent_len(%kizu.owned %out, i1 %absolute)");
+    try wl(out, "  %out_raw = extractvalue %kizu.owned %out, 0");
+    try wl(out, "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %out_raw, i32 0, i32 2");
+    try wl(out, "  store i64 %parent_len, ptr %len_field");
+    try wl(out, "  %next_depth_pop = sub i64 %depth, 1");
+    try wl(out, "  br label %loop");
+    try wl(out, "leading_parent:");
+    try wl(out, "  br i1 %absolute, label %leading_abs_continue, label %leading_append");
+    try wl(out, "leading_abs_continue:");
+    try wl(out, "  br label %loop");
+    try wl(out, "leading_append:");
+    try wl(out, "  %leading_before = call i64 @kizu_rt_string_len(%kizu.owned %out)");
+    try wl(out, "  %leading_has_before = icmp sgt i64 %leading_before, 0");
+    try wl(out, "  br i1 %leading_has_before, label %leading_sep, label %leading_segment");
+    try wl(out, "leading_sep:");
+    try wl(out, "  %leading_sep_result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %out, i8 47)");
+    try wl(out, "  %leading_sep_ok = extractvalue %kizu.error.void %leading_sep_result, 0");
+    try wl(out, "  br i1 %leading_sep_ok, label %leading_segment, label %fail_leading_sep");
+    try wl(out, "leading_segment:");
+    try wl(out, "  %leading_seg_ptr = getelementptr i8, ptr %ptr, i64 %skip_i");
+    try wl(out, "  %leading_seg_base = insertvalue %kizu.slice.u8 poison, ptr %leading_seg_ptr, 0");
+    try wl(out, "  %leading_seg = insertvalue %kizu.slice.u8 %leading_seg_base, i64 %seg_len, 1");
+    try wl(out, "  %leading_result = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %out, %kizu.slice.u8 %leading_seg)");
+    try wl(out, "  %leading_ok = extractvalue %kizu.error.void %leading_result, 0");
+    try wl(out, "  br i1 %leading_ok, label %leading_done, label %fail_leading_segment");
+    try wl(out, "leading_done:");
+    try wl(out, "  br label %loop");
+    try wl(out, "normal:");
+    try wl(out, "  %before = call i64 @kizu_rt_string_len(%kizu.owned %out)");
+    try wl(out, "  %has_before = icmp sgt i64 %before, 0");
+    try wl(out, "  %before_is_root = icmp eq i64 %before, 1");
+    try wl(out, "  %absolute_root = and i1 %absolute, %before_is_root");
+    try wl(out, "  %not_absolute_root = xor i1 %absolute_root, true");
+    try wl(out, "  %need_sep = and i1 %has_before, %not_absolute_root");
+    try wl(out, "  br i1 %need_sep, label %normal_sep, label %normal_segment");
+    try wl(out, "normal_sep:");
+    try wl(out, "  %sep_result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %out, i8 47)");
+    try wl(out, "  %sep_ok = extractvalue %kizu.error.void %sep_result, 0");
+    try wl(out, "  br i1 %sep_ok, label %normal_segment, label %fail_sep");
+    try wl(out, "normal_segment:");
+    try wl(out, "  %normal_seg_ptr = getelementptr i8, ptr %ptr, i64 %skip_i");
+    try wl(out, "  %normal_seg_base = insertvalue %kizu.slice.u8 poison, ptr %normal_seg_ptr, 0");
+    try wl(out, "  %normal_seg = insertvalue %kizu.slice.u8 %normal_seg_base, i64 %seg_len, 1");
+    try wl(out, "  %segment_result = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %out, %kizu.slice.u8 %normal_seg)");
+    try wl(out, "  %segment_ok = extractvalue %kizu.error.void %segment_result, 0");
+    try wl(out, "  br i1 %segment_ok, label %normal_done, label %fail_segment");
+    try wl(out, "normal_done:");
+    try wl(out, "  %next_depth_normal = add i64 %depth, 1");
+    try wl(out, "  br label %loop");
+    try wl(out, "success:");
+    try wl(out, "  %ok_flag = insertvalue %kizu.error.i64 zeroinitializer, i1 true, 0");
+    try wl(out, "  %ok_depth = insertvalue %kizu.error.i64 %ok_flag, i64 %depth, 1");
+    try wl(out, "  ret %kizu.error.i64 %ok_depth");
+    try wl(out, "fail_sep:");
+    try wl(out, "  %sep_msg = extractvalue %kizu.error.void %sep_result, 1");
+    try wl(out, "  %sep_fail = insertvalue %kizu.error.i64 zeroinitializer, %kizu.slice.u8 %sep_msg, 2");
+    try wl(out, "  ret %kizu.error.i64 %sep_fail");
+    try wl(out, "fail_segment:");
+    try wl(out, "  %segment_msg = extractvalue %kizu.error.void %segment_result, 1");
+    try wl(out, "  %segment_fail = insertvalue %kizu.error.i64 zeroinitializer, %kizu.slice.u8 %segment_msg, 2");
+    try wl(out, "  ret %kizu.error.i64 %segment_fail");
+    try wl(out, "fail_leading_sep:");
+    try wl(out, "  %leading_sep_msg = extractvalue %kizu.error.void %leading_sep_result, 1");
+    try wl(out, "  %leading_sep_fail = insertvalue %kizu.error.i64 zeroinitializer, %kizu.slice.u8 %leading_sep_msg, 2");
+    try wl(out, "  ret %kizu.error.i64 %leading_sep_fail");
+    try wl(out, "fail_leading_segment:");
+    try wl(out, "  %leading_msg = extractvalue %kizu.error.void %leading_result, 1");
+    try wl(out, "  %leading_fail = insertvalue %kizu.error.i64 zeroinitializer, %kizu.slice.u8 %leading_msg, 2");
+    try wl(out, "  ret %kizu.error.i64 %leading_fail");
+    try wl(out, "}");
+    try nl(out);
+    try render_path_clean_helper(out);
+    try render_path_join_helper(out);
+    return;
+}
+
+fn render_path_owned_success(out: &var std::string::String) -> !void {
+    try wl(out, "success:");
+    try wl(out, "  %ok_flag = insertvalue %kizu.error.owned zeroinitializer, i1 true, 0");
+    try wl(out, "  %ok_owned = insertvalue %kizu.error.owned %ok_flag, %kizu.owned %out, 1");
+    try wl(out, "  ret %kizu.error.owned %ok_owned");
+    return;
+}
+
+fn render_path_dot_append(out: &var std::string::String) -> !void {
+    try wl(out, "append_dot:");
+    try wl(out, "  %dot_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.path_dot, 0");
+    try wl(out, "  %dot_slice = insertvalue %kizu.slice.u8 %dot_base, i64 1, 1");
+    try wl(out, "  %dot_result = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %out, %kizu.slice.u8 %dot_slice)");
+    try wl(out, "  %dot_ok = extractvalue %kizu.error.void %dot_result, 0");
+    try wl(out, "  br i1 %dot_ok, label %success, label %fail_dot");
+    return;
+}
+
+fn render_path_owned_failures(out: &var std::string::String) -> !void {
+    try wl(out, "fail_root:");
+    try wl(out, "  %root_msg = extractvalue %kizu.error.void %root_result, 1");
+    try wl(out, "  call void @kizu_rt_string_deinit(%kizu.owned %out)");
+    try wl(out, "  %root_fail = insertvalue %kizu.error.owned zeroinitializer, %kizu.slice.u8 %root_msg, 2");
+    try wl(out, "  ret %kizu.error.owned %root_fail");
+    try wl(out, "fail_parts:");
+    try wl(out, "  %parts_msg = extractvalue %kizu.error.i64 %parts, 2");
+    try wl(out, "  call void @kizu_rt_string_deinit(%kizu.owned %out)");
+    try wl(out, "  %parts_fail = insertvalue %kizu.error.owned zeroinitializer, %kizu.slice.u8 %parts_msg, 2");
+    try wl(out, "  ret %kizu.error.owned %parts_fail");
+    try wl(out, "fail_dot:");
+    try wl(out, "  %dot_msg = extractvalue %kizu.error.void %dot_result, 1");
+    try wl(out, "  call void @kizu_rt_string_deinit(%kizu.owned %out)");
+    try wl(out, "  %dot_fail = insertvalue %kizu.error.owned zeroinitializer, %kizu.slice.u8 %dot_msg, 2");
+    try wl(out, "  ret %kizu.error.owned %dot_fail");
+    return;
+}
+
+fn render_path_clean_helper(out: &var std::string::String) -> !void {
+    try wl(out, "define %kizu.error.owned @kizu_run_path_clean(%kizu.owned %allocator, %kizu.slice.u8 %path) {");
+    try wl(out, "entry:");
+    try wl(out, "  %out = call %kizu.owned @kizu_rt_string_new(%kizu.owned %allocator)");
+    try wl(out, "  %len = extractvalue %kizu.slice.u8 %path, 1");
+    try wl(out, "  %has_first = icmp sgt i64 %len, 0");
+    try wl(out, "  br i1 %has_first, label %check_absolute, label %after_absolute");
+    try wl(out, "check_absolute:");
+    try wl(out, "  %ptr = extractvalue %kizu.slice.u8 %path, 0");
+    try wl(out, "  %first_ptr = getelementptr i8, ptr %ptr, i64 0");
+    try wl(out, "  %first = load i8, ptr %first_ptr");
+    try wl(out, "  %first_slash = icmp eq i8 %first, 47");
+    try wl(out, "  br label %after_absolute");
+    try wl(out, "after_absolute:");
+    try wl(out, "  %absolute = phi i1 [ %first_slash, %check_absolute ], [ false, %entry ]");
+    try wl(out, "  br i1 %absolute, label %append_root, label %append_parts");
+    try wl(out, "append_root:");
+    try wl(out, "  %root_result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %out, i8 47)");
+    try wl(out, "  %root_ok = extractvalue %kizu.error.void %root_result, 0");
+    try wl(out, "  br i1 %root_ok, label %append_parts, label %fail_root");
+    try wl(out, "append_parts:");
+    try wl(out, "  %parts = call %kizu.error.i64 @kizu_run_path_append_components(%kizu.owned %out, %kizu.slice.u8 %path, i1 %absolute, i64 0)");
+    try wl(out, "  %parts_ok = extractvalue %kizu.error.i64 %parts, 0");
+    try wl(out, "  br i1 %parts_ok, label %maybe_dot, label %fail_parts");
+    try wl(out, "maybe_dot:");
+    try wl(out, "  %out_len = call i64 @kizu_rt_string_len(%kizu.owned %out)");
+    try wl(out, "  %out_empty = icmp eq i64 %out_len, 0");
+    try wl(out, "  br i1 %out_empty, label %append_dot, label %success");
+    try render_path_dot_append(out);
+    try render_path_owned_success(out);
+    try render_path_owned_failures(out);
+    try wl(out, "}");
+    try nl(out);
+    return;
+}
+
+fn render_path_join_helper(out: &var std::string::String) -> !void {
+    try wl(out, "define %kizu.error.owned @kizu_run_path_join(%kizu.owned %allocator, %kizu.slice.u8 %left, %kizu.slice.u8 %right) {");
+    try wl(out, "entry:");
+    try wl(out, "  %out = call %kizu.owned @kizu_rt_string_new(%kizu.owned %allocator)");
+    try wl(out, "  %left_len = extractvalue %kizu.slice.u8 %left, 1");
+    try wl(out, "  %left_nonempty = icmp sgt i64 %left_len, 0");
+    try wl(out, "  br i1 %left_nonempty, label %left_absolute, label %right_absolute_gate");
+    try wl(out, "left_absolute:");
+    try wl(out, "  %left_ptr = extractvalue %kizu.slice.u8 %left, 0");
+    try wl(out, "  %left_first_ptr = getelementptr i8, ptr %left_ptr, i64 0");
+    try wl(out, "  %left_first = load i8, ptr %left_first_ptr");
+    try wl(out, "  %left_slash = icmp eq i8 %left_first, 47");
+    try wl(out, "  br label %after_absolute");
+    try wl(out, "right_absolute_gate:");
+    try wl(out, "  %right_len = extractvalue %kizu.slice.u8 %right, 1");
+    try wl(out, "  %right_nonempty = icmp sgt i64 %right_len, 0");
+    try wl(out, "  br i1 %right_nonempty, label %right_absolute, label %after_absolute");
+    try wl(out, "right_absolute:");
+    try wl(out, "  %right_ptr = extractvalue %kizu.slice.u8 %right, 0");
+    try wl(out, "  %right_first_ptr = getelementptr i8, ptr %right_ptr, i64 0");
+    try wl(out, "  %right_first = load i8, ptr %right_first_ptr");
+    try wl(out, "  %right_slash = icmp eq i8 %right_first, 47");
+    try wl(out, "  br label %after_absolute");
+    try wl(out, "after_absolute:");
+    try wl(out, "  %absolute = phi i1 [ %left_slash, %left_absolute ], [ %right_slash, %right_absolute ], [ false, %right_absolute_gate ]");
+    try wl(out, "  br i1 %absolute, label %append_root, label %append_left");
+    try wl(out, "append_root:");
+    try wl(out, "  %root_result = call %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %out, i8 47)");
+    try wl(out, "  %root_ok = extractvalue %kizu.error.void %root_result, 0");
+    try wl(out, "  br i1 %root_ok, label %append_left, label %fail_root");
+    try wl(out, "append_left:");
+    try wl(out, "  %left_parts = call %kizu.error.i64 @kizu_run_path_append_components(%kizu.owned %out, %kizu.slice.u8 %left, i1 %absolute, i64 0)");
+    try wl(out, "  %left_ok = extractvalue %kizu.error.i64 %left_parts, 0");
+    try wl(out, "  br i1 %left_ok, label %append_right, label %fail_left");
+    try wl(out, "append_right:");
+    try wl(out, "  %left_depth = extractvalue %kizu.error.i64 %left_parts, 1");
+    try wl(out, "  %parts = call %kizu.error.i64 @kizu_run_path_append_components(%kizu.owned %out, %kizu.slice.u8 %right, i1 %absolute, i64 %left_depth)");
+    try wl(out, "  %parts_ok = extractvalue %kizu.error.i64 %parts, 0");
+    try wl(out, "  br i1 %parts_ok, label %maybe_dot, label %fail_parts");
+    try wl(out, "maybe_dot:");
+    try wl(out, "  %out_len = call i64 @kizu_rt_string_len(%kizu.owned %out)");
+    try wl(out, "  %out_empty = icmp eq i64 %out_len, 0");
+    try wl(out, "  br i1 %out_empty, label %append_dot, label %success");
+    try render_path_dot_append(out);
+    try render_path_owned_success(out);
+    try wl(out, "fail_left:");
+    try wl(out, "  %left_msg = extractvalue %kizu.error.i64 %left_parts, 2");
+    try wl(out, "  call void @kizu_rt_string_deinit(%kizu.owned %out)");
+    try wl(out, "  %left_fail = insertvalue %kizu.error.owned zeroinitializer, %kizu.slice.u8 %left_msg, 2");
+    try wl(out, "  ret %kizu.error.owned %left_fail");
+    try render_path_owned_failures(out);
     try wl(out, "}");
     try nl(out);
     return;
@@ -1678,6 +1975,14 @@ fn render_one_instruction_core_call(
     let try_call_owned_string = codegen::code_op_try_call_owned_string();
     if op == try_call_owned_string {
         try render_try_call_owned_string(out, text, code, kinds, index, abi);
+    }
+    let try_path_join = codegen::code_op_try_path_join();
+    if op == try_path_join {
+        try render_try_path_join(out, code, index, abi);
+    }
+    let try_path_clean = codegen::code_op_try_path_clean();
+    if op == try_path_clean {
+        try render_try_path_clean(out, code, index, abi);
     }
     return;
 }
@@ -3453,6 +3758,86 @@ fn render_try_call_owned_string(
     try w(out, "(");
     try render_call_args(out, code, kinds, index, arg_count, 0);
     try wl(out, ")");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.owned %tc");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %tc");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.owned %tc");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try render_runtime_message_propagate(out, code, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.error.owned %tc");
+    try wi(out, index);
+    try wl(out, ", 1");
+    return;
+}
+
+fn render_try_path_join(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let allocator = try code.get(index + 2);
+    let left = try code.get(index + 3);
+    let right = try code.get(index + 4);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.owned @kizu_run_path_join(%kizu.owned %v");
+    try wi(out, allocator);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, left);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, right);
+    try wl(out, ")");
+    return try render_try_path_owned_result(out, code, index, dst, abi);
+}
+
+fn render_try_path_clean(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let allocator = try code.get(index + 2);
+    let path = try code.get(index + 3);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.owned @kizu_run_path_clean(%kizu.owned %v");
+    try wi(out, allocator);
+    try w(out, ", %kizu.slice.u8 %v");
+    try wi(out, path);
+    try wl(out, ")");
+    return try render_try_path_owned_result(out, code, index, dst, abi);
+}
+
+fn render_try_path_owned_result(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    dst: i64,
+    abi: i64
+) -> !void {
     try w(out, "  %tc");
     try wi(out, index);
     try w(out, "_ok = extractvalue %kizu.error.owned %tc");
@@ -8627,6 +9012,14 @@ fn tape_record_end_call_group(code: &std::array::Array<i64>, index: i64, op: i64
     let try_call_owned_string = codegen::code_op_try_call_owned_string();
     if op == try_call_owned_string {
         return try tape_call_record_end(code, index);
+    }
+    let try_path_join = codegen::code_op_try_path_join();
+    if op == try_path_join {
+        return index + 5;
+    }
+    let try_path_clean = codegen::code_op_try_path_clean();
+    if op == try_path_clean {
+        return index + 4;
     }
     return -1;
 }

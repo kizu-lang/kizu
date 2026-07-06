@@ -66,6 +66,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderStringBuilderCases()...)
 	cases = append(cases, runRenderOwnedArrayCases()...)
 	cases = append(cases, runRenderCleanupCases()...)
+	cases = append(cases, runRenderPathJoinCleanCases()...)
 	cases = append(cases, runRenderStructCases()...)
 	cases = append(cases, runRenderEnumMatchCases()...)
 	cases = append(cases, runRenderVarStructCases()...)
@@ -568,6 +569,39 @@ func runRenderCleanupCases() []runRenderCase {
 				"call void @kizu_rt_array_deinit(%kizu.owned %v2)",
 				"call void @kizu_rt_array_deinit(%kizu.owned %v1)",
 				"ret %kizu.error.void { i1 false",
+			},
+		},
+	}
+}
+
+// runRenderPathJoinCleanCases covers owned std::path::join/clean lowering.
+func runRenderPathJoinCleanCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "std_path_join_clean",
+			source: "fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    var source = try std::path::join(allocator, \"examples\", \"fixtures/config.txt\");\n" +
+				"    let source_bytes = source.as_bytes();\n" +
+				"    print(source_bytes);\n" +
+				"    var absolute = try std::path::join(allocator, \"/a\", \"../b/\");\n" +
+				"    let absolute_bytes = absolute.as_bytes();\n" +
+				"    print(absolute_bytes);\n" +
+				"    var cleaned = try std::path::clean(allocator, \"a//./b/../c/\");\n" +
+				"    let cleaned_bytes = cleaned.as_bytes();\n" +
+				"    print(cleaned_bytes);\n" +
+				"    var parent = try std::path::clean(allocator, \"../a/..\");\n" +
+				"    let parent_bytes = parent.as_bytes();\n" +
+				"    print(parent_bytes);\n" +
+				"    source.deinit();\n" +
+				"    absolute.deinit();\n" +
+				"    cleaned.deinit();\n" +
+				"    parent.deinit();\n" +
+				"    return;\n}\n",
+			wantStdout: "examples/fixtures/config.txt\n/b\na/c\n..\n",
+			wantLLVMFragments: []string{
+				"call %kizu.error.owned @kizu_run_path_join",
+				"call %kizu.error.owned @kizu_run_path_clean",
 			},
 		},
 	}
