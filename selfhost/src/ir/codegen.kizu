@@ -877,6 +877,14 @@ pub fn code_op_try_path_clean() -> i64 {
     return 151;
 }
 
+// ARRAY_AT_MUT bounds-checks an Array<T> index and yields a pointer to the
+// element storage: 'op dst receiver_value index_value element_kind'. It shares
+// the ARRAY_SET/GET runtime check path and leaves load/store semantics to the
+// mutable-borrow deref path.
+pub fn code_op_try_array_at_mut() -> i64 {
+    return 152;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -1100,7 +1108,7 @@ fn code_kind_is_owned_map_enum(kind: i64) -> bool {
     if kind > code_kind_owned_map_enum_base() {
         return false;
     }
-    return kind > code_kind_arena_record_base();
+    return kind > code_kind_owned_array_struct_base();
 }
 
 fn code_kind_owned_map_enum_decl_pos(kind: i64) -> i64 {
@@ -1217,10 +1225,13 @@ pub fn code_kind_is_owned_array(kind: i64) -> bool {
     if kind == code_kind_owned_array_slice() {
         return true;
     }
-    return code_kind_is_owned_array_enum(kind);
+    if code_kind_is_owned_array_enum(kind) {
+        return true;
+    }
+    return code_kind_is_owned_array_struct(kind);
 }
 
-fn code_array_element_kind(array_kind: i64) -> i64 {
+fn code_array_element_kind(code: &var std::array::Array<i64>, array_kind: i64) -> !i64 {
     if array_kind == code_kind_owned_array_i64() {
         return code_kind_i64();
     }
@@ -1233,11 +1244,15 @@ fn code_array_element_kind(array_kind: i64) -> i64 {
     if code_kind_is_owned_array_enum(array_kind) {
         return code_kind_i64();
     }
+    if code_kind_is_owned_array_struct(array_kind) {
+        let record_pos = code_kind_owned_array_struct_record_pos(array_kind);
+        return try struct_param_first_field_kind(code, record_pos);
+    }
     return 0 - 1;
 }
 
-fn code_array_element_size(array_kind: i64) -> i64 {
-    let element_kind = code_array_element_kind(array_kind);
+fn code_array_element_size(code: &var std::array::Array<i64>, array_kind: i64) -> !i64 {
+    let element_kind = try code_array_element_kind(code, array_kind);
     if element_kind == code_kind_i64() {
         return 8;
     }
@@ -1277,14 +1292,50 @@ fn code_kind_owned_array_enum_decl_pos(kind: i64) -> i64 {
     return code_kind_owned_array_enum_base() - kind;
 }
 
+// Array<SingleFieldStruct> stores the single field using the field's ABI, while
+// the value kind exposed by Array.at/get is a STRUCT_PARAM record so '.field'
+// reads stay type-directed and identity-lowered. The encoded record position is
+// the STRUCT_PARAM record, not the original STRUCT_DECL.
+fn code_kind_owned_array_struct_base() -> i64 {
+    return 0 - 700000000;
+}
+
+fn code_kind_owned_array_struct(struct_param_pos: i64) -> i64 {
+    return code_kind_owned_array_struct_base() - struct_param_pos;
+}
+
+fn code_kind_is_owned_array_struct(kind: i64) -> bool {
+    if kind > code_kind_owned_array_struct_base() {
+        return false;
+    }
+    return kind > code_kind_arena_record_base();
+}
+
+fn code_kind_owned_array_struct_record_pos(kind: i64) -> i64 {
+    return code_kind_owned_array_struct_base() - kind;
+}
+
+fn struct_param_first_field_kind(
+    code: &var std::array::Array<i64>,
+    record_pos: i64
+) -> !i64 {
+    return try code.get(record_pos + 4);
+}
+
 // code_array_get_result_kind reports the kinds-array entry for an Array.get
 // result: an enum-element array restores the enum record-backed value kind
 // (struct_base + ENUM_DECL pos, the same kind a plain enum value carries) so the
-// result prints as the variant name, while every other array yields its scalar
-// element kind.
-fn code_array_get_result_kind(receiver_kind: i64) -> i64 {
+// result prints as the variant name; a single-field struct array restores its
+// STRUCT_PARAM record kind so field reads unwrap through the field ABI; every
+// other array yields its scalar element kind.
+fn code_array_get_result_kind(code: &var std::array::Array<i64>, receiver_kind: i64) -> !i64 {
+    if code_kind_is_owned_array_struct(receiver_kind) {
+        let record_pos = code_kind_owned_array_struct_record_pos(receiver_kind);
+        let record_base = code_kind_struct_base();
+        return record_base + record_pos;
+    }
     if !code_kind_is_owned_array_enum(receiver_kind) {
-        return code_array_element_kind(receiver_kind);
+        return try code_array_element_kind(code, receiver_kind);
     }
     let enum_pos = code_kind_owned_array_enum_decl_pos(receiver_kind);
     let record_base = code_kind_struct_base();
@@ -5287,7 +5338,7 @@ fn lower_code_deref_store_slice(
     kinds: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
-    let slice_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    let slice_eval = try lower_code_slice_store_value(text, code, kinds, value_id, next_value);
     if !slice_eval.ok {
         return code_eval_unsupported(slice_eval.next);
     }
@@ -5297,6 +5348,55 @@ fn lower_code_deref_store_slice(
         return code_eval_unsupported(slice_eval.next);
     }
     return try emit_code_ptr_store_slice(deref_ptr, slice_eval.value_id, code, slice_eval.next);
+}
+
+fn lower_code_slice_store_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let direct = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    if !direct.ok {
+        return code_eval_unsupported(direct.next);
+    }
+    let direct_kind = try kinds.get(direct.value_id);
+    if direct_kind == code_kind_slice() {
+        return direct;
+    }
+    return try lower_code_single_field_struct_slice_value(text, code, kinds, value_id, next_value);
+}
+
+fn lower_code_single_field_struct_slice_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    let value_kind = try kinds.get(value_id);
+    if value_kind < record_base {
+        return code_eval_unsupported(next_value);
+    }
+    let record_pos = value_kind - record_base;
+    let op = try code.get(record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if op != op_struct_lit {
+        return code_eval_unsupported(next_value);
+    }
+    let field_count = try code.get(record_pos + 4);
+    if field_count != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let first_field_value = try code.get(record_pos + 7);
+    let field_eval = try lower_code_arg_slice(text, code, kinds, first_field_value, next_value);
+    let field_kind = try kinds.get(field_eval.value_id);
+    if field_kind != code_kind_slice() {
+        return code_eval_unsupported(field_eval.next);
+    }
+    return field_eval;
 }
 
 // lower_code_slice_var_store materializes the assigned value to a slice and emits
@@ -6849,23 +6949,8 @@ fn lower_code_try_array_method(
     if !arg_eval.ok {
         return code_eval_unsupported(arg_eval.next);
     }
-    let element_eval = try lower_code_arg_slice(text, code, kinds, arg_eval.value_id, arg_eval.next);
-    let element_kind = code_array_element_kind(receiver_kind);
-    let arg_kind = try kinds.get(element_eval.value_id);
-    if arg_kind != element_kind {
-        // Array<EnumType> instantiates as an i64-tag array (see
-        // code_array_type_arg_kind): an enum element value is its i64
-        // discriminant at runtime, so an enum-typed arg lowers through the
-        // i64 append op. Any other kind mismatch (and struct-backed values,
-        // whose ABI differs) stays unsupported.
-        let arg_is_enum = try code_kind_is_enum_value(code, arg_kind);
-        if element_kind != code_kind_i64() {
-            return code_eval_unsupported(element_eval.next);
-        }
-        if !arg_is_enum {
-            return code_eval_unsupported(element_eval.next);
-        }
-    }
+    let element_eval = try lower_code_array_element_value(text, code, kinds, receiver_kind, arg_eval.value_id, arg_eval.next);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     if element_kind == code_kind_i64() {
         let op_array_append_i64 = code_op_try_array_append_i64();
         try code.append(op_array_append_i64);
@@ -6880,6 +6965,76 @@ fn lower_code_try_array_method(
         try code.append(element_kind);
     }
     return code_eval_value(0, element_eval.next);
+}
+
+fn lower_code_array_element_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    receiver_kind: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let element_kind = try code_array_element_kind(code, receiver_kind);
+    if code_kind_is_owned_array_struct(receiver_kind) {
+        return try lower_code_array_struct_element_value(text, code, kinds, receiver_kind, value_id, element_kind, next_value);
+    }
+    let element_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    let element_value = element_eval.value_id;
+    let element_next = element_eval.next;
+    let value_kind = try kinds.get(element_value);
+    if value_kind == element_kind {
+        return code_eval_value(element_value, element_next);
+    }
+    // Array<EnumType> instantiates as an i64-tag array: an enum element value is
+    // its i64 discriminant at runtime, so it lowers through the i64 element path.
+    let value_is_enum = try code_kind_is_enum_value(code, value_kind);
+    if element_kind != code_kind_i64() {
+        return code_eval_unsupported(element_next);
+    }
+    if !value_is_enum {
+        return code_eval_unsupported(element_next);
+    }
+    return code_eval_value(element_value, element_next);
+}
+
+fn lower_code_array_struct_element_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    receiver_kind: i64,
+    value_id: i64,
+    element_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    let value_kind = try kinds.get(value_id);
+    let param_pos = code_kind_owned_array_struct_record_pos(receiver_kind);
+    if value_kind == record_base + param_pos {
+        return code_eval_value(value_id, next_value);
+    }
+    if value_kind < record_base {
+        return code_eval_unsupported(next_value);
+    }
+    let value_record_pos = value_kind - record_base;
+    let op = try code.get(value_record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if op != op_struct_lit {
+        return code_eval_unsupported(next_value);
+    }
+    let field_start = try code.get(param_pos + 2);
+    let field_end = try code.get(param_pos + 3);
+    let field_count = try code.get(value_record_pos + 4);
+    let field_value = try struct_record_field(text, code, value_record_pos, field_count, field_start, field_end, 0);
+    if field_value < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let field_eval = try lower_code_arg_slice(text, code, kinds, field_value, next_value);
+    let field_kind = try kinds.get(field_eval.value_id);
+    if field_kind != element_kind {
+        return code_eval_unsupported(field_eval.next);
+    }
+    return field_eval;
 }
 
 // lower_code_try_array_set lowers 'try xs.set(i, v)' to ARRAY_SET. The index
@@ -6920,21 +7075,8 @@ fn lower_code_try_array_set(
     if !value_eval.ok {
         return code_eval_unsupported(value_eval.next);
     }
-    let element_eval = try lower_code_arg_slice(text, code, kinds, value_eval.value_id, value_eval.next);
-    let element_kind = code_array_element_kind(receiver_kind);
-    let value_kind = try kinds.get(element_eval.value_id);
-    if value_kind != element_kind {
-        // Mirrors append: Array<EnumType> stores an i64 discriminant, so an
-        // enum-typed value lowers through the i64 element store. Any other kind
-        // mismatch (and non-i64 element arrays) stays unsupported.
-        let value_is_enum = try code_kind_is_enum_value(code, value_kind);
-        if element_kind != kind_i64 {
-            return code_eval_unsupported(element_eval.next);
-        }
-        if !value_is_enum {
-            return code_eval_unsupported(element_eval.next);
-        }
-    }
+    let element_eval = try lower_code_array_element_value(text, code, kinds, receiver_kind, value_eval.value_id, value_eval.next);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     let op_try_array_set = code_op_try_array_set();
     try code.append(op_try_array_set);
     try code.append(receiver_value);
@@ -10041,7 +10183,7 @@ fn lower_code_array_new(
     if kind_array == code_no_array_kind() {
         return code_eval_unsupported(next_value);
     }
-    let element_size = code_array_element_size(kind_array);
+    let element_size = try code_array_element_size(code, kind_array);
     return try lower_code_storage_new(text, ast, decls, args, kind_array, element_size, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
 }
 
@@ -10107,7 +10249,45 @@ fn code_array_type_arg_kind(
     if enum_pos >= 0 {
         return code_kind_owned_array_enum(enum_pos);
     }
+    let struct_pos = try struct_decl_pos_by_span(text, code, span.start, span.end, 0);
+    if struct_pos >= 0 {
+        return try append_code_owned_array_struct_kind(code, struct_pos);
+    }
     return 0 - 1;
+}
+
+fn append_code_owned_array_struct_kind(
+    code: &var std::array::Array<i64>,
+    struct_pos: i64
+) -> !i64 {
+    let field_count = try code.get(struct_pos + 3);
+    if field_count != 1 {
+        return code_no_array_kind();
+    }
+    let field_name_start = try code.get(struct_pos + 4);
+    let field_name_end = try code.get(struct_pos + 5);
+    let field_kind = try code.get(struct_pos + 6);
+    if !code_array_struct_field_kind_supported(field_kind) {
+        return code_no_array_kind();
+    }
+    let record_pos = code.len();
+    let op_struct_param = code_op_struct_param();
+    try code.append(op_struct_param);
+    try code.append(1);
+    try code.append(field_name_start);
+    try code.append(field_name_end);
+    try code.append(field_kind);
+    return code_kind_owned_array_struct(record_pos);
+}
+
+fn code_array_struct_field_kind_supported(field_kind: i64) -> bool {
+    if field_kind == code_kind_i64() {
+        return true;
+    }
+    if field_kind == code_kind_bool() {
+        return true;
+    }
+    return field_kind == code_kind_slice();
 }
 
 fn lower_code_arena_new(
@@ -11402,7 +11582,7 @@ fn lower_code_array_get(
     if index_kind != kind_i64 {
         return code_eval_unsupported(index_eval.next);
     }
-    let element_kind = code_array_element_kind(receiver_kind);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     if element_kind == kind_i64 {
         let op_array_get_i64 = code_op_array_get_i64();
         try code.append(op_array_get_i64);
@@ -11418,7 +11598,7 @@ fn lower_code_array_get(
         try code.append(index_eval.value_id);
         try code.append(element_kind);
     }
-    let result_kind = code_array_get_result_kind(receiver_kind);
+    let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let result_value = index_eval.next;
     let after_value = result_value + 1;
@@ -12525,7 +12705,8 @@ fn lower_code_try_runtime_field_expr_call(
     // value itself, so a read-use 'at' lowers exactly like 'get' (the write-use
     // 'r.* = v' path is out of scope and never reaches this element lowering).
     let method_is_at = std::mem::equal_bytes(method, "at");
-    let method_supported = method_is_get or method_is_pop or method_is_at;
+    let method_is_at_mut = std::mem::equal_bytes(method, "at_mut");
+    let method_supported = method_is_get or method_is_pop or method_is_at or method_is_at_mut;
     if !method_supported {
         return code_eval_unsupported(next_value);
     }
@@ -12535,9 +12716,9 @@ fn lower_code_try_runtime_field_expr_call(
     }
     let receiver_kind = try kinds.get(receiver_eval.value_id);
     if code_kind_is_owned_array(receiver_kind) {
-        return try lower_code_try_array_get_or_pop(text, ast, decls, receiver_eval.value_id, receiver_kind, method_is_pop, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+        return try lower_code_try_array_get_or_pop(text, ast, decls, receiver_eval.value_id, receiver_kind, method_is_pop, method_is_at_mut, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
-    if method_is_pop or method_is_at {
+    if method_is_pop or method_is_at or method_is_at_mut {
         return code_eval_unsupported(receiver_eval.next);
     }
     if !code_kind_is_map_handle(receiver_kind) {
@@ -12553,6 +12734,7 @@ fn lower_code_try_array_get_or_pop(
     receiver_value: i64,
     receiver_kind: i64,
     method_is_pop: bool,
+    method_is_at_mut: bool,
     args: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -12563,10 +12745,69 @@ fn lower_code_try_array_get_or_pop(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    if method_is_at_mut {
+        return try lower_code_try_array_at_mut(text, ast, decls, receiver_value, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     if method_is_pop {
         return try lower_code_try_array_pop(receiver_value, receiver_kind, args, code, kinds, next_value);
     }
     return try lower_code_try_array_get(text, ast, decls, receiver_value, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+fn lower_code_try_array_at_mut(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver_value: i64,
+    receiver_kind: i64,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let index_arg = try ast.child_at(args, 0);
+    let index_eval = try lower_code_expr(text, ast, decls, index_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !index_eval.ok {
+        return code_eval_unsupported(index_eval.next);
+    }
+    let kind_i64 = code_kind_i64();
+    let index_kind = try kinds.get(index_eval.value_id);
+    if index_kind != kind_i64 {
+        return code_eval_unsupported(index_eval.next);
+    }
+    let element_kind = try code_array_element_kind(code, receiver_kind);
+    let borrow_kind = code_array_mut_borrow_kind(element_kind);
+    if borrow_kind < 0 {
+        return code_eval_unsupported(index_eval.next);
+    }
+    let result_value = index_eval.next;
+    let op = code_op_try_array_at_mut();
+    try code.append(op);
+    try code.append(result_value);
+    try code.append(receiver_value);
+    try code.append(index_eval.value_id);
+    try code.append(element_kind);
+    try kinds.append(borrow_kind);
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+fn code_array_mut_borrow_kind(element_kind: i64) -> i64 {
+    if element_kind == code_kind_i64() {
+        return code_kind_mut_borrow_i64();
+    }
+    if element_kind == code_kind_slice() {
+        return code_kind_mut_borrow_slice();
+    }
+    return 0 - 1;
 }
 
 fn lower_code_try_array_pop(
@@ -12581,13 +12822,13 @@ fn lower_code_try_array_pop(
         return code_eval_unsupported(next_value);
     }
     let result_value = next_value;
-    let element_kind = code_array_element_kind(receiver_kind);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     let op_try_array_pop = code_op_try_array_pop();
     try code.append(op_try_array_pop);
     try code.append(result_value);
     try code.append(receiver_value);
     try code.append(element_kind);
-    let result_kind = code_array_get_result_kind(receiver_kind);
+    let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
@@ -12623,7 +12864,7 @@ fn lower_code_try_array_get(
         return code_eval_unsupported(index_eval.next);
     }
     let result_value = index_eval.next;
-    let element_kind = code_array_element_kind(receiver_kind);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     if element_kind == kind_i64 {
         let op_try_array_get_i64 = code_op_try_array_get_i64();
         try code.append(op_try_array_get_i64);
@@ -12639,7 +12880,7 @@ fn lower_code_try_array_get(
         try code.append(index_eval.value_id);
         try code.append(element_kind);
     }
-    let result_kind = code_array_get_result_kind(receiver_kind);
+    let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);

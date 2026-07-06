@@ -547,6 +547,28 @@ func runRenderOwnedArrayCases() []runRenderCase {
 				"ret %kizu.error.void { i1 false",
 			},
 		},
+		{
+			name: "std_array_single_field_struct_borrow",
+			source: "struct Token {\n    text: []u8,\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    var tokens = std::array::Array<Token>(allocator);\n" +
+				"    try tokens.append(Token { text: \"let\" });\n" +
+				"    let first = try tokens.at(0);\n" +
+				"    print(first.text);\n" +
+				"    let slot = try tokens.at_mut(0);\n" +
+				"    slot.* = Token { text: \"var\" };\n" +
+				"    let updated = try tokens.at(0);\n" +
+				"    print(updated.text);\n" +
+				"    tokens.deinit();\n" +
+				"    return;\n}\n",
+			wantStdout: "let\nvar\n",
+			wantLLVMFragments: []string{
+				"call %kizu.error.slice.u8 @kizu_rt_array_at",
+				" = extractvalue %kizu.slice.u8 %am",
+				"store %kizu.slice.u8 %v",
+			},
+		},
 	}
 }
 

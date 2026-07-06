@@ -2294,6 +2294,10 @@ fn render_one_instruction_runtime_array_items(
     if op == try_array_set {
         try render_try_array_set(out, code, index, abi);
     }
+    let try_array_at_mut = codegen::code_op_try_array_at_mut();
+    if op == try_array_at_mut {
+        try render_try_array_at_mut(out, code, index, abi);
+    }
     let try_array_pop = codegen::code_op_try_array_pop();
     if op == try_array_pop {
         try render_try_array_pop(out, code, index, abi);
@@ -6894,6 +6898,62 @@ fn render_array_set_store(out: &var std::string::String, index: i64, value: i64,
     return;
 }
 
+// render_try_array_at_mut emits ARRAY_AT_MUT: bounds-check the index through
+// kizu_rt_array_at, propagate failure, and expose the returned element pointer
+// as the result value. Loads and stores are handled later by PTR_LOAD/PTR_STORE.
+fn render_try_array_at_mut(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    let item_index = try code.get(index + 3);
+    try w(out, "  %am");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", i64 %v");
+    try wi(out, item_index);
+    try wl(out, ")");
+    try w(out, "  %am");
+    try wi(out, index);
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %am");
+    try wi(out, index);
+    try wl(out, ", 0");
+    try w(out, "  br i1 %am");
+    try wi(out, index);
+    try w(out, "_ok, label %tc");
+    try wi(out, index);
+    try w(out, "_cont, label %tc");
+    try wi(out, index);
+    try wl(out, "_fail");
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_fail:");
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.slice.u8 %am");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try render_array_get_propagate(out, code, index, abi);
+    try w(out, "tc");
+    try wi(out, index);
+    try wl(out, "_cont:");
+    try w(out, "  %am");
+    try wi(out, index);
+    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %am");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = extractvalue %kizu.slice.u8 %am");
+    try wi(out, index);
+    try wl(out, "_slice, 0");
+    return;
+}
+
 // render_try_array_pop emits ARRAY_POP: read Array.len, check len-1 through
 // array_at, load the element value, then decrement len in the runtime array header.
 fn render_try_array_pop(
@@ -8835,6 +8895,10 @@ fn tape_record_end_array_items(code: &std::array::Array<i64>, index: i64, op: i6
     }
     let try_array_set = codegen::code_op_try_array_set();
     if op == try_array_set {
+        return index + 5;
+    }
+    let try_array_at_mut = codegen::code_op_try_array_at_mut();
+    if op == try_array_at_mut {
         return index + 5;
     }
     let try_array_pop = codegen::code_op_try_array_pop();
