@@ -934,6 +934,18 @@ pub fn code_return_kind_owned_string_err() -> i64 {
     return 902;
 }
 
+fn code_return_kind_owned_array_i64_err() -> i64 {
+    return 903;
+}
+
+fn code_return_kind_owned_array_bool_err() -> i64 {
+    return 904;
+}
+
+fn code_return_kind_owned_array_slice_err() -> i64 {
+    return 905;
+}
+
 // code_kind_owned marks a '%kizu.owned' runtime handle value (e.g. the io handle
 // returned by std::io::blocking()). code_kind_slice marks a runtime
 // '%kizu.slice.u8' value (e.g. the bytes returned by std::fs::read_file), as
@@ -1328,6 +1340,7 @@ fn code_binary_kind_is_comparison(kind: i64) -> bool {
 // code_return_kind classifies a function's declared return type for the tape:
 // 0 = void (empty or 'void'), 1 = i64, 2 = error-union void ('!void'),
 // 3 = error-union i64 ('!i64'), code_return_kind_bool() = bool,
+// code_return_kind_owned_*_err() = '%kizu.error.owned' success payload,
 // record_base + <UNION_DECL position> for a
 // declared union (the runtime aggregate return), record_base + <ENUM_DECL
 // position> for a declared enum (the i64 tag ABI with enum identity),
@@ -1367,6 +1380,10 @@ fn code_return_kind(
     if std::mem::equal_bytes(type_text, "!std::string::String") {
         return code_return_kind_owned_string_err();
     }
+    let array_err = code_error_union_array_return_kind(type_text);
+    if array_err != code_kind_missing() {
+        return array_err;
+    }
     let union_kind = try code_param_union_kind(text, ast, type_node, code);
     if union_kind >= 0 {
         return union_kind;
@@ -1394,7 +1411,51 @@ fn code_return_kind_result_kind(ret_kind: i64) -> i64 {
     if ret_kind == code_return_kind_owned_string_err() {
         return code_kind_owned_string();
     }
+    let array_result = code_error_union_array_result_kind(ret_kind);
+    if array_result != code_kind_missing() {
+        return array_result;
+    }
     return ret_kind;
+}
+
+fn code_error_union_array_return_kind(type_text: []u8) -> i64 {
+    let prefix = "!std::array::Array<";
+    if !std::mem::starts_with(type_text, prefix) {
+        return code_kind_missing();
+    }
+    let text_len = std::mem::len(type_text);
+    let prefix_len = std::mem::len(prefix);
+    if text_len <= prefix_len {
+        return code_kind_missing();
+    }
+    let last = text_len - 1;
+    if type_text[last] != cast<u8>(62) {
+        return code_kind_missing();
+    }
+    let element = type_text[prefix_len..last];
+    if std::mem::equal_bytes(element, "i64") {
+        return code_return_kind_owned_array_i64_err();
+    }
+    if std::mem::equal_bytes(element, "bool") {
+        return code_return_kind_owned_array_bool_err();
+    }
+    if std::mem::equal_bytes(element, "[]u8") {
+        return code_return_kind_owned_array_slice_err();
+    }
+    return code_kind_missing();
+}
+
+fn code_error_union_array_result_kind(ret_kind: i64) -> i64 {
+    if ret_kind == code_return_kind_owned_array_i64_err() {
+        return code_kind_owned_array_i64();
+    }
+    if ret_kind == code_return_kind_owned_array_bool_err() {
+        return code_kind_owned_array_bool();
+    }
+    if ret_kind == code_return_kind_owned_array_slice_err() {
+        return code_kind_owned_array_slice();
+    }
+    return code_kind_missing();
 }
 
 // code_node_span returns the trimmed (start, end) byte span of a node's source
@@ -2610,8 +2671,8 @@ fn copy_code_defer_args(
     return;
 }
 
-// lower_code_params binds every parameter name to the next sequential value
-// id; the tape owns i64 parameters only, so each declared type must be i64.
+// lower_code_params binds every parameter name to the next sequential value id;
+// code_param_kind owns the supported ABI classification for each declared type.
 fn lower_code_params(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -2868,10 +2929,10 @@ fn union_decl_variant_index(
 }
 
 // code_param_kind classifies a parameter's declared type for the tape: scalar,
-// slice, and supported borrowed map parameters render directly, unions reference
-// their UNION_DECL record, and single-field struct parameters reference a
-// STRUCT_PARAM record so field reads resolve from type metadata instead of
-// source identifier spelling.
+// slice, runtime-owned handles, and supported borrowed map parameters render
+// directly, unions reference their UNION_DECL record, and single-field struct
+// parameters reference a STRUCT_PARAM record so field reads resolve from type
+// metadata instead of source identifier spelling.
 fn code_param_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -2888,6 +2949,12 @@ fn code_param_kind(
     }
     if std::mem::equal_bytes(type_text, "[]u8") {
         return code_kind_slice();
+    }
+    if std::mem::equal_bytes(type_text, "Allocator") {
+        return code_kind_owned();
+    }
+    if std::mem::equal_bytes(type_text, "std::mem::Allocator") {
+        return code_kind_owned();
     }
     // A supported borrow parameter flows on the value tape as its referent
     // handle/value kind. General '&var T' write-back semantics are still
@@ -6871,12 +6938,10 @@ fn emit_code_try_call_i64(
     return code_eval_value(result_value, after_value);
 }
 
-// emit_code_try_call_owned_string lowers 'try <!std::string::String callee>(...)'
-// in value position: it lays down the same call record as TRY_CALL_I64 but tags
-// the op TRY_CALL_OWNED_STRING and the result value-kind owned-String, so the
-// renderer unwraps the '%kizu.error.owned' result and the binding takes sole
-// ownership of the moved-out String handle.
-fn emit_code_try_call_owned_string(
+// emit_code_try_call_error_owned lowers 'try <callee>(...)' when the callee
+// returns a '%kizu.error.owned' aggregate. The caller supplies the success
+// value-kind, so the same record covers owned String and owned Array handles.
+fn emit_code_try_call_error_owned(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
@@ -6889,7 +6954,8 @@ fn emit_code_try_call_owned_string(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
-    next_value: i64
+    next_value: i64,
+    result_kind: i64
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
@@ -6907,8 +6973,7 @@ fn emit_code_try_call_owned_string(
     let scratch_bound = scratch_base + arg_count;
     try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
     try args_scratch.set(0, scratch_base);
-    let kind_owned_string = code_kind_owned_string();
-    try kinds.append(kind_owned_string);
+    try kinds.append(result_kind);
     let result_value = args_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
@@ -11940,7 +12005,11 @@ fn lower_code_try_call_expr(
     // A 'try <callee>(...)' of a declared '!std::string::String' function yields
     // the moved-out owned-String success payload.
     if callee_kind == code_return_kind_owned_string_err() {
-        return try emit_code_try_call_owned_string(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+        return try emit_code_try_call_error_owned(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value, code_kind_owned_string());
+    }
+    let owned_array_kind = code_error_union_array_result_kind(callee_kind);
+    if owned_array_kind != code_kind_missing() {
+        return try emit_code_try_call_error_owned(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value, owned_array_kind);
     }
     return code_eval_unsupported(next_value);
 }

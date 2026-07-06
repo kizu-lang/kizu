@@ -61,6 +61,7 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderSliceParamCases()...)
 	cases = append(cases, runRenderIoWriteCases()...)
 	cases = append(cases, runRenderStringBuilderCases()...)
+	cases = append(cases, runRenderOwnedArrayCases()...)
 	cases = append(cases, runRenderStructCases()...)
 	cases = append(cases, runRenderEnumMatchCases()...)
 	cases = append(cases, runRenderVarStructCases()...)
@@ -469,6 +470,32 @@ func runRenderStringBuilderCases() []runRenderCase {
 				"    try std::fmt::append_bytes_literal(text, \"a\\b\");\n\n" +
 				"    let bytes = text.as_bytes();\n    print(bytes);\n    return;\n}\n",
 			wantStdout: "0 -9223372036854775808 42 true false \"token\" \"a\\\\b\"\n",
+		},
+	}
+}
+
+// runRenderOwnedArrayCases covers runtime-owned Array handles returned through
+// the shared '%kizu.error.owned' ABI.
+func runRenderOwnedArrayCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "try_returns_owned_array_i64",
+			source: "fn make_values(allocator: Allocator) -> !std::array::Array<i64> {\n" +
+				"    let values = std::array::Array<i64>(allocator);\n" +
+				"    try values.append(1);\n" +
+				"    try values.append(2);\n" +
+				"    return values;\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    let values = try make_values(allocator);\n" +
+				"    defer values.deinit();\n" +
+				"\n" +
+				"    std::testing::expect_equal<i64>(2, values.len());\n" +
+				"    std::testing::expect_equal<i64>(1, values.get_or_panic(0));\n" +
+				"    std::testing::expect_equal<i64>(2, values.get_or_panic(1));\n" +
+				"    print(\"ok\");\n" +
+				"    return;\n}\n",
+			wantStdout: "ok\n",
 		},
 	}
 }
