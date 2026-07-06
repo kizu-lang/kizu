@@ -3158,10 +3158,10 @@ fn code_param_kind(
 
 // read_borrow_referent_kind resolves a read borrow '&T' parameter to the tape
 // kind of its referent 'T' for the scalar/slice kinds that resolve by type text
-// alone (i64, bool, []u8). It also resolves &Map/&var Map<i64> parameters to
-// borrowed map handle kinds with the same runtime ABI as owned maps: shared
-// borrows can read, mutable borrows can perform interior mutation, and neither
-// kind is an owned resource for deinit.
+// alone (i64, bool, []u8). It also resolves handle-backed borrows: &Map/&var
+// Map<i64> parameters keep the map runtime ABI, and &var std::string::String
+// keeps the owned String handle ABI because mutations happen inside the runtime
+// storage object behind the handle.
 fn read_borrow_referent_kind(type_text: []u8) -> i64 {
     let length = std::mem::len(type_text);
     if length < 2 {
@@ -3214,19 +3214,36 @@ fn mut_borrow_map_referent_kind(referent: []u8) -> i64 {
     return 0 - 1;
 }
 
-// mut_borrow_referent_kind resolves a '&var T' referent ('var T'): a supported
-// Map handle keeps the interior-mutation handle ABI, while a scalar 'i64' takes
-// the new pointer write-back kind. Anything else stays -1 (unchanged).
+// mut_borrow_referent_kind resolves a '&var T' referent ('var T'): supported
+// handle-backed resources keep their runtime handle ABI, while i64 and []u8
+// locals use pointer write-back slots. Anything else stays -1 (unchanged).
 fn mut_borrow_referent_kind(referent: []u8) -> i64 {
     let map_kind = mut_borrow_map_referent_kind(referent);
     if map_kind >= 0 {
         return map_kind;
+    }
+    let handle_kind = mut_borrow_handle_referent_kind(referent);
+    if handle_kind >= 0 {
+        return handle_kind;
     }
     let slice_kind = mut_borrow_slice_referent_kind(referent);
     if slice_kind >= 0 {
         return slice_kind;
     }
     return mut_borrow_scalar_referent_kind(referent);
+}
+
+// mut_borrow_handle_referent_kind resolves mutable borrows of runtime handles
+// whose mutation is interior to the runtime object. A String handle is a
+// '%kizu.owned' value pointing at '%kizu.rt.string'; append/clear update that
+// pointee, so passing the handle by value preserves caller-visible mutation.
+fn mut_borrow_handle_referent_kind(referent: []u8) -> i64 {
+    let referent_len = std::mem::len(referent);
+    let unwrapped = referent[4..referent_len];
+    if std::mem::equal_bytes(unwrapped, "std::string::String") {
+        return code_kind_owned_string();
+    }
+    return 0 - 1;
 }
 
 // mut_borrow_slice_referent_kind resolves a '&var []u8' referent ('var []u8') to
@@ -8050,12 +8067,12 @@ fn lower_code_prefix(
     if op == std::kizu::ast::prefix_borrow() {
         return try lower_code_expr(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
-    // A mutable borrow '&var <var>' of an i64 or '[]u8' var passes the address of
-    // the caller's var slot (a 'ptr' value) so the callee writes back through it.
-    // Only a bare var that owns an alloca slot is addressable; anything else (a
-    // let, a temporary) stays unsupported and falls through to the diagnostic.
+    // A mutable borrow '&var <var>' lowers by referent ABI: i64/[]u8 vars pass
+    // the address of the caller slot, while owned String handles pass the handle
+    // value because its runtime methods mutate storage behind the handle. Other
+    // operands stay unsupported and fall through to the diagnostic.
     if op == std::kizu::ast::prefix_mut_borrow() {
-        return try lower_code_mut_borrow_scalar(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
+        return try lower_code_mut_borrow_value(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
     }
     // A unary minus '-<expr>' lowers as '0 - <expr>' through the existing BINARY
     // sub path, so the renderer needs no change. A bool/slice operand has no i64
@@ -8123,12 +8140,12 @@ fn lower_code_neg(
     return code_eval_value(result_value, after_value);
 }
 
-// lower_code_mut_borrow_scalar lowers '&var <var>' for an i64 or '[]u8' var: it
-// resolves the operand to its alloca slot and emits VAR_ADDR (i64 slot, kind
-// code_kind_mut_borrow_i64) or VAR_ADDR_SLICE (slice slot, kind
-// code_kind_mut_borrow_slice), yielding a 'ptr' value. A non-var operand has no
-// slot and stays unsupported, the same safe fallback the value model used before.
-fn lower_code_mut_borrow_scalar(
+// lower_code_mut_borrow_value lowers '&var <var>' by the referent's storage ABI:
+// i64 and []u8 vars resolve to alloca-slot addresses (VAR_ADDR/VAR_ADDR_SLICE),
+// while owned String handles keep their value ABI because append/clear mutate the
+// runtime object behind the handle. A non-addressable operand stays unsupported,
+// the same safe fallback the value model used before.
+fn lower_code_mut_borrow_value(
     text: []u8,
     ast: std::kizu::ast::Ast,
     right: std::kizu::ast::NodeId,
@@ -8145,10 +8162,38 @@ fn lower_code_mut_borrow_scalar(
         return try emit_code_var_addr_slice(slice_slot, code, kinds, next_value);
     }
     let slot = try code_var_slot_of(text, ast, right, local_starts, local_ends, local_values, locals_base);
-    if slot < 0 {
-        return code_eval_unsupported(next_value);
+    if slot >= 0 {
+        return try emit_code_var_addr(slot, code, kinds, next_value);
     }
-    return try emit_code_var_addr(slot, code, kinds, next_value);
+    return try lower_code_mut_borrow_owned_string_handle(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
+}
+
+// lower_code_mut_borrow_owned_string_handle accepts '&var <local String>' without
+// adding a pointer slot: '%kizu.owned' carries the address of the runtime string
+// object, and String mutation ops update that object. Reassigning through the
+// borrow remains unsupported by the assignment path; this only enables interior
+// String mutation methods such as append_bytes and clear.
+fn lower_code_mut_borrow_owned_string_handle(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    right: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let eval = try lower_code_var(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let kind = try kinds.get(eval.value_id);
+    if kind != code_kind_owned_string() {
+        return code_eval_unsupported(eval.next);
+    }
+    return eval;
 }
 
 // emit_code_var_addr appends a VAR_ADDR record producing the address of a var
@@ -12924,9 +12969,9 @@ fn lower_code_args(
     return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_name_start, callee_name_end, after, arg_eval.next);
 }
 
-// lower_code_mut_borrow_arg_chain marshals one scalar '&var i64' argument as a
-// caller-slot pointer, records it in the scratch row, and continues lowering the
-// remaining arguments. It is a single-statement tail of lower_code_args's
+// lower_code_mut_borrow_arg_chain marshals one pointer-backed '&var' argument as
+// a caller-slot pointer, records it in the scratch row, and continues lowering
+// the remaining arguments. It is a single-statement tail of lower_code_args's
 // mut-borrow branch so each then-body stays a lone 'return try <call>'.
 fn lower_code_mut_borrow_arg_chain(
     text: []u8,
@@ -12958,10 +13003,11 @@ fn lower_code_mut_borrow_arg_chain(
 }
 
 // code_no_user_callee is the sentinel callee-name-start a method call passes to
-// lower_code_args so the '&var i64' caller-slot probe is skipped (method params
-// are out of this PR's scope). It is a call, not an inline '0 - 1', so the
-// argument the call site forwards stays a plain local (the compiled call-arg
-// lowering rejects a bare arithmetic literal as a positional argument).
+// lower_code_args so the pointer-backed '&var' caller-slot probe is skipped
+// (method params are out of this PR's scope). It is a call, not an inline
+// '0 - 1', so the argument the call site forwards stays a plain local (the
+// compiled call-arg lowering rejects a bare arithmetic literal as a positional
+// argument).
 fn code_no_user_callee() -> i64 {
     return 0 - 1;
 }
@@ -12985,10 +13031,10 @@ fn code_arg_callee_param_kind(
     return try code_callee_param_kind(text, ast, decls, callee_name_start, callee_name_end, param_index, 0);
 }
 
-// lower_code_mut_borrow_call_arg marshals one '&var i64' argument: a bare var
-// takes its slot address (VAR_ADDR), and an explicit '&var <var>' prefix lowers
-// through the prefix arm (also VAR_ADDR). Anything else has no addressable slot
-// and stays unsupported.
+// lower_code_mut_borrow_call_arg marshals one pointer-backed '&var' argument: a
+// bare var takes its slot address, and an explicit '&var <var>' prefix lowers
+// through the prefix arm. Handle-backed mutable borrows such as String skip this
+// branch because their parameter kind is the handle kind, not a pointer kind.
 fn lower_code_mut_borrow_call_arg(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -13005,7 +13051,7 @@ fn lower_code_mut_borrow_call_arg(
 ) -> !CodeEval {
     let node = ast.get(arg);
     return match node.data {
-        Var(var_node) => try lower_code_mut_borrow_scalar(text, ast, arg, code, kinds, local_starts, local_ends, local_values, locals_base, next_value),
+        Var(var_node) => try lower_code_mut_borrow_value(text, ast, arg, code, kinds, local_starts, local_ends, local_values, locals_base, next_value),
         Prefix(prefix_node) => try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };

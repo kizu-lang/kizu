@@ -477,6 +477,28 @@ func runRenderStringBuilderCases() []runRenderCase {
 				"    let bytes = text.as_bytes();\n    print(bytes);\n    return;\n}\n",
 			wantStdout: "0 -9223372036854775808 42 true false \"token\" \"a\\\\b\"\n",
 		},
+		{
+			name: "std_string_mut_borrow_param",
+			source: "fn append_suffix(text: &var std::string::String) -> !void {\n" +
+				"    try text.append_bytes(\" suffix\");\n" +
+				"    text.clear();\n" +
+				"    try text.append_bytes(\"mutated\");\n" +
+				"    return;\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    var text = std::string::String(allocator);\n" +
+				"    try text.append_bytes(\"prefix\");\n" +
+				"    try append_suffix(text);\n" +
+				"    let bytes = text.as_bytes();\n" +
+				"    print(bytes);\n" +
+				"    return;\n}\n",
+			wantStdout: "mutated\n",
+			wantLLVMFragments: []string{
+				"define %kizu.error.void @kizu_run_user_append_suffix(%kizu.owned",
+				"call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned",
+				"_len_field = getelementptr inbounds %kizu.rt.string",
+			},
+		},
 	}
 }
 
