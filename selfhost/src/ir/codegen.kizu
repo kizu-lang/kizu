@@ -885,6 +885,18 @@ pub fn code_op_try_array_at_mut() -> i64 {
     return 152;
 }
 
+// TRY_CALL_TYPED_ERROR_* mirrors TRY_CALL/TRY_CALL_I64 for functions declared as
+// 'Error!void' or 'Error!i64'. The failure payload is the runtime union aggregate
+// for the concrete error union type, so typed errors do not collapse into the
+// untyped message-slice ABI.
+pub fn code_op_try_call_typed_error_void() -> i64 {
+    return 153;
+}
+
+pub fn code_op_try_call_typed_error_i64() -> i64 {
+    return 154;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -983,6 +995,14 @@ fn code_return_kind_owned_array_bool_err() -> i64 {
 
 fn code_return_kind_owned_array_slice_err() -> i64 {
     return 905;
+}
+
+fn code_return_kind_typed_error_i64() -> i64 {
+    return 906;
+}
+
+fn code_return_kind_typed_error_void() -> i64 {
+    return 907;
 }
 
 // code_kind_owned marks a '%kizu.owned' runtime handle value (e.g. the io handle
@@ -1466,6 +1486,10 @@ fn code_return_kind(
     if array_err != code_kind_missing() {
         return array_err;
     }
+    let typed_err = try code_typed_error_union_return_kind(text, ast, type_node, code);
+    if typed_err != code_kind_missing() {
+        return typed_err;
+    }
     let union_kind = try code_param_union_kind(text, ast, type_node, code);
     if union_kind >= 0 {
         return union_kind;
@@ -1496,6 +1520,9 @@ fn code_return_kind_result_kind(ret_kind: i64) -> i64 {
     let array_result = code_error_union_array_result_kind(ret_kind);
     if array_result != code_kind_missing() {
         return array_result;
+    }
+    if ret_kind == code_return_kind_typed_error_i64() {
+        return code_kind_i64();
     }
     return ret_kind;
 }
@@ -1538,6 +1565,52 @@ fn code_error_union_array_result_kind(ret_kind: i64) -> i64 {
         return code_kind_owned_array_slice();
     }
     return code_kind_missing();
+}
+
+// code_typed_error_union_return_kind classifies 'Error!i64' and 'Error!void'
+// return annotations when Error names a declared union. The run tape uses a
+// shared typed-error ABI whose failure field is a '%kizu.run.union' payload; the
+// checker has already proven that try propagation only crosses matching error
+// union types.
+fn code_typed_error_union_return_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !i64 {
+    let span = code_node_span(text, ast, type_node);
+    let bang = code_typed_error_bang_index(text, span.end, span.start);
+    if bang <= span.start {
+        return code_kind_missing();
+    }
+    let success_start = bang + 1;
+    if success_start >= span.end {
+        return code_kind_missing();
+    }
+    let union_pos = try union_decl_pos_by_span(text, code, span.start, bang, 0);
+    if union_pos < 0 {
+        return code_kind_missing();
+    }
+    let success = text[success_start..span.end];
+    if std::mem::equal_bytes(success, "i64") {
+        return code_return_kind_typed_error_i64();
+    }
+    if std::mem::equal_bytes(success, "void") {
+        return code_return_kind_typed_error_void();
+    }
+    return code_kind_missing();
+}
+
+fn code_typed_error_bang_index(text: []u8, end: i64, index: i64) -> i64 {
+    if index >= end {
+        return 0 - 1;
+    }
+    let bang = cast<u8>(33);
+    if text[index] == bang {
+        return index;
+    }
+    let next = index + 1;
+    return code_typed_error_bang_index(text, end, next);
 }
 
 // code_node_span returns the trimmed (start, end) byte span of a node's source
@@ -6476,6 +6549,12 @@ fn lower_code_user_call_statement(
     if callee_kind == 3 {
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if callee_kind == code_return_kind_typed_error_void() {
+        return try emit_code_try_call_typed_error_void(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if callee_kind == code_return_kind_typed_error_i64() {
+        return try emit_code_try_call_typed_error_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     return code_eval_unsupported(next_value);
 }
 
@@ -6558,6 +6637,12 @@ fn lower_code_try_call(
     // the TRY_CALL_I64 record still allocates its result id.
     if callee_kind == 3 {
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if callee_kind == code_return_kind_typed_error_void() {
+        return try emit_code_try_call_typed_error_void(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if callee_kind == code_return_kind_typed_error_i64() {
+        return try emit_code_try_call_typed_error_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
 }
@@ -7251,13 +7336,51 @@ fn emit_code_try_call_void(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let op_try_call = code_op_try_call();
+    return try emit_code_try_call_void_record(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, op_try_call, next_value);
+}
+
+fn emit_code_try_call_typed_error_void(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op_try_call = code_op_try_call_typed_error_void();
+    return try emit_code_try_call_void_record(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, op_try_call, next_value);
+}
+
+fn emit_code_try_call_void_record(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    op_try_call: i64,
+    next_value: i64
+) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
     let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_span.start, callee_span.end, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
-    let op_try_call = code_op_try_call();
     try code.append(op_try_call);
     try code.append(callee_span.start);
     try code.append(callee_span.end);
@@ -7286,13 +7409,51 @@ fn emit_code_try_call_i64(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let op_try_call_i64 = code_op_try_call_i64();
+    return try emit_code_try_call_i64_record(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, op_try_call_i64, next_value);
+}
+
+fn emit_code_try_call_typed_error_i64(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op_try_call_i64 = code_op_try_call_typed_error_i64();
+    return try emit_code_try_call_i64_record(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, op_try_call_i64, next_value);
+}
+
+fn emit_code_try_call_i64_record(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    op_try_call_i64: i64,
+    next_value: i64
+) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
     let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_span.start, callee_span.end, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
-    let op_try_call_i64 = code_op_try_call_i64();
     try code.append(op_try_call_i64);
     try code.append(args_eval.next);
     try code.append(callee_span.start);
@@ -12459,6 +12620,9 @@ fn lower_code_try_call_expr(
     let callee_kind = try code_callee_return_kind(text, ast, decls, code, callee_span.start, callee_span.end, 0);
     if callee_kind == 3 {
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if callee_kind == code_return_kind_typed_error_i64() {
+        return try emit_code_try_call_typed_error_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     // A 'try <callee>(...)' of a declared '!std::string::String' function yields
     // the moved-out owned-String success payload.

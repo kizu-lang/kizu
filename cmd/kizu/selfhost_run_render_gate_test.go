@@ -337,6 +337,42 @@ func runRenderErrorUnionI64Cases() []runRenderCase {
 			source:     "fn main() -> i64 {\n    print(\"v\");\n    return 5;\n}\n",
 			wantStdout: "v\n",
 		},
+		{
+			name: "typed_error_i64_success",
+			source: "union ConfigError {\n    NotFound([]u8),\n    InvalidPort(i64),\n}\n\n" +
+				"fn read_port(ok: bool) -> ConfigError!i64 {\n" +
+				"    if ok {\n        return 8080;\n    }\n" +
+				"    return ConfigError::NotFound(\"config.kizu\");\n}\n\n" +
+				"fn main() -> ConfigError!void {\n" +
+				"    let port = try read_port(true);\n    print(port);\n    return;\n}\n",
+			wantStdout: "8080\n",
+			wantLLVMFragments: []string{
+				"%kizu.error.union.i64 = type { i1, i64, %kizu.run.union }",
+				"define %kizu.error.union.i64 @kizu_run_user_read_port",
+				"call %kizu.error.union.i64 @kizu_run_user_read_port",
+				"insertvalue %kizu.error.union.i64 { i1 false",
+			},
+		},
+		{
+			name: "typed_error_i64_failure_exits",
+			source: "union ConfigError {\n    NotFound([]u8),\n    InvalidPort(i64),\n}\n\n" +
+				"fn read_port(ok: bool) -> ConfigError!i64 {\n" +
+				"    if ok {\n        return 8080;\n    }\n" +
+				"    return ConfigError::NotFound(\"config.kizu\");\n}\n\n" +
+				"fn step() -> ConfigError!void {\n" +
+				"    let port = try read_port(false);\n    print(port);\n    return;\n}\n\n" +
+				"fn main() -> ConfigError!void {\n" +
+				"    try step();\n    print(\"unreachable\");\n    return;\n}\n",
+			wantExit: 1,
+			wantLLVMOrderedFragments: []string{
+				"define %kizu.error.union.void @kizu_run_user_step",
+				"call %kizu.error.union.i64 @kizu_run_user_read_port",
+				"extractvalue %kizu.error.union.i64 %tc",
+				"insertvalue %kizu.error.union.void { i1 false",
+				"define i64 @kizu_run_main()",
+				"call %kizu.error.union.void @kizu_run_user_step",
+			},
+		},
 	}
 }
 
