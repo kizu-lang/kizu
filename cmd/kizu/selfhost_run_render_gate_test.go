@@ -14,9 +14,12 @@ import (
 // runRenderCase is one end-to-end tape-render case: a kizu source that lowers onto
 // the run codegen IR v1 tape, renders to LLVM, links, runs, and prints wantStdout.
 type runRenderCase struct {
-	name       string
-	source     string
-	wantStdout string
+	name                     string
+	source                   string
+	wantStdout               string
+	wantExit                 int
+	wantLLVMFragments        []string
+	wantLLVMOrderedFragments []string
 }
 
 // TestSelfhostRunRenderGate drives the tape renderer end to end: it lowers a kizu
@@ -61,6 +64,10 @@ func TestSelfhostRunRenderGate(t *testing.T) {
 	cases = append(cases, runRenderSliceParamCases()...)
 	cases = append(cases, runRenderIoWriteCases()...)
 	cases = append(cases, runRenderStringBuilderCases()...)
+	cases = append(cases, runRenderOwnedArrayCases()...)
+	cases = append(cases, runRenderCleanupCases()...)
+	cases = append(cases, runRenderCleanupControlFlowCases()...)
+	cases = append(cases, runRenderPathJoinCleanCases()...)
 	cases = append(cases, runRenderStructCases()...)
 	cases = append(cases, runRenderEnumMatchCases()...)
 	cases = append(cases, runRenderVarStructCases()...)
@@ -330,6 +337,42 @@ func runRenderErrorUnionI64Cases() []runRenderCase {
 			source:     "fn main() -> i64 {\n    print(\"v\");\n    return 5;\n}\n",
 			wantStdout: "v\n",
 		},
+		{
+			name: "typed_error_i64_success",
+			source: "union ConfigError {\n    NotFound([]u8),\n    InvalidPort(i64),\n}\n\n" +
+				"fn read_port(ok: bool) -> ConfigError!i64 {\n" +
+				"    if ok {\n        return 8080;\n    }\n" +
+				"    return ConfigError::NotFound(\"config.kizu\");\n}\n\n" +
+				"fn main() -> ConfigError!void {\n" +
+				"    let port = try read_port(true);\n    print(port);\n    return;\n}\n",
+			wantStdout: "8080\n",
+			wantLLVMFragments: []string{
+				"%kizu.error.union.i64 = type { i1, i64, %kizu.run.union }",
+				"define %kizu.error.union.i64 @kizu_run_user_read_port",
+				"call %kizu.error.union.i64 @kizu_run_user_read_port",
+				"insertvalue %kizu.error.union.i64 { i1 false",
+			},
+		},
+		{
+			name: "typed_error_i64_failure_exits",
+			source: "union ConfigError {\n    NotFound([]u8),\n    InvalidPort(i64),\n}\n\n" +
+				"fn read_port(ok: bool) -> ConfigError!i64 {\n" +
+				"    if ok {\n        return 8080;\n    }\n" +
+				"    return ConfigError::NotFound(\"config.kizu\");\n}\n\n" +
+				"fn step() -> ConfigError!void {\n" +
+				"    let port = try read_port(false);\n    print(port);\n    return;\n}\n\n" +
+				"fn main() -> ConfigError!void {\n" +
+				"    try step();\n    print(\"unreachable\");\n    return;\n}\n",
+			wantExit: 1,
+			wantLLVMOrderedFragments: []string{
+				"define %kizu.error.union.void @kizu_run_user_step",
+				"call %kizu.error.union.i64 @kizu_run_user_read_port",
+				"extractvalue %kizu.error.union.i64 %tc",
+				"insertvalue %kizu.error.union.void { i1 false",
+				"define i64 @kizu_run_main()",
+				"call %kizu.error.union.void @kizu_run_user_step",
+			},
+		},
 	}
 }
 
@@ -469,6 +512,286 @@ func runRenderStringBuilderCases() []runRenderCase {
 				"    try std::fmt::append_bytes_literal(text, \"a\\b\");\n\n" +
 				"    let bytes = text.as_bytes();\n    print(bytes);\n    return;\n}\n",
 			wantStdout: "0 -9223372036854775808 42 true false \"token\" \"a\\\\b\"\n",
+		},
+		{
+			name: "std_string_mut_borrow_param",
+			source: "fn append_suffix(text: &var std::string::String) -> !void {\n" +
+				"    try text.append_bytes(\" suffix\");\n" +
+				"    text.clear();\n" +
+				"    try text.append_bytes(\"mutated\");\n" +
+				"    return;\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    var text = std::string::String(allocator);\n" +
+				"    try text.append_bytes(\"prefix\");\n" +
+				"    try append_suffix(text);\n" +
+				"    let bytes = text.as_bytes();\n" +
+				"    print(bytes);\n" +
+				"    return;\n}\n",
+			wantStdout: "mutated\n",
+			wantLLVMFragments: []string{
+				"define %kizu.error.void @kizu_run_user_append_suffix(%kizu.owned",
+				"call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned",
+				"_len_field = getelementptr inbounds %kizu.rt.string",
+			},
+		},
+	}
+}
+
+// runRenderOwnedArrayCases covers runtime-owned Array handles returned through
+// the shared '%kizu.error.owned' ABI.
+func runRenderOwnedArrayCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "errdefer_returns_owned_array_i64",
+			source: "fn make_values(allocator: Allocator) -> !std::array::Array<i64> {\n" +
+				"    let values = std::array::Array<i64>(allocator);\n" +
+				"    errdefer values.deinit();\n" +
+				"\n" +
+				"    try values.append(1);\n" +
+				"    try values.append(2);\n" +
+				"    return values;\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    let values = try make_values(allocator);\n" +
+				"    defer values.deinit();\n" +
+				"\n" +
+				"    std::testing::expect_equal<i64>(2, values.len());\n" +
+				"    std::testing::expect_equal<i64>(1, values.get_or_panic(0));\n" +
+				"    std::testing::expect_equal<i64>(2, values.get_or_panic(1));\n" +
+				"    print(\"ok\");\n" +
+				"    return;\n}\n",
+			wantStdout: "ok\n",
+			wantLLVMFragments: []string{
+				"_fail:\n  call void @kizu_rt_array_deinit(%kizu.owned %v",
+			},
+		},
+		{
+			name: "errdefer_return_error_deinits_array_i64",
+			source: "fn fail_values(allocator: Allocator) -> !void {\n" +
+				"    let values = std::array::Array<i64>(allocator);\n" +
+				"    errdefer values.deinit();\n" +
+				"    return error(\"boom\");\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    try fail_values(allocator);\n" +
+				"    print(\"unreachable\");\n" +
+				"    return;\n}\n",
+			wantExit: 1,
+			wantLLVMFragments: []string{
+				"call void @kizu_rt_array_deinit(%kizu.owned %v",
+				"ret %kizu.error.void { i1 false",
+			},
+		},
+		{
+			name: "std_array_single_field_struct_borrow",
+			source: "struct Token {\n    text: []u8,\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    var tokens = std::array::Array<Token>(allocator);\n" +
+				"    try tokens.append(Token { text: \"let\" });\n" +
+				"    let first = try tokens.at(0);\n" +
+				"    print(first.text);\n" +
+				"    let slot = try tokens.at_mut(0);\n" +
+				"    slot.* = Token { text: \"var\" };\n" +
+				"    let updated = try tokens.at(0);\n" +
+				"    print(updated.text);\n" +
+				"    tokens.deinit();\n" +
+				"    return;\n}\n",
+			wantStdout: "let\nvar\n",
+			wantLLVMFragments: []string{
+				"call %kizu.error.slice.u8 @kizu_rt_array_at",
+				" = extractvalue %kizu.slice.u8 %am",
+				"store %kizu.slice.u8 %v",
+			},
+		},
+	}
+}
+
+// runRenderCleanupCases covers SPEC cleanup stack behavior across error exits:
+// normal defer runs on error paths, errdefer is error-only, and both share LIFO.
+func runRenderCleanupCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "defer_try_error_deinits_array_i64",
+			source: "fn failer() -> !void {\n" +
+				"    return error(\"boom\");\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    let values = std::array::Array<i64>(allocator);\n" +
+				"    defer values.deinit();\n" +
+				"    try failer();\n" +
+				"    print(\"unreachable\");\n" +
+				"    return;\n}\n",
+			wantExit: 1,
+			wantLLVMFragments: []string{
+				"_fail:\n  call void @kizu_rt_array_deinit(%kizu.owned %v",
+			},
+		},
+		{
+			name: "defer_errdefer_return_error_lifo_order",
+			source: "fn fail_mixed(allocator: Allocator) -> !void {\n" +
+				"    let first = std::array::Array<i64>(allocator);\n" +
+				"    defer first.deinit();\n" +
+				"    let second = std::array::Array<i64>(allocator);\n" +
+				"    errdefer second.deinit();\n" +
+				"    let third = std::array::Array<i64>(allocator);\n" +
+				"    defer third.deinit();\n" +
+				"    return error(\"boom\");\n}\n\n" +
+				"fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    try fail_mixed(allocator);\n" +
+				"    print(\"unreachable\");\n" +
+				"    return;\n}\n",
+			wantExit: 1,
+			wantLLVMOrderedFragments: []string{
+				"define %kizu.error.void @kizu_run_user_fail_mixed",
+				"call void @kizu_rt_array_deinit(%kizu.owned %v3)",
+				"call void @kizu_rt_array_deinit(%kizu.owned %v2)",
+				"call void @kizu_rt_array_deinit(%kizu.owned %v1)",
+				"ret %kizu.error.void { i1 false",
+			},
+		},
+	}
+}
+
+const runRenderCleanupMarkerPrelude = "struct Marker {\n" +
+	"    label: []u8,\n" +
+	"}\n\n" +
+	"impl Marker {\n" +
+	"    fn deinit(self: Marker) -> void {\n" +
+	"        print(self.label);\n" +
+	"    }\n" +
+	"}\n\n"
+
+// runRenderCleanupControlFlowCases covers normal defer cleanup on non-local
+// control-flow exits: return, break, continue, and labeled break.
+func runRenderCleanupControlFlowCases() []runRenderCase {
+	cases := append(runRenderCleanupLoopExitCases(), runRenderCleanupBranchExitCases()...)
+	return cases
+}
+
+// runRenderCleanupLoopExitCases covers break/continue paths inside a loop body.
+func runRenderCleanupLoopExitCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "defer_runs_before_break",
+			source: runRenderCleanupMarkerPrelude +
+				"fn main() {\n" +
+				"    while true {\n" +
+				"        let marker = Marker { label: \"cleanup\" };\n" +
+				"        defer marker.deinit();\n" +
+				"        print(\"before\");\n" +
+				"        break;\n" +
+				"    }\n" +
+				"    print(\"after\");\n" +
+				"}\n",
+			wantStdout: "before\ncleanup\nafter\n",
+		},
+		{
+			name: "defer_runs_before_continue",
+			source: runRenderCleanupMarkerPrelude +
+				"fn main() {\n" +
+				"    var i = 0;\n" +
+				"    while i < 2 {\n" +
+				"        i = i + 1;\n" +
+				"        let marker = Marker { label: \"cleanup\" };\n" +
+				"        defer marker.deinit();\n" +
+				"        print(i);\n" +
+				"        continue;\n" +
+				"    }\n" +
+				"    print(\"done\");\n" +
+				"}\n",
+			wantStdout: "1\ncleanup\n2\ncleanup\ndone\n",
+		},
+	}
+}
+
+// runRenderCleanupBranchExitCases covers branch exits that must preserve or run defers.
+func runRenderCleanupBranchExitCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "defer_after_non_taken_return_branch",
+			source: runRenderCleanupMarkerPrelude +
+				"fn maybe(flag: bool) {\n" +
+				"    let marker = Marker { label: \"cleanup\" };\n" +
+				"    defer marker.deinit();\n" +
+				"    if flag {\n" +
+				"        return;\n" +
+				"    }\n" +
+				"    print(\"body\");\n" +
+				"}\n\n" +
+				"fn main() {\n" +
+				"    maybe(false);\n" +
+				"}\n",
+			wantStdout: "body\ncleanup\n",
+		},
+		{
+			name: "outer_defer_not_run_before_break",
+			source: runRenderCleanupMarkerPrelude +
+				"fn main() {\n" +
+				"    let outer = Marker { label: \"outer\" };\n" +
+				"    defer outer.deinit();\n" +
+				"    while true {\n" +
+				"        let inner = Marker { label: \"inner\" };\n" +
+				"        defer inner.deinit();\n" +
+				"        print(\"before\");\n" +
+				"        break;\n" +
+				"    }\n" +
+				"    print(\"after\");\n" +
+				"}\n",
+			wantStdout: "before\ninner\nafter\nouter\n",
+		},
+		{
+			name: "labeled_break_runs_exited_defers_lifo",
+			source: runRenderCleanupMarkerPrelude +
+				"fn main() {\n" +
+				"    outer_loop: while true {\n" +
+				"        let outer = Marker { label: \"outer\" };\n" +
+				"        defer outer.deinit();\n" +
+				"        while true {\n" +
+				"            let inner = Marker { label: \"inner\" };\n" +
+				"            defer inner.deinit();\n" +
+				"            print(\"before\");\n" +
+				"            break :outer_loop;\n" +
+				"        }\n" +
+				"    }\n" +
+				"    print(\"after\");\n" +
+				"}\n",
+			wantStdout: "before\ninner\nouter\nafter\n",
+		},
+	}
+}
+
+// runRenderPathJoinCleanCases covers owned std::path::join/clean lowering.
+func runRenderPathJoinCleanCases() []runRenderCase {
+	return []runRenderCase{
+		{
+			name: "std_path_join_clean",
+			source: "fn main() -> !void {\n" +
+				"    let allocator = std::mem::page_allocator();\n" +
+				"    var source = try std::path::join(allocator, \"examples\", \"fixtures/config.txt\");\n" +
+				"    let source_bytes = source.as_bytes();\n" +
+				"    print(source_bytes);\n" +
+				"    var absolute = try std::path::join(allocator, \"/a\", \"../b/\");\n" +
+				"    let absolute_bytes = absolute.as_bytes();\n" +
+				"    print(absolute_bytes);\n" +
+				"    var cleaned = try std::path::clean(allocator, \"a//./b/../c/\");\n" +
+				"    let cleaned_bytes = cleaned.as_bytes();\n" +
+				"    print(cleaned_bytes);\n" +
+				"    var parent = try std::path::clean(allocator, \"../a/..\");\n" +
+				"    let parent_bytes = parent.as_bytes();\n" +
+				"    print(parent_bytes);\n" +
+				"    source.deinit();\n" +
+				"    absolute.deinit();\n" +
+				"    cleaned.deinit();\n" +
+				"    parent.deinit();\n" +
+				"    return;\n}\n",
+			wantStdout: "examples/fixtures/config.txt\n/b\na/c\n..\n",
+			wantLLVMFragments: []string{
+				"call %kizu.error.owned @kizu_run_path_join",
+				"call %kizu.error.owned @kizu_run_path_clean",
+			},
 		},
 	}
 }
@@ -650,6 +973,11 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 		t.Fatalf("render gate did not report success:\n%s", out.String())
 	}
 	llPath := "target/selfhost/run_render.ll"
+	llText, err := os.ReadFile(llPath)
+	if err != nil {
+		t.Fatalf("read rendered module: %v", err)
+	}
+	assertRunRenderLLVM(t, llText, item)
 	exePath := filepath.Join("target/selfhost", item.name+".render")
 	compile := exec.Command(
 		clang,
@@ -663,7 +991,6 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 		exePath,
 	)
 	if linkOut, err := compile.CombinedOutput(); err != nil {
-		llText, _ := os.ReadFile(llPath)
 		t.Fatalf("link rendered module: %v\n%s\n--- module ---\n%s", err, linkOut, llText)
 	}
 	absExe, err := filepath.Abs(exePath)
@@ -676,10 +1003,41 @@ func runOneRenderCase(t *testing.T, program *ast.Program, clang string, item run
 	run.Stdout = &stdout
 	run.Stderr = &stderr
 	runErr := run.Run()
-	if exitCode(runErr) != 0 {
-		t.Fatalf("rendered program exit=%d stderr=%q", exitCode(runErr), stderr.String())
+	if exitCode(runErr) != item.wantExit {
+		t.Fatalf(
+			"rendered program exit=%d want %d stderr=%q",
+			exitCode(runErr),
+			item.wantExit,
+			stderr.String(),
+		)
 	}
 	if stdout.String() != item.wantStdout {
 		t.Fatalf("rendered program stdout=%q want %q", stdout.String(), item.wantStdout)
+	}
+}
+
+// assertRunRenderLLVM checks unordered and ordered LLVM fragments requested by a
+// render case before the module is linked and executed.
+func assertRunRenderLLVM(t *testing.T, llText []byte, item runRenderCase) {
+	t.Helper()
+	for _, fragment := range item.wantLLVMFragments {
+		if !bytes.Contains(llText, []byte(fragment)) {
+			t.Fatalf("rendered module missing fragment %q\n--- module ---\n%s", fragment, llText)
+		}
+	}
+	if len(item.wantLLVMOrderedFragments) > 0 {
+		offset := 0
+		for _, fragment := range item.wantLLVMOrderedFragments {
+			found := bytes.Index(llText[offset:], []byte(fragment))
+			if found < 0 {
+				t.Fatalf(
+					"rendered module missing ordered fragment %q after byte %d\n--- module ---\n%s",
+					fragment,
+					offset,
+					llText,
+				)
+			}
+			offset += found + len(fragment)
+		}
 	}
 }

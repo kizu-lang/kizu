@@ -536,6 +536,9 @@ pub fn code_op_ptr_store_slice() -> i64 {
 // or past the loop, WHILE_END closes the body back to the condition block. Each
 // carries the WHILE_BEGIN tape index so the renderer's labels match without a
 // render-time block stack.
+// WHILE_BEGIN carries the loop begin index and the defer-stack lower bound for
+// break/continue cleanup. WHILE_COND / WHILE_END carry the begin index so labels
+// stay stable after condition/body records are inserted.
 pub fn code_op_while_begin() -> i64 {
     return 60;
 }
@@ -552,7 +555,8 @@ pub fn code_op_while_end() -> i64 {
 // seeds the induction slot from the start value and opens the condition block
 // (loading the slot and comparing against the end value), FOR_END emits the
 // latch (increment the slot) and closes the loop. FOR_BEGIN carries the temp
-// value ids its load/compare use; FOR_END carries the temp ids its latch uses.
+// value ids its load/compare use plus the defer-stack lower bound for loop exits;
+// FOR_END carries the temp ids its latch uses.
 pub fn code_op_for_begin() -> i64 {
     return 70;
 }
@@ -561,9 +565,9 @@ pub fn code_op_for_end() -> i64 {
     return 73;
 }
 
-// Break/continue opcodes carry the enclosing loop's begin index and its loop
-// kind (0 = while, 1 = for) so the renderer targets the right exit/continue
-// label; for loops continue at their latch, while loops at their condition.
+// Break/continue opcodes carry the target loop's begin index and its loop kind
+// (0 = while, 1 = for). Lowering emits any normal defers whose scopes are exited
+// before the branch, and the renderer targets the right exit/continue label.
 pub fn code_op_break() -> i64 {
     return 80;
 }
@@ -846,6 +850,61 @@ pub fn code_op_try_call_owned_string() -> i64 {
     return 146;
 }
 
+// DEFER_DEINIT / ERRDEFER_DEINIT record cleanup stack entries. They are inert
+// in normal render flow; error propagation renderers scan active records and
+// emit the deinit calls inside their fail blocks. ERRDEFER_SCOPE_END closes the
+// active interval for records declared at or after its lower-bound tape index.
+pub fn code_op_errdefer_deinit() -> i64 {
+    return 147;
+}
+
+pub fn code_op_errdefer_scope_end() -> i64 {
+    return 148;
+}
+
+pub fn code_op_defer_deinit() -> i64 {
+    return 149;
+}
+
+// TRY_PATH_JOIN / TRY_PATH_CLEAN lower std::path::join / clean into owned
+// String-producing helpers: JOIN is 'op dst allocator left_slice right_slice',
+// CLEAN is 'op dst allocator path_slice'. Both render through '%kizu.error.owned'.
+pub fn code_op_try_path_join() -> i64 {
+    return 150;
+}
+
+pub fn code_op_try_path_clean() -> i64 {
+    return 151;
+}
+
+// ARRAY_AT_MUT bounds-checks an Array<T> index and yields a pointer to the
+// element storage: 'op dst receiver_value index_value element_kind'. It shares
+// the ARRAY_SET/GET runtime check path and leaves load/store semantics to the
+// mutable-borrow deref path.
+pub fn code_op_try_array_at_mut() -> i64 {
+    return 152;
+}
+
+// TRY_CALL_TYPED_ERROR_* mirrors TRY_CALL/TRY_CALL_I64 for functions declared as
+// 'Error!void' or 'Error!i64'. The failure payload is the runtime union aggregate
+// for the concrete error union type, so typed errors do not collapse into the
+// untyped message-slice ABI.
+pub fn code_op_try_call_typed_error_void() -> i64 {
+    return 153;
+}
+
+pub fn code_op_try_call_typed_error_i64() -> i64 {
+    return 154;
+}
+
+// STRING_RESERVE grows an owned String's backing byte storage without changing
+// its length: 'op receiver_value additional_value'. The renderer delegates to
+// kizu_rt_string_reserve so capacity growth stays in the runtime storage module
+// rather than duplicating allocation/copy/free logic in every artifact.
+pub fn code_op_try_string_reserve() -> i64 {
+    return 155;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -932,6 +991,26 @@ pub fn code_return_kind_slice() -> i64 {
 // '%kizu.error.owned' aggregate.
 pub fn code_return_kind_owned_string_err() -> i64 {
     return 902;
+}
+
+fn code_return_kind_owned_array_i64_err() -> i64 {
+    return 903;
+}
+
+fn code_return_kind_owned_array_bool_err() -> i64 {
+    return 904;
+}
+
+fn code_return_kind_owned_array_slice_err() -> i64 {
+    return 905;
+}
+
+fn code_return_kind_typed_error_i64() -> i64 {
+    return 906;
+}
+
+fn code_return_kind_typed_error_void() -> i64 {
+    return 907;
 }
 
 // code_kind_owned marks a '%kizu.owned' runtime handle value (e.g. the io handle
@@ -1057,7 +1136,7 @@ fn code_kind_is_owned_map_enum(kind: i64) -> bool {
     if kind > code_kind_owned_map_enum_base() {
         return false;
     }
-    return kind > code_kind_arena_record_base();
+    return kind > code_kind_owned_array_struct_base();
 }
 
 fn code_kind_owned_map_enum_decl_pos(kind: i64) -> i64 {
@@ -1174,10 +1253,13 @@ pub fn code_kind_is_owned_array(kind: i64) -> bool {
     if kind == code_kind_owned_array_slice() {
         return true;
     }
-    return code_kind_is_owned_array_enum(kind);
+    if code_kind_is_owned_array_enum(kind) {
+        return true;
+    }
+    return code_kind_is_owned_array_struct(kind);
 }
 
-fn code_array_element_kind(array_kind: i64) -> i64 {
+fn code_array_element_kind(code: &var std::array::Array<i64>, array_kind: i64) -> !i64 {
     if array_kind == code_kind_owned_array_i64() {
         return code_kind_i64();
     }
@@ -1190,11 +1272,15 @@ fn code_array_element_kind(array_kind: i64) -> i64 {
     if code_kind_is_owned_array_enum(array_kind) {
         return code_kind_i64();
     }
+    if code_kind_is_owned_array_struct(array_kind) {
+        let record_pos = code_kind_owned_array_struct_record_pos(array_kind);
+        return try struct_param_first_field_kind(code, record_pos);
+    }
     return 0 - 1;
 }
 
-fn code_array_element_size(array_kind: i64) -> i64 {
-    let element_kind = code_array_element_kind(array_kind);
+fn code_array_element_size(code: &var std::array::Array<i64>, array_kind: i64) -> !i64 {
+    let element_kind = try code_array_element_kind(code, array_kind);
     if element_kind == code_kind_i64() {
         return 8;
     }
@@ -1234,14 +1320,50 @@ fn code_kind_owned_array_enum_decl_pos(kind: i64) -> i64 {
     return code_kind_owned_array_enum_base() - kind;
 }
 
+// Array<SingleFieldStruct> stores the single field using the field's ABI, while
+// the value kind exposed by Array.at/get is a STRUCT_PARAM record so '.field'
+// reads stay type-directed and identity-lowered. The encoded record position is
+// the STRUCT_PARAM record, not the original STRUCT_DECL.
+fn code_kind_owned_array_struct_base() -> i64 {
+    return 0 - 700000000;
+}
+
+fn code_kind_owned_array_struct(struct_param_pos: i64) -> i64 {
+    return code_kind_owned_array_struct_base() - struct_param_pos;
+}
+
+fn code_kind_is_owned_array_struct(kind: i64) -> bool {
+    if kind > code_kind_owned_array_struct_base() {
+        return false;
+    }
+    return kind > code_kind_arena_record_base();
+}
+
+fn code_kind_owned_array_struct_record_pos(kind: i64) -> i64 {
+    return code_kind_owned_array_struct_base() - kind;
+}
+
+fn struct_param_first_field_kind(
+    code: &var std::array::Array<i64>,
+    record_pos: i64
+) -> !i64 {
+    return try code.get(record_pos + 4);
+}
+
 // code_array_get_result_kind reports the kinds-array entry for an Array.get
 // result: an enum-element array restores the enum record-backed value kind
 // (struct_base + ENUM_DECL pos, the same kind a plain enum value carries) so the
-// result prints as the variant name, while every other array yields its scalar
-// element kind.
-fn code_array_get_result_kind(receiver_kind: i64) -> i64 {
+// result prints as the variant name; a single-field struct array restores its
+// STRUCT_PARAM record kind so field reads unwrap through the field ABI; every
+// other array yields its scalar element kind.
+fn code_array_get_result_kind(code: &var std::array::Array<i64>, receiver_kind: i64) -> !i64 {
+    if code_kind_is_owned_array_struct(receiver_kind) {
+        let record_pos = code_kind_owned_array_struct_record_pos(receiver_kind);
+        let record_base = code_kind_struct_base();
+        return record_base + record_pos;
+    }
     if !code_kind_is_owned_array_enum(receiver_kind) {
-        return code_array_element_kind(receiver_kind);
+        return try code_array_element_kind(code, receiver_kind);
     }
     let enum_pos = code_kind_owned_array_enum_decl_pos(receiver_kind);
     let record_base = code_kind_struct_base();
@@ -1328,6 +1450,7 @@ fn code_binary_kind_is_comparison(kind: i64) -> bool {
 // code_return_kind classifies a function's declared return type for the tape:
 // 0 = void (empty or 'void'), 1 = i64, 2 = error-union void ('!void'),
 // 3 = error-union i64 ('!i64'), code_return_kind_bool() = bool,
+// code_return_kind_owned_*_err() = '%kizu.error.owned' success payload,
 // record_base + <UNION_DECL position> for a
 // declared union (the runtime aggregate return), record_base + <ENUM_DECL
 // position> for a declared enum (the i64 tag ABI with enum identity),
@@ -1367,6 +1490,14 @@ fn code_return_kind(
     if std::mem::equal_bytes(type_text, "!std::string::String") {
         return code_return_kind_owned_string_err();
     }
+    let array_err = code_error_union_array_return_kind(type_text);
+    if array_err != code_kind_missing() {
+        return array_err;
+    }
+    let typed_err = try code_typed_error_union_return_kind(text, ast, type_node, code);
+    if typed_err != code_kind_missing() {
+        return typed_err;
+    }
     let union_kind = try code_param_union_kind(text, ast, type_node, code);
     if union_kind >= 0 {
         return union_kind;
@@ -1394,7 +1525,100 @@ fn code_return_kind_result_kind(ret_kind: i64) -> i64 {
     if ret_kind == code_return_kind_owned_string_err() {
         return code_kind_owned_string();
     }
+    let array_result = code_error_union_array_result_kind(ret_kind);
+    if array_result != code_kind_missing() {
+        return array_result;
+    }
+    if ret_kind == code_return_kind_typed_error_i64() {
+        return code_kind_i64();
+    }
     return ret_kind;
+}
+
+fn code_error_union_array_return_kind(type_text: []u8) -> i64 {
+    let prefix = "!std::array::Array<";
+    if !std::mem::starts_with(type_text, prefix) {
+        return code_kind_missing();
+    }
+    let text_len = std::mem::len(type_text);
+    let prefix_len = std::mem::len(prefix);
+    if text_len <= prefix_len {
+        return code_kind_missing();
+    }
+    let last = text_len - 1;
+    if type_text[last] != cast<u8>(62) {
+        return code_kind_missing();
+    }
+    let element = type_text[prefix_len..last];
+    if std::mem::equal_bytes(element, "i64") {
+        return code_return_kind_owned_array_i64_err();
+    }
+    if std::mem::equal_bytes(element, "bool") {
+        return code_return_kind_owned_array_bool_err();
+    }
+    if std::mem::equal_bytes(element, "[]u8") {
+        return code_return_kind_owned_array_slice_err();
+    }
+    return code_kind_missing();
+}
+
+fn code_error_union_array_result_kind(ret_kind: i64) -> i64 {
+    if ret_kind == code_return_kind_owned_array_i64_err() {
+        return code_kind_owned_array_i64();
+    }
+    if ret_kind == code_return_kind_owned_array_bool_err() {
+        return code_kind_owned_array_bool();
+    }
+    if ret_kind == code_return_kind_owned_array_slice_err() {
+        return code_kind_owned_array_slice();
+    }
+    return code_kind_missing();
+}
+
+// code_typed_error_union_return_kind classifies 'Error!i64' and 'Error!void'
+// return annotations when Error names a declared union. The run tape uses a
+// shared typed-error ABI whose failure field is a '%kizu.run.union' payload; the
+// checker has already proven that try propagation only crosses matching error
+// union types.
+fn code_typed_error_union_return_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>
+) -> !i64 {
+    let span = code_node_span(text, ast, type_node);
+    let bang = code_typed_error_bang_index(text, span.end, span.start);
+    if bang <= span.start {
+        return code_kind_missing();
+    }
+    let success_start = bang + 1;
+    if success_start >= span.end {
+        return code_kind_missing();
+    }
+    let union_pos = try union_decl_pos_by_span(text, code, span.start, bang, 0);
+    if union_pos < 0 {
+        return code_kind_missing();
+    }
+    let success = text[success_start..span.end];
+    if std::mem::equal_bytes(success, "i64") {
+        return code_return_kind_typed_error_i64();
+    }
+    if std::mem::equal_bytes(success, "void") {
+        return code_return_kind_typed_error_void();
+    }
+    return code_kind_missing();
+}
+
+fn code_typed_error_bang_index(text: []u8, end: i64, index: i64) -> i64 {
+    if index >= end {
+        return 0 - 1;
+    }
+    let bang = cast<u8>(33);
+    if text[index] == bang {
+        return index;
+    }
+    let next = index + 1;
+    return code_typed_error_bang_index(text, end, next);
 }
 
 // code_node_span returns the trimmed (start, end) byte span of a node's source
@@ -2213,6 +2437,7 @@ fn lower_code_scoped_statements(
     next_value: i64
 ) -> !CodeEval {
     let defer_base = defer_records.len();
+    let errdefer_base = code.len();
     let eval = try lower_code_statements(text, ast, decls, statements, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, scope_base, loop_begin, loop_kind, 0, next_value);
     if !eval.ok {
         return code_eval_unsupported(eval.next);
@@ -2221,6 +2446,9 @@ fn lower_code_scoped_statements(
     if !defer_eval.ok {
         return code_eval_unsupported(defer_eval.next);
     }
+    let op_errdefer_scope_end = code_op_errdefer_scope_end();
+    try code.append(op_errdefer_scope_end);
+    try code.append(errdefer_base);
     try scrub_code_locals(local_starts, local_ends, scope_base);
     return code_eval_value(0, defer_eval.next);
 }
@@ -2296,6 +2524,91 @@ fn lower_code_defer_call(
     return code_eval_unsupported(next_value);
 }
 
+fn lower_code_errdefer(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    expr: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(expr);
+    return match node.data {
+        Call(call_node) => try lower_code_errdefer_call(text, ast, decls, call_node.callee, call_node.args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_errdefer_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let node = ast.get(callee);
+    return match node.data {
+        FieldExpr(field_expr) => try lower_code_errdefer_deinit_field(text, ast, decls, field_expr.receiver, field_expr.name, field_expr.namespace, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
+        _ => code_eval_unsupported(next_value),
+    };
+}
+
+fn lower_code_errdefer_deinit_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if namespace {
+        return code_eval_unsupported(next_value);
+    }
+    let method = ast_node_text(text, ast, name);
+    if !std::mem::equal_bytes(method, "deinit") {
+        return code_eval_unsupported(next_value);
+    }
+    if args.len != 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let receiver_eval = try lower_code_expr(text, ast, decls, receiver, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !receiver_eval.ok {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let receiver_kind = try kinds.get(receiver_eval.value_id);
+    if !code_kind_is_owned_resource(receiver_kind) {
+        return code_eval_unsupported(receiver_eval.next);
+    }
+    let op_errdefer_deinit = code_op_errdefer_deinit();
+    try code.append(op_errdefer_deinit);
+    try code.append(receiver_eval.value_id);
+    try code.append(receiver_kind);
+    return code_eval_value(0, receiver_eval.next);
+}
+
 fn append_code_defer_runtime_deinit(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -2355,6 +2668,10 @@ fn append_code_defer_runtime_deinit_field(
     if !code_kind_is_owned_resource(receiver_kind) {
         return code_eval_unsupported(receiver_eval.next);
     }
+    let op_defer_deinit = code_op_defer_deinit();
+    try code.append(op_defer_deinit);
+    try code.append(receiver_eval.value_id);
+    try code.append(receiver_kind);
     let tag = code_defer_runtime_deinit_tag();
     try defer_records.append(tag);
     try defer_records.append(0);
@@ -2518,7 +2835,7 @@ fn lower_code_defer_range_from(
     if record_index < lower_bound {
         return code_eval_unsupported(next_value);
     }
-    let eval = try emit_code_defer_record(code, kinds, defer_records, record_index, next_value);
+    let eval = try emit_code_defer_record(code, kinds, defer_records, record_index, next_value, true);
     if !eval.ok {
         return code_eval_unsupported(eval.next);
     }
@@ -2530,7 +2847,8 @@ fn emit_code_defer_record(
     kinds: &var std::array::Array<i64>,
     defer_records: &var std::array::Array<i64>,
     record_index: i64,
-    next_value: i64
+    next_value: i64,
+    deactivate: bool
 ) -> !CodeEval {
     let active_pos = record_index + 4;
     let active = try defer_records.get(active_pos);
@@ -2540,7 +2858,7 @@ fn emit_code_defer_record(
     let name_start = try defer_records.get(record_index);
     let runtime_tag = code_defer_runtime_deinit_tag();
     if name_start == runtime_tag {
-        return try emit_code_defer_runtime_deinit(code, defer_records, record_index, next_value);
+        return try emit_code_defer_runtime_deinit(code, defer_records, record_index, next_value, deactivate);
     }
     let op_method_call = code_op_method_call();
     try code.append(op_method_call);
@@ -2563,7 +2881,9 @@ fn emit_code_defer_record(
     let args_start = record_index + 7;
     let args_end = args_start + arg_count;
     try copy_code_defer_args(code, defer_records, args_start, args_end);
-    try defer_records.set(active_pos, 0);
+    if deactivate {
+        try defer_records.set(active_pos, 0);
+    }
     try kinds.append(result_kind);
     let after_value = next_value + 1;
     return code_eval_value(next_value, after_value);
@@ -2573,7 +2893,8 @@ fn emit_code_defer_runtime_deinit(
     code: &var std::array::Array<i64>,
     defer_records: &var std::array::Array<i64>,
     record_index: i64,
-    next_value: i64
+    next_value: i64,
+    deactivate: bool
 ) -> !CodeEval {
     let receiver_kind_pos = record_index + 2;
     let receiver_kind = try defer_records.get(receiver_kind_pos);
@@ -2589,9 +2910,52 @@ fn emit_code_defer_runtime_deinit(
         try code.append(receiver_value);
         try code.append(receiver_kind);
     }
-    let active_pos = record_index + 4;
-    try defer_records.set(active_pos, 0);
+    if deactivate {
+        let active_pos = record_index + 4;
+        try defer_records.set(active_pos, 0);
+    }
     return code_eval_value(0, next_value);
+}
+
+// Early exits need the same LIFO cleanup instructions as lexical scope end, but
+// must not consume the compile-time active flags: a sibling branch may still fall
+// through and need the original defer record at the normal scope end.
+fn lower_code_defer_range_for_exit(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
+    lower_bound: i64,
+    next_value: i64
+) -> !CodeEval {
+    let count = defer_records.len();
+    if count <= lower_bound {
+        return code_eval_value(0, next_value);
+    }
+    return try lower_code_defer_range_for_exit_from(code, kinds, defer_records, lower_bound, count, next_value);
+}
+
+fn lower_code_defer_range_for_exit_from(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
+    lower_bound: i64,
+    upper_bound: i64,
+    next_value: i64
+) -> !CodeEval {
+    if upper_bound <= lower_bound {
+        return code_eval_value(0, next_value);
+    }
+    let size_pos = upper_bound - 1;
+    let record_size = try defer_records.get(size_pos);
+    let record_index = upper_bound - record_size;
+    if record_index < lower_bound {
+        return code_eval_unsupported(next_value);
+    }
+    let eval = try emit_code_defer_record(code, kinds, defer_records, record_index, next_value, false);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    return try lower_code_defer_range_for_exit_from(code, kinds, defer_records, lower_bound, record_index, eval.next);
 }
 
 fn copy_code_defer_args(
@@ -2610,8 +2974,8 @@ fn copy_code_defer_args(
     return;
 }
 
-// lower_code_params binds every parameter name to the next sequential value
-// id; the tape owns i64 parameters only, so each declared type must be i64.
+// lower_code_params binds every parameter name to the next sequential value id;
+// code_param_kind owns the supported ABI classification for each declared type.
 fn lower_code_params(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -2868,10 +3232,10 @@ fn union_decl_variant_index(
 }
 
 // code_param_kind classifies a parameter's declared type for the tape: scalar,
-// slice, and supported borrowed map parameters render directly, unions reference
-// their UNION_DECL record, and single-field struct parameters reference a
-// STRUCT_PARAM record so field reads resolve from type metadata instead of
-// source identifier spelling.
+// slice, runtime-owned handles, and supported borrowed map parameters render
+// directly, unions reference their UNION_DECL record, and single-field struct
+// parameters reference a STRUCT_PARAM record so field reads resolve from type
+// metadata instead of source identifier spelling.
 fn code_param_kind(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -2888,6 +3252,12 @@ fn code_param_kind(
     }
     if std::mem::equal_bytes(type_text, "[]u8") {
         return code_kind_slice();
+    }
+    if std::mem::equal_bytes(type_text, "Allocator") {
+        return code_kind_owned();
+    }
+    if std::mem::equal_bytes(type_text, "std::mem::Allocator") {
+        return code_kind_owned();
     }
     // A supported borrow parameter flows on the value tape as its referent
     // handle/value kind. General '&var T' write-back semantics are still
@@ -2920,10 +3290,10 @@ fn code_param_kind(
 
 // read_borrow_referent_kind resolves a read borrow '&T' parameter to the tape
 // kind of its referent 'T' for the scalar/slice kinds that resolve by type text
-// alone (i64, bool, []u8). It also resolves &Map/&var Map<i64> parameters to
-// borrowed map handle kinds with the same runtime ABI as owned maps: shared
-// borrows can read, mutable borrows can perform interior mutation, and neither
-// kind is an owned resource for deinit.
+// alone (i64, bool, []u8). It also resolves handle-backed borrows: &Map/&var
+// Map<i64> parameters keep the map runtime ABI, and &var std::string::String
+// keeps the owned String handle ABI because mutations happen inside the runtime
+// storage object behind the handle.
 fn read_borrow_referent_kind(type_text: []u8) -> i64 {
     let length = std::mem::len(type_text);
     if length < 2 {
@@ -2976,19 +3346,36 @@ fn mut_borrow_map_referent_kind(referent: []u8) -> i64 {
     return 0 - 1;
 }
 
-// mut_borrow_referent_kind resolves a '&var T' referent ('var T'): a supported
-// Map handle keeps the interior-mutation handle ABI, while a scalar 'i64' takes
-// the new pointer write-back kind. Anything else stays -1 (unchanged).
+// mut_borrow_referent_kind resolves a '&var T' referent ('var T'): supported
+// handle-backed resources keep their runtime handle ABI, while i64 and []u8
+// locals use pointer write-back slots. Anything else stays -1 (unchanged).
 fn mut_borrow_referent_kind(referent: []u8) -> i64 {
     let map_kind = mut_borrow_map_referent_kind(referent);
     if map_kind >= 0 {
         return map_kind;
+    }
+    let handle_kind = mut_borrow_handle_referent_kind(referent);
+    if handle_kind >= 0 {
+        return handle_kind;
     }
     let slice_kind = mut_borrow_slice_referent_kind(referent);
     if slice_kind >= 0 {
         return slice_kind;
     }
     return mut_borrow_scalar_referent_kind(referent);
+}
+
+// mut_borrow_handle_referent_kind resolves mutable borrows of runtime handles
+// whose mutation is interior to the runtime object. A String handle is a
+// '%kizu.owned' value pointing at '%kizu.rt.string'; append/clear update that
+// pointee, so passing the handle by value preserves caller-visible mutation.
+fn mut_borrow_handle_referent_kind(referent: []u8) -> i64 {
+    let referent_len = std::mem::len(referent);
+    let unwrapped = referent[4..referent_len];
+    if std::mem::equal_bytes(unwrapped, "std::string::String") {
+        return code_kind_owned_string();
+    }
+    return 0 - 1;
 }
 
 // mut_borrow_slice_referent_kind resolves a '&var []u8' referent ('var []u8') to
@@ -3268,12 +3655,13 @@ fn lower_code_statement(
         ExprStmt(expr_stmt) => try lower_code_expr_statement(text, ast, decls, expr_stmt.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         Return(return_node) => try lower_code_return_with_defers(text, ast, decls, return_node.value, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, next_value),
         Defer(defer_node) => try lower_code_defer(text, ast, decls, defer_node.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, next_value),
+        ErrDefer(err_defer_node) => try lower_code_errdefer(text, ast, decls, err_defer_node.expr, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         If(if_node) => try lower_code_if(text, ast, decls, if_node.condition, if_node.then_block, if_node.else_block, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, loop_begin, loop_kind, next_value),
         Match(match_node) => try lower_code_match(text, ast, decls, match_node.value, match_node.arms, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, loop_begin, loop_kind, next_value),
         While(while_node) => try lower_code_while(text, ast, decls, while_node.label, while_node.condition, while_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, next_value),
         For(for_node) => try lower_code_for(text, ast, decls, for_node.label, for_node.name, for_node.start, for_node.end, for_node.body, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, next_value),
-        Break(break_node) => try lower_code_break(text, ast, break_node.label, code, local_starts, local_ends, local_values, locals_base, loop_begin, loop_kind, next_value),
-        Continue(continue_node) => try lower_code_continue(text, ast, continue_node.label, code, local_starts, local_ends, local_values, locals_base, loop_begin, loop_kind, next_value),
+        Break(break_node) => try lower_code_break(text, ast, break_node.label, code, kinds, local_starts, local_ends, local_values, defer_records, locals_base, loop_begin, loop_kind, next_value),
+        Continue(continue_node) => try lower_code_continue(text, ast, continue_node.label, code, kinds, local_starts, local_ends, local_values, defer_records, locals_base, loop_begin, loop_kind, next_value),
         _ => code_eval_unsupported(next_value),
     };
 }
@@ -5031,7 +5419,7 @@ fn lower_code_deref_store_slice(
     kinds: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
-    let slice_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    let slice_eval = try lower_code_slice_store_value(text, code, kinds, value_id, next_value);
     if !slice_eval.ok {
         return code_eval_unsupported(slice_eval.next);
     }
@@ -5041,6 +5429,55 @@ fn lower_code_deref_store_slice(
         return code_eval_unsupported(slice_eval.next);
     }
     return try emit_code_ptr_store_slice(deref_ptr, slice_eval.value_id, code, slice_eval.next);
+}
+
+fn lower_code_slice_store_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let direct = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    if !direct.ok {
+        return code_eval_unsupported(direct.next);
+    }
+    let direct_kind = try kinds.get(direct.value_id);
+    if direct_kind == code_kind_slice() {
+        return direct;
+    }
+    return try lower_code_single_field_struct_slice_value(text, code, kinds, value_id, next_value);
+}
+
+fn lower_code_single_field_struct_slice_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    let value_kind = try kinds.get(value_id);
+    if value_kind < record_base {
+        return code_eval_unsupported(next_value);
+    }
+    let record_pos = value_kind - record_base;
+    let op = try code.get(record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if op != op_struct_lit {
+        return code_eval_unsupported(next_value);
+    }
+    let field_count = try code.get(record_pos + 4);
+    if field_count != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let first_field_value = try code.get(record_pos + 7);
+    let field_eval = try lower_code_arg_slice(text, code, kinds, first_field_value, next_value);
+    let field_kind = try kinds.get(field_eval.value_id);
+    if field_kind != code_kind_slice() {
+        return code_eval_unsupported(field_eval.next);
+    }
+    return field_eval;
 }
 
 // lower_code_slice_var_store materializes the assigned value to a slice and emits
@@ -5534,6 +5971,8 @@ fn lower_code_while(
     let op_while_begin = code_op_while_begin();
     try code.append(op_while_begin);
     try code.append(while_begin_index);
+    let loop_defer_base = defer_records.len();
+    try code.append(loop_defer_base);
     let cond_eval = try lower_code_expr(text, ast, decls, condition, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if !cond_eval.ok {
         return code_eval_unsupported(cond_eval.next);
@@ -5612,6 +6051,8 @@ fn lower_code_for(
     try code.append(end_eval.value_id);
     try code.append(cond_load_value);
     try code.append(cond_cmp_value);
+    let loop_defer_base = defer_records.len();
+    try code.append(loop_defer_base);
     let kind_for = code_loop_kind_for();
     try bind_code_loop_label(text, ast, label, local_starts, local_ends, local_values, for_begin_index, kind_for);
     let body_next = cond_cmp_value + 1;
@@ -5644,9 +6085,11 @@ fn lower_code_break(
     ast: std::kizu::ast::Ast,
     label: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
     locals_base: i64,
     loop_begin: i64,
     loop_kind: i64,
@@ -5654,7 +6097,7 @@ fn lower_code_break(
 ) -> !CodeEval {
     let op_break = code_op_break();
     if is_empty_node(ast, label) {
-        return try emit_code_loop_exit(code, op_break, loop_begin, loop_kind, next_value);
+        return try emit_code_loop_exit_with_defers(code, kinds, defer_records, op_break, loop_begin, loop_kind, next_value);
     }
     let target = try code_loop_label_target(text, ast, label, local_starts, local_ends, local_values, locals_base);
     if target < 0 {
@@ -5662,7 +6105,7 @@ fn lower_code_break(
     }
     let target_begin = code_loop_label_target_begin(target);
     let target_kind = code_loop_label_target_kind(target, target_begin);
-    return try emit_code_loop_exit(code, op_break, target_begin, target_kind, next_value);
+    return try emit_code_loop_exit_with_defers(code, kinds, defer_records, op_break, target_begin, target_kind, next_value);
 }
 
 fn lower_code_continue(
@@ -5670,9 +6113,11 @@ fn lower_code_continue(
     ast: std::kizu::ast::Ast,
     label: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
     local_ends: &var std::array::Array<i64>,
     local_values: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
     locals_base: i64,
     loop_begin: i64,
     loop_kind: i64,
@@ -5680,7 +6125,7 @@ fn lower_code_continue(
 ) -> !CodeEval {
     let op_continue = code_op_continue();
     if is_empty_node(ast, label) {
-        return try emit_code_loop_exit(code, op_continue, loop_begin, loop_kind, next_value);
+        return try emit_code_loop_exit_with_defers(code, kinds, defer_records, op_continue, loop_begin, loop_kind, next_value);
     }
     let target = try code_loop_label_target(text, ast, label, local_starts, local_ends, local_values, locals_base);
     if target < 0 {
@@ -5688,7 +6133,27 @@ fn lower_code_continue(
     }
     let target_begin = code_loop_label_target_begin(target);
     let target_kind = code_loop_label_target_kind(target, target_begin);
-    return try emit_code_loop_exit(code, op_continue, target_begin, target_kind, next_value);
+    return try emit_code_loop_exit_with_defers(code, kinds, defer_records, op_continue, target_begin, target_kind, next_value);
+}
+
+fn emit_code_loop_exit_with_defers(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    defer_records: &var std::array::Array<i64>,
+    op: i64,
+    loop_begin: i64,
+    loop_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    if loop_begin < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let defer_base = try code_loop_defer_base(code, loop_begin, loop_kind);
+    let defer_eval = try lower_code_defer_range_for_exit(code, kinds, defer_records, defer_base, next_value);
+    if !defer_eval.ok {
+        return code_eval_unsupported(defer_eval.next);
+    }
+    return try emit_code_loop_exit(code, op, loop_begin, loop_kind, defer_eval.next);
 }
 
 // emit_code_loop_exit appends one BREAK or CONTINUE record targeting the loop
@@ -5707,6 +6172,18 @@ fn emit_code_loop_exit(
     try code.append(loop_begin);
     try code.append(loop_kind);
     return code_eval_value(0, next_value);
+}
+
+fn code_loop_defer_base(
+    code: &std::array::Array<i64>,
+    loop_begin: i64,
+    loop_kind: i64
+) -> !i64 {
+    let kind_while = code_loop_kind_while();
+    if loop_kind == kind_while {
+        return try code.get(loop_begin + 2);
+    }
+    return try code.get(loop_begin + 7);
 }
 
 // bind_code_loop_label registers a loop's label (when present) as a scoped
@@ -6080,6 +6557,12 @@ fn lower_code_user_call_statement(
     if callee_kind == 3 {
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if callee_kind == code_return_kind_typed_error_void() {
+        return try emit_code_try_call_typed_error_void(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if callee_kind == code_return_kind_typed_error_i64() {
+        return try emit_code_try_call_typed_error_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     return code_eval_unsupported(next_value);
 }
 
@@ -6162,6 +6645,12 @@ fn lower_code_try_call(
     // the TRY_CALL_I64 record still allocates its result id.
     if callee_kind == 3 {
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if callee_kind == code_return_kind_typed_error_void() {
+        return try emit_code_try_call_typed_error_void(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if callee_kind == code_return_kind_typed_error_i64() {
+        return try emit_code_try_call_typed_error_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
 }
@@ -6487,10 +6976,8 @@ fn lower_code_try_string_truncate(
 }
 
 // String.reserve(additional) is a capacity hint that never changes the string's
-// length or bytes, so the lowering is a semantic no-op: it lowers and type-checks
-// the i64 argument (preserving any evaluation it implies) but emits no run-codegen
-// op. A reserve-free artifact renders byte-identical, so skipping the op keeps
-// flip parity without a runtime call.
+// length or bytes, but its capacity is observable through String.capacity().
+// Lower it to the runtime storage helper instead of treating it as a no-op.
 fn lower_code_try_string_reserve(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -6519,6 +7006,10 @@ fn lower_code_try_string_reserve(
     if actual_kind != kind_i64 {
         return code_eval_unsupported(arg_eval.next);
     }
+    let op = code_op_try_string_reserve();
+    try code.append(op);
+    try code.append(receiver_value);
+    try code.append(arg_eval.value_id);
     return code_eval_value(0, arg_eval.next);
 }
 
@@ -6553,23 +7044,8 @@ fn lower_code_try_array_method(
     if !arg_eval.ok {
         return code_eval_unsupported(arg_eval.next);
     }
-    let element_eval = try lower_code_arg_slice(text, code, kinds, arg_eval.value_id, arg_eval.next);
-    let element_kind = code_array_element_kind(receiver_kind);
-    let arg_kind = try kinds.get(element_eval.value_id);
-    if arg_kind != element_kind {
-        // Array<EnumType> instantiates as an i64-tag array (see
-        // code_array_type_arg_kind): an enum element value is its i64
-        // discriminant at runtime, so an enum-typed arg lowers through the
-        // i64 append op. Any other kind mismatch (and struct-backed values,
-        // whose ABI differs) stays unsupported.
-        let arg_is_enum = try code_kind_is_enum_value(code, arg_kind);
-        if element_kind != code_kind_i64() {
-            return code_eval_unsupported(element_eval.next);
-        }
-        if !arg_is_enum {
-            return code_eval_unsupported(element_eval.next);
-        }
-    }
+    let element_eval = try lower_code_array_element_value(text, code, kinds, receiver_kind, arg_eval.value_id, arg_eval.next);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     if element_kind == code_kind_i64() {
         let op_array_append_i64 = code_op_try_array_append_i64();
         try code.append(op_array_append_i64);
@@ -6584,6 +7060,76 @@ fn lower_code_try_array_method(
         try code.append(element_kind);
     }
     return code_eval_value(0, element_eval.next);
+}
+
+fn lower_code_array_element_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    receiver_kind: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let element_kind = try code_array_element_kind(code, receiver_kind);
+    if code_kind_is_owned_array_struct(receiver_kind) {
+        return try lower_code_array_struct_element_value(text, code, kinds, receiver_kind, value_id, element_kind, next_value);
+    }
+    let element_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    let element_value = element_eval.value_id;
+    let element_next = element_eval.next;
+    let value_kind = try kinds.get(element_value);
+    if value_kind == element_kind {
+        return code_eval_value(element_value, element_next);
+    }
+    // Array<EnumType> instantiates as an i64-tag array: an enum element value is
+    // its i64 discriminant at runtime, so it lowers through the i64 element path.
+    let value_is_enum = try code_kind_is_enum_value(code, value_kind);
+    if element_kind != code_kind_i64() {
+        return code_eval_unsupported(element_next);
+    }
+    if !value_is_enum {
+        return code_eval_unsupported(element_next);
+    }
+    return code_eval_value(element_value, element_next);
+}
+
+fn lower_code_array_struct_element_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    receiver_kind: i64,
+    value_id: i64,
+    element_kind: i64,
+    next_value: i64
+) -> !CodeEval {
+    let record_base = code_kind_struct_base();
+    let value_kind = try kinds.get(value_id);
+    let param_pos = code_kind_owned_array_struct_record_pos(receiver_kind);
+    if value_kind == record_base + param_pos {
+        return code_eval_value(value_id, next_value);
+    }
+    if value_kind < record_base {
+        return code_eval_unsupported(next_value);
+    }
+    let value_record_pos = value_kind - record_base;
+    let op = try code.get(value_record_pos);
+    let op_struct_lit = code_op_struct_lit();
+    if op != op_struct_lit {
+        return code_eval_unsupported(next_value);
+    }
+    let field_start = try code.get(param_pos + 2);
+    let field_end = try code.get(param_pos + 3);
+    let field_count = try code.get(value_record_pos + 4);
+    let field_value = try struct_record_field(text, code, value_record_pos, field_count, field_start, field_end, 0);
+    if field_value < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    let field_eval = try lower_code_arg_slice(text, code, kinds, field_value, next_value);
+    let field_kind = try kinds.get(field_eval.value_id);
+    if field_kind != element_kind {
+        return code_eval_unsupported(field_eval.next);
+    }
+    return field_eval;
 }
 
 // lower_code_try_array_set lowers 'try xs.set(i, v)' to ARRAY_SET. The index
@@ -6624,21 +7170,8 @@ fn lower_code_try_array_set(
     if !value_eval.ok {
         return code_eval_unsupported(value_eval.next);
     }
-    let element_eval = try lower_code_arg_slice(text, code, kinds, value_eval.value_id, value_eval.next);
-    let element_kind = code_array_element_kind(receiver_kind);
-    let value_kind = try kinds.get(element_eval.value_id);
-    if value_kind != element_kind {
-        // Mirrors append: Array<EnumType> stores an i64 discriminant, so an
-        // enum-typed value lowers through the i64 element store. Any other kind
-        // mismatch (and non-i64 element arrays) stays unsupported.
-        let value_is_enum = try code_kind_is_enum_value(code, value_kind);
-        if element_kind != kind_i64 {
-            return code_eval_unsupported(element_eval.next);
-        }
-        if !value_is_enum {
-            return code_eval_unsupported(element_eval.next);
-        }
-    }
+    let element_eval = try lower_code_array_element_value(text, code, kinds, receiver_kind, value_eval.value_id, value_eval.next);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     let op_try_array_set = code_op_try_array_set();
     try code.append(op_try_array_set);
     try code.append(receiver_value);
@@ -6813,13 +7346,51 @@ fn emit_code_try_call_void(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let op_try_call = code_op_try_call();
+    return try emit_code_try_call_void_record(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, op_try_call, next_value);
+}
+
+fn emit_code_try_call_typed_error_void(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op_try_call = code_op_try_call_typed_error_void();
+    return try emit_code_try_call_void_record(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, op_try_call, next_value);
+}
+
+fn emit_code_try_call_void_record(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    op_try_call: i64,
+    next_value: i64
+) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
     let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_span.start, callee_span.end, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
-    let op_try_call = code_op_try_call();
     try code.append(op_try_call);
     try code.append(callee_span.start);
     try code.append(callee_span.end);
@@ -6848,13 +7419,51 @@ fn emit_code_try_call_i64(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let op_try_call_i64 = code_op_try_call_i64();
+    return try emit_code_try_call_i64_record(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, op_try_call_i64, next_value);
+}
+
+fn emit_code_try_call_typed_error_i64(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op_try_call_i64 = code_op_try_call_typed_error_i64();
+    return try emit_code_try_call_i64_record(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, op_try_call_i64, next_value);
+}
+
+fn emit_code_try_call_i64_record(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    op_try_call_i64: i64,
+    next_value: i64
+) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
     let args_eval = try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_span.start, callee_span.end, 0, next_value);
     if !args_eval.ok {
         return code_eval_unsupported(args_eval.next);
     }
-    let op_try_call_i64 = code_op_try_call_i64();
     try code.append(op_try_call_i64);
     try code.append(args_eval.next);
     try code.append(callee_span.start);
@@ -6871,12 +7480,10 @@ fn emit_code_try_call_i64(
     return code_eval_value(result_value, after_value);
 }
 
-// emit_code_try_call_owned_string lowers 'try <!std::string::String callee>(...)'
-// in value position: it lays down the same call record as TRY_CALL_I64 but tags
-// the op TRY_CALL_OWNED_STRING and the result value-kind owned-String, so the
-// renderer unwraps the '%kizu.error.owned' result and the binding takes sole
-// ownership of the moved-out String handle.
-fn emit_code_try_call_owned_string(
+// emit_code_try_call_error_owned lowers 'try <callee>(...)' when the callee
+// returns a '%kizu.error.owned' aggregate. The caller supplies the success
+// value-kind, so the same record covers owned String and owned Array handles.
+fn emit_code_try_call_error_owned(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
@@ -6889,7 +7496,8 @@ fn emit_code_try_call_owned_string(
     local_values: &var std::array::Array<i64>,
     args_scratch: &var std::array::Array<i64>,
     locals_base: i64,
-    next_value: i64
+    next_value: i64,
+    result_kind: i64
 ) -> !CodeEval {
     let callee_span = code_node_span(text, ast, callee);
     let scratch_base = try args_scratch.get(0);
@@ -6907,8 +7515,7 @@ fn emit_code_try_call_owned_string(
     let scratch_bound = scratch_base + arg_count;
     try copy_code_args(code, args_scratch, scratch_base, scratch_bound);
     try args_scratch.set(0, scratch_base);
-    let kind_owned_string = code_kind_owned_string();
-    try kinds.append(kind_owned_string);
+    try kinds.append(result_kind);
     let result_value = args_eval.next;
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
@@ -7006,11 +7613,34 @@ fn lower_code_return_with_defers(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
-    let defer_eval = try lower_code_defer_range(text, ast, decls, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records, locals_base, 0, next_value);
+    if code_return_value_is_error_call(text, ast, value) {
+        return try lower_code_return(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    let defer_eval = try lower_code_defer_range_for_exit(code, kinds, defer_records, 0, next_value);
     if !defer_eval.ok {
         return code_eval_unsupported(defer_eval.next);
     }
     return try lower_code_return(text, ast, decls, value, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, defer_eval.next);
+}
+
+fn code_return_value_is_error_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(value);
+    return match node.data {
+        Call(call_node) => code_call_is_error(text, ast, call_node.callee),
+        _ => false,
+    };
+}
+
+fn code_call_is_error(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId
+) -> bool {
+    return std::mem::equal_bytes(ast_node_text(text, ast, callee), "error");
 }
 
 fn lower_code_return(
@@ -7758,12 +8388,12 @@ fn lower_code_prefix(
     if op == std::kizu::ast::prefix_borrow() {
         return try lower_code_expr(text, ast, decls, right, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
-    // A mutable borrow '&var <var>' of an i64 or '[]u8' var passes the address of
-    // the caller's var slot (a 'ptr' value) so the callee writes back through it.
-    // Only a bare var that owns an alloca slot is addressable; anything else (a
-    // let, a temporary) stays unsupported and falls through to the diagnostic.
+    // A mutable borrow '&var <var>' lowers by referent ABI: i64/[]u8 vars pass
+    // the address of the caller slot, while owned String handles pass the handle
+    // value because its runtime methods mutate storage behind the handle. Other
+    // operands stay unsupported and fall through to the diagnostic.
     if op == std::kizu::ast::prefix_mut_borrow() {
-        return try lower_code_mut_borrow_scalar(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
+        return try lower_code_mut_borrow_value(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
     }
     // A unary minus '-<expr>' lowers as '0 - <expr>' through the existing BINARY
     // sub path, so the renderer needs no change. A bool/slice operand has no i64
@@ -7831,12 +8461,12 @@ fn lower_code_neg(
     return code_eval_value(result_value, after_value);
 }
 
-// lower_code_mut_borrow_scalar lowers '&var <var>' for an i64 or '[]u8' var: it
-// resolves the operand to its alloca slot and emits VAR_ADDR (i64 slot, kind
-// code_kind_mut_borrow_i64) or VAR_ADDR_SLICE (slice slot, kind
-// code_kind_mut_borrow_slice), yielding a 'ptr' value. A non-var operand has no
-// slot and stays unsupported, the same safe fallback the value model used before.
-fn lower_code_mut_borrow_scalar(
+// lower_code_mut_borrow_value lowers '&var <var>' by the referent's storage ABI:
+// i64 and []u8 vars resolve to alloca-slot addresses (VAR_ADDR/VAR_ADDR_SLICE),
+// while owned String handles keep their value ABI because append/clear mutate the
+// runtime object behind the handle. A non-addressable operand stays unsupported,
+// the same safe fallback the value model used before.
+fn lower_code_mut_borrow_value(
     text: []u8,
     ast: std::kizu::ast::Ast,
     right: std::kizu::ast::NodeId,
@@ -7853,10 +8483,38 @@ fn lower_code_mut_borrow_scalar(
         return try emit_code_var_addr_slice(slice_slot, code, kinds, next_value);
     }
     let slot = try code_var_slot_of(text, ast, right, local_starts, local_ends, local_values, locals_base);
-    if slot < 0 {
-        return code_eval_unsupported(next_value);
+    if slot >= 0 {
+        return try emit_code_var_addr(slot, code, kinds, next_value);
     }
-    return try emit_code_var_addr(slot, code, kinds, next_value);
+    return try lower_code_mut_borrow_owned_string_handle(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
+}
+
+// lower_code_mut_borrow_owned_string_handle accepts '&var <local String>' without
+// adding a pointer slot: '%kizu.owned' carries the address of the runtime string
+// object, and String mutation ops update that object. Reassigning through the
+// borrow remains unsupported by the assignment path; this only enables interior
+// String mutation methods such as append_bytes and clear.
+fn lower_code_mut_borrow_owned_string_handle(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    right: std::kizu::ast::NodeId,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    let eval = try lower_code_var(text, ast, right, code, kinds, local_starts, local_ends, local_values, locals_base, next_value);
+    if !eval.ok {
+        return code_eval_unsupported(eval.next);
+    }
+    let kind = try kinds.get(eval.value_id);
+    if kind != code_kind_owned_string() {
+        return code_eval_unsupported(eval.next);
+    }
+    return eval;
 }
 
 // emit_code_var_addr appends a VAR_ADDR record producing the address of a var
@@ -9704,7 +10362,7 @@ fn lower_code_array_new(
     if kind_array == code_no_array_kind() {
         return code_eval_unsupported(next_value);
     }
-    let element_size = code_array_element_size(kind_array);
+    let element_size = try code_array_element_size(code, kind_array);
     return try lower_code_storage_new(text, ast, decls, args, kind_array, element_size, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
 }
 
@@ -9770,7 +10428,45 @@ fn code_array_type_arg_kind(
     if enum_pos >= 0 {
         return code_kind_owned_array_enum(enum_pos);
     }
+    let struct_pos = try struct_decl_pos_by_span(text, code, span.start, span.end, 0);
+    if struct_pos >= 0 {
+        return try append_code_owned_array_struct_kind(code, struct_pos);
+    }
     return 0 - 1;
+}
+
+fn append_code_owned_array_struct_kind(
+    code: &var std::array::Array<i64>,
+    struct_pos: i64
+) -> !i64 {
+    let field_count = try code.get(struct_pos + 3);
+    if field_count != 1 {
+        return code_no_array_kind();
+    }
+    let field_name_start = try code.get(struct_pos + 4);
+    let field_name_end = try code.get(struct_pos + 5);
+    let field_kind = try code.get(struct_pos + 6);
+    if !code_array_struct_field_kind_supported(field_kind) {
+        return code_no_array_kind();
+    }
+    let record_pos = code.len();
+    let op_struct_param = code_op_struct_param();
+    try code.append(op_struct_param);
+    try code.append(1);
+    try code.append(field_name_start);
+    try code.append(field_name_end);
+    try code.append(field_kind);
+    return code_kind_owned_array_struct(record_pos);
+}
+
+fn code_array_struct_field_kind_supported(field_kind: i64) -> bool {
+    if field_kind == code_kind_i64() {
+        return true;
+    }
+    if field_kind == code_kind_bool() {
+        return true;
+    }
+    return field_kind == code_kind_slice();
 }
 
 fn lower_code_arena_new(
@@ -11065,7 +11761,7 @@ fn lower_code_array_get(
     if index_kind != kind_i64 {
         return code_eval_unsupported(index_eval.next);
     }
-    let element_kind = code_array_element_kind(receiver_kind);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     if element_kind == kind_i64 {
         let op_array_get_i64 = code_op_array_get_i64();
         try code.append(op_array_get_i64);
@@ -11081,7 +11777,7 @@ fn lower_code_array_get(
         try code.append(index_eval.value_id);
         try code.append(element_kind);
     }
-    let result_kind = code_array_get_result_kind(receiver_kind);
+    let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let result_value = index_eval.next;
     let after_value = result_value + 1;
@@ -11922,6 +12618,12 @@ fn lower_code_try_call_expr(
     if std::mem::equal_bytes(callee_text, "std::mem::slice") {
         return try lower_code_mem_slice(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if std::mem::equal_bytes(callee_text, "std::path::join") {
+        return try lower_code_try_path_join(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
+    if std::mem::equal_bytes(callee_text, "std::path::clean") {
+        return try lower_code_try_path_clean(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     let box_kind = try code_callee_box_kind(text, ast, callee);
     if box_kind >= 0 {
         return try lower_code_try_box_call_expr(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
@@ -11937,12 +12639,140 @@ fn lower_code_try_call_expr(
     if callee_kind == 3 {
         return try emit_code_try_call_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
+    if callee_kind == code_return_kind_typed_error_i64() {
+        return try emit_code_try_call_typed_error_i64(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     // A 'try <callee>(...)' of a declared '!std::string::String' function yields
     // the moved-out owned-String success payload.
     if callee_kind == code_return_kind_owned_string_err() {
-        return try emit_code_try_call_owned_string(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+        return try emit_code_try_call_error_owned(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value, code_kind_owned_string());
+    }
+    let owned_array_kind = code_error_union_array_result_kind(callee_kind);
+    if owned_array_kind != code_kind_missing() {
+        return try emit_code_try_call_error_owned(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value, owned_array_kind);
     }
     return code_eval_unsupported(next_value);
+}
+
+fn lower_code_try_path_join(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 3 {
+        return code_eval_unsupported(next_value);
+    }
+    let allocator_arg = try ast.child_at(args, 0);
+    let allocator_eval = try lower_code_expr(text, ast, decls, allocator_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !allocator_eval.ok {
+        return code_eval_unsupported(allocator_eval.next);
+    }
+    let allocator_kind = try kinds.get(allocator_eval.value_id);
+    if allocator_kind != code_kind_owned() {
+        return code_eval_unsupported(allocator_eval.next);
+    }
+    let left_arg = try ast.child_at(args, 1);
+    let left_eval = try lower_code_expr(text, ast, decls, left_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, allocator_eval.next);
+    if !left_eval.ok {
+        return code_eval_unsupported(left_eval.next);
+    }
+    let left_slice = try lower_code_arg_slice(text, code, kinds, left_eval.value_id, left_eval.next);
+    if !left_slice.ok {
+        return code_eval_unsupported(left_slice.next);
+    }
+    let right_arg = try ast.child_at(args, 2);
+    let right_eval = try lower_code_expr(text, ast, decls, right_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, left_slice.next);
+    if !right_eval.ok {
+        return code_eval_unsupported(right_eval.next);
+    }
+    let right_slice = try lower_code_arg_slice(text, code, kinds, right_eval.value_id, right_eval.next);
+    if !right_slice.ok {
+        return code_eval_unsupported(right_slice.next);
+    }
+    return try emit_code_try_path_join(code, kinds, allocator_eval.value_id, left_slice.value_id, right_slice.value_id, right_slice.next);
+}
+
+fn lower_code_try_path_clean(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 2 {
+        return code_eval_unsupported(next_value);
+    }
+    let allocator_arg = try ast.child_at(args, 0);
+    let allocator_eval = try lower_code_expr(text, ast, decls, allocator_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !allocator_eval.ok {
+        return code_eval_unsupported(allocator_eval.next);
+    }
+    let allocator_kind = try kinds.get(allocator_eval.value_id);
+    if allocator_kind != code_kind_owned() {
+        return code_eval_unsupported(allocator_eval.next);
+    }
+    let path_arg = try ast.child_at(args, 1);
+    let path_eval = try lower_code_expr(text, ast, decls, path_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, allocator_eval.next);
+    if !path_eval.ok {
+        return code_eval_unsupported(path_eval.next);
+    }
+    let path_slice = try lower_code_arg_slice(text, code, kinds, path_eval.value_id, path_eval.next);
+    if !path_slice.ok {
+        return code_eval_unsupported(path_slice.next);
+    }
+    return try emit_code_try_path_clean(code, kinds, allocator_eval.value_id, path_slice.value_id, path_slice.next);
+}
+
+fn emit_code_try_path_join(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    allocator_value: i64,
+    left_value: i64,
+    right_value: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = code_op_try_path_join();
+    try code.append(op);
+    try code.append(next_value);
+    try code.append(allocator_value);
+    try code.append(left_value);
+    try code.append(right_value);
+    try kinds.append(code_kind_owned_string());
+    let after = next_value + 1;
+    return code_eval_value(next_value, after);
+}
+
+fn emit_code_try_path_clean(
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    allocator_value: i64,
+    path_value: i64,
+    next_value: i64
+) -> !CodeEval {
+    let op = code_op_try_path_clean();
+    try code.append(op);
+    try code.append(next_value);
+    try code.append(allocator_value);
+    try code.append(path_value);
+    try kinds.append(code_kind_owned_string());
+    let after = next_value + 1;
+    return code_eval_value(next_value, after);
 }
 
 fn lower_code_try_box_call_expr(
@@ -12057,7 +12887,8 @@ fn lower_code_try_runtime_field_expr_call(
     // value itself, so a read-use 'at' lowers exactly like 'get' (the write-use
     // 'r.* = v' path is out of scope and never reaches this element lowering).
     let method_is_at = std::mem::equal_bytes(method, "at");
-    let method_supported = method_is_get or method_is_pop or method_is_at;
+    let method_is_at_mut = std::mem::equal_bytes(method, "at_mut");
+    let method_supported = method_is_get or method_is_pop or method_is_at or method_is_at_mut;
     if !method_supported {
         return code_eval_unsupported(next_value);
     }
@@ -12067,9 +12898,9 @@ fn lower_code_try_runtime_field_expr_call(
     }
     let receiver_kind = try kinds.get(receiver_eval.value_id);
     if code_kind_is_owned_array(receiver_kind) {
-        return try lower_code_try_array_get_or_pop(text, ast, decls, receiver_eval.value_id, receiver_kind, method_is_pop, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+        return try lower_code_try_array_get_or_pop(text, ast, decls, receiver_eval.value_id, receiver_kind, method_is_pop, method_is_at_mut, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
-    if method_is_pop or method_is_at {
+    if method_is_pop or method_is_at or method_is_at_mut {
         return code_eval_unsupported(receiver_eval.next);
     }
     if !code_kind_is_map_handle(receiver_kind) {
@@ -12085,6 +12916,7 @@ fn lower_code_try_array_get_or_pop(
     receiver_value: i64,
     receiver_kind: i64,
     method_is_pop: bool,
+    method_is_at_mut: bool,
     args: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -12095,10 +12927,69 @@ fn lower_code_try_array_get_or_pop(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    if method_is_at_mut {
+        return try lower_code_try_array_at_mut(text, ast, decls, receiver_value, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    }
     if method_is_pop {
         return try lower_code_try_array_pop(receiver_value, receiver_kind, args, code, kinds, next_value);
     }
     return try lower_code_try_array_get(text, ast, decls, receiver_value, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+}
+
+fn lower_code_try_array_at_mut(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    receiver_value: i64,
+    receiver_kind: i64,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let index_arg = try ast.child_at(args, 0);
+    let index_eval = try lower_code_expr(text, ast, decls, index_arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
+    if !index_eval.ok {
+        return code_eval_unsupported(index_eval.next);
+    }
+    let kind_i64 = code_kind_i64();
+    let index_kind = try kinds.get(index_eval.value_id);
+    if index_kind != kind_i64 {
+        return code_eval_unsupported(index_eval.next);
+    }
+    let element_kind = try code_array_element_kind(code, receiver_kind);
+    let borrow_kind = code_array_mut_borrow_kind(element_kind);
+    if borrow_kind < 0 {
+        return code_eval_unsupported(index_eval.next);
+    }
+    let result_value = index_eval.next;
+    let op = code_op_try_array_at_mut();
+    try code.append(op);
+    try code.append(result_value);
+    try code.append(receiver_value);
+    try code.append(index_eval.value_id);
+    try code.append(element_kind);
+    try kinds.append(borrow_kind);
+    let after_value = result_value + 1;
+    return code_eval_value(result_value, after_value);
+}
+
+fn code_array_mut_borrow_kind(element_kind: i64) -> i64 {
+    if element_kind == code_kind_i64() {
+        return code_kind_mut_borrow_i64();
+    }
+    if element_kind == code_kind_slice() {
+        return code_kind_mut_borrow_slice();
+    }
+    return 0 - 1;
 }
 
 fn lower_code_try_array_pop(
@@ -12113,13 +13004,13 @@ fn lower_code_try_array_pop(
         return code_eval_unsupported(next_value);
     }
     let result_value = next_value;
-    let element_kind = code_array_element_kind(receiver_kind);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     let op_try_array_pop = code_op_try_array_pop();
     try code.append(op_try_array_pop);
     try code.append(result_value);
     try code.append(receiver_value);
     try code.append(element_kind);
-    let result_kind = code_array_get_result_kind(receiver_kind);
+    let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
@@ -12155,7 +13046,7 @@ fn lower_code_try_array_get(
         return code_eval_unsupported(index_eval.next);
     }
     let result_value = index_eval.next;
-    let element_kind = code_array_element_kind(receiver_kind);
+    let element_kind = try code_array_element_kind(code, receiver_kind);
     if element_kind == kind_i64 {
         let op_try_array_get_i64 = code_op_try_array_get_i64();
         try code.append(op_try_array_get_i64);
@@ -12171,7 +13062,7 @@ fn lower_code_try_array_get(
         try code.append(index_eval.value_id);
         try code.append(element_kind);
     }
-    let result_kind = code_array_get_result_kind(receiver_kind);
+    let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
@@ -12501,9 +13392,9 @@ fn lower_code_args(
     return try lower_code_args(text, ast, decls, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, scratch_base, callee_name_start, callee_name_end, after, arg_eval.next);
 }
 
-// lower_code_mut_borrow_arg_chain marshals one scalar '&var i64' argument as a
-// caller-slot pointer, records it in the scratch row, and continues lowering the
-// remaining arguments. It is a single-statement tail of lower_code_args's
+// lower_code_mut_borrow_arg_chain marshals one pointer-backed '&var' argument as
+// a caller-slot pointer, records it in the scratch row, and continues lowering
+// the remaining arguments. It is a single-statement tail of lower_code_args's
 // mut-borrow branch so each then-body stays a lone 'return try <call>'.
 fn lower_code_mut_borrow_arg_chain(
     text: []u8,
@@ -12535,10 +13426,11 @@ fn lower_code_mut_borrow_arg_chain(
 }
 
 // code_no_user_callee is the sentinel callee-name-start a method call passes to
-// lower_code_args so the '&var i64' caller-slot probe is skipped (method params
-// are out of this PR's scope). It is a call, not an inline '0 - 1', so the
-// argument the call site forwards stays a plain local (the compiled call-arg
-// lowering rejects a bare arithmetic literal as a positional argument).
+// lower_code_args so the pointer-backed '&var' caller-slot probe is skipped
+// (method params are out of this PR's scope). It is a call, not an inline
+// '0 - 1', so the argument the call site forwards stays a plain local (the
+// compiled call-arg lowering rejects a bare arithmetic literal as a positional
+// argument).
 fn code_no_user_callee() -> i64 {
     return 0 - 1;
 }
@@ -12562,10 +13454,10 @@ fn code_arg_callee_param_kind(
     return try code_callee_param_kind(text, ast, decls, callee_name_start, callee_name_end, param_index, 0);
 }
 
-// lower_code_mut_borrow_call_arg marshals one '&var i64' argument: a bare var
-// takes its slot address (VAR_ADDR), and an explicit '&var <var>' prefix lowers
-// through the prefix arm (also VAR_ADDR). Anything else has no addressable slot
-// and stays unsupported.
+// lower_code_mut_borrow_call_arg marshals one pointer-backed '&var' argument: a
+// bare var takes its slot address, and an explicit '&var <var>' prefix lowers
+// through the prefix arm. Handle-backed mutable borrows such as String skip this
+// branch because their parameter kind is the handle kind, not a pointer kind.
 fn lower_code_mut_borrow_call_arg(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -12582,7 +13474,7 @@ fn lower_code_mut_borrow_call_arg(
 ) -> !CodeEval {
     let node = ast.get(arg);
     return match node.data {
-        Var(var_node) => try lower_code_mut_borrow_scalar(text, ast, arg, code, kinds, local_starts, local_ends, local_values, locals_base, next_value),
+        Var(var_node) => try lower_code_mut_borrow_value(text, ast, arg, code, kinds, local_starts, local_ends, local_values, locals_base, next_value),
         Prefix(prefix_node) => try lower_code_expr(text, ast, decls, arg, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value),
         _ => code_eval_unsupported(next_value),
     };

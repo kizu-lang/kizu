@@ -217,6 +217,47 @@ fn main() {
 	}
 }
 
+// TestLowerExhaustiveMatchExpressionMissIsUnreachable keeps the implicit
+// impossible miss edge out of the match value phi predecessors.
+func TestLowerExhaustiveMatchExpressionMissIsUnreachable(t *testing.T) {
+	module := lowerSource(t, `enum Choice {
+    A,
+    B,
+}
+
+fn choose(choice: Choice) -> i64 {
+    return match choice {
+        A => 1,
+        B => 2,
+    };
+}`)
+	fn := module.Functions[0]
+	var end *Block
+	for _, block := range fn.Blocks {
+		if strings.HasPrefix(block.Name, "match.end") {
+			end = block
+			break
+		}
+	}
+	if end == nil {
+		t.Fatalf("missing match end block:\n%s", Dump(module))
+	}
+	foundUnreachable := false
+	for _, block := range fn.Blocks {
+		if strings.HasPrefix(block.Name, "match.unreachable") &&
+			block.Terminator.Op == "unreachable" {
+			foundUnreachable = true
+		}
+		if strings.HasPrefix(block.Name, "match.check") &&
+			block.Terminator.Else == end.Name {
+			t.Fatalf("match miss edge still targets value phi block:\n%s", Dump(module))
+		}
+	}
+	if !foundUnreachable {
+		t.Fatalf("missing unreachable match miss block:\n%s", Dump(module))
+	}
+}
+
 // TestLowerWhileBreakAssignmentsFeedExitPhis keeps values assigned before an
 // explicit break visible after the loop.
 func TestLowerWhileBreakAssignmentsFeedExitPhis(t *testing.T) {

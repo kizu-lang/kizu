@@ -1011,7 +1011,8 @@ func assertCompiledClosureParamsDerivation(t *testing.T, cli string) {
 	closureRequired := []string{
 		"var params_spec = std::string::String(std::mem::page_allocator());",
 		"defer params_spec.deinit();",
-		"compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name)",
+		"compiled_abi_params::append_params_spec_indexed(",
+		"lookup_index, &var params_spec, ir_bytes, name",
 		"if params_spec.len() == 0 and !allow_empty_params {",
 		"compiled closure: missing signature params",
 		"let params_spec_bytes = params_spec.as_bytes();",
@@ -2342,7 +2343,7 @@ func assertCompiledMirPaths(t *testing.T, compiled string) {
 // lowered_main_print_program, plus the unsupported_program / none_value /
 // main_print_payload / metadata_for_program roots) is now derived through the
 // shared compiled closure BFS, so cli_llvm delegates to
-// append_codegen_reachable_compiled_functions instead of carrying a handwritten
+// append_codegen_reachable_compiled_functions_profiled instead of carrying a handwritten
 // mangled symbol per member. The dedicated derivation is pinned in
 // selfhost_codegen_compiled_closure_test.go.
 func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
@@ -2350,7 +2351,7 @@ func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
 	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto_indexed(") {
 		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto_indexed")
 	}
-	delegation := "try append_codegen_reachable_compiled_functions(out, lookup_index, ir_bytes);"
+	delegation := "try append_codegen_reachable_compiled_functions_profiled("
 	if !strings.Contains(cliLlvm, delegation) {
 		t.Fatal("cli_llvm does not delegate to the shared codegen compiled closure")
 	}
@@ -3808,7 +3809,7 @@ func assertExecutableIRThreading(
 		}
 	}
 	for _, fragment := range []string{
-		"try cli_llvm::append_functions(out, lookup_index, ir_bytes)",
+		"try cli_llvm::append_functions(\n        out,\n        lookup_index,\n        ir_bytes,",
 		"try cli_ast_boundary_llvm::append_functions(out)",
 		"try cli_test_ast_llvm::append_functions(out)",
 		"try cli_test_llvm::append_functions(out, ir_bytes)",

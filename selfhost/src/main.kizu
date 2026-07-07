@@ -13,6 +13,7 @@ import selfhost::parser::format;
 import selfhost::resolver;
 import selfhost::source;
 import selfhost::source::loader;
+import selfhost::stage_profile;
 import selfhost::types;
 
 struct CachedStageFile {
@@ -422,33 +423,154 @@ fn stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact {
 }
 
 fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact {
+    var profile_out = std::string::String(allocator);
+    defer profile_out.deinit();
+    let profile = try stage_profile::start(&var profile_out);
+    try stage_profile::flush(&profile, &var profile_out, io);
+
+    let load_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "load_selfhost_sources");
     var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
     defer files.deinit();
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "load_selfhost_sources",
+        load_started
+    );
+
+    let resolve_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "resolve_sources");
     let resolved = try resolver::resolve_sources(allocator, files);
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "resolve_sources",
+        resolve_started
+    );
+
+    let check_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "check_sources");
     let typed = try types::check_sources(allocator, files, resolved);
+    try stage_profile::end(&profile, &var profile_out, io, "check_sources", check_started);
+
+    let ownership_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "ownership_check");
     let checked = try ownership::check_package(allocator, files, typed);
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "ownership_check",
+        ownership_started
+    );
     if checked.diagnostics != 0 {
         return error("selfhost check failed");
     }
 
+    let cache_input_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "stage_cache_input");
     let cache_input = try cache::stage_cache_input(files);
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "stage_cache_input",
+        cache_input_started
+    );
+
+    let cache_key_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "stage_cache_key");
     let cache_key = cache::stage_key(&cache_input);
+    try stage_profile::end(&profile, &var profile_out, io, "stage_cache_key", cache_key_started);
+
+    let cache_lookup_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "stage_cache_lookup");
     let lookup = try cache::lookup_entry(allocator, io, &cache_key);
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "stage_cache_lookup",
+        cache_lookup_started
+    );
     if lookup.found {
+        try stage_profile::record_i64(&profile, &var profile_out, "stage.cache.hit", 1);
+        try stage_profile::flush(&profile, &var profile_out, io);
+        let cache_restore_started = try stage_profile::begin(
+            &profile,
+            &var profile_out,
+            io,
+            "restore_cached_stage_artifact"
+        );
         let packed = try std::fs::read_file(io, lookup.artifact_path);
-        return try restore_cached_stage_artifact(io, packed);
+        let restored = try restore_cached_stage_artifact(io, packed);
+        try stage_profile::end(
+            &profile,
+            &var profile_out,
+            io,
+            "restore_cached_stage_artifact",
+            cache_restore_started
+        );
+        try stage_profile::finish(&profile, &var profile_out, io);
+        return restored;
     }
 
+    try stage_profile::record_i64(&profile, &var profile_out, "stage.cache.hit", 0);
+    try stage_profile::flush(&profile, &var profile_out, io);
+
+    let emit_checked_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "emit_checked_artifacts");
     let artifact = try ir::emit_checked_artifacts(allocator, io, files, checked);
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "emit_checked_artifacts",
+        emit_checked_started
+    );
+
+    let emit_llvm_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "emit_llvm_artifact");
     let llvm = try backend::emit_llvm_artifact(
         allocator,
         io,
         artifact.ir_path,
         artifact.manifest_path
     );
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "emit_llvm_artifact",
+        emit_llvm_started
+    );
+
+    let pack_cache_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "pack_stage_cache_artifact");
     var packed = try pack_stage_cache_artifact(allocator, io, &llvm);
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "pack_stage_cache_artifact",
+        pack_cache_started
+    );
     let packed_bytes = packed.as_bytes();
+
+    let write_cache_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "write_stage_cache_entry");
     let _written = try cache::write_stage_entry(allocator, io, &cache_input, packed_bytes);
+    try stage_profile::end(
+        &profile,
+        &var profile_out,
+        io,
+        "write_stage_cache_entry",
+        write_cache_started
+    );
+    try stage_profile::finish(&profile, &var profile_out, io);
     return llvm;
 }
 

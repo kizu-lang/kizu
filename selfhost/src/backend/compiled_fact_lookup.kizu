@@ -215,7 +215,40 @@ pub fn lookup_struct_field_by_prefix_indexed(
         }
         entry_index = entry_index + 1;
     }
-    return try lookup_struct_field_by_prefix(ir_bytes, module_prefix, short_type, field_name);
+    return try lookup_struct_field_by_suffix_indexed(index, ir_bytes, short_type, field_name);
+}
+
+fn lookup_struct_field_by_suffix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    short_type: []u8,
+    field_name: []u8
+) -> !StructFieldLookup {
+    let prefix = "struct-field ";
+    let prefix_len = std::mem::len(prefix);
+    var suffix_match = empty_struct_field_lookup(ir_bytes);
+    var suffix_line = 0;
+    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
+    while entry_index >= 0 and ir_index::entry_key_starts_with(
+        index, ir_bytes, entry_index, prefix
+    ) {
+        let type_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
+        let type_end = ir_index::entry_key_end(index, entry_index);
+        if type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
+            let field = try extract_struct_field_by_name(
+                ir_bytes, type_end, field_name
+            );
+            if field.found {
+                let line_start = ir_index::entry_line_start(index, entry_index);
+                if !suffix_match.found or line_start < suffix_line {
+                    suffix_match = field;
+                    suffix_line = line_start;
+                }
+            }
+        }
+        entry_index = entry_index + 1;
+    }
+    return suffix_match;
 }
 
 fn lookup_struct_field_type_by_prefix_or_empty(
@@ -288,9 +321,42 @@ pub fn lookup_struct_field_type_by_prefix_or_empty_indexed(
         }
         entry_index = entry_index + 1;
     }
-    return try lookup_struct_field_type_by_prefix_or_empty(
-        ir_bytes, module_prefix, short_type, target_index
+    return try lookup_struct_field_type_by_suffix_or_empty_indexed(
+        index, ir_bytes, short_type, target_index
     );
+}
+
+fn lookup_struct_field_type_by_suffix_or_empty_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    short_type: []u8,
+    target_index: i64
+) -> ![]u8 {
+    let prefix = "struct-field ";
+    let prefix_len = std::mem::len(prefix);
+    var suffix_type = ir_bytes[0..0];
+    var suffix_line = 0;
+    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
+    while entry_index >= 0 and ir_index::entry_key_starts_with(
+        index, ir_bytes, entry_index, prefix
+    ) {
+        let type_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
+        let type_end = ir_index::entry_key_end(index, entry_index);
+        if type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
+            let field_type = try extract_struct_field_type_at_index(
+                ir_bytes, type_end, target_index
+            );
+            if std::mem::len(field_type) > 0 {
+                let line_start = ir_index::entry_line_start(index, entry_index);
+                if std::mem::len(suffix_type) == 0 or line_start < suffix_line {
+                    suffix_type = field_type;
+                    suffix_line = line_start;
+                }
+            }
+        }
+        entry_index = entry_index + 1;
+    }
+    return suffix_type;
 }
 
 // lookup_struct_field_name_by_prefix_indexed returns the field name recorded at target_index in the
@@ -321,9 +387,42 @@ pub fn lookup_struct_field_name_by_prefix_indexed(
         }
         entry_index = entry_index + 1;
     }
-    return try lookup_struct_field_name_by_prefix_or_empty(
-        ir_bytes, module_prefix, short_type, target_index
+    return try lookup_struct_field_name_by_suffix_or_empty_indexed(
+        index, ir_bytes, short_type, target_index
     );
+}
+
+fn lookup_struct_field_name_by_suffix_or_empty_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    short_type: []u8,
+    target_index: i64
+) -> ![]u8 {
+    let prefix = "struct-field ";
+    let prefix_len = std::mem::len(prefix);
+    var suffix_name = ir_bytes[0..0];
+    var suffix_line = 0;
+    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
+    while entry_index >= 0 and ir_index::entry_key_starts_with(
+        index, ir_bytes, entry_index, prefix
+    ) {
+        let type_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
+        let type_end = ir_index::entry_key_end(index, entry_index);
+        if type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
+            let field_name = try extract_struct_field_name_at_index(
+                ir_bytes, type_end, target_index
+            );
+            if std::mem::len(field_name) > 0 {
+                let line_start = ir_index::entry_line_start(index, entry_index);
+                if std::mem::len(suffix_name) == 0 or line_start < suffix_line {
+                    suffix_name = field_name;
+                    suffix_line = line_start;
+                }
+            }
+        }
+        entry_index = entry_index + 1;
+    }
+    return suffix_name;
 }
 
 fn lookup_struct_field_name_by_prefix_or_empty(
@@ -515,6 +614,28 @@ pub fn lookup_qualified_function_name_by_callee_suffix(
             }
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return ir_bytes[0..0];
+}
+
+pub fn lookup_qualified_function_name_by_callee_suffix_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    callee_name: []u8
+) -> []u8 {
+    let prefix = "function-signature-return ";
+    let prefix_len = std::mem::len(prefix);
+    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
+    while entry_index >= 0 and
+        ir_index::entry_key_starts_with(index, ir_bytes, entry_index, prefix) {
+        let name_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
+        let name_end = ir_index::entry_key_end(index, entry_index);
+        let name = ir_bytes[name_start..name_end];
+        if !std::mem::equal_bytes(name, callee_name) and
+            type_matches_suffix(name, callee_name) {
+            return name;
+        }
+        entry_index = entry_index + 1;
     }
     return ir_bytes[0..0];
 }
@@ -1239,20 +1360,16 @@ pub fn is_union_type_indexed(
     if entry_index >= 0 {
         return true;
     }
-    let byte_len = std::mem::len(ir_bytes);
     let marker = "union-variant ";
     let marker_len = std::mem::len(marker);
-    var scan = 0;
-    while scan + marker_len + std::mem::len(short_name) < byte_len {
-        if compiled_util::is_line_start(ir_bytes, scan) and
-            std::mem::equal_bytes(ir_bytes[scan..scan + marker_len], marker) {
-            let name_start = scan + marker_len;
-            let name_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), name_start);
-            if type_matches_suffix(ir_bytes[name_start..name_end], short_name) {
-                return true;
-            }
+    var scan = ir_index::first_entry_with_fact_prefix(index, ir_bytes, marker);
+    while scan >= 0 and ir_index::entry_key_starts_with(index, ir_bytes, scan, marker) {
+        let name_start = ir_index::entry_line_start(index, scan) + marker_len;
+        let name_end = ir_index::entry_key_end(index, scan);
+        if type_matches_suffix(ir_bytes[name_start..name_end], short_name) {
+            return true;
         }
-        scan = compiled_util::find_line_end(ir_bytes, scan) + 1;
+        scan = scan + 1;
     }
     return false;
 }

@@ -1,4 +1,5 @@
 import selfhost::backend::compiled_util;
+import selfhost::backend::ir_index;
 
 // kizu_type_to_abi maps a single Kizu parameter type spelling to its LLVM ABI
 // type. This is the strict ABI mapper (Agent B, tracker 1069): unlike
@@ -195,46 +196,50 @@ pub fn append_params_spec(
     ir_bytes: []u8,
     function_name: []u8
 ) -> !void {
+    var lookup_index = try ir_index::build(ir_bytes);
+    defer lookup_index.deinit();
+    try append_params_spec_indexed(&lookup_index, out, ir_bytes, function_name);
+    return;
+}
+
+pub fn append_params_spec_indexed(
+    index: &ir_index::IrIndex,
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8
+) -> !void {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "function-signature-param ";
-    let prefix_len = std::mem::len(prefix);
-    let name_len = std::mem::len(function_name);
     let space = cast<u8>(32);
     let colon = cast<u8>(58);
     let semicolon = cast<u8>(59);
-    var index = 0;
+    var entry_index = ir_index::first_matching_entry(index, ir_bytes, prefix, "", function_name);
     var emitted = 0;
-    while index + prefix_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let name_start = index + prefix_len;
-            let name_end = name_start + name_len;
-            if name_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[name_start..name_end], function_name) and
-                ir_bytes[name_end] == space {
-                let line_end_pos = compiled_util::find_line_end(ir_bytes, name_end);
-                // entry == ' <index> <name>:runtime:<type>'
-                let entry = ir_bytes[name_end..line_end_pos];
-                let entry_len = std::mem::len(entry);
-                let space1 = compiled_util::find_byte(entry, space, 1);
-                let colon1 = compiled_util::find_byte(entry, colon, 0);
-                let colon2 = compiled_util::find_byte(entry, colon, colon1 + 1);
-                if space1 >= colon1 or colon2 >= entry_len {
-                    return error("abi mapper: invalid signature param fact");
-                }
-                let param_name = entry[space1 + 1..colon1];
-                let kizu_type = entry[colon2 + 1..entry_len];
-                let abi_type = try kizu_type_to_abi(kizu_type);
-                if emitted > 0 {
-                    try out.append_byte(semicolon);
-                }
-                try out.append_bytes(abi_type);
-                try out.append_byte(space);
-                try out.append_bytes(param_name);
-                emitted = emitted + 1;
+    while ir_index::entry_matches_query(index, ir_bytes, entry_index, prefix, "", function_name) {
+        let name_end = ir_index::entry_key_end(index, entry_index);
+        let line_end_pos = ir_index::entry_line_end(index, entry_index);
+        if name_end < byte_len and ir_bytes[name_end] == space {
+            // entry == ' <index> <name>:runtime:<type>'
+            let entry = ir_bytes[name_end..line_end_pos];
+            let entry_len = std::mem::len(entry);
+            let space1 = compiled_util::find_byte(entry, space, 1);
+            let colon1 = compiled_util::find_byte(entry, colon, 0);
+            let colon2 = compiled_util::find_byte(entry, colon, colon1 + 1);
+            if space1 >= colon1 or colon2 >= entry_len {
+                return error("abi mapper: invalid signature param fact");
             }
+            let param_name = entry[space1 + 1..colon1];
+            let kizu_type = entry[colon2 + 1..entry_len];
+            let abi_type = try kizu_type_to_abi(kizu_type);
+            if emitted > 0 {
+                try out.append_byte(semicolon);
+            }
+            try out.append_bytes(abi_type);
+            try out.append_byte(space);
+            try out.append_bytes(param_name);
+            emitted = emitted + 1;
         }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+        entry_index = entry_index + 1;
     }
     return;
 }
@@ -267,10 +272,16 @@ function-body demo";
 
     var spec = std::string::String(allocator);
     try append_params_spec(spec, facts, "demo");
+    var indexed_facts = try ir_index::build(facts);
+    defer indexed_facts.deinit();
+    var indexed_spec = std::string::String(allocator);
+    try append_params_spec_indexed(&indexed_facts, indexed_spec, facts, "demo");
 
     let expected = "i8 byte;i64 count;i64 offset;%kizu.slice.u8 source;%kizu.kizu.lexer.position pos;%kizu.kizu.lexer.token tok;i8 ref";
     let spec_bytes = spec.as_bytes();
+    let indexed_spec_bytes = indexed_spec.as_bytes();
     std::testing::expect_equal<[]u8>(expected, spec_bytes);
+    std::testing::expect_equal<[]u8>(expected, indexed_spec_bytes);
 
     // Spot-check the scalar mapper directly, including a borrowed slice.
     std::testing::expect_equal<[]u8>("i8", try kizu_type_to_abi("u8"));
@@ -294,10 +305,18 @@ function-body source_file";
 
     var loader_spec = std::string::String(allocator);
     try append_params_spec(loader_spec, loader_facts, "source_file");
+    var indexed_loader_facts = try ir_index::build(loader_facts);
+    defer indexed_loader_facts.deinit();
+    var indexed_loader_spec = std::string::String(allocator);
+    try append_params_spec_indexed(
+        &indexed_loader_facts, indexed_loader_spec, loader_facts, "source_file"
+    );
 
     let loader_expected = "i64 id;i64 kind;%kizu.slice.u8 package_name;i64 module_start;i64 module_end;%kizu.slice.u8 path;%kizu.slice.u8 text";
     let loader_spec_bytes = loader_spec.as_bytes();
+    let indexed_loader_spec_bytes = indexed_loader_spec.as_bytes();
     std::testing::expect_equal<[]u8>(loader_expected, loader_spec_bytes);
+    std::testing::expect_equal<[]u8>(loader_expected, indexed_loader_spec_bytes);
 
     // Both SourceKind spellings (aliased and fully qualified) share the i64 ABI.
     std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("source::SourceKind"));
@@ -313,7 +332,9 @@ function-body source_file";
     );
 
     spec.deinit();
+    indexed_spec.deinit();
     loader_spec.deinit();
+    indexed_loader_spec.deinit();
 
     print("abi-params-spec");
     print(expected);

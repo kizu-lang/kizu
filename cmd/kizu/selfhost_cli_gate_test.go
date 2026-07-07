@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,7 +267,8 @@ func selfhostCLIFrontendTestHappyCases(
 		{
 			name:    "test_temp_expect_failure",
 			args:    []string{"test", fixtures.expectFail},
-			wantOut: "error: runtime error: expected condition to be true\nexit-code\n1\n",
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: runtime error: expected condition to be true\n",
 			wantFiles: selfhostTestArtifactExpectations(
 				fixtures.expectFail,
 				selfhostArtifactStem(fixtures.expectFail),
@@ -1857,28 +1857,13 @@ func runSelfhostCLIFileFrontendCase(program *ast.Program, args []string) (string
 		return "", "", err
 	}
 
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		return "", "", err
-	}
-	oldStderr := os.Stderr
-	os.Stderr = writer
-	defer func() {
-		os.Stderr = oldStderr
-		_ = reader.Close()
-	}()
-
 	var out bytes.Buffer
-	runErr := interp.NewWithProcessArgs(&out, args).RunEntry(program, "selfhost::cli_gate")
-	_ = writer.Close()
-	stderrBytes, readErr := io.ReadAll(reader)
+	var errOut bytes.Buffer
+	runErr := interp.NewWithProcessIO(&out, &errOut, args).RunEntry(program, "selfhost::cli_gate")
 	if runErr != nil {
-		return out.String(), string(stderrBytes), runErr
+		return out.String(), errOut.String(), runErr
 	}
-	if readErr != nil {
-		return out.String(), string(stderrBytes), readErr
-	}
-	return out.String(), string(stderrBytes), nil
+	return out.String(), errOut.String(), nil
 }
 
 // countSelfhostCLIGateFailures checks supported CLI commands and stage artifacts.

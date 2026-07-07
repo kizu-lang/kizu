@@ -148,6 +148,7 @@ func buildNativeSelfhost(
 		"build",
 		"--target",
 		"native",
+		"--opt",
 		"--libc",
 		"on",
 		"--runtime",
@@ -199,6 +200,18 @@ func runNativeSelfhostCommand(
 	args ...string,
 ) bootstrapCommandResult {
 	t.Helper()
+	return runNativeSelfhostCommandWithEnv(t, exePath, cacheDir, nil, args...)
+}
+
+// runNativeSelfhostCommandWithEnv runs one command with explicit extra env vars.
+func runNativeSelfhostCommandWithEnv(
+	t *testing.T,
+	exePath string,
+	cacheDir string,
+	extraEnv []string,
+	args ...string,
+) bootstrapCommandResult {
+	t.Helper()
 	start := time.Now()
 	absExe, err := filepath.Abs(exePath)
 	if err != nil {
@@ -206,6 +219,7 @@ func runNativeSelfhostCommand(
 	}
 	run := exec.Command(absExe, args...)
 	run.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	run.Env = append(run.Env, extraEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	run.Stdout = &stdout
@@ -782,6 +796,7 @@ func appendNativeSourceCommandResult(
 	fmt.Fprintf(out, "%s.exit %d\n", label, result.code)
 	fmt.Fprintf(out, "%s.stdout.sha256 %s\n", label, textFingerprint(result.stdout))
 	fmt.Fprintf(out, "%s.stderr.sha256 %s\n", label, textFingerprint(result.stderr))
+	fmt.Fprintf(out, "%s.elapsed.ms %d\n", label, result.elapsed.Milliseconds())
 }
 
 // finishNativeSourceExecutableReport writes the native-source report.

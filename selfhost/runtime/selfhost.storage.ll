@@ -26,6 +26,7 @@ source_filename = "target/selfhost/selfhost.storage"
 @.kizu.rt.array_smoke = private unnamed_addr constant [8 x i8] c"array-ok"
 @.kizu.rt.array_smoke_second = private unnamed_addr constant [8 x i8] c"payload2"
 @.kizu.rt.string_smoke = private unnamed_addr constant [3 x i8] c"kiz"
+@.kizu.rt.string_reserve_negative = private unnamed_addr constant [39 x i8] c"String.reserve expects non-negative i64"
 @.kizu.rt.invalid_map_key = private unnamed_addr constant [15 x i8] c"invalid map key"
 @.kizu.rt.map_full = private unnamed_addr constant [21 x i8] c"map capacity exceeded"
 @.kizu.rt.map_key_not_found = private unnamed_addr constant [21 x i8] c"Map.get key not found"
@@ -269,13 +270,27 @@ append:
   %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2
   %current = load i64, ptr %len_field
   %current_valid = icmp sge i64 %current, 0
-  br i1 %current_valid, label %length_check, label %invalid_slice
+  %cap_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 3
+  %current_cap = load i64, ptr %cap_field
+  %cap_valid = icmp sge i64 %current_cap, 0
+  %storage_valid = and i1 %current_valid, %cap_valid
+  br i1 %storage_valid, label %length_check, label %invalid_slice
 length_check:
   %max_delta = sub i64 9223372036854775807, %current
   %fits = icmp sle i64 %byte_len, %max_delta
-  br i1 %fits, label %allocate, label %invalid_slice
-allocate:
+  br i1 %fits, label %capacity_check, label %invalid_slice
+capacity_check:
   %next = add i64 %current, %byte_len
+  %within_capacity = icmp sle i64 %next, %current_cap
+  %data_ok = icmp ne ptr %current_data, null
+  %copy_in_place = and i1 %within_capacity, %data_ok
+  br i1 %copy_in_place, label %copy_new_in_place, label %allocate
+copy_new_in_place:
+  %in_place_dest = getelementptr i8, ptr %current_data, i64 %current
+  call void @llvm.memcpy.p0.p0.i64(ptr %in_place_dest, ptr %byte_ptr, i64 %byte_len, i1 false)
+  store i64 %next, ptr %len_field
+  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+allocate:
   %new_data = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %next)
   %allocated = icmp ne ptr %new_data, null
   br i1 %allocated, label %copy_old_check, label %allocation_failed
@@ -296,9 +311,94 @@ free_old:
 store:
   store ptr %new_data, ptr %data_field
   store i64 %next, ptr %len_field
-  %cap_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 3
   store i64 %next, ptr %cap_field
   ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+allocation_failed:
+  %message_ptr = getelementptr inbounds [17 x i8], ptr @.kizu.rt.allocation_failed, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 17, 1
+  %failed_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %failed = insertvalue %kizu.error.void %failed_base, %kizu.slice.u8 %message, 1
+  ret %kizu.error.void %failed
+invalid_slice:
+  %invalid_message_ptr = getelementptr inbounds [13 x i8], ptr @.kizu.rt.invalid_slice, i64 0, i64 0
+  %invalid_message_base = insertvalue %kizu.slice.u8 poison, ptr %invalid_message_ptr, 0
+  %invalid_message = insertvalue %kizu.slice.u8 %invalid_message_base, i64 13, 1
+  %invalid_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %invalid_result = insertvalue %kizu.error.void %invalid_base, %kizu.slice.u8 %invalid_message, 1
+  ret %kizu.error.void %invalid_result
+}
+
+define %kizu.error.void @kizu_rt_string_reserve(%kizu.owned %string, i64 %additional) {
+entry:
+  %additional_nonnegative = icmp sge i64 %additional, 0
+  br i1 %additional_nonnegative, label %load, label %negative
+load:
+  %raw = extractvalue %kizu.owned %string, 0
+  %allocator_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 0
+  %allocator_ptr = load ptr, ptr %allocator_field
+  %data_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 1
+  %current_data = load ptr, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2
+  %current = load i64, ptr %len_field
+  %cap_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 3
+  %current_cap = load i64, ptr %cap_field
+  %current_valid = icmp sge i64 %current, 0
+  %cap_valid = icmp sge i64 %current_cap, 0
+  %storage_valid = and i1 %current_valid, %cap_valid
+  br i1 %storage_valid, label %overflow_check, label %invalid_slice
+overflow_check:
+  %max_delta = sub i64 9223372036854775807, %current
+  %fits = icmp sle i64 %additional, %max_delta
+  br i1 %fits, label %want_check, label %invalid_slice
+want_check:
+  %want = add i64 %current, %additional
+  %already_reserved = icmp sle i64 %want, %current_cap
+  br i1 %already_reserved, label %ok, label %select_start
+select_start:
+  %cap_zero = icmp eq i64 %current_cap, 0
+  br i1 %cap_zero, label %grow_from_four, label %grow_loop
+grow_from_four:
+  br label %grow_loop
+grow_loop:
+  %candidate = phi i64 [ %current_cap, %select_start ], [ 4, %grow_from_four ], [ %doubled, %double ]
+  %enough = icmp sge i64 %candidate, %want
+  br i1 %enough, label %allocate, label %grow_check
+grow_check:
+  %can_double = icmp sle i64 %candidate, 4611686018427387903
+  br i1 %can_double, label %double, label %invalid_slice
+double:
+  %doubled = mul i64 %candidate, 2
+  br label %grow_loop
+allocate:
+  %new_data = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %candidate)
+  %allocated = icmp ne ptr %new_data, null
+  br i1 %allocated, label %copy_old_check, label %allocation_failed
+copy_old_check:
+  %has_old = icmp sgt i64 %current, 0
+  br i1 %has_old, label %copy_old, label %free_old_check
+copy_old:
+  call void @llvm.memcpy.p0.p0.i64(ptr %new_data, ptr %current_data, i64 %current, i1 false)
+  br label %free_old_check
+free_old_check:
+  %has_old_data = icmp ne ptr %current_data, null
+  br i1 %has_old_data, label %free_old, label %store
+free_old:
+  call void @kizu_rt_free(ptr %allocator_ptr, ptr %current_data)
+  br label %store
+store:
+  store ptr %new_data, ptr %data_field
+  store i64 %candidate, ptr %cap_field
+  br label %ok
+ok:
+  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+negative:
+  %negative_message_ptr = getelementptr inbounds [39 x i8], ptr @.kizu.rt.string_reserve_negative, i64 0, i64 0
+  %negative_message_base = insertvalue %kizu.slice.u8 poison, ptr %negative_message_ptr, 0
+  %negative_message = insertvalue %kizu.slice.u8 %negative_message_base, i64 39, 1
+  %negative_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %negative_result = insertvalue %kizu.error.void %negative_base, %kizu.slice.u8 %negative_message, 1
+  ret %kizu.error.void %negative_result
 allocation_failed:
   %message_ptr = getelementptr inbounds [17 x i8], ptr @.kizu.rt.allocation_failed, i64 0, i64 0
   %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0

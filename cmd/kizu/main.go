@@ -280,7 +280,7 @@ func runSelfhostFrontendCommand(command string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	code, err := interp.NewWithProcessArgs(os.Stdout, processArgs).
+	code, err := interp.NewWithProcessIO(os.Stdout, os.Stderr, processArgs).
 		RunEntryInt(program, "selfhost::cli_main")
 	if err != nil {
 		return err
@@ -360,7 +360,7 @@ func runFile(path string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	return interp.NewWithProcessArgs(os.Stdout, args).Run(program)
+	return interp.NewWithProcessIO(os.Stdout, os.Stderr, args).Run(program)
 }
 
 // runPackage resolves a package root and executes the root module main.
@@ -373,7 +373,7 @@ func runPackage(path string, args []string) error {
 		return err
 	}
 	entry := graph.Root + "::main"
-	return interp.NewWithProcessArgs(os.Stdout, args).RunEntry(program, entry)
+	return interp.NewWithProcessIO(os.Stdout, os.Stderr, args).RunEntry(program, entry)
 }
 
 // checkFile parses a source file and runs static checks.
@@ -491,7 +491,7 @@ func testFile(path string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	if err := interp.NewWithProcessArgs(os.Stdout, args).RunTests(program); err != nil {
+	if err := interp.NewWithProcessIO(os.Stdout, os.Stderr, args).RunTests(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("test: ok")
@@ -507,7 +507,7 @@ func testPackage(path string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	if err := interp.NewWithProcessArgs(os.Stdout, args).RunTests(program); err != nil {
+	if err := interp.NewWithProcessIO(os.Stdout, os.Stderr, args).RunTests(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("test: ok")
@@ -649,11 +649,14 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Native --opt controls clang's native optimization. The typed-SSA optimizer
+	// remains scoped to `build --emit-llvm --opt` until it is package-scale safe.
+	const nativeIROpt = false
 	var module *ir.Module
 	if isPackageRoot(options.Path) {
-		module, err = lowerPackage(options.Path, options.Opt)
+		module, err = lowerPackage(options.Path, nativeIROpt)
 	} else {
-		module, err = lowerFile(options.Path, options.Opt)
+		module, err = lowerFile(options.Path, nativeIROpt)
 	}
 	if err != nil {
 		return err
@@ -666,6 +669,7 @@ func emitNativeFile(args []string) error {
 		LLVMIR: llvmIR, Output: options.Output, Triple: options.Triple,
 		CPU: options.CPU, ABI: options.ABI, LibC: options.LibC,
 		Runtime: options.Runtime, Emit: options.Emit, Linker: options.Linker,
+		Opt: options.Opt,
 	}); err != nil {
 		return err
 	}

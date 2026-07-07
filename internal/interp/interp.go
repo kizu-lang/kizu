@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -17,6 +18,7 @@ import (
 // Interpreter executes a parsed Kizu program.
 type Interpreter struct {
 	out            io.Writer
+	errOut         io.Writer
 	outMu          sync.Mutex
 	functions      map[string]*ast.FunctionDecl
 	impls          map[string]map[string]*ast.FunctionDecl
@@ -27,6 +29,7 @@ type Interpreter struct {
 	typeArgs       map[string]string
 	qualified      map[ast.Expression]string
 	processArgs    []string
+	startedAt      time.Time
 	blockScopes    map[*ast.BlockStmt]bool
 	compiledBodies map[*ast.FunctionDecl]stmtEval
 }
@@ -61,8 +64,17 @@ func New(out io.Writer) *Interpreter {
 
 // NewWithProcessArgs creates an interpreter with explicit process arguments.
 func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
+	return NewWithProcessIO(out, out, args)
+}
+
+// NewWithProcessIO creates an interpreter with explicit process IO and args.
+func NewWithProcessIO(out io.Writer, errOut io.Writer, args []string) *Interpreter {
+	if errOut == nil {
+		errOut = out
+	}
 	return &Interpreter{
 		out:            out,
+		errOut:         errOut,
 		functions:      map[string]*ast.FunctionDecl{},
 		impls:          map[string]map[string]*ast.FunctionDecl{},
 		enums:          map[string]map[string]bool{},
@@ -72,6 +84,7 @@ func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 		typeArgs:       map[string]string{},
 		qualified:      map[ast.Expression]string{},
 		processArgs:    append([]string{}, args...),
+		startedAt:      time.Now(),
 		blockScopes:    map[*ast.BlockStmt]bool{},
 		compiledBodies: map[*ast.FunctionDecl]stmtEval{},
 	}
@@ -1745,7 +1758,7 @@ func (i *Interpreter) evalIoHelperBuiltin(
 		value, err := i.evalIoWrite(args, env, i.out)
 		return value, true, err
 	case "std.builtin.io_write_stderr":
-		value, err := i.evalIoWrite(args, env, os.Stderr)
+		value, err := i.evalIoWrite(args, env, i.errOut)
 		return value, true, err
 	case "std.builtin.io_read_stdin":
 		value, err := i.evalIoReadStdin(args, env)
@@ -1773,6 +1786,16 @@ func (i *Interpreter) evalProcessBuiltin(
 	case "std.builtin.process_env":
 		value, err := i.evalProcessEnv(args, env)
 		return value, true, err
+	case "std.builtin.process_env_or_empty":
+		value, err := i.evalProcessEnvOrEmpty(args, env)
+		return value, true, err
+	case "std.builtin.process_monotonic_millis":
+		if len(args) != 0 {
+			return voidValue(), true, fmt.Errorf(
+				"runtime error: std::process::monotonic_millis expects 0 args",
+			)
+		}
+		return intValue(time.Since(i.startedAt).Milliseconds()), true, nil
 	case "std.builtin.process_spawn_wait8":
 		value, err := i.evalProcessSpawnWait8(args, env)
 		return value, true, err
@@ -2115,6 +2138,18 @@ func (i *Interpreter) evalProcessEnv(args []ast.Expression, env *Env) (Value, er
 	return stringValue(value), nil
 }
 
+// evalProcessEnvOrEmpty reads one environment variable and returns an empty slice when absent.
+func (i *Interpreter) evalProcessEnvOrEmpty(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std::process::env_or_empty expected name")
+	}
+	name, err := i.evalPathArg(args[0], env, "std::process::env_or_empty")
+	if err != nil {
+		return voidValue(), err
+	}
+	return stringValue(os.Getenv(name)), nil
+}
+
 // evalProcessSpawnWait8 runs a fixed-arity host process command.
 func (i *Interpreter) evalProcessSpawnWait8(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 9 {
@@ -2137,7 +2172,7 @@ func (i *Interpreter) evalProcessSpawnWait8(args []ast.Expression, env *Env) (Va
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = i.out
-	cmd.Stderr = i.out
+	cmd.Stderr = i.errOut
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return intValue(int64(exitErr.ExitCode())), nil

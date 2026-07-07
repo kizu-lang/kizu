@@ -16,6 +16,7 @@ import selfhost::backend::compiled_llvm;
 import selfhost::backend::compiled_signature;
 import selfhost::backend::ir_contract;
 import selfhost::backend::ir_index;
+import selfhost::backend::profile;
 
 pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_llvm_constant(out, "check", "5", "check");
@@ -919,8 +920,13 @@ fn append_unsupported_run_ast_success_return(out: &var std::string::String, valu
 pub fn append_functions(
     out: &var std::string::String,
     lookup_index: &ir_index::IrIndex,
-    ir_bytes: []u8
+    ir_bytes: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
 ) -> !void {
+    let static_helpers_started =
+        try profile::begin(backend_profile, profile_out, io, "append_static_cli_helpers");
     try append_slice_equal_function(out);
     try append_slice_len_function(out);
     try append_slice_starts_with_dash_function(out);
@@ -935,17 +941,58 @@ pub fn append_functions(
     try cli_match_llvm::append_functions(out);
     try cli_test_ast_llvm::append_functions(out);
     try cli_test_llvm::append_functions(out, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_static_cli_helpers",
+        static_helpers_started
+    );
     // The selfhost::ir::codegen run codegen IR v1 tape closure compiled into stage2:
     // the shared BFS walks the cluster from the tape lowering root lower_code_module
     // plus the code_op_mem_page_allocator opcode accessor, deriving each member's llvm
     // symbol and params_spec from signature facts. The hosted per-shape Program builder
     // roots were severed once shape emit became closure-excluded (issue 1255 slice4 PR-1).
-    try append_codegen_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    let codegen_started =
+        try profile::begin(backend_profile, profile_out, io, "append_codegen_reachable");
+    try append_codegen_reachable_compiled_functions_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        backend_profile,
+        profile_out,
+        io
+    );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_codegen_reachable",
+        codegen_started
+    );
     // The selfhost::ir::code_render run tape renderer closure compiled into stage2:
     // render_run_artifact lowers a parsed run source to the tape (via the codegen
     // closure's lower_code_module) and renders it to the executable LLVM module text,
     // the generic replacement for the per-shape hosted run renderers.
-    try append_code_render_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    let code_render_started =
+        try profile::begin(backend_profile, profile_out, io, "append_code_render_reachable");
+    try append_code_render_reachable_compiled_functions_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        backend_profile,
+        profile_out,
+        io
+    );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_code_render_reachable",
+        code_render_started
+    );
+    let ast_stdlib_roots_started =
+        try profile::begin(backend_profile, profile_out, io, "append_ast_stdlib_roots");
     // artifact_path is the first selfhost std::string::String builder compiled into
     // stage2 (issue 1165 slice 1): it lowers through the generic multi-statement path,
     // calling the runtime string intrinsics to concatenate the directory, the borrowed
@@ -1523,7 +1570,25 @@ pub fn append_functions(
     // let-try / return-try arithmetic). The shared BFS walks the whole cluster from
     // these two seeds and links selfhost.ll with no undefined symbol; each member's
     // llvm symbol and params_spec are derived from signature facts.
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_ast_stdlib_roots",
+        ast_stdlib_roots_started
+    );
+    let ast_reachable_started =
+        try profile::begin(backend_profile, profile_out, io, "append_ast_reachable");
     try append_ast_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_ast_reachable",
+        ast_reachable_started
+    );
+    let std_mem_roots_started =
+        try profile::begin(backend_profile, profile_out, io, "append_std_mem_roots");
     // std::mem::is_ascii_space backs the ast_node_text span accessor's trim (tracker 961):
     // an or-chain byte classifier returning i1. It lowers through the single-statement
     // expression-return path (the binary renderer already handles or / eq).
@@ -1562,11 +1627,36 @@ pub fn append_functions(
         "kizu_std__mem_slice",
         "%kizu.slice.u8 bytes;i64 start;i64 end"
     );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_std_mem_roots",
+        std_mem_roots_started
+    );
+    let types_checker_started =
+        try profile::begin(backend_profile, profile_out, io, "append_types_checker_reachable");
     try append_types_checker_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_types_checker_reachable",
+        types_checker_started
+    );
     // first_token / next_token seed the std::kizu::lexer tokenizer helper closure. The closure
     // reaches token_at, raw_token_at, scan helpers, Token constructors, position tracking, and byte
     // classifiers while leaving tokenize manual because it contains method calls on Array.
+    let kizu_lexer_started =
+        try profile::begin(backend_profile, profile_out, io, "append_kizu_lexer_reachable");
     try append_kizu_lexer_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_kizu_lexer_reachable",
+        kizu_lexer_started
+    );
     // tokenize(allocator, source) -> !Array<Token> builds the token stream feeding the parser
     // (tracker 961, scope 4 prerequisite). Its body now lowers through the generic multi-statement
     // path: lower_multi_statement_function recognises the value-carried array-append loop shape
@@ -1574,12 +1664,21 @@ pub fn append_functions(
     // MirTokenizeStmt (issue 1165). Its return type is derived from the signature fact like every
     // other compiled closure member: the compiled type lowering maps every !std::array::Array<T>
     // to %kizu.error.owned via a single prefix rule (issue 1165 slice 2).
+    let lexer_tokenize_started =
+        try profile::begin(backend_profile, profile_out, io, "append_lexer_tokenize");
     try compiled_llvm::append_compiled_function_auto_indexed(
         lookup_index,
         out, ir_bytes,
         "std::kizu::lexer::tokenize",
         "kizu_kizu__lexer_tokenize",
         "%kizu.owned allocator;%kizu.slice.u8 source"
+    );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_lexer_tokenize",
+        lexer_tokenize_started
     );
     // The std::kizu::parser predicate / byte / span helper closure compiled into
     // stage2 (tracker 961, scope 4 prerequisite). The TokenKind predicates match a
@@ -1593,11 +1692,38 @@ pub fn append_functions(
     // accessor (spelled ast.get). Each member's llvm symbol and params_spec are
     // derived from signature facts, so the cluster no longer needs a handwritten
     // append_compiled_function_auto per helper.
-    try append_kizu_parser_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    let kizu_parser_started =
+        try profile::begin(backend_profile, profile_out, io, "append_kizu_parser_reachable");
+    try append_kizu_parser_reachable_compiled_functions_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        backend_profile,
+        profile_out,
+        io
+    );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_kizu_parser_reachable",
+        kizu_parser_started
+    );
     // ast_node_text is emitted by the codegen closure BFS (reached from the run
     // tape descent seed lower_code_expr), so it no longer needs an explicit
     // registration here.
+    let lexer_started =
+        try profile::begin(backend_profile, profile_out, io, "append_lexer_reachable");
     try append_lexer_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_lexer_reachable",
+        lexer_started
+    );
+    let hosted_output_started =
+        try profile::begin(backend_profile, profile_out, io, "append_hosted_output_len");
     try compiled_llvm::append_compiled_function_auto_indexed(
         lookup_index,
         out, ir_bytes,
@@ -1605,8 +1731,33 @@ pub fn append_functions(
         "kizu_selfhost__hosted_output_len",
         "%kizu.slice.u8 output_payload;i1 append_newline"
     );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_hosted_output_len",
+        hosted_output_started
+    );
+    let source_started =
+        try profile::begin(backend_profile, profile_out, io, "append_source_reachable");
     try append_source_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_source_reachable",
+        source_started
+    );
+    let loader_started =
+        try profile::begin(backend_profile, profile_out, io, "append_loader_reachable");
     try append_loader_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_loader_reachable",
+        loader_started
+    );
     // The selfhost::parser::format read-only helper closure compiled into stage2
     // (issue 1165 / issue 1162): the TokenKind predicates that classify a single
     // token and token_text, the span-slice accessor. They lower through the shared
@@ -1615,8 +1766,20 @@ pub fn append_functions(
     // is the first formatter component on the compiled path, exercising the read-only
     // helpers ahead of the token-array loop / import-sort helpers that still wait on
     // local/param Array<T> read lowering.
+    let format_started =
+        try profile::begin(backend_profile, profile_out, io, "append_format_reachable");
     try append_format_reachable_compiled_functions(out, lookup_index, ir_bytes);
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_format_reachable",
+        format_started
+    );
+    let cli_main_started =
+        try profile::begin(backend_profile, profile_out, io, "append_cli_main");
     try append_cli_main_function(out, ir_bytes);
+    try profile::end(backend_profile, profile_out, io, "append_cli_main", cli_main_started);
     return;
 }
 
@@ -1742,6 +1905,86 @@ fn append_component_reachable_compiled_functions(
     return;
 }
 
+fn append_component_reachable_compiled_functions_profiled(
+    out: &var std::string::String,
+    lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    prefix: []u8,
+    pending: &var std::array::Array<[]u8>,
+    allow_empty_params: bool,
+    profile_prefix: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
+) -> !void {
+    var emitted = std::array::Array<[]u8>(std::mem::page_allocator());
+    var index = 0;
+    while index < pending.len() {
+        let local_name = try pending.get(index);
+        if !(try compiled_closure_name_seen(&emitted, local_name)) {
+            let member_started = try profile::begin_component_member(
+                backend_profile,
+                profile_out,
+                io,
+                profile_prefix,
+                local_name,
+                "total"
+            );
+            try append_component_compiled_closure_member_profiled(
+                out,
+                lookup_index,
+                ir_bytes,
+                prefix,
+                local_name,
+                allow_empty_params,
+                profile_prefix,
+                backend_profile,
+                profile_out,
+                io
+            );
+
+            let collect_started =
+                try profile::begin_component_member(
+                backend_profile,
+                profile_out,
+                io,
+                profile_prefix,
+                local_name,
+                "collect"
+            );
+            try collect_component_compiled_callees(
+                lookup_index,
+                ir_bytes,
+                prefix,
+                local_name,
+                pending
+            );
+            try profile::end_component_member(
+                backend_profile,
+                profile_out,
+                io,
+                profile_prefix,
+                local_name,
+                "collect",
+                collect_started
+            );
+            try emitted.append(local_name);
+            try profile::end_component_member(
+                backend_profile,
+                profile_out,
+                io,
+                profile_prefix,
+                local_name,
+                "total",
+                member_started
+            );
+        }
+        index = index + 1;
+    }
+    emitted.deinit();
+    return;
+}
+
 // append_component_compiled_closure_member emits the LLVM definition for one
 // compiled closure member. The fully qualified name is built from the component
 // prefix plus the local name, and the params_spec and llvm_symbol are derived from
@@ -1766,6 +2009,37 @@ fn append_component_compiled_closure_member(
     return;
 }
 
+fn append_component_compiled_closure_member_profiled(
+    out: &var std::string::String,
+    lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    prefix: []u8,
+    local_name: []u8,
+    allow_empty_params: bool,
+    profile_prefix: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
+) -> !void {
+    var function_name = std::string::String(std::mem::page_allocator());
+    defer function_name.deinit();
+    try append_component_qualified_name(&var function_name, prefix, local_name);
+    let function_name_bytes = function_name.as_bytes();
+    try emit_compiled_closure_member_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        function_name_bytes,
+        allow_empty_params,
+        profile_prefix,
+        local_name,
+        backend_profile,
+        profile_out,
+        io
+    );
+    return;
+}
+
 // emit_compiled_closure_member writes the LLVM definition for one compiled closure
 // member from its fully qualified name. The name arrives as a borrow so the
 // component member builder can construct it from the prefix plus the local name
@@ -1783,7 +2057,9 @@ fn emit_compiled_closure_member(
     let name = function_name.*;
     var params_spec = std::string::String(std::mem::page_allocator());
     defer params_spec.deinit();
-    try compiled_abi_params::append_params_spec(&var params_spec, ir_bytes, name);
+    try compiled_abi_params::append_params_spec_indexed(
+        lookup_index, &var params_spec, ir_bytes, name
+    );
     if params_spec.len() == 0 and !allow_empty_params {
         return error("compiled closure: missing signature params");
     }
@@ -1799,6 +2075,118 @@ fn emit_compiled_closure_member(
         name,
         llvm_symbol_bytes,
         params_spec_bytes
+    );
+    return;
+}
+
+fn emit_compiled_closure_member_profiled(
+    out: &var std::string::String,
+    lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: &[]u8,
+    allow_empty_params: bool,
+    profile_prefix: []u8,
+    local_name: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
+) -> !void {
+    let name = function_name.*;
+    let params_started = try profile::begin_component_member(
+        backend_profile,
+        profile_out,
+        io,
+        profile_prefix,
+        local_name,
+        "params"
+    );
+    var params_spec = std::string::String(std::mem::page_allocator());
+    defer params_spec.deinit();
+    try compiled_abi_params::append_params_spec_indexed(
+        lookup_index, &var params_spec, ir_bytes, name
+    );
+    try profile::end_component_member(
+        backend_profile,
+        profile_out,
+        io,
+        profile_prefix,
+        local_name,
+        "params",
+        params_started
+    );
+    if params_spec.len() == 0 and !allow_empty_params {
+        return error("compiled closure: missing signature params");
+    }
+    let params_spec_bytes = params_spec.as_bytes();
+
+    let symbol_started = try profile::begin_component_member(
+        backend_profile,
+        profile_out,
+        io,
+        profile_prefix,
+        local_name,
+        "symbol"
+    );
+    var llvm_symbol = std::string::String(std::mem::page_allocator());
+    defer llvm_symbol.deinit();
+    try compiled_signature::append_function_llvm_symbol(&var llvm_symbol, name);
+    let llvm_symbol_bytes = llvm_symbol.as_bytes();
+    try profile::end_component_member(
+        backend_profile,
+        profile_out,
+        io,
+        profile_prefix,
+        local_name,
+        "symbol",
+        symbol_started
+    );
+
+    let derive_return_started = try profile::begin_component_member(
+        backend_profile,
+        profile_out,
+        io,
+        profile_prefix,
+        local_name,
+        "derive_return"
+    );
+    let llvm_return_type = try compiled_signature::derive_return_type_indexed(
+        lookup_index, ir_bytes, name
+    );
+    try profile::end_component_member(
+        backend_profile,
+        profile_out,
+        io,
+        profile_prefix,
+        local_name,
+        "derive_return",
+        derive_return_started
+    );
+
+    let lower_started = try profile::begin_component_member(
+        backend_profile,
+        profile_out,
+        io,
+        profile_prefix,
+        local_name,
+        "lower_render_body"
+    );
+    try compiled_llvm::append_compiled_function_auto_return_indexed(
+        lookup_index,
+        out,
+        ir_bytes,
+        name,
+        llvm_symbol_bytes,
+        llvm_return_type,
+        params_spec_bytes
+    );
+    try profile::end_component_member(
+        backend_profile,
+        profile_out,
+        io,
+        profile_prefix,
+        local_name,
+        "lower_render_body",
+        lower_started
     );
     return;
 }
@@ -1832,18 +2220,25 @@ fn collect_component_compiled_body_callees(
 ) -> !void {
     let name = function_name.*;
     let body_start = ir_index::body_node_facts_start(lookup_index, ir_bytes, name);
-    let count = try ir_contract::body_node_count_from(ir_bytes, name, body_start);
+    var node_line_starts = std::array::Array<i64>(std::mem::page_allocator());
+    defer node_line_starts.deinit();
+    try ir_contract::collect_body_node_line_starts(
+        ir_bytes, name, body_start, &var node_line_starts
+    );
     var sequence = 0;
-    while sequence < count {
-        let kind = try ir_contract::body_node_kind_from(ir_bytes, name, sequence, body_start);
-        if std::mem::equal_bytes(kind, "Call") {
-            let callee = try ir_contract::body_call_callee_or_empty_from(
-                ir_bytes,
-                name,
-                sequence,
-                body_start
-            );
-            try collect_component_compiled_callee(lookup_index, ir_bytes, prefix, callee, pending);
+    while sequence < node_line_starts.len() {
+        let line_start = try node_line_starts.get(sequence);
+        if line_start >= 0 {
+            let kind = try ir_contract::body_node_kind_from(ir_bytes, name, sequence, line_start);
+            if std::mem::equal_bytes(kind, "Call") {
+                let callee = try ir_contract::body_call_callee_or_empty_from(
+                    ir_bytes,
+                    name,
+                    sequence,
+                    line_start
+                );
+                try collect_component_compiled_callee(lookup_index, ir_bytes, prefix, callee, pending);
+            }
         }
         sequence = sequence + 1;
     }
@@ -2247,6 +2642,49 @@ fn append_kizu_parser_reachable_compiled_functions(
     ir_bytes: []u8
 ) -> !void {
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try append_kizu_parser_reachable_roots(&var pending);
+    try append_component_reachable_compiled_functions(
+        out,
+        lookup_index,
+        ir_bytes,
+        "std::kizu::parser::",
+        &var pending,
+        false
+    );
+    pending.deinit();
+    return;
+}
+
+fn append_kizu_parser_reachable_compiled_functions_profiled(
+    out: &var std::string::String,
+    lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try append_kizu_parser_reachable_roots(&var pending);
+    try append_component_reachable_compiled_functions_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        "std::kizu::parser::",
+        &var pending,
+        false,
+        "kizu_parser",
+        backend_profile,
+        profile_out,
+        io
+    );
+    pending.deinit();
+    return;
+}
+
+fn append_kizu_parser_reachable_roots(
+    pending: &var std::array::Array<[]u8>
+) -> !void {
+    // Keep the parser closure roots shared by profiled and unprofiled emitters.
     try pending.append("is_double_colon");
     try pending.append("is_eof_token");
     try pending.append("is_left_brace_token");
@@ -2269,64 +2707,11 @@ fn append_kizu_parser_reachable_compiled_functions(
     try pending.append("parse_bool");
     try pending.append("parse_int");
     try pending.append("parse_string");
-    // name_node_with_doc is the issue 1157 C2 real parser consumer for
-    // ast.add_var_with_doc. It directly builds VarNode { name, doc } without
-    // pulling the full declaration parser.
     try pending.append("name_node_with_doc");
-    // synth_parse_node_sig is the issue 1157 PJ synthetic fixture seed (in-degree zero, so it
-    // must be seeded explicitly like the standalone predicates): a minimal '-> !ParseNode' helper
-    // that binds the same-component cursor constructor std::kizu::parser::parse_node(...) to a let
-    // and returns it. Seeding it here lowers it on the native compiled path so the backend
-    // exercises the site-955 stdlib short-circuit guard, the !ParseNode error-union ABI, and the
-    // ParseNode value type. The BFS pulls in the real leaf parse_node through its call edge.
-    try pending.append("synth_parse_node_sig");
-    // synth_postfix_loop is the issue 1157 worker-3 grammar-loop fixture: it carries the exact
-    // parse_postfix_expr 'while true' value-loop CFG (loop-head phi over a carried ParseNode, three
-    // bool-predicate-call guarded arms each reassigning through a free !ParseNode try-call, and a
-    // terminal carried-value return) but reassigns through the already-lowered synth_parse_node_sig
-    // leaf rather than the not-yet-lowered grammar helpers. Seeding it exercises the GrammarLoop
-    // lowering on the native compiled path ahead of the real parse_primary consumer.
-    try pending.append("synth_postfix_loop");
-    // synth_child_assembly is the issue 1157 NEW-A fixture: it opens a child range, appends one
-    // NodeId with ast.add_child, and closes it with ast.finish_children. Seeding it exercises the
-    // child-array mutator method-call lowering + bodies in isolation, replacing the parse_primary
-    // seed which pulls the whole recursive expression SCC.
-    try pending.append("synth_child_assembly");
-    // synth_append_loop is the issue 1157 worker-3 NEW-A fixture: it carries the parse_call_with_args
-    // argument-loop CFG (a Token cursor through a value-cursor loop-head phi, a 'while
-    // !is_call_close_token(cursor)' prefix-not bool-predicate-call header, a borrowed '&var
-    // Array<NodeId>' append, and a free !Token try-call value-cursor latch), parsing each argument
-    // through the already-lowered synth_parse_node_sig leaf instead of the recursive parse_expr.
-    // Seeding it exercises the ValueCursorWhile lowering end to end in isolation, ahead of the real
-    // parse_call_with_args consumer (which additionally needs the loop embedded mid-function with a
-    // next_token call seed and parse_expr lowered).
-    try pending.append("synth_append_loop");
-    // synth_collection_build is the NEW-A integration fixture: it combines the append loop,
-    // child-range drain, begin/add/finish mutators, and final ast.add_call C2 construction with
-    // parse_expr replaced by the already-lowered synth_parse_node_sig leaf.
-    try pending.append("synth_collection_build");
-    // expect_ident is the smallest real !Token enum-dispatch consumer: the Ident arm ok-wraps the
-    // matched token and every other arm returns error("expected identifier").
     try pending.append("expect_ident");
-    // synth_depth2_dispatch_match is the NEW-B fixture for depth-2 enum dispatch:
-    // match left.next.kind { ... }.
-    try pending.append("synth_depth2_dispatch_match");
-    // prefix_op and binary_op are real parser enum-dispatch consumers returning
-    // !PrefixOp / !BinaryOp. They exercise enum success payload ok-wrapping.
     try pending.append("prefix_op");
     try pending.append("binary_op");
-    // issue 1157: seed parse_program so the compiled parser closure provides
-    // @kizu_kizu__parser_parse_program for the cli_parse_validated_ast glue.
     try pending.append("parse_program");
-    try append_component_reachable_compiled_functions(
-        out,
-        lookup_index,
-        ir_bytes,
-        "std::kizu::parser::",
-        &var pending,
-        false
-    );
-    pending.deinit();
     return;
 }
 
@@ -2345,6 +2730,46 @@ pub fn append_codegen_reachable_compiled_functions(
     ir_bytes: []u8
 ) -> !void {
     var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try append_codegen_reachable_roots(&var pending);
+    try append_component_reachable_compiled_functions(
+        out,
+        lookup_index,
+        ir_bytes,
+        "selfhost::ir::codegen::",
+        &var pending,
+        true
+    );
+    pending.deinit();
+    return;
+}
+
+fn append_codegen_reachable_compiled_functions_profiled(
+    out: &var std::string::String,
+    lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try append_codegen_reachable_roots(&var pending);
+    try append_component_reachable_compiled_functions_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        "selfhost::ir::codegen::",
+        &var pending,
+        true,
+        "codegen",
+        backend_profile,
+        profile_out,
+        io
+    );
+    pending.deinit();
+    return;
+}
+
+fn append_codegen_reachable_roots(pending: &var std::array::Array<[]u8>) -> !void {
     // lower_code_module is the run codegen IR v1 tape lowering root: the
     // whole-file walk compiled into stage2 so the hosted run path can lower a
     // checked file onto the flat instruction tape.
@@ -2358,15 +2783,6 @@ pub fn append_codegen_reachable_compiled_functions(
     // previously reached via the severed metadata_for_program root, so it is seeded
     // directly here to keep its compiled define present without pulling in shape.
     try pending.append("metadata_line");
-    try append_component_reachable_compiled_functions(
-        out,
-        lookup_index,
-        ir_bytes,
-        "selfhost::ir::codegen::",
-        &var pending,
-        true
-    );
-    pending.deinit();
     return;
 }
 
@@ -2384,6 +2800,32 @@ pub fn append_code_render_reachable_compiled_functions(
         "selfhost::ir::code_render::",
         &var pending,
         true
+    );
+    pending.deinit();
+    return;
+}
+
+fn append_code_render_reachable_compiled_functions_profiled(
+    out: &var std::string::String,
+    lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("render_run_artifact");
+    try append_component_reachable_compiled_functions_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        "selfhost::ir::code_render::",
+        &var pending,
+        true,
+        "code_render",
+        backend_profile,
+        profile_out,
+        io
     );
     pending.deinit();
     return;

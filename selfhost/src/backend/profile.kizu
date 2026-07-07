@@ -1,0 +1,216 @@
+pub struct Profile {
+    enabled: bool,
+    flush_each: bool,
+    started_ms: i64,
+    path: []u8,
+}
+
+pub fn start(out: &var std::string::String) -> !Profile {
+    let backend_enabled = std::process::env_or_empty("KIZU_SELFHOST_BACKEND_PROFILE");
+    let flush_each_value = std::process::env_or_empty("KIZU_SELFHOST_BACKEND_PROFILE_FLUSH_EACH");
+    let path_value = std::process::env_or_empty("KIZU_SELFHOST_BACKEND_PROFILE_PATH");
+    var path = "target/selfhost/reports/backend-profile.txt";
+    if std::mem::len(path_value) > 0 {
+        path = path_value;
+    }
+    let now = std::process::monotonic_millis();
+    let enabled = std::mem::equal_bytes(backend_enabled, "1");
+    let flush_each = std::mem::equal_bytes(flush_each_value, "1");
+    if enabled {
+        try out.append_bytes("kizu-selfhost-backend-profile-v0");
+        try out.append_byte(cast<u8>(10));
+        try append_i64(out, "backend.started.ms", now);
+    }
+    return Profile {
+        enabled: enabled,
+        flush_each: flush_each,
+        started_ms: now,
+        path: path
+    };
+}
+
+pub fn is_enabled(profile: &Profile) -> bool {
+    return profile.enabled;
+}
+
+pub fn begin(
+    profile: &Profile,
+    out: &var std::string::String,
+    io: Io,
+    name: []u8
+) -> !i64 {
+    if !profile.enabled {
+        return 0;
+    }
+    let now = std::process::monotonic_millis();
+    try phase_i64(out, name, ".start.ms", now - profile.started_ms);
+    try flush_incremental(profile, out, io);
+    return now;
+}
+
+pub fn end(
+    profile: &Profile,
+    out: &var std::string::String,
+    io: Io,
+    name: []u8,
+    phase_started_ms: i64
+) -> !void {
+    if !profile.enabled {
+        return;
+    }
+    let now = std::process::monotonic_millis();
+    try phase_i64(out, name, ".end.ms", now - profile.started_ms);
+    try phase_i64(out, name, ".elapsed.ms", now - phase_started_ms);
+    try flush_incremental(profile, out, io);
+    return;
+}
+
+pub fn begin_component_member(
+    profile: &Profile,
+    out: &var std::string::String,
+    io: Io,
+    component: []u8,
+    member: []u8,
+    suffix: []u8
+) -> !i64 {
+    if !profile.enabled {
+        return 0;
+    }
+    let now = std::process::monotonic_millis();
+    try component_phase_i64(out, component, member, suffix, ".start.ms", now - profile.started_ms);
+    try flush_incremental(profile, out, io);
+    return now;
+}
+
+pub fn end_component_member(
+    profile: &Profile,
+    out: &var std::string::String,
+    io: Io,
+    component: []u8,
+    member: []u8,
+    suffix: []u8,
+    phase_started_ms: i64
+) -> !void {
+    if !profile.enabled {
+        return;
+    }
+    let now = std::process::monotonic_millis();
+    try component_phase_i64(out, component, member, suffix, ".end.ms", now - profile.started_ms);
+    try component_phase_i64(out, component, member, suffix, ".elapsed.ms", now - phase_started_ms);
+    try flush_incremental(profile, out, io);
+    return;
+}
+
+pub fn finish(
+    profile: &Profile,
+    out: &var std::string::String,
+    io: Io
+) -> !void {
+    if !profile.enabled {
+        return;
+    }
+    let now = std::process::monotonic_millis();
+    try append_i64(out, "backend.total.ms", now - profile.started_ms);
+    try flush(profile, out, io);
+    return;
+}
+
+pub fn flush(
+    profile: &Profile,
+    out: &var std::string::String,
+    io: Io
+) -> !void {
+    if !profile.enabled {
+        return;
+    }
+    try ensure_dir(io);
+    let bytes = out.as_bytes();
+    try std::fs::write_file(io, profile.path, bytes);
+    return;
+}
+
+pub fn record_i64(
+    profile: &Profile,
+    out: &var std::string::String,
+    key: []u8,
+    value: i64
+) -> !void {
+    if !profile.enabled {
+        return;
+    }
+    try append_i64(out, key, value);
+    return;
+}
+
+fn flush_incremental(
+    profile: &Profile,
+    out: &var std::string::String,
+    io: Io
+) -> !void {
+    if !profile.flush_each {
+        return;
+    }
+    try flush(profile, out, io);
+    return;
+}
+
+fn ensure_dir(io: Io) -> !void {
+    if !(try std::fs::exists(io, "target")) {
+        try std::fs::create_dir(io, "target");
+    }
+    if !(try std::fs::exists(io, "target/selfhost")) {
+        try std::fs::create_dir(io, "target/selfhost");
+    }
+    if !(try std::fs::exists(io, "target/selfhost/reports")) {
+        try std::fs::create_dir(io, "target/selfhost/reports");
+    }
+    return;
+}
+
+fn append_i64(
+    out: &var std::string::String,
+    key: []u8,
+    value: i64
+) -> !void {
+    try out.append_bytes(key);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, value);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn component_phase_i64(
+    out: &var std::string::String,
+    component: []u8,
+    member: []u8,
+    suffix: []u8,
+    field: []u8,
+    value: i64
+) -> !void {
+    try out.append_bytes("phase.");
+    try out.append_bytes(component);
+    try out.append_bytes("_member_");
+    try out.append_bytes(member);
+    try out.append_byte(cast<u8>(95));
+    try out.append_bytes(suffix);
+    try out.append_bytes(field);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, value);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn phase_i64(
+    out: &var std::string::String,
+    name: []u8,
+    suffix: []u8,
+    value: i64
+) -> !void {
+    try out.append_bytes("phase.");
+    try out.append_bytes(name);
+    try out.append_bytes(suffix);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, value);
+    try out.append_byte(cast<u8>(10));
+    return;
+}

@@ -35,6 +35,8 @@ declare void @kizu_host_io_write_stderr(ptr, ptr, %kizu.slice.u8)
 declare i64 @kizu_host_process_arg_count()
 declare void @kizu_host_process_arg(ptr, i64)
 declare void @kizu_host_process_env(ptr, %kizu.slice.u8)
+declare %kizu.slice.u8 @kizu_host_process_env_or_empty(%kizu.slice.u8)
+declare i64 @kizu_host_process_monotonic_millis()
 declare i64 @kizu_host_process_exit_code(i64)
 declare void @kizu_host_process_exit(i64) noreturn
 declare void @kizu_host_process_spawn_wait8(
@@ -204,6 +206,18 @@ entry:
   call void @kizu_host_process_env(ptr %slot, %kizu.slice.u8 %name)
   %result = load %kizu.error.slice.u8, ptr %slot
   ret %kizu.error.slice.u8 %result
+}
+
+define %kizu.slice.u8 @kizu_rt_process_env_or_empty(%kizu.slice.u8 %name) {
+entry:
+  %value = call %kizu.slice.u8 @kizu_host_process_env_or_empty(%kizu.slice.u8 %name)
+  ret %kizu.slice.u8 %value
+}
+
+define i64 @kizu_rt_process_monotonic_millis() {
+entry:
+  %value = call i64 @kizu_host_process_monotonic_millis()
+  ret i64 %value
 }
 
 define i64 @kizu_rt_process_exit_code(i64 %code) {

@@ -49,6 +49,10 @@ pub fn entry_count(index: &IrIndex) -> i64 {
     return index.key_starts.len();
 }
 
+pub fn newline_count(index: &IrIndex) -> i64 {
+    return index.newline_offsets.len();
+}
+
 pub fn entry_key_end(index: &IrIndex, entry_index: i64) -> i64 {
     return index.key_ends.get_or_panic(entry_index);
 }
@@ -423,6 +427,137 @@ pub fn first_matching_entry(
         return low;
     }
     return 0 - 1;
+}
+
+pub fn first_entry_with_fact_prefix(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    fact_prefix: []u8
+) -> i64 {
+    var low = 0;
+    var high = entry_count(index);
+    while low < high {
+        let mid = (low + high) / 2;
+        let cmp = compare_entry_to_query(
+            ir_bytes, index, mid, fact_prefix, ir_bytes[0..0], ir_bytes[0..0]
+        );
+        if cmp < 0 {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    if low >= entry_count(index) {
+        return 0 - 1;
+    }
+    if entry_key_starts_with(index, ir_bytes, low, fact_prefix) {
+        return low;
+    }
+    return 0 - 1;
+}
+
+pub fn entry_key_starts_with(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    entry_index: i64,
+    prefix: []u8
+) -> bool {
+    if entry_index < 0 or entry_index >= entry_count(index) {
+        return false;
+    }
+    let key_start = entry_key_start(index, entry_index);
+    let key_len = entry_key_end(index, entry_index) - key_start;
+    let prefix_len = std::mem::len(prefix);
+    if key_len < prefix_len {
+        return false;
+    }
+    return std::mem::equal_bytes(ir_bytes[key_start..key_start + prefix_len], prefix);
+}
+
+pub fn fact_prefix_entry_count(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    fact_prefix: []u8
+) -> i64 {
+    var entry = first_entry_with_fact_prefix(index, ir_bytes, fact_prefix);
+    var count = 0;
+    while entry >= 0 and entry_key_starts_with(index, ir_bytes, entry, fact_prefix) {
+        count = count + 1;
+        entry = entry + 1;
+    }
+    return count;
+}
+
+pub fn fact_prefix_line_bytes(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    fact_prefix: []u8
+) -> i64 {
+    var entry = first_entry_with_fact_prefix(index, ir_bytes, fact_prefix);
+    var bytes = 0;
+    while entry >= 0 and entry_key_starts_with(index, ir_bytes, entry, fact_prefix) {
+        bytes = bytes + (entry_line_end(index, entry) - entry_line_start(index, entry));
+        entry = entry + 1;
+    }
+    return bytes;
+}
+
+pub fn first_matching_entry_at_or_after_line(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    fact_prefix: []u8,
+    module_prefix: []u8,
+    short_name: []u8,
+    min_line_start: i64
+) -> i64 {
+    let first = first_matching_entry(index, ir_bytes, fact_prefix, module_prefix, short_name);
+    if first < 0 {
+        return 0 - 1;
+    }
+    let end = first_entry_after_query(index, ir_bytes, fact_prefix, module_prefix, short_name, first);
+    var low = first;
+    var high = end;
+    while low < high {
+        let mid = (low + high) / 2;
+        if entry_line_start(index, mid) < min_line_start {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    if low >= end {
+        return 0 - 1;
+    }
+    return low;
+}
+
+fn first_entry_after_query(
+    index: &IrIndex,
+    ir_bytes: []u8,
+    fact_prefix: []u8,
+    module_prefix: []u8,
+    short_name: []u8,
+    first: i64
+) -> i64 {
+    var low = first;
+    var high = entry_count(index);
+    while low < high {
+        let mid = (low + high) / 2;
+        let cmp = compare_entry_to_query(
+            ir_bytes,
+            index,
+            mid,
+            fact_prefix,
+            module_prefix,
+            short_name
+        );
+        if cmp <= 0 {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
 }
 
 pub fn entry_matches_query(

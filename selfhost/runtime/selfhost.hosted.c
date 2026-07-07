@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct {
@@ -417,6 +418,27 @@ void kizu_host_process_env(kizu_error_slice_u8 *out, kizu_slice_u8 name) {
     out->value = borrowed_slice(value);
     out->message = borrowed_slice("");
     return;
+}
+
+kizu_slice_u8 kizu_host_process_env_or_empty(kizu_slice_u8 name) {
+    char *key = slice_c_string(name);
+    if (key == NULL) {
+        return borrowed_slice("");
+    }
+    char *value = getenv(key);
+    free(key);
+    if (value == NULL) {
+        return borrowed_slice("");
+    }
+    return borrowed_slice(value);
+}
+
+int64_t kizu_host_process_monotonic_millis(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return ((int64_t)ts.tv_sec * 1000) + ((int64_t)ts.tv_nsec / 1000000);
 }
 
 int64_t kizu_host_process_exit_code(int64_t code) {

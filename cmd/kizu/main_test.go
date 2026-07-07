@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1562,6 +1563,36 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildTargetNativeOptCommandSmoke checks --opt reaches the native linker
+// command and still produces a runnable executable.
+func TestBuildTargetNativeOptCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	output := filepath.Join(t.TempDir(), "hello-opt")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native", "--opt",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, "../../examples/hello.kizu",
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native opt build failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != output {
+		t.Fatalf("got %q, want output path %q", out, output)
+	}
+	assertNativeMetadata(t, output+".kizu-build.json", output)
+	run := exec.Command(output)
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native opt executable failed: %v\n%s", err, out)
+	}
+	if string(out) != "hello, kizu\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
 // TestBuildTargetNativeErrorUnionCommandSmoke checks native builds preserve try control flow.
 func TestBuildTargetNativeErrorUnionCommandSmoke(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {
@@ -1668,6 +1699,50 @@ func TestBuildTargetNativeProcessSpawnCommandSmoke(t *testing.T) {
 		t.Fatalf("native executable failed: %v\n%s", err, runOut)
 	}
 	if got := string(runOut); got != "0\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// TestBuildTargetNativeProcessProfileHelpersSmoke checks profile helper primitives.
+func TestBuildTargetNativeProcessProfileHelpersSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	source := filepath.Join(t.TempDir(), "process_profile_helpers.kizu")
+	code := []byte(`fn main() -> void {
+    let missing = std::process::env_or_empty("KIZU_TEST_PROCESS_PROFILE_MISSING");
+    print(std::mem::len(missing));
+    let present = std::process::env_or_empty("KIZU_TEST_PROCESS_PROFILE_PRESENT");
+    print(present);
+    let before = std::process::monotonic_millis();
+    let after = std::process::monotonic_millis();
+    if after < before {
+        print("time-regressed");
+    } else {
+        print("time-ok");
+    }
+    return;
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "process_profile_helpers")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output)
+	run.Env = append(os.Environ(), "KIZU_TEST_PROCESS_PROFILE_PRESENT=profile-ok")
+	runOut, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, runOut)
+	}
+	if got := string(runOut); got != "0\nprofile-ok\ntime-ok\n" {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -1859,6 +1934,7 @@ func assertNativeMetadata(t *testing.T, path string, output string) {
 		Runtime string   `json:"runtime"`
 		Emit    string   `json:"emit"`
 		Linker  string   `json:"linker"`
+		OptMode string   `json:"optimization_mode"`
 		Output  string   `json:"output"`
 		Command []string `json:"command"`
 	}
@@ -1871,8 +1947,18 @@ func assertNativeMetadata(t *testing.T, path string, output string) {
 	if got.Emit != "exe" || got.Linker != "clang" || got.Output != output {
 		t.Fatalf("unexpected metadata: %+v", got)
 	}
+	if got.OptMode != "debug" && got.OptMode != "opt" {
+		t.Fatalf("unexpected optimization metadata: %+v", got)
+	}
 	if len(got.Command) == 0 || got.Command[0] != "clang" {
 		t.Fatalf("unexpected command metadata: %+v", got.Command)
+	}
+	wantFlag := "-O0"
+	if got.OptMode == "opt" {
+		wantFlag = "-O2"
+	}
+	if !slices.Contains(got.Command, wantFlag) {
+		t.Fatalf("metadata command %v missing %s", got.Command, wantFlag)
 	}
 }
 

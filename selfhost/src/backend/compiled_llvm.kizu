@@ -113,7 +113,7 @@ pub fn append_compiled_function_params_indexed(
         if (std::mem::equal_bytes(kind, "Match") or std::mem::equal_bytes(kind, "ExprStmt")) and
             (try compiled_mir_lower::function_is_bool_token_kind_predicate(ir_bytes, function_name, bs)) {
             let predicate_mir = try compiled_mir_lower::lower_token_kind_predicate_function(
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
             );
             defer predicate_mir.deinit();
             try compiled_mir_llvm::append_function(out, &predicate_mir);
@@ -154,7 +154,7 @@ pub fn append_compiled_function_params_indexed(
         if std::mem::equal_bytes(value_kind, "Match") and
             (try compiled_mir_lower::function_is_bool_token_kind_predicate(ir_bytes, function_name, bs)) {
             let predicate_mir = try compiled_mir_lower::lower_token_kind_predicate_function(
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
             );
             defer predicate_mir.deinit();
             try compiled_mir_llvm::append_function(out, &predicate_mir);
@@ -178,7 +178,7 @@ pub fn append_compiled_function_params_indexed(
         }
         if std::mem::equal_bytes(value_kind, "FieldExpr") {
             let mir = try compiled_mir_lower::lower_enum_field_return_function(
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, value, bs
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, value, bs
             );
             defer mir.deinit();
             try compiled_mir_llvm::append_function(out, &mir);
@@ -290,7 +290,8 @@ pub fn append_compiled_function_params_indexed(
     // 961, scope 4 prerequisite).
     if std::mem::equal_bytes(function_name, "std::kizu::lexer::number_token") {
         let number_mir = try compiled_mir_lower::lower_number_token_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs,
+            ir_lookup_index
         );
         defer number_mir.deinit();
         try compiled_mir_llvm::append_function(out, &number_mir);
@@ -302,7 +303,8 @@ pub fn append_compiled_function_params_indexed(
     // (tracker 961, scope 4 prerequisite).
     if std::mem::equal_bytes(function_name, "std::kizu::lexer::string_token") {
         let string_mir = try compiled_mir_lower::lower_string_token_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs,
+            ir_lookup_index
         );
         defer string_mir.deinit();
         try compiled_mir_llvm::append_function(out, &string_mir);
@@ -316,7 +318,7 @@ pub fn append_compiled_function_params_indexed(
     // 961, scope 4 prerequisite).
     if std::mem::equal_bytes(function_name, "std::kizu::lexer::skip_line_comment") {
         let skip_mir = try compiled_mir_lower::lower_skip_line_comment_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
         defer skip_mir.deinit();
         try compiled_mir_llvm::append_function(out, &skip_mir);
@@ -342,7 +344,7 @@ pub fn append_compiled_function_params_indexed(
     // detection (tracker 961, scope 4 prerequisite).
     if std::mem::equal_bytes(function_name, "std::kizu::lexer::word_token") {
         let word_mir = try compiled_mir_lower::lower_word_token_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
         defer word_mir.deinit();
         try compiled_mir_llvm::append_function(out, &word_mir);
@@ -355,7 +357,8 @@ pub fn append_compiled_function_params_indexed(
     // prerequisite).
     if std::mem::equal_bytes(function_name, "std::kizu::lexer::raw_token_at") {
         let raw_mir = try compiled_mir_lower::lower_raw_token_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs,
+            ir_lookup_index
         );
         defer raw_mir.deinit();
         try compiled_mir_llvm::append_function(out, &raw_mir);
@@ -380,7 +383,7 @@ pub fn append_compiled_function_params_indexed(
     if std::mem::equal_bytes(function_name, "std::kizu::parser::is_namespace_path_span") or
         std::mem::equal_bytes(function_name, "std::kizu::parser::is_struct_literal_type_span") {
         let span_mir = try compiled_mir_lower::lower_parser_span_predicate_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
         defer span_mir.deinit();
         try compiled_mir_llvm::append_function(out, &span_mir);
@@ -479,85 +482,87 @@ pub fn append_compiled_function_params_indexed(
         try compiled_mir_llvm::append_function(out, &span_mir);
         return;
     }
-    // The comment-preservation driver append_preserved_line_comments returns its loop-carried
-    // scalar state as a 'CommentFormatState' struct in an error union, so its return type is the
-    // '%kizu.error.comment_format_state' shape. That is the type-derived signal that selects the
-    // structured-control-flow comment emitter: a forward scan loop carrying four loop-head phis,
-    // an if/else comment arm that mutates a '&var std::string::String' through the
-    // @kizu_rt_string_append_* ABI, and a 'return CommentFormatState { ... }' success wrap. No
-    // other compiled member returns this error union, so dispatching on the return type keeps the
-    // selection shape/type-driven rather than name-based (issue 1165 / 1162).
-    if std::mem::equal_bytes(llvm_return_type, "%kizu.error.comment_format_state") {
-        try compiled_struct_cf::append_comment_preserve_function(
-            out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-        return;
-    }
-    // A scan-shift sort over a '&var std::array::Array<T>' parameter (an outer counter
-    // loop, a nested cursor/flag scan loop, an if/else that re-merges into the loop, a
-    // try-call comparator condition, and Array<T>.get/set element ABI) needs genuine
-    // basic-block + phi control flow rather than the template-shaped i64-induction While
-    // machinery, so it lowers through the structured-control-flow emitter
-    // (issue 1165 / 1162). sort_import_indices is its first consumer.
-    if try compiled_struct_cf::is_import_sort_shape(ir_bytes, function_name, statement_count, bs) {
-        try compiled_struct_cf::append_import_sort_function(
-            out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-        return;
-    }
-    // The leading-import collector builds a runtime Array<i64>, scans the token array through
-    // an if/else branch-merge loop (a loop-terminating 'index = tokens.len()' on one arm, an
-    // append-then-try-advance on the other), sorts the collected indices in place, and returns
-    // the filled array as the '!std::array::Array<i64>' success. Its array constructor,
-    // Array<T>.append, branch-merge phi, try-call advance / sort and owned success wrap need
-    // genuine basic-block + phi control flow rather than the i64-induction While machinery, so
-    // it lowers through the structured-control-flow emitter (issue 1165 / 1162).
-    // leading_import_indices is its first consumer.
-    if try compiled_struct_cf::is_leading_import_shape(ir_bytes, function_name, statement_count, bs) {
-        try compiled_struct_cf::append_leading_import_function(
-            out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-        return;
-    }
-    // The single-import emitter mutates a '&var std::string::String' accumulator: it appends the
-    // 'import ' prefix, scans the import's tokens through a loop carrying an early-return ';'
-    // append and a fall-through 'ident or double-colon' text append, and returns the void
-    // success. Its String append runtime calls, string-literal globals, early-return branch and
-    // boolean-or fall-through need genuine basic-block + phi control flow rather than the
-    // i64-induction While machinery, so it lowers through the structured-control-flow emitter
-    // (issue 1165 / 1162). append_import_decl is its first consumer.
-    if try compiled_struct_cf::is_import_decl_shape(ir_bytes, function_name, statement_count, bs) {
-        try compiled_struct_cf::append_import_decl_function(
-            out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-        return;
-    }
-    // The indentation emitter scans an i64 depth counter, appending the indentation string literal
-    // through the @kizu_rt_string_append_bytes ABI on each iteration. It mutates a '&var
-    // std::string::String' accumulator inside a counter loop whose String append runtime call and
-    // try-propagation need genuine basic-block + phi control flow rather than the i64-induction
-    // While machinery, so it lowers through the structured-control-flow emitter (issue 1165 /
-    // 1162). It shares the (Let(Int), While, Return(Empty)) top-level shape with the import-cluster
-    // emitter, so it is dispatched ahead of is_sorted_imports_shape. append_indent is its first
-    // consumer.
-    if try compiled_struct_cf::is_append_indent_shape(ir_bytes, function_name, statement_count, bs) {
-        try compiled_struct_cf::append_append_indent_function(
-            out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-        return;
-    }
-    // The import-cluster emitter scans the sorted indices array and, for each, appends a single
-    // import declaration via append_import_decl followed by a newline byte. Its checked
-    // Array<i64>.get, its try-call to the String-mutating append_import_decl with error
-    // propagation, and its @kizu_rt_string_append_byte newline append need genuine basic-block +
-    // phi control flow rather than the i64-induction While machinery, so it lowers through the
-    // structured-control-flow emitter (issue 1165 / 1162). append_sorted_imports is its first
-    // consumer.
-    if try compiled_struct_cf::is_sorted_imports_shape(ir_bytes, function_name, statement_count, bs) {
-        try compiled_struct_cf::append_sorted_imports_function(
-            out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-        return;
+    if compiled_function_is_format_component(function_name) {
+        // The comment-preservation driver append_preserved_line_comments returns its loop-carried
+        // scalar state as a 'CommentFormatState' struct in an error union, so its return type is the
+        // '%kizu.error.comment_format_state' shape. That is the type-derived signal that selects the
+        // structured-control-flow comment emitter: a forward scan loop carrying four loop-head phis,
+        // an if/else comment arm that mutates a '&var std::string::String' through the
+        // @kizu_rt_string_append_* ABI, and a 'return CommentFormatState { ... }' success wrap. No
+        // other compiled member returns this error union, so dispatching on the return type keeps the
+        // selection shape/type-driven rather than name-based (issue 1165 / 1162).
+        if std::mem::equal_bytes(llvm_return_type, "%kizu.error.comment_format_state") {
+            try compiled_struct_cf::append_comment_preserve_function(
+                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            return;
+        }
+        // A scan-shift sort over a '&var std::array::Array<T>' parameter (an outer counter
+        // loop, a nested cursor/flag scan loop, an if/else that re-merges into the loop, a
+        // try-call comparator condition, and Array<T>.get/set element ABI) needs genuine
+        // basic-block + phi control flow rather than the template-shaped i64-induction While
+        // machinery, so it lowers through the structured-control-flow emitter
+        // (issue 1165 / 1162). sort_import_indices is its first consumer.
+        if try compiled_struct_cf::is_import_sort_shape(ir_bytes, function_name, statement_count, bs) {
+            try compiled_struct_cf::append_import_sort_function(
+                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            return;
+        }
+        // The leading-import collector builds a runtime Array<i64>, scans the token array through
+        // an if/else branch-merge loop (a loop-terminating 'index = tokens.len()' on one arm, an
+        // append-then-try-advance on the other), sorts the collected indices in place, and returns
+        // the filled array as the '!std::array::Array<i64>' success. Its array constructor,
+        // Array<T>.append, branch-merge phi, try-call advance / sort and owned success wrap need
+        // genuine basic-block + phi control flow rather than the i64-induction While machinery, so
+        // it lowers through the structured-control-flow emitter (issue 1165 / 1162).
+        // leading_import_indices is its first consumer.
+        if try compiled_struct_cf::is_leading_import_shape(ir_bytes, function_name, statement_count, bs) {
+            try compiled_struct_cf::append_leading_import_function(
+                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            return;
+        }
+        // The single-import emitter mutates a '&var std::string::String' accumulator: it appends the
+        // 'import ' prefix, scans the import's tokens through a loop carrying an early-return ';'
+        // append and a fall-through 'ident or double-colon' text append, and returns the void
+        // success. Its String append runtime calls, string-literal globals, early-return branch and
+        // boolean-or fall-through need genuine basic-block + phi control flow rather than the
+        // i64-induction While machinery, so it lowers through the structured-control-flow emitter
+        // (issue 1165 / 1162). append_import_decl is its first consumer.
+        if try compiled_struct_cf::is_import_decl_shape(ir_bytes, function_name, statement_count, bs) {
+            try compiled_struct_cf::append_import_decl_function(
+                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            return;
+        }
+        // The indentation emitter scans an i64 depth counter, appending the indentation string literal
+        // through the @kizu_rt_string_append_bytes ABI on each iteration. It mutates a '&var
+        // std::string::String' accumulator inside a counter loop whose String append runtime call and
+        // try-propagation need genuine basic-block + phi control flow rather than the i64-induction
+        // While machinery, so it lowers through the structured-control-flow emitter (issue 1165 /
+        // 1162). It shares the (Let(Int), While, Return(Empty)) top-level shape with the import-cluster
+        // emitter, so it is dispatched ahead of is_sorted_imports_shape. append_indent is its first
+        // consumer.
+        if try compiled_struct_cf::is_append_indent_shape(ir_bytes, function_name, statement_count, bs) {
+            try compiled_struct_cf::append_append_indent_function(
+                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            return;
+        }
+        // The import-cluster emitter scans the sorted indices array and, for each, appends a single
+        // import declaration via append_import_decl followed by a newline byte. Its checked
+        // Array<i64>.get, its try-call to the String-mutating append_import_decl with error
+        // propagation, and its @kizu_rt_string_append_byte newline append need genuine basic-block +
+        // phi control flow rather than the i64-induction While machinery, so it lowers through the
+        // structured-control-flow emitter (issue 1165 / 1162). append_sorted_imports is its first
+        // consumer.
+        if try compiled_struct_cf::is_sorted_imports_shape(ir_bytes, function_name, statement_count, bs) {
+            try compiled_struct_cf::append_sorted_imports_function(
+                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            );
+            return;
+        }
     }
     let mir = try compiled_mir_lower::lower_multi_statement_function(
         ir_lookup_index,
@@ -572,6 +577,10 @@ pub fn append_compiled_function_params_indexed(
     defer mir.deinit();
     try compiled_mir_llvm::append_function(out, &mir);
     return;
+}
+
+fn compiled_function_is_format_component(function_name: []u8) -> bool {
+    return std::mem::starts_with(function_name, "selfhost::parser::format::");
 }
 
 pub fn append_compiled_function_auto(
@@ -623,6 +632,29 @@ pub fn append_compiled_function_auto_indexed(
     let llvm_return_type = try compiled_signature::derive_return_type_indexed(
         ir_lookup_index, ir_bytes, function_name
     );
+    let llvm_symbol_value = llvm_symbol.*;
+    let params_spec_value = params_spec.*;
+    try append_compiled_function_params_indexed(
+        ir_lookup_index,
+        out,
+        ir_bytes,
+        function_name,
+        llvm_symbol_value,
+        llvm_return_type,
+        params_spec_value
+    );
+    return;
+}
+
+pub fn append_compiled_function_auto_return_indexed(
+    ir_lookup_index: &ir_index::IrIndex,
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: &[]u8,
+    llvm_return_type: []u8,
+    params_spec: &[]u8
+) -> !void {
     let llvm_symbol_value = llvm_symbol.*;
     let params_spec_value = params_spec.*;
     try append_compiled_function_params_indexed(

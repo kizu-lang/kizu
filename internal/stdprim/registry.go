@@ -30,6 +30,11 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std.builtin.process_arg_count":  {Return: "i64"},
 	"std.builtin.process_arg":        {Args: []ArgKind{ArgI64}, Return: "![]u8"},
 	"std.builtin.process_env":        {Args: []ArgKind{ArgBytes}, Return: "![]u8"},
+	"std.builtin.process_env_or_empty": {
+		Args:   []ArgKind{ArgBytes},
+		Return: "[]u8",
+	},
+	"std.builtin.process_monotonic_millis": {Return: "i64"},
 	"std.builtin.process_spawn_wait8": {
 		Args: []ArgKind{
 			ArgI64,

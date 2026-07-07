@@ -35,35 +35,8 @@ func parserCompiledClosureSeeds() []string {
 		// issue 1157 C2 real parser consumer: exercises ast.add_var_with_doc from the
 		// compiled parser path without pulling the full declaration parser.
 		"name_node_with_doc",
-		// issue 1157 PJ synthetic fixture: a '-> !ParseNode' helper seeded (in-degree
-		// zero) to exercise the site-955 cursor-constructor call, the ParseNode
-		// error-union return, and the ParseNode value type on the compiled parser path.
-		"synth_parse_node_sig",
-		// issue 1157 worker-3 grammar-loop fixture: synth_postfix_loop carries the
-		// parse_postfix_expr 'while true' value-loop CFG (reassigning through the lowered
-		// synth_parse_node_sig leaf), exercising the GrammarLoop lowering ahead of the real
-		// parse_primary consumer.
-		"synth_postfix_loop",
-		// issue 1157 NEW-A fixture: synth_child_assembly opens a child range, appends one NodeId
-		// with ast.add_child, and closes it with ast.finish_children. It lowers the child-array
-		// mutator method calls + bodies in isolation, replacing the parse_primary seed, which pulled
-		// the whole recursive expression SCC. add_call, the i64 drain, and the value-carried append
-		// loop are deferred.
-		"synth_child_assembly",
-		// issue 1157 worker-3 NEW-A fixture: synth_append_loop carries the parse_call_with_args
-		// argument-loop CFG (a Token cursor through a value-cursor loop-head phi, a prefix-not
-		// bool-predicate-call header, a borrowed '&var Array<NodeId>' append, and a free !Token
-		// try-call value-cursor latch), parsing each argument through the lowered
-		// synth_parse_node_sig leaf, exercising the ValueCursorWhile lowering ahead of the real
-		// parse_call_with_args consumer.
-		"synth_append_loop",
-		// issue 1157 NEW-A integration fixture: combines append-loop, drain,
-		// begin/add/finish, and ast.add_call C2 with parse_expr replaced by synth_parse_node_sig.
-		"synth_collection_build",
 		// expect_ident exercises !Token ok-wrap/error arms.
 		"expect_ident",
-		// issue 1157 NEW-B fixture: isolates match left.next.kind depth-2 enum dispatch.
-		"synth_depth2_dispatch_match",
 		// issue 1157 enum-payload error-union real consumers: exercise !PrefixOp / !BinaryOp
 		// ok-wrap lowering from the compiled parser closure without seeding parse_primary.
 		"prefix_op",
@@ -138,9 +111,9 @@ func TestSelfhostParserCompiledClosureDerivedFromSharedBFS(t *testing.T) {
 	assertSharedCompiledClosurePath(t, cli)
 	assertNoPerComponentCompiledClosureHelpers(t, cli)
 
-	// The append_functions entry point delegates to the shared walk rather than
+	// The append_functions entry point delegates to the profiled shared walk rather than
 	// re-listing the cluster members.
-	delegation := "try append_kizu_parser_reachable_compiled_functions(out, lookup_index, ir_bytes);"
+	delegation := "try append_kizu_parser_reachable_compiled_functions_profiled("
 	if !strings.Contains(cli, delegation) {
 		t.Fatalf("append_functions missing shared parser closure delegation")
 	}

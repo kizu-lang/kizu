@@ -4469,6 +4469,14 @@ fn append_traversal_arm_block(
     }
     try append_ll_line(out, ")");
     if arm.is_plain_call {
+        if !is_error_union_type(stmt.own_error_union) {
+            try out.append_bytes("  ret ");
+            try out.append_bytes(stmt.own_error_union);
+            try out.append_bytes(" %match_arm_");
+            try std::fmt::append_i64(out, arm_index);
+            try append_ll_line(out, "_call");
+            return;
+        }
         // Wrap the plain call's success value into the own error union and return it.
         try out.append_bytes("  %match_arm_");
         try std::fmt::append_i64(out, arm_index);
@@ -5082,7 +5090,8 @@ fn append_multi_return_expr(
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.expr_insts);
     try append_expr_return_value(
-        out, function.return_type.llvm_name, &stmt.expr_insts, stmt.expr_result_id
+        out, function.return_type.llvm_name, &stmt.expr_insts, stmt.expr_result_id,
+        stmt.expr_result_id
     );
     return;
 }
@@ -5114,6 +5123,19 @@ fn append_multi_return_array_get(
         &stmt.expr_insts, stmt.index_result_id
     );
     let index_int_value = try expr_inst_int_value_by_id(&stmt.expr_insts, stmt.index_result_id);
+    if stmt.field_index < 0 {
+        try append_value_array_get_return_body(
+            out,
+            function.return_type.llvm_name,
+            stmt.receiver_name,
+            stmt.element_type,
+            index_value_name,
+            index_is_int_literal,
+            index_int_value,
+            stmt.index_result_id
+        );
+        return;
+    }
     try append_array_get_body(
         out,
         function.return_type.llvm_name,
@@ -5128,6 +5150,108 @@ fn append_multi_return_array_get(
         index_int_value,
         stmt.index_result_id
     );
+    return;
+}
+
+fn append_value_array_get_return_body(
+    out: &var std::string::String,
+    error_union: []u8,
+    receiver_name: []u8,
+    element_type: []u8,
+    index_value_name: []u8,
+    index_is_int_literal: bool,
+    index_int_value: i64,
+    index_temp_id: i64
+) -> !void {
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %");
+    try out.append_bytes(receiver_name);
+    try out.append_bytes(", i64 ");
+    try append_ssa_or_int_or_temp_ref(
+        out, index_value_name, index_is_int_literal, index_int_value, index_temp_id
+    );
+    try append_ll_line(out, ")");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_ok = extractvalue %kizu.error.slice.u8 %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_view, 0");
+    try out.append_bytes("  br i1 %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_ok, label %array_get_");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_ok, label %array_get_");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_fail");
+    try out.append_bytes("array_get_");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_ok:");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_slice = extractvalue %kizu.error.slice.u8 %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_view, 1");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_ptr = extractvalue %kizu.slice.u8 %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_slice, 0");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_elem = load ");
+    try out.append_bytes(element_type);
+    try out.append_bytes(", ptr %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_ptr");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_ok_flag = insertvalue ");
+    try out.append_bytes(error_union);
+    try append_ll_line(out, " zeroinitializer, i1 true, 0");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_ok_value = insertvalue ");
+    try out.append_bytes(error_union);
+    try out.append_bytes(" %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_ok_flag, ");
+    try out.append_bytes(element_type);
+    try out.append_bytes(" %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_elem, 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(error_union);
+    try out.append_bytes(" %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_ok_value");
+    try out.append_bytes("array_get_");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_fail:");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_fail_msg = extractvalue %kizu.error.slice.u8 %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_view, 2");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_fail_flag = insertvalue ");
+    try out.append_bytes(error_union);
+    try append_ll_line(out, " zeroinitializer, i1 false, 0");
+    try out.append_bytes("  %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_fail_value = insertvalue ");
+    try out.append_bytes(error_union);
+    try out.append_bytes(" %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try out.append_bytes("_fail_flag, %kizu.slice.u8 %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_fail_msg, 2");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(error_union);
+    try out.append_bytes(" %ag");
+    try std::fmt::append_i64(out, index_temp_id);
+    try append_ll_line(out, "_fail_value");
     return;
 }
 // append_multi_let_array_get renders a 'let <name> = try <receiver>.get(<expr>);' where
@@ -5506,7 +5630,8 @@ fn append_expr_return_value(
     out: &var std::string::String,
     return_type: []u8,
     insts: &std::array::Array<compiled_mir::MirExprInst>,
-    result_id: i64
+    result_id: i64,
+    local_prefix: i64
 ) -> !void {
     let value_type = try expr_inst_type_by_id(insts, result_id);
     let needs_wrap = is_error_union_type(return_type) and
@@ -5520,13 +5645,19 @@ fn append_expr_return_value(
         try out.append_byte(cast<u8>(10));
         return;
     }
-    try out.append_bytes("  %retwrap_ok = insertvalue ");
+    try out.append_bytes("  %retwrap");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes("_ok = insertvalue ");
     try out.append_bytes(return_type);
     try out.append_bytes(" zeroinitializer, i1 true, 0");
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %retwrap_val = insertvalue ");
+    try out.append_bytes("  %retwrap");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes("_val = insertvalue ");
     try out.append_bytes(return_type);
-    try out.append_bytes(" %retwrap_ok, ");
+    try out.append_bytes(" %retwrap");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes("_ok, ");
     try out.append_bytes(value_type);
     try out.append_bytes(" ");
     try append_expr_value_ref(out, insts, result_id);
@@ -5534,7 +5665,9 @@ fn append_expr_return_value(
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ret ");
     try out.append_bytes(return_type);
-    try out.append_bytes(" %retwrap_val");
+    try out.append_bytes(" %retwrap");
+    try std::fmt::append_i64(out, local_prefix);
+    try out.append_bytes("_val");
     try out.append_byte(cast<u8>(10));
     return;
 }

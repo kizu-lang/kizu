@@ -8,9 +8,8 @@ import (
 // assertComponentReachableCompiledClosure pins that one component's compiled
 // closure entry point seeds its BFS queue and delegates to the shared
 // append_component_reachable_compiled_functions walk with the component prefix
-// and the allow_empty_params flag. Keeping the seeds inline guarantees the
-// closure is not widened by a hand-seeded supported list, and routing through the
-// shared walk guarantees the per-component BFS duplicates stay collapsed.
+// and the allow_empty_params flag. Roots may live in a helper shared by profiled
+// and unprofiled emitters, but they must still be the narrow explicit seed list.
 func assertComponentReachableCompiledClosure(
 	t *testing.T,
 	cli string,
@@ -21,9 +20,23 @@ func assertComponentReachableCompiledClosure(
 ) {
 	t.Helper()
 	body := selfhostKizuFunctionBody(t, cli, fn)
+	seedBody := body
+	if len(seeds) > 0 && !strings.Contains(seedBody, "try pending.append(\""+seeds[0]+"\");") {
+		rootFn := ""
+		switch prefix {
+		case "std::kizu::parser::":
+			rootFn = "fn append_kizu_parser_reachable_roots("
+		case "selfhost::ir::codegen::":
+			rootFn = "fn append_codegen_reachable_roots("
+		}
+		if rootFn == "" {
+			t.Fatalf("%s seeds moved but no root helper is known for prefix %q", fn, prefix)
+		}
+		seedBody = selfhostKizuFunctionBody(t, cli, rootFn)
+	}
 	for _, seed := range seeds {
 		fragment := "try pending.append(\"" + seed + "\");"
-		if !strings.Contains(body, fragment) {
+		if !strings.Contains(seedBody, fragment) {
 			t.Fatalf("%s seed changed, missing %q", fn, fragment)
 		}
 	}
@@ -66,8 +79,9 @@ func assertSharedCompiledClosurePath(t *testing.T, cli string) {
 	collector := selfhostKizuFunctionBody(t, cli, "fn collect_component_compiled_body_callees(")
 	for _, fragment := range []string{
 		"let body_start = ir_index::body_node_facts_start(lookup_index, ir_bytes, name);",
-		"ir_contract::body_node_count_from(ir_bytes, name, body_start)",
-		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, body_start)",
+		"ir_contract::collect_body_node_line_starts(",
+		"let line_start = try node_line_starts.get(sequence);",
+		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, line_start)",
 		"ir_contract::body_call_callee_or_empty_from(",
 	} {
 		if !strings.Contains(collector, fragment) {
@@ -78,6 +92,8 @@ func assertSharedCompiledClosurePath(t *testing.T, cli string) {
 		"ir_contract::body_node_count(ir_bytes, name)",
 		"ir_contract::body_node_kind(ir_bytes, name, sequence)",
 		"ir_contract::body_call_callee_or_empty(",
+		"ir_contract::body_node_count_from(ir_bytes, name, body_start)",
+		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, body_start)",
 	} {
 		if strings.Contains(collector, fragment) {
 			t.Fatalf("shared compiled closure collector keeps full-artifact scan %q", fragment)
