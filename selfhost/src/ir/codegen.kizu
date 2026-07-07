@@ -897,6 +897,14 @@ pub fn code_op_try_call_typed_error_i64() -> i64 {
     return 154;
 }
 
+// STRING_RESERVE grows an owned String's backing byte storage without changing
+// its length: 'op receiver_value additional_value'. The renderer delegates to
+// kizu_rt_string_reserve so capacity growth stays in the runtime storage module
+// rather than duplicating allocation/copy/free logic in every artifact.
+pub fn code_op_try_string_reserve() -> i64 {
+    return 155;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -6968,10 +6976,8 @@ fn lower_code_try_string_truncate(
 }
 
 // String.reserve(additional) is a capacity hint that never changes the string's
-// length or bytes, so the lowering is a semantic no-op: it lowers and type-checks
-// the i64 argument (preserving any evaluation it implies) but emits no run-codegen
-// op. A reserve-free artifact renders byte-identical, so skipping the op keeps
-// flip parity without a runtime call.
+// length or bytes, but its capacity is observable through String.capacity().
+// Lower it to the runtime storage helper instead of treating it as a no-op.
 fn lower_code_try_string_reserve(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -7000,6 +7006,10 @@ fn lower_code_try_string_reserve(
     if actual_kind != kind_i64 {
         return code_eval_unsupported(arg_eval.next);
     }
+    let op = code_op_try_string_reserve();
+    try code.append(op);
+    try code.append(receiver_value);
+    try code.append(arg_eval.value_id);
     return code_eval_value(0, arg_eval.next);
 }
 
@@ -7620,9 +7630,17 @@ fn code_return_value_is_error_call(
 ) -> bool {
     let node = ast.get(value);
     return match node.data {
-        Call(call_node) => std::mem::equal_bytes(ast_node_text(text, ast, call_node.callee), "error"),
+        Call(call_node) => code_call_is_error(text, ast, call_node.callee),
         _ => false,
     };
+}
+
+fn code_call_is_error(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId
+) -> bool {
+    return std::mem::equal_bytes(ast_node_text(text, ast, callee), "error");
 }
 
 fn lower_code_return(

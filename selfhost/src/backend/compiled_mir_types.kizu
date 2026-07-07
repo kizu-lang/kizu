@@ -812,6 +812,12 @@ pub fn lower_call_return_type(
         );
         return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, stdlib_ret);
     }
+    let array_get_element = try resolve_value_array_get_element_or_empty(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    if std::mem::len(array_get_element) > 0 {
+        return try array_get_error_union_llvm_type(ir_bytes, module_prefix, array_get_element);
+    }
     return try compiled_signature::resolve_call_return_type(
         ir_bytes, function_name, module_prefix, call_node, bs
     );
@@ -859,6 +865,14 @@ pub fn lower_call_return_type_indexed(
         );
         return try compiled_type_lower::kizu_type_to_llvm_indexed(
             index, ir_bytes, module_prefix, stdlib_ret
+        );
+    }
+    let array_get_element = try resolve_value_array_get_element_or_empty(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    if std::mem::len(array_get_element) > 0 {
+        return try array_get_error_union_llvm_type_indexed(
+            index, ir_bytes, module_prefix, array_get_element
         );
     }
     return try compiled_signature::resolve_call_return_type_indexed(
@@ -932,7 +946,13 @@ pub fn lower_call_info_indexed_cached(
         index, ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
     );
     if std::mem::len(ret_kizu) == 0 {
-        return error("compiled signature: call return type not found");
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled signature: call return type not found: ");
+        try message.append_bytes(function_name);
+        try message.append_bytes(" -> ");
+        try message.append_bytes(callee_name);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
     let return_llvm = try kizu_type_to_llvm_indexed_cached(
         index, ir_bytes, module_prefix, ret_kizu, cache
@@ -1259,7 +1279,8 @@ fn lower_signature_call_arg_types(
         }
         index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
-    if types.len() == arg_count {
+    let found_count = types.len();
+    if found_count == arg_count {
         return types;
     }
     if std::mem::len(lookup_prefix) > 0 {
@@ -1267,7 +1288,15 @@ fn lower_signature_call_arg_types(
             ir_bytes, ir_bytes[0..0], callee_name, type_module_prefix, arg_count
         );
     }
-    return error("compiled function: call arg type not found");
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled function: call arg type not found: ");
+    try message.append_bytes(callee_name);
+    try message.append_bytes(" expected ");
+    try std::fmt::append_i64(&var message, arg_count);
+    try message.append_bytes(" got ");
+    try std::fmt::append_i64(&var message, found_count);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }
 
 fn lower_signature_call_arg_types_indexed(
@@ -1306,7 +1335,8 @@ fn lower_signature_call_arg_types_indexed(
         );
         entry_index = entry_index + 1;
     }
-    if types.len() == arg_count {
+    let found_count = types.len();
+    if found_count == arg_count {
         return types;
     }
     if std::mem::len(lookup_prefix) > 0 {
@@ -1314,7 +1344,15 @@ fn lower_signature_call_arg_types_indexed(
             index, ir_bytes, ir_bytes[0..0], callee_name, type_module_prefix, arg_count
         );
     }
-    return error("compiled function: call arg type not found");
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled function: call arg type not found: ");
+    try message.append_bytes(callee_name);
+    try message.append_bytes(" expected ");
+    try std::fmt::append_i64(&var message, arg_count);
+    try message.append_bytes(" got ");
+    try std::fmt::append_i64(&var message, found_count);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }
 
 fn lower_stdlib_call_arg_types(
@@ -1914,6 +1952,27 @@ fn resolve_value_array_get_element_or_empty_indexed_cached(
     );
     let lookup = struct_lookup_kizu_type(receiver_kizu);
     return array_value_element_kizu_type_or_empty(lookup);
+}
+
+fn array_get_error_union_llvm_type(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    element_kizu_type: []u8
+) -> ![]u8 {
+    return try compiled_type_lower::error_union_inner_to_llvm(
+        ir_bytes, module_prefix, element_kizu_type
+    );
+}
+
+fn array_get_error_union_llvm_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    element_kizu_type: []u8
+) -> ![]u8 {
+    return try compiled_type_lower::error_union_inner_to_llvm_indexed(
+        index, ir_bytes, module_prefix, element_kizu_type
+    );
 }
 
 // array_value_element_kizu_type_or_empty strips the std::array::Array<...> wrapper and
@@ -2535,7 +2594,21 @@ pub fn resolve_method_call(
         ir_bytes, "function-signature-return ", ir_bytes[0..0], qualified_name
     );
     if std::mem::len(return_kizu) == 0 {
-        return error("compiled mir: method call signature not found");
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled mir: method call signature not found: ");
+        try message.append_bytes(function_name);
+        try message.append_bytes(" node ");
+        try std::fmt::append_i64(&var message, call_node);
+        try message.append_bytes(" receiver ");
+        try message.append_bytes(receiver_name);
+        try message.append_bytes(":");
+        try message.append_bytes(receiver_kizu);
+        try message.append_bytes(" method ");
+        try message.append_bytes(method_name);
+        try message.append_bytes(" qualified ");
+        try message.append_bytes(qualified_name);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
     let return_llvm = try compiled_type_lower::kizu_type_to_llvm(
         ir_bytes, impl_prefix, return_kizu

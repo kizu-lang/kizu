@@ -1248,8 +1248,8 @@ func requiredLLVMFormatHelperFragments() []string {
 		"%t24 = icmp slt i64 %index, %t23",
 		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +
 			"%kizu.owned %format_tokens, i64 %index)",
-		"%retwrap_ok = insertvalue %kizu.error.owned zeroinitializer, i1 true, 0",
-		"%retwrap_val = insertvalue %kizu.error.owned %retwrap_ok, %kizu.owned %out, 1",
+		"%retwrap0_ok = insertvalue %kizu.error.owned zeroinitializer, i1 true, 0",
+		"%retwrap0_val = insertvalue %kizu.error.owned %retwrap0_ok, %kizu.owned %out, 1",
 	}
 	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
 	fragments = append(fragments, requiredLLVMFormatSortFragments()...)

@@ -164,6 +164,43 @@ fn require_contiguous_call_args(nodes: &std::array::Array<i64>) -> !void {
     return;
 }
 
+fn generic_call_arg_field_mode_error(
+    function_name: []u8,
+    callee_name: []u8,
+    call_node: i64
+) -> !void {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled mir: field call reached generic call arg lowering: ");
+    try message.append_bytes(function_name);
+    try message.append_bytes(" node ");
+    try std::fmt::append_i64(&var message, call_node);
+    try message.append_bytes(" callee ");
+    try message.append_bytes(callee_name);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
+}
+
+fn call_is_field_mode(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    from: i64
+) -> !bool {
+    let callee_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, call_node, "callee", 0, from
+    );
+    let callee_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, callee_node, from
+    );
+    if !std::mem::equal_bytes(callee_kind, "FieldExpr") {
+        return false;
+    }
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, callee_node, from
+    );
+    return std::mem::equal_bytes(mode, "field");
+}
+
 fn call_arg_token_end(bytes: []u8, start: i64) -> i64 {
     let byte_len = std::mem::len(bytes);
     var index = start;
@@ -614,6 +651,9 @@ pub fn lower_call_args_cached(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, cf
     );
+    if try call_is_field_mode(ir_bytes, function_name, call_node, cf) {
+        try generic_call_arg_field_mode_error(function_name, callee_name, call_node);
+    }
     var arg_nodes = try call_arg_nodes_bounded(
         ir_lookup_index, ir_bytes, function_name, call_node, bs
     );
@@ -725,6 +765,9 @@ pub fn lower_call_args_with_aliases_cached(
     let callee_name = try ir_contract::body_call_callee_or_empty_from(
         ir_bytes, function_name, call_node, cf
     );
+    if try call_is_field_mode(ir_bytes, function_name, call_node, cf) {
+        try generic_call_arg_field_mode_error(function_name, callee_name, call_node);
+    }
     var arg_nodes = try call_arg_nodes_bounded(
         ir_lookup_index, ir_bytes, function_name, call_node, bs
     );

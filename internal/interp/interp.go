@@ -18,6 +18,7 @@ import (
 // Interpreter executes a parsed Kizu program.
 type Interpreter struct {
 	out            io.Writer
+	errOut         io.Writer
 	outMu          sync.Mutex
 	functions      map[string]*ast.FunctionDecl
 	impls          map[string]map[string]*ast.FunctionDecl
@@ -63,8 +64,17 @@ func New(out io.Writer) *Interpreter {
 
 // NewWithProcessArgs creates an interpreter with explicit process arguments.
 func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
+	return NewWithProcessIO(out, out, args)
+}
+
+// NewWithProcessIO creates an interpreter with explicit process IO and args.
+func NewWithProcessIO(out io.Writer, errOut io.Writer, args []string) *Interpreter {
+	if errOut == nil {
+		errOut = out
+	}
 	return &Interpreter{
 		out:            out,
+		errOut:         errOut,
 		functions:      map[string]*ast.FunctionDecl{},
 		impls:          map[string]map[string]*ast.FunctionDecl{},
 		enums:          map[string]map[string]bool{},
@@ -1748,7 +1758,7 @@ func (i *Interpreter) evalIoHelperBuiltin(
 		value, err := i.evalIoWrite(args, env, i.out)
 		return value, true, err
 	case "std.builtin.io_write_stderr":
-		value, err := i.evalIoWrite(args, env, os.Stderr)
+		value, err := i.evalIoWrite(args, env, i.errOut)
 		return value, true, err
 	case "std.builtin.io_read_stdin":
 		value, err := i.evalIoReadStdin(args, env)
@@ -2162,7 +2172,7 @@ func (i *Interpreter) evalProcessSpawnWait8(args []ast.Expression, env *Env) (Va
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = i.out
-	cmd.Stderr = i.out
+	cmd.Stderr = i.errOut
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return intValue(int64(exitErr.ExitCode())), nil

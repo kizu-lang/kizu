@@ -224,6 +224,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare %kizu.owned @kizu_rt_string_new(%kizu.owned)");
     try wl(out, "declare %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned, i8)");
+    try wl(out, "declare %kizu.error.void @kizu_rt_string_reserve(%kizu.owned, i64)");
     try wl(out, "declare %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned)");
     try wl(out, "declare i64 @kizu_rt_string_len(%kizu.owned)");
     try wl(out, "declare void @kizu_rt_string_deinit(%kizu.owned)");
@@ -2312,6 +2313,10 @@ fn render_one_instruction_runtime_array_storage(
     if op == try_string_truncate {
         try render_try_string_truncate(out, code, index, abi);
     }
+    let try_string_reserve = codegen::code_op_try_string_reserve();
+    if op == try_string_reserve {
+        try render_try_string_reserve(out, code, index, abi);
+    }
     return;
 }
 
@@ -4037,7 +4042,8 @@ fn render_try_path_join(
     try w(out, ", %kizu.slice.u8 %v");
     try wi(out, right);
     try wl(out, ")");
-    return try render_try_path_owned_result(out, code, index, dst, abi);
+    try render_try_path_owned_result(out, code, index, dst, abi);
+    return;
 }
 
 fn render_try_path_clean(
@@ -4056,7 +4062,8 @@ fn render_try_path_clean(
     try w(out, ", %kizu.slice.u8 %v");
     try wi(out, path);
     try wl(out, ")");
-    return try render_try_path_owned_result(out, code, index, dst, abi);
+    try render_try_path_owned_result(out, code, index, dst, abi);
+    return;
 }
 
 fn render_try_path_owned_result(
@@ -6222,7 +6229,8 @@ fn render_error_cleanup(
     current_index: i64
 ) -> !void {
     let body_start = try tape_current_body_start(code, current_index, 0, 0);
-    return try render_error_cleanup_before(out, code, body_start, current_index, current_index);
+    try render_error_cleanup_before(out, code, body_start, current_index, current_index);
+    return;
 }
 
 fn render_error_cleanup_before(
@@ -6238,7 +6246,8 @@ fn render_error_cleanup_before(
         return;
     }
     try render_storage_deinit(out, code, last);
-    return try render_error_cleanup_before(out, code, lower, last, current_index);
+    try render_error_cleanup_before(out, code, lower, last, current_index);
+    return;
 }
 
 fn last_active_error_cleanup_before(
@@ -6631,6 +6640,25 @@ fn render_storage_clear(
         try wi(out, index);
         try wl(out, "_len_field");
     }
+    return;
+}
+
+fn render_try_string_reserve(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64,
+    abi: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let additional = try code.get(index + 2);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, " = call %kizu.error.void @kizu_rt_string_reserve(%kizu.owned %v");
+    try wi(out, receiver);
+    try w(out, ", i64 %v");
+    try wi(out, additional);
+    try wl(out, ")");
+    try render_try_error_void_tail(out, code, index, abi);
     return;
 }
 
@@ -9199,6 +9227,10 @@ fn tape_record_end_array_storage(code: &std::array::Array<i64>, index: i64, op: 
     }
     let try_string_truncate = codegen::code_op_try_string_truncate();
     if op == try_string_truncate {
+        return index + 3;
+    }
+    let try_string_reserve = codegen::code_op_try_string_reserve();
+    if op == try_string_reserve {
         return index + 3;
     }
     return -1;

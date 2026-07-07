@@ -280,7 +280,7 @@ func runSelfhostFrontendCommand(command string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	code, err := interp.NewWithProcessArgs(os.Stdout, processArgs).
+	code, err := interp.NewWithProcessIO(os.Stdout, os.Stderr, processArgs).
 		RunEntryInt(program, "selfhost::cli_main")
 	if err != nil {
 		return err
@@ -360,7 +360,7 @@ func runFile(path string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	return interp.NewWithProcessArgs(os.Stdout, args).Run(program)
+	return interp.NewWithProcessIO(os.Stdout, os.Stderr, args).Run(program)
 }
 
 // runPackage resolves a package root and executes the root module main.
@@ -373,7 +373,7 @@ func runPackage(path string, args []string) error {
 		return err
 	}
 	entry := graph.Root + "::main"
-	return interp.NewWithProcessArgs(os.Stdout, args).RunEntry(program, entry)
+	return interp.NewWithProcessIO(os.Stdout, os.Stderr, args).RunEntry(program, entry)
 }
 
 // checkFile parses a source file and runs static checks.
@@ -491,7 +491,7 @@ func testFile(path string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	if err := interp.NewWithProcessArgs(os.Stdout, args).RunTests(program); err != nil {
+	if err := interp.NewWithProcessIO(os.Stdout, os.Stderr, args).RunTests(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("test: ok")
@@ -507,7 +507,7 @@ func testPackage(path string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	if err := interp.NewWithProcessArgs(os.Stdout, args).RunTests(program); err != nil {
+	if err := interp.NewWithProcessIO(os.Stdout, os.Stderr, args).RunTests(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("test: ok")

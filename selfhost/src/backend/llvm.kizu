@@ -1425,6 +1425,12 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
     try out.append_bytes("invalid slice");
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
+    try out.append_bytes(
+        "@.kizu.rt.string_reserve_negative = private unnamed_addr constant [39 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("String.reserve expects non-negative i64");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "");
     try append_line(out, "define %kizu.owned @kizu_rt_string_new(%kizu.owned %allocator) {");
     try append_line(out, "entry:");
@@ -1473,13 +1479,30 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
         "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2");
     try append_line(out, "  %current = load i64, ptr %len_field");
     try append_line(out, "  %current_valid = icmp sge i64 %current, 0");
-    try append_line(out, "  br i1 %current_valid, label %length_check, label %invalid_slice");
+    try append_line(out,
+        "  %cap_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 3");
+    try append_line(out, "  %current_cap = load i64, ptr %cap_field");
+    try append_line(out, "  %cap_valid = icmp sge i64 %current_cap, 0");
+    try append_line(out, "  %storage_valid = and i1 %current_valid, %cap_valid");
+    try append_line(out, "  br i1 %storage_valid, label %length_check, label %invalid_slice");
     try append_line(out, "length_check:");
     try append_line(out, "  %max_delta = sub i64 9223372036854775807, %current");
     try append_line(out, "  %fits = icmp sle i64 %byte_len, %max_delta");
-    try append_line(out, "  br i1 %fits, label %allocate, label %invalid_slice");
-    try append_line(out, "allocate:");
+    try append_line(out, "  br i1 %fits, label %capacity_check, label %invalid_slice");
+    try append_line(out, "capacity_check:");
     try append_line(out, "  %next = add i64 %current, %byte_len");
+    try append_line(out, "  %within_capacity = icmp sle i64 %next, %current_cap");
+    try append_line(out, "  %data_ok = icmp ne ptr %current_data, null");
+    try append_line(out, "  %copy_in_place = and i1 %within_capacity, %data_ok");
+    try append_line(out, "  br i1 %copy_in_place, label %copy_new_in_place, label %allocate");
+    try append_line(out, "copy_new_in_place:");
+    try append_line(out, "  %in_place_dest = getelementptr i8, ptr %current_data, i64 %current");
+    try append_line(out,
+        "  call void @llvm.memcpy.p0.p0.i64(ptr %in_place_dest, ptr %byte_ptr, i64 %byte_len, i1 false)");
+    try append_line(out, "  store i64 %next, ptr %len_field");
+    try append_line(out,
+        "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    try append_line(out, "allocate:");
     try append_line(out, "  %new_data = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %next)");
     try append_line(out, "  %allocated = icmp ne ptr %new_data, null");
     try append_line(out, "  br i1 %allocated, label %copy_old_check, label %allocation_failed");
@@ -1502,10 +1525,111 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
     try append_line(out, "store:");
     try append_line(out, "  store ptr %new_data, ptr %data_field");
     try append_line(out, "  store i64 %next, ptr %len_field");
-    try append_line(out,
-        "  %cap_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 3");
     try append_line(out, "  store i64 %next, ptr %cap_field");
     try append_line(out, "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    try append_line(out, "allocation_failed:");
+    try append_line(out,
+        "  %message_ptr = getelementptr inbounds [17 x i8], ptr @.kizu.rt.allocation_failed, i64 0, i64 0");
+    try append_line(out, "  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0");
+    try append_line(out, "  %message = insertvalue %kizu.slice.u8 %message_base, i64 17, 1");
+    try append_line(out, "  %failed_base = insertvalue %kizu.error.void poison, i1 false, 0");
+    try append_line(out,
+        "  %failed = insertvalue %kizu.error.void %failed_base, %kizu.slice.u8 %message, 1");
+    try append_line(out, "  ret %kizu.error.void %failed");
+    try append_line(out, "invalid_slice:");
+    try append_line(out,
+        "  %invalid_message_ptr = getelementptr inbounds [13 x i8], ptr @.kizu.rt.invalid_slice, i64 0, i64 0");
+    try append_line(out,
+        "  %invalid_message_base = insertvalue %kizu.slice.u8 poison, ptr %invalid_message_ptr, 0");
+    try append_line(out,
+        "  %invalid_message = insertvalue %kizu.slice.u8 %invalid_message_base, i64 13, 1");
+    try append_line(out, "  %invalid_base = insertvalue %kizu.error.void poison, i1 false, 0");
+    try append_line(out,
+        "  %invalid_result = insertvalue %kizu.error.void %invalid_base, %kizu.slice.u8 %invalid_message, 1");
+    try append_line(out, "  ret %kizu.error.void %invalid_result");
+    try append_line(out, "}");
+    try append_line(out, "");
+    try append_line(out,
+        "define %kizu.error.void @kizu_rt_string_reserve(%kizu.owned %string, i64 %additional) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %additional_nonnegative = icmp sge i64 %additional, 0");
+    try append_line(out, "  br i1 %additional_nonnegative, label %load, label %negative");
+    try append_line(out, "load:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %string, 0");
+    try append_line(out,
+        "  %allocator_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 0");
+    try append_line(out, "  %allocator_ptr = load ptr, ptr %allocator_field");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  %current_data = load ptr, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %current = load i64, ptr %len_field");
+    try append_line(out,
+        "  %cap_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 3");
+    try append_line(out, "  %current_cap = load i64, ptr %cap_field");
+    try append_line(out, "  %current_valid = icmp sge i64 %current, 0");
+    try append_line(out, "  %cap_valid = icmp sge i64 %current_cap, 0");
+    try append_line(out, "  %storage_valid = and i1 %current_valid, %cap_valid");
+    try append_line(out, "  br i1 %storage_valid, label %overflow_check, label %invalid_slice");
+    try append_line(out, "overflow_check:");
+    try append_line(out, "  %max_delta = sub i64 9223372036854775807, %current");
+    try append_line(out, "  %fits = icmp sle i64 %additional, %max_delta");
+    try append_line(out, "  br i1 %fits, label %want_check, label %invalid_slice");
+    try append_line(out, "want_check:");
+    try append_line(out, "  %want = add i64 %current, %additional");
+    try append_line(out, "  %already_reserved = icmp sle i64 %want, %current_cap");
+    try append_line(out, "  br i1 %already_reserved, label %ok, label %select_start");
+    try append_line(out, "select_start:");
+    try append_line(out, "  %cap_zero = icmp eq i64 %current_cap, 0");
+    try append_line(out, "  br i1 %cap_zero, label %grow_from_four, label %grow_loop");
+    try append_line(out, "grow_from_four:");
+    try append_line(out, "  br label %grow_loop");
+    try append_line(out, "grow_loop:");
+    try append_line(out,
+        "  %candidate = phi i64 [ %current_cap, %select_start ], [ 4, %grow_from_four ], [ %doubled, %double ]");
+    try append_line(out, "  %enough = icmp sge i64 %candidate, %want");
+    try append_line(out, "  br i1 %enough, label %allocate, label %grow_check");
+    try append_line(out, "grow_check:");
+    try append_line(out, "  %can_double = icmp sle i64 %candidate, 4611686018427387903");
+    try append_line(out, "  br i1 %can_double, label %double, label %invalid_slice");
+    try append_line(out, "double:");
+    try append_line(out, "  %doubled = mul i64 %candidate, 2");
+    try append_line(out, "  br label %grow_loop");
+    try append_line(out, "allocate:");
+    try append_line(out, "  %new_data = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %candidate)");
+    try append_line(out, "  %allocated = icmp ne ptr %new_data, null");
+    try append_line(out, "  br i1 %allocated, label %copy_old_check, label %allocation_failed");
+    try append_line(out, "copy_old_check:");
+    try append_line(out, "  %has_old = icmp sgt i64 %current, 0");
+    try append_line(out, "  br i1 %has_old, label %copy_old, label %free_old_check");
+    try append_line(out, "copy_old:");
+    try append_line(out,
+        "  call void @llvm.memcpy.p0.p0.i64(ptr %new_data, ptr %current_data, i64 %current, i1 false)");
+    try append_line(out, "  br label %free_old_check");
+    try append_line(out, "free_old_check:");
+    try append_line(out, "  %has_old_data = icmp ne ptr %current_data, null");
+    try append_line(out, "  br i1 %has_old_data, label %free_old, label %store");
+    try append_line(out, "free_old:");
+    try append_line(out, "  call void @kizu_rt_free(ptr %allocator_ptr, ptr %current_data)");
+    try append_line(out, "  br label %store");
+    try append_line(out, "store:");
+    try append_line(out, "  store ptr %new_data, ptr %data_field");
+    try append_line(out, "  store i64 %candidate, ptr %cap_field");
+    try append_line(out, "  br label %ok");
+    try append_line(out, "ok:");
+    try append_line(out, "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    try append_line(out, "negative:");
+    try append_line(out,
+        "  %negative_message_ptr = getelementptr inbounds [39 x i8], ptr @.kizu.rt.string_reserve_negative, i64 0, i64 0");
+    try append_line(out,
+        "  %negative_message_base = insertvalue %kizu.slice.u8 poison, ptr %negative_message_ptr, 0");
+    try append_line(out,
+        "  %negative_message = insertvalue %kizu.slice.u8 %negative_message_base, i64 39, 1");
+    try append_line(out, "  %negative_base = insertvalue %kizu.error.void poison, i1 false, 0");
+    try append_line(out,
+        "  %negative_result = insertvalue %kizu.error.void %negative_base, %kizu.slice.u8 %negative_message, 1");
+    try append_line(out, "  ret %kizu.error.void %negative_result");
     try append_line(out, "allocation_failed:");
     try append_line(out,
         "  %message_ptr = getelementptr inbounds [17 x i8], ptr @.kizu.rt.allocation_failed, i64 0, i64 0");
