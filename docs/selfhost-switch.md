@@ -342,19 +342,22 @@ Supported selected shapes under the gate: a top-level `test` whose body is a
 single `std::testing::expect(true|false)` call (for example
 `selfhost/tests/cli/test_expect_ok.kizu`), or a bool-literal `if` with no `else`
 whose then-block is that same single expectation shape (for example
-`selfhost/tests/cli/test_if_unsupported.kizu`). They lower, link, and execute end
+`selfhost/tests/cli/test_if_unsupported.kizu`), or a sequence of those bounded
+expectation statements in one test body (for example
+`selfhost/tests/cli/test_two_expect_ok.kizu`). They lower, link, and execute end
 to end; `expect(true)` prints `test: ok` and exits 0, `expect(false)` prints the
 runtime error and exits 1. A false bool-literal `if` does not execute its
-expectation and therefore emits the existing passing test artifact.
+expectation and therefore contributes the existing passing test result. A
+sequence lowers to the first executed failing expectation, or to the existing
+passing test artifact when every bounded statement passes or is skipped.
 
 Deliberately not switched / remaining unsupported, kept explicit in #1157:
 
-- Unsupported test shapes under the gate (for example multiple expectation
-  statements in a single test body, as in
-  `selfhost/tests/cli/test_two_expect_unsupported.kizu`) stay explicit selfhost
-  diagnostics (usage, exit 64) with **no Go fallback**; the gate-off default Go
-  `testFile` path still runs them through the interpreter, which is why the
-  switch stays gated rather than default-on.
+- Unsupported test shapes under the gate (for example helper-driven assertions,
+  as in `selfhost/tests/cli/test_helper_call_unsupported.kizu`) stay explicit
+  selfhost diagnostics (usage, exit 64) with **no Go fallback**; the gate-off
+  default Go `testFile` path still runs them through the interpreter, which is
+  why the switch stays gated rather than default-on.
 - Broader test discovery (multiple `test` blocks, helper-driven assertions,
   non-`std::testing::expect` bodies) is not switched; those shapes are not yet
   lowerable by the selfhost test executable backend.

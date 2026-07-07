@@ -661,6 +661,26 @@ func nativeSourceTestCases() []runParityCase {
 			artifactMode: "hosted-artifact",
 			artifactStem: "test_expect_failure",
 		},
+		{
+			name:         "test_two_expect_ok",
+			command:      "test",
+			fixture:      "selfhost/tests/cli/test_two_expect_ok.kizu",
+			exitCode:     0,
+			stdoutGolden: "selfhost/tests/cli/golden/test_expect_ok.stdout",
+			stderrGolden: "selfhost/tests/cli/golden/test_expect_ok.stderr",
+			artifactMode: "hosted-artifact",
+			artifactStem: "test_two_expect_ok",
+		},
+		{
+			name:         "test_two_expect_failure",
+			command:      "test",
+			fixture:      "selfhost/tests/cli/test_two_expect_failure.kizu",
+			exitCode:     1,
+			stdoutGolden: "selfhost/tests/cli/golden/test_expect_failure.stdout",
+			stderrGolden: "selfhost/tests/cli/golden/test_expect_failure.stderr",
+			artifactMode: "hosted-artifact",
+			artifactStem: "test_two_expect_failure",
+		},
 	}
 }
 
