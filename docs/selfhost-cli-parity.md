@@ -36,6 +36,7 @@ The current hosted stage2 artifact supports these command slices:
 | `test <top-level expect-ok source file>` | #590/#752 positive source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
 | `test <top-level expect-failure source file>` | #590/#752 assertion-failure source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
 | `test <bool-literal-if expect source file>` | #1070 positive bool-literal control-flow source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
+| `test <multiple expect statements source file>` | #1070 positive bounded statement-sequence slice lowered to the existing pass/fail test executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
 
 `selfhost/tests/cli/parse-parity.tsv` is the
 #525/#579/#586/#594/#598/#600/#646 parse parity manifest. It records command
@@ -183,10 +184,15 @@ selfhost/tests/cli/test-parity.tsv
 # Columns: name command fixture exit stdout_golden stderr_golden artifact_mode artifact_stem
 test_expect_ok test selfhost/tests/cli/test_expect_ok.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_expect_ok
 test_expect_ok_alias test selfhost/tests/cli/test_expect_ok_alias.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_expect_ok_alias
+test_expect_void_ok test selfhost/tests/cli/test_expect_void_ok.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_expect_void_ok
 test_helper_before_main test selfhost/tests/cli/test_helper_before_main.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_helper_before_main
+test_comments test selfhost/tests/cli/test_comments.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_comments
 test_expect_failure test selfhost/tests/cli/test_expect_failure.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure
 test_expect_failure_alias test selfhost/tests/cli/test_expect_failure_alias.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure_alias
 test_if_unsupported test selfhost/tests/cli/test_if_unsupported.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_if_unsupported
+test_two_expect_ok test selfhost/tests/cli/test_two_expect_ok.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_two_expect_ok
+test_two_expect_failure test selfhost/tests/cli/test_two_expect_failure.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_two_expect_failure
+test_moved_value test examples/negative/moved_value.kizu 1 selfhost/tests/cli/golden/check_moved_value.stdout selfhost/tests/cli/golden/check_moved_value.stderr hosted-artifact -
 ```
 
 `test_expect_ok.kizu` is the first positive fixture:
@@ -209,6 +215,10 @@ supported slice is limited to a bool-literal `if` with no `else` and one
 `std::testing::expect(true|false)` in its then-block. A false condition lowers
 to the existing passing hosted artifact because the expectation is not
 executed.
+`test_two_expect_ok.kizu` and `test_two_expect_failure.kizu` extend that bounded
+model to statement sequences: the lowering returns the first executed failing
+expectation, otherwise the existing passing hosted artifact. This does not add
+helper-driven assertions or test discovery.
 
 The first `run` and `test` children use the existing `selfhost-abi-v0` runtime
 surface: explicit `std::io::blocking`, `std::io::write_stdout`,
@@ -235,7 +245,7 @@ release scope:
 | broader `parse <file>` diagnostics | Partially deferred | #579, #586, #594, #598, and #600 move the first positive, call-statement, qualified-call, declaration/record/field/call, and negative parse shapes off single hardcoded paths, but broader parsing and diagnostic recovery are not claimed. | Add one parse diagnostic/source shape at a time, keeping checked-in goldens and no Go fallback. |
 | broader `fmt <file>` and `fmt --write` | Partially deferred | #1073 covers selected source-preserving stdout/write rows for comments, inline comments, imports, and deterministic no-write failures; syntax surfaces outside the manifest are not claimed. | Extend `fmt-parity.tsv` one source-preservation shape at a time, keeping unsupported syntax explicit until implemented. |
 | broader `run <file>` | Partially deferred | #588 moves the first positive and negative run shapes off single hardcoded paths, but broader frontend, lowering, and artifact naming are not claimed. | Extend `run-parity.tsv` one source shape at a time, using hosted-artifact validation and no Go fallback. |
-| broader `kizu test <file>` | Partially deferred | #590 moves the first expect-ok and expect-failure shapes off single hardcoded paths, but broader frontend, lowering, artifact naming, and discovery are not claimed. | Extend `test-parity.tsv` one source shape at a time, using hosted-artifact validation and no discovery. |
+| broader `kizu test <file>` | Partially deferred | #590 and #1070 move the first expect-ok, expect-failure, bool-literal-if, and bounded statement-sequence shapes off single hardcoded paths, but broader frontend, lowering, artifact naming, helper-driven assertions, and discovery are not claimed. | Extend `test-parity.tsv` one source shape at a time, using hosted-artifact validation and no discovery. |
 | cache/status, cache/prune, why-rebuild, cache artifact commands | Deferred | Hosted artifact cache ownership, persistence, pruning, and no-op rebuild semantics are not designed. | Split into cache command issues with explicit cache directory, artifact paths, mutation rules, stdout/stderr, and cache-size acceptance checks. |
 | non-critical diagnostic/display parity commands | Deferred | Diagnostic formatting must be command-specific to avoid broad parity without contracts. | Create one command/display contract per slice, including exact stdout/stderr and unsupported behavior. |
 

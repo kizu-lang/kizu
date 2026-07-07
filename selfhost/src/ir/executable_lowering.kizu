@@ -119,40 +119,85 @@ fn lower_test_block(
     return_type: std::kizu::ast::NodeId,
     statements: std::kizu::ast::ChildRange
 ) -> !LoweredBlock {
-    if statements.len == 1 {
-        let return_type_node = ast.get(return_type);
-        let return_type_supported = match return_type_node.data {
-            Empty => true,
-            TypeName(type_name) => std::mem::equal_bytes(
-                ast_node_text(text, ast, return_type),
-                "void"
-            ),
-            _ => false,
-        };
-        if !return_type_supported {
-            return unsupported_block(text);
-        }
-        let statement = try ast.child_at(statements, 0);
-        return LoweredBlock {
-            statement: try lower_test_statement(text, ast, statement)
-        };
-    }
-    if statements.len != 2 {
+    let statement_count = try lower_test_effective_statement_count(ast, statements);
+    if statement_count == 0 {
         return unsupported_block(text);
     }
-    let expect_statement = try ast.child_at(statements, 0);
-    let return_statement = try ast.child_at(statements, 1);
-    let return_node = ast.get(return_statement);
-    let empty_return_statement = match return_node.data {
-        Return(return_node) => is_empty_node(ast, return_node.value),
-        _ => false,
-    };
-    if !empty_return_statement {
+    if !lower_test_return_type_supported(text, ast, return_type) {
         return unsupported_block(text);
     }
     return LoweredBlock {
-        statement: try lower_test_statement(text, ast, expect_statement)
+        statement: try lower_test_statement_sequence(text, ast, statements, statement_count)
     };
+}
+
+fn lower_test_effective_statement_count(
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !i64 {
+    if statements.len == 0 {
+        return 0;
+    }
+    let last_index = statements.len - 1;
+    let last_statement = try ast.child_at(statements, last_index);
+    let last_node = ast.get(last_statement);
+    let trailing_empty_return = match last_node.data {
+        Return(return_node) => is_empty_node(ast, return_node.value),
+        _ => false,
+    };
+    if trailing_empty_return {
+        return last_index;
+    }
+    return statements.len;
+}
+
+fn lower_test_return_type_supported(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    return_type: std::kizu::ast::NodeId
+) -> bool {
+    let return_type_node = ast.get(return_type);
+    return match return_type_node.data {
+        Empty => true,
+        TypeName(type_name) => std::mem::equal_bytes(
+            ast_node_text(text, ast, return_type),
+            "void"
+        ),
+        _ => false,
+    };
+}
+
+fn lower_test_statement_sequence(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    statement_count: i64
+) -> !LoweredStatement {
+    var index = 0;
+    while index < statement_count {
+        let statement = try ast.child_at(statements, index);
+        let lowered = try lower_test_statement(text, ast, statement);
+        if !lower_test_call_statement_supported(&lowered) {
+            return unsupported_statement(text);
+        }
+        if lowered.expr.argument.kind != LoweredValueKind::BoolLiteral {
+            return unsupported_statement(text);
+        }
+        let payload = lowered.expr.argument.payload;
+        if std::mem::equal_bytes(payload, "false") {
+            return lower_test_failure_statement(text);
+        }
+        if !std::mem::equal_bytes(payload, "true") {
+            return unsupported_statement(text);
+        }
+        index = index + 1;
+    }
+    return lower_test_noop_success_statement(text);
+}
+
+fn lower_test_call_statement_supported(statement: &LoweredStatement) -> bool {
+    return statement.kind == LoweredStatementKind::ExprStmt and
+        statement.expr.kind == LoweredExpressionKind::Call;
 }
 
 fn lower_test_statement(
@@ -358,6 +403,21 @@ fn lower_test_noop_success_statement(text: []u8) -> LoweredStatement {
                 kind: LoweredValueKind::BoolLiteral,
                 name: text[0..0],
                 payload: "true"
+            }
+        }
+    };
+}
+
+fn lower_test_failure_statement(text: []u8) -> LoweredStatement {
+    return LoweredStatement {
+        kind: LoweredStatementKind::ExprStmt,
+        expr: LoweredExpression {
+            kind: LoweredExpressionKind::Call,
+            callee: "std::testing::expect",
+            argument: LoweredValue {
+                kind: LoweredValueKind::BoolLiteral,
+                name: text[0..0],
+                payload: "false"
             }
         }
     };

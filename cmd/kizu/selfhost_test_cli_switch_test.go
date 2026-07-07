@@ -80,8 +80,8 @@ func TestSelfhostTestCliSwitchRoutesThroughSelfhost(t *testing.T) {
 		t.Fatalf("build kizu: %v\n%s", err, out)
 	}
 
-	const supported = "selfhost/tests/cli/test_if_unsupported.kizu"
-	const unsupported = "selfhost/tests/cli/test_two_expect_unsupported.kizu"
+	const supported = "selfhost/tests/cli/test_two_expect_ok.kizu"
+	const unsupported = "selfhost/tests/cli/test_helper_call_unsupported.kizu"
 
 	// Gate on: the supported shape is selfhost-owned end to end. The printed
 	// output comes from executing the linked native test artifact, not the Go
