@@ -163,6 +163,71 @@ fn lower_test_statement(
     let node = ast.get(statement);
     return match node.data {
         ExprStmt(expr_stmt) => try lower_test_expr_statement(text, ast, expr_stmt.expr),
+        If(if_node) => try lower_test_if_statement(
+            text,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block
+        ),
+        _ => unsupported_statement(text),
+    };
+}
+
+fn lower_test_if_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    condition_node: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId
+) -> !LoweredStatement {
+    let condition = lower_test_bool_literal(text, ast, condition_node);
+    if condition.kind != LoweredValueKind::BoolLiteral {
+        return unsupported_statement(text);
+    }
+    if !is_empty_node(ast, else_block) {
+        return unsupported_statement(text);
+    }
+
+    let then_statement = try lower_test_single_statement_block(text, ast, then_block);
+    if then_statement.kind != LoweredStatementKind::ExprStmt or
+        then_statement.expr.kind != LoweredExpressionKind::Call {
+        return unsupported_statement(text);
+    }
+
+    if lower_test_bool_payload_is_true(&condition) {
+        return then_statement;
+    }
+    if lower_test_bool_payload_is_false(&condition) {
+        return lower_test_noop_success_statement(text);
+    }
+    return unsupported_statement(text);
+}
+
+fn lower_test_single_statement_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    block_node: std::kizu::ast::NodeId
+) -> !LoweredStatement {
+    let node = ast.get(block_node);
+    return match node.data {
+        Block(block) => try lower_test_single_statement_range(text, ast, block.statements),
+        _ => unsupported_statement(text),
+    };
+}
+
+fn lower_test_single_statement_range(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !LoweredStatement {
+    if statements.len != 1 {
+        return unsupported_statement(text);
+    }
+    let statement = try ast.child_at(statements, 0);
+    let node = ast.get(statement);
+    return match node.data {
+        ExprStmt(expr_stmt) => try lower_test_expr_statement(text, ast, expr_stmt.expr),
         _ => unsupported_statement(text),
     };
 }
@@ -270,6 +335,31 @@ fn lower_test_bool_literal(
             payload: ast_node_text(text, ast, arg)
         },
         _ => unsupported_value(text),
+    };
+}
+
+fn lower_test_bool_payload_is_true(value: &LoweredValue) -> bool {
+    return value.kind == LoweredValueKind::BoolLiteral and
+        std::mem::equal_bytes(value.payload, "true");
+}
+
+fn lower_test_bool_payload_is_false(value: &LoweredValue) -> bool {
+    return value.kind == LoweredValueKind::BoolLiteral and
+        std::mem::equal_bytes(value.payload, "false");
+}
+
+fn lower_test_noop_success_statement(text: []u8) -> LoweredStatement {
+    return LoweredStatement {
+        kind: LoweredStatementKind::ExprStmt,
+        expr: LoweredExpression {
+            kind: LoweredExpressionKind::Call,
+            callee: "std::testing::expect",
+            argument: LoweredValue {
+                kind: LoweredValueKind::BoolLiteral,
+                name: text[0..0],
+                payload: "true"
+            }
+        }
     };
 }
 
