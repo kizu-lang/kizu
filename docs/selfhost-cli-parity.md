@@ -35,7 +35,7 @@ The current hosted stage2 artifact supports these command slices:
 | `run <control-flow print source file>` | #752 unsupported branch-control source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
 | `test <top-level expect-ok source file>` | #590/#752 positive source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
 | `test <top-level expect-failure source file>` | #590/#752 assertion-failure source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
-| `test <control-flow expect source file>` | #752 unsupported branch-control source-shape slice, no artifact execution | `just selfhost-test-parity-gate` |
+| `test <bool-literal-if expect source file>` | #1070 positive bool-literal control-flow source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
 
 `selfhost/tests/cli/parse-parity.tsv` is the
 #525/#579/#586/#594/#598/#600/#646 parse parity manifest. It records command
@@ -186,7 +186,7 @@ test_expect_ok_alias test selfhost/tests/cli/test_expect_ok_alias.kizu 0 selfhos
 test_helper_before_main test selfhost/tests/cli/test_helper_before_main.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_helper_before_main
 test_expect_failure test selfhost/tests/cli/test_expect_failure.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure
 test_expect_failure_alias test selfhost/tests/cli/test_expect_failure_alias.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure_alias
-test_if_unsupported test selfhost/tests/cli/test_if_unsupported.kizu 64 selfhost/tests/cli/golden/test_expect_ok.stderr selfhost/tests/cli/golden/usage.stderr hosted-artifact -
+test_if_unsupported test selfhost/tests/cli/test_if_unsupported.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_if_unsupported
 ```
 
 `test_expect_ok.kizu` is the first positive fixture:
@@ -204,6 +204,11 @@ bounded test executable path.
 `test_expect_failure.kizu` uses `std::testing::expect(false)` and must produce
 empty stdout, a deterministic assertion diagnostic containing
 `expected condition to be true`, and exit code `1`.
+`test_if_unsupported.kizu` is the historical blocker fixture for #1070; the
+supported slice is limited to a bool-literal `if` with no `else` and one
+`std::testing::expect(true|false)` in its then-block. A false condition lowers
+to the existing passing hosted artifact because the expectation is not
+executed.
 
 The first `run` and `test` children use the existing `selfhost-abi-v0` runtime
 surface: explicit `std::io::blocking`, `std::io::write_stdout`,
