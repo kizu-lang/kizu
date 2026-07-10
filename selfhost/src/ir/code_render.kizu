@@ -1783,6 +1783,11 @@ fn render_var_allocas(
         let bool_slot = try code.get(index + 1);
         try render_one_bool_alloca(out, bool_slot);
     }
+    let atomic_new_bool = codegen::code_op_atomic_new_bool();
+    if op == atomic_new_bool {
+        let atomic_value = try code.get(index + 1);
+        try render_one_atomic_bool_alloca(out, atomic_value);
+    }
     let for_begin = codegen::code_op_for_begin();
     if op == for_begin {
         let for_slot = try code.get(index + 2);
@@ -1812,6 +1817,16 @@ fn render_one_slice_alloca(out: &var std::string::String, slot: i64) -> !void {
     try w(out, "  %sslot");
     try wi(out, slot);
     try wl(out, " = alloca %kizu.slice.u8");
+    return;
+}
+
+// render_one_atomic_bool_alloca owns the storage cell for one Atomic<bool> tape
+// value. Atomic operations address this cell directly; it is distinct from the
+// ordinary mutable-bool local slots.
+fn render_one_atomic_bool_alloca(out: &var std::string::String, value: i64) -> !void {
+    try w(out, "  %atomic");
+    try wi(out, value);
+    try wl(out, " = alloca i1, align 1");
     return;
 }
 
@@ -1902,6 +1917,10 @@ fn render_one_instruction_core_scalar(
     let const_bool = codegen::code_op_const_bool();
     if op == const_bool {
         try render_const_bool(out, code, index);
+    }
+    let atomic_new_bool = codegen::code_op_atomic_new_bool();
+    if op == atomic_new_bool {
+        try render_atomic_new_bool(out, code, index);
     }
     let not_op = codegen::code_op_not();
     if op == not_op {
@@ -3163,6 +3182,24 @@ fn render_const_bool(
     try w(out, " = icmp ne i64 ");
     try wi(out, literal);
     try wl(out, ", 0");
+    return;
+}
+
+// render_atomic_new_bool initializes the renderer-owned Atomic<bool> cell with
+// an LLVM atomic store. The alloca is hoisted by render_var_allocas so this
+// remains valid when the constructor appears inside structured control flow.
+fn render_atomic_new_bool(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let init = try code.get(index + 2);
+    try w(out, "  store atomic i1 %v");
+    try wi(out, init);
+    try w(out, ", ptr %atomic");
+    try wi(out, dst);
+    try wl(out, " seq_cst, align 1");
     return;
 }
 
@@ -9051,6 +9088,10 @@ fn tape_record_end_core_scalar(code: &std::array::Array<i64>, index: i64, op: i6
     }
     let const_bool = codegen::code_op_const_bool();
     if op == const_bool {
+        return index + 3;
+    }
+    let atomic_new_bool = codegen::code_op_atomic_new_bool();
+    if op == atomic_new_bool {
         return index + 3;
     }
     let not_op = codegen::code_op_not();

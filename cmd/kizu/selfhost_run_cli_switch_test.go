@@ -81,19 +81,19 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	}
 
 	const supported = "selfhost/tests/cli/run_hello.kizu"
+	const atomicConstructor = "selfhost/tests/cli/run_atomic_constructor.kizu"
 	const unsupported = "examples/atomic_flag.kizu"
 	const unsupportedGoOutput = "false\ntrue\n"
 
 	// Gate on: the supported shape is selfhost-owned end to end. The printed
 	// output comes from executing the linked native artifact, not the Go
 	// interpreter.
-	onStdout, _, onCode := runCliSwitchCommand(t, bin, repoRoot, true, supported)
-	if onCode != 0 {
-		t.Fatalf("selfhost run %s exit = %d, want 0", supported, onCode)
-	}
-	if onStdout != "hello, kizu\n" {
-		t.Fatalf("selfhost run %s stdout = %q, want %q", supported, onStdout, "hello, kizu\n")
-	}
+	assertHelloProduction(t, bin, repoRoot, supported)
+
+	// The checked Atomic<bool> constructor crosses the same production path and
+	// executes a native artifact. Its renderer must materialize real atomic
+	// storage and initialization rather than accepting an unrendered tape shape.
+	assertAtomicConstructorProduction(t, bin, repoRoot, atomicConstructor)
 
 	// Gate on: the unsupported shape is an explicit selfhost diagnostic, never the
 	// Go interpreter output. This is the no-Go-fallback guarantee.
@@ -125,6 +125,45 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 
 	if err := writeRunCliSwitchReport(supported, unsupported, diagnostic); err != nil {
 		t.Fatalf("write run cli switch report: %v", err)
+	}
+}
+
+// assertHelloProduction verifies the baseline native artifact execution.
+func assertHelloProduction(t *testing.T, bin, repoRoot, source string) {
+	t.Helper()
+	stdout, _, code := runCliSwitchCommand(t, bin, repoRoot, true, source)
+	if code != 0 {
+		t.Fatalf("selfhost run %s exit = %d, want 0", source, code)
+	}
+	if stdout != "hello, kizu\n" {
+		t.Fatalf("selfhost run %s stdout = %q, want %q", source, stdout, "hello, kizu\n")
+	}
+}
+
+// assertAtomicConstructorProduction verifies checked lowering and LLVM storage.
+func assertAtomicConstructorProduction(t *testing.T, bin, repoRoot, source string) {
+	t.Helper()
+	stdout, stderr, code := runCliSwitchCommand(t, bin, repoRoot, true, source)
+	if code != 0 {
+		t.Fatalf("selfhost run %s exit = %d, want 0\nstderr=%s", source, code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("selfhost run %s stdout = %q, want empty", source, stdout)
+	}
+	artifact := filepath.Join(
+		"target", "selfhost", "cache", "run", "run_atomic_constructor.ll",
+	)
+	llvm, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatalf("read atomic constructor artifact: %v", err)
+	}
+	for _, instruction := range []string{
+		"%atomic1 = alloca i1, align 1",
+		"store atomic i1 %v0, ptr %atomic1 seq_cst, align 1",
+	} {
+		if !strings.Contains(string(llvm), instruction) {
+			t.Fatalf("atomic constructor artifact missing %q", instruction)
+		}
 	}
 }
 
