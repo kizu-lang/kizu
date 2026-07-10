@@ -565,6 +565,10 @@ int64_t std_builtin_process_monotonic_millis(void) {
     return ((int64_t)ts.tv_sec * 1000) + ((int64_t)ts.tv_nsec / 1000000);
 }
 
+int64_t std_builtin_process_id(void) {
+    return (int64_t)getpid();
+}
+
 static int kizu_run_child_process(char *const argv[]) {
     pid_t pid = fork();
     if (pid < 0) {
@@ -627,6 +631,39 @@ void std_builtin_process_spawn_wait8(
     for (int free_index = 0; free_index < 8; free_index++) {
         free(owned_args[free_index]);
     }
+    *out = kizu_ok_i64((int64_t)code);
+}
+
+void std_builtin_process_spawn_wait_forwarded(
+    KizuErrorI64 *out,
+    const KizuSliceU8 *executable,
+    int64_t arg_start,
+    int64_t arg_count
+) {
+    if (!executable || executable->len == 0) {
+        *out = kizu_err_i64("missing process executable");
+        return;
+    }
+    int64_t available = std_builtin_process_arg_count();
+    if (arg_start < 0 || arg_count < 0 || arg_start > available - arg_count) {
+        *out = kizu_err_i64("process arg range out of bounds");
+        return;
+    }
+    char *owned_executable = kizu_slice_to_cstr(*executable);
+    char **argv = calloc((size_t)arg_count + 2, sizeof(char *));
+    if (!owned_executable || !argv) {
+        free(owned_executable);
+        free(argv);
+        *out = kizu_err_i64("allocation failed");
+        return;
+    }
+    argv[0] = owned_executable;
+    for (int64_t index = 0; index < arg_count; index++) {
+        argv[index + 1] = kizu_runtime_argv[arg_start + index + 1];
+    }
+    int code = kizu_run_child_process(argv);
+    free(owned_executable);
+    free(argv);
     *out = kizu_ok_i64((int64_t)code);
 }
 

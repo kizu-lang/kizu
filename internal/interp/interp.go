@@ -1796,8 +1796,16 @@ func (i *Interpreter) evalProcessBuiltin(
 			)
 		}
 		return intValue(time.Since(i.startedAt).Milliseconds()), true, nil
+	case "std.builtin.process_id":
+		if len(args) != 0 {
+			return voidValue(), true, fmt.Errorf("runtime error: std::process::id expects 0 args")
+		}
+		return intValue(int64(os.Getpid())), true, nil
 	case "std.builtin.process_spawn_wait8":
 		value, err := i.evalProcessSpawnWait8(args, env)
+		return value, true, err
+	case "std.builtin.process_spawn_wait_forwarded":
+		value, err := i.evalProcessSpawnWaitForwarded(args, env)
 		return value, true, err
 	default:
 		return voidValue(), false, nil
@@ -2171,6 +2179,41 @@ func (i *Interpreter) evalProcessSpawnWait8(args []ast.Expression, env *Env) (Va
 		argv = append(argv, arg)
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout = i.out
+	cmd.Stderr = i.errOut
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return intValue(int64(exitErr.ExitCode())), nil
+		}
+		return errorUnionValue(err.Error()), nil
+	}
+	return intValue(0), nil
+}
+
+// evalProcessSpawnWaitForwarded runs an executable with a range of current process args.
+func (i *Interpreter) evalProcessSpawnWaitForwarded(
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) != 3 {
+		return errorUnionValue("std::process::spawn_wait_forwarded expected 3 args"), nil
+	}
+	executable, err := i.evalMemArg(args[0], env, "std::process::spawn_wait_forwarded")
+	if err != nil {
+		return voidValue(), err
+	}
+	start, err := i.evalI64Arg(args[1], env, "std::process::spawn_wait_forwarded")
+	if err != nil {
+		return voidValue(), err
+	}
+	count, err := i.evalI64Arg(args[2], env, "std::process::spawn_wait_forwarded")
+	if err != nil {
+		return voidValue(), err
+	}
+	if start < 0 || count < 0 || start > int64(len(i.processArgs))-count {
+		return errorUnionValue("process arg range out of bounds"), nil
+	}
+	cmd := exec.Command(executable, i.processArgs[start:start+count]...)
 	cmd.Stdout = i.out
 	cmd.Stderr = i.errOut
 	if err := cmd.Run(); err != nil {

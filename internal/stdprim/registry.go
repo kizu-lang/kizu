@@ -35,6 +35,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 		Return: "[]u8",
 	},
 	"std.builtin.process_monotonic_millis": {Return: "i64"},
+	"std.builtin.process_id":               {Return: "i64"},
 	"std.builtin.process_spawn_wait8": {
 		Args: []ArgKind{
 			ArgI64,
@@ -47,6 +48,10 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 			ArgBytes,
 			ArgBytes,
 		},
+		Return: "!i64",
+	},
+	"std.builtin.process_spawn_wait_forwarded": {
+		Args:   []ArgKind{ArgBytes, ArgI64, ArgI64},
 		Return: "!i64",
 	},
 	"std.builtin.test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},

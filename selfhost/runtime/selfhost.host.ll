@@ -39,6 +39,7 @@ declare void @kizu_host_process_arg(ptr, i64)
 declare void @kizu_host_process_env(ptr, %kizu.slice.u8)
 declare %kizu.slice.u8 @kizu_host_process_env_or_empty(%kizu.slice.u8)
 declare i64 @kizu_host_process_monotonic_millis()
+declare i64 @kizu_host_process_id()
 declare i64 @kizu_host_process_exit_code(i64)
 declare void @kizu_host_process_exit(i64) noreturn
 declare void @kizu_host_process_spawn_wait8(
@@ -53,6 +54,7 @@ declare void @kizu_host_process_spawn_wait8(
   %kizu.slice.u8,
   %kizu.slice.u8
 )
+declare void @kizu_host_process_spawn_wait_forwarded(ptr, %kizu.slice.u8, i64, i64)
 declare void @kizu_host_trap(%kizu.slice.u8) noreturn
 
 define %kizu.owned @kizu_rt_mem_page_allocator() {
@@ -244,6 +246,12 @@ entry:
   ret i64 %value
 }
 
+define i64 @kizu_rt_process_id() {
+entry:
+  %value = call i64 @kizu_host_process_id()
+  ret i64 %value
+}
+
 define void @kizu_rt_process_exit(i64 %code) noreturn {
 entry:
   call void @kizu_host_process_exit(i64 %code)
@@ -274,6 +282,23 @@ entry:
     %kizu.slice.u8 %arg5,
     %kizu.slice.u8 %arg6,
     %kizu.slice.u8 %arg7
+  )
+  %result = load %kizu.error.i64, ptr %slot
+  ret %kizu.error.i64 %result
+}
+
+define %kizu.error.i64 @kizu_rt_process_spawn_wait_forwarded(
+  %kizu.slice.u8 %executable,
+  i64 %arg_start,
+  i64 %arg_count
+) {
+entry:
+  %slot = alloca %kizu.error.i64
+  call void @kizu_host_process_spawn_wait_forwarded(
+    ptr %slot,
+    %kizu.slice.u8 %executable,
+    i64 %arg_start,
+    i64 %arg_count
   )
   %result = load %kizu.error.i64, ptr %slot
   ret %kizu.error.i64 %result
