@@ -101,6 +101,7 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
         "37",
         "target/selfhost/selfhost.host.ll.meta"
     );
+    try append_llvm_constant(out, "stage2_dir", "22", "target/selfhost/stage2");
     try append_llvm_constant(out, "stage2_ll_path", "34", "target/selfhost/stage2/selfhost.ll");
     try append_llvm_constant(
         out,
@@ -948,6 +949,23 @@ pub fn append_functions(
         "append_static_cli_helpers",
         static_helpers_started
     );
+    let type_id_started =
+        try profile::begin(backend_profile, profile_out, io, "append_type_id_reachable");
+    try append_type_id_reachable_compiled_functions_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        backend_profile,
+        profile_out,
+        io
+    );
+    try profile::end(
+        backend_profile,
+        profile_out,
+        io,
+        "append_type_id_reachable",
+        type_id_started
+    );
     // The selfhost::ir::codegen run codegen IR v1 tape closure compiled into stage2:
     // the shared BFS walks the cluster from the tape lowering root lower_code_module
     // plus the code_op_mem_page_allocator opcode accessor, deriving each member's llvm
@@ -1279,6 +1297,11 @@ pub fn append_functions(
     );
     try append_ast_mutator_compiled_root(
         out, lookup_index, ir_bytes,
+        "add_impl_decl_with_contract",
+        "%kizu.kizu.ast.ast self;%kizu.kizu.ast.span span_value;%kizu.kizu.ast.node_id contract_name;%kizu.kizu.ast.node_id type_name;%kizu.kizu.ast.child_range methods"
+    );
+    try append_ast_mutator_compiled_root(
+        out, lookup_index, ir_bytes,
         "add_block",
         "%kizu.kizu.ast.ast self;%kizu.kizu.ast.span span_value;%kizu.kizu.ast.child_range statements"
     );
@@ -1356,6 +1379,16 @@ pub fn append_functions(
         out, lookup_index, ir_bytes,
         "add_union_variant_with_doc",
         "%kizu.kizu.ast.ast self;%kizu.kizu.ast.span span_value;%kizu.kizu.ast.node_id name;%kizu.kizu.ast.node_id payload;%kizu.kizu.ast.span doc"
+    );
+    try append_ast_mutator_compiled_root(
+        out, lookup_index, ir_bytes,
+        "add_contract_decl",
+        "%kizu.kizu.ast.ast self;%kizu.kizu.ast.span span_value;i1 public;%kizu.kizu.ast.node_id name;%kizu.kizu.ast.child_range methods"
+    );
+    try append_ast_mutator_compiled_root(
+        out, lookup_index, ir_bytes,
+        "add_contract_decl_with_doc",
+        "%kizu.kizu.ast.ast self;%kizu.kizu.ast.span span_value;i1 public;%kizu.kizu.ast.node_id name;%kizu.kizu.ast.child_range methods;%kizu.kizu.ast.span doc"
     );
     try append_ast_mutator_compiled_root(
         out, lookup_index, ir_bytes,
@@ -1819,6 +1852,65 @@ fn append_types_checker_reachable_compiled_functions(
         "selfhost::types::checker::",
         &var pending,
         false
+    );
+    pending.deinit();
+    return;
+}
+
+fn append_type_id_reachable_compiled_functions(
+    out: &var std::string::String,
+    lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("type_record_from_node");
+    try pending.append("function_return_type_id_from_node");
+    try pending.append("function_param_type_id_from_node");
+    try pending.append("type_record_from_id");
+    try pending.append("type_record_from_text");
+    try pending.append("map_type_parts_from_text");
+    try pending.append("box_type_parts_from_text");
+    try pending.append("type_text_is_arena_handle");
+    try append_component_reachable_compiled_functions(
+        out,
+        lookup_index,
+        ir_bytes,
+        "selfhost::types::type_id::",
+        &var pending,
+        true
+    );
+    pending.deinit();
+    return;
+}
+
+fn append_type_id_reachable_compiled_functions_profiled(
+    out: &var std::string::String,
+    lookup_index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    backend_profile: &profile::Profile,
+    profile_out: &var std::string::String,
+    io: Io
+) -> !void {
+    var pending = std::array::Array<[]u8>(std::mem::page_allocator());
+    try pending.append("type_record_from_node");
+    try pending.append("function_return_type_id_from_node");
+    try pending.append("function_param_type_id_from_node");
+    try pending.append("type_record_from_id");
+    try pending.append("type_record_from_text");
+    try pending.append("map_type_parts_from_text");
+    try pending.append("box_type_parts_from_text");
+    try pending.append("type_text_is_arena_handle");
+    try append_component_reachable_compiled_functions_profiled(
+        out,
+        lookup_index,
+        ir_bytes,
+        "selfhost::types::type_id::",
+        &var pending,
+        true,
+        "append_type_id_member",
+        backend_profile,
+        profile_out,
+        io
     );
     pending.deinit();
     return;
@@ -2318,7 +2410,13 @@ fn collect_component_compiled_callee(
         try pending.append(callee);
         return;
     }
-    return error("compiled closure: unsupported callee");
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled closure: unsupported callee: prefix ");
+    try message.append_bytes(prefix);
+    try message.append_bytes(" callee ");
+    try message.append_bytes(callee);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }
 
 // compiled_external_accessor_allowed reports whether a compiled closure callee names an
@@ -2360,7 +2458,13 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         return std::mem::equal_bytes(callee, "ast.get") or
             std::mem::equal_bytes(callee, "ast.child_at");
     }
+    if std::mem::equal_bytes(prefix, "selfhost::types::type_id::") {
+        return std::mem::equal_bytes(callee, "ast.get");
+    }
     if std::mem::equal_bytes(prefix, "selfhost::ir::codegen::") {
+        if compiled_codegen_type_id_callee_allowed(callee) {
+            return true;
+        }
         // The tape's recursive list walks bind children through the compiled external
         // std::kizu::ast accessor (spelled ast.child_at), emitted separately as
         // kizu_kizu__ast_ast_child_at; the BFS references it without re-emitting it.
@@ -2412,6 +2516,18 @@ fn compiled_external_accessor_allowed(prefix: []u8, callee: []u8) -> bool {
         return true;
     }
     return false;
+}
+
+fn compiled_codegen_type_id_callee_allowed(callee: []u8) -> bool {
+    return std::mem::equal_bytes(callee, "type_id::type_record_from_node") or
+        std::mem::equal_bytes(callee, "type_id::function_return_type_id_from_node") or
+        std::mem::equal_bytes(callee, "type_id::function_param_type_id_from_node") or
+        std::mem::equal_bytes(callee, "type_id::type_record_from_id") or
+        std::mem::equal_bytes(callee, "type_id::type_record_from_text") or
+        std::mem::equal_bytes(callee, "type_id::unknown_type_record") or
+        std::mem::equal_bytes(callee, "type_id::map_type_parts_from_text") or
+        std::mem::equal_bytes(callee, "type_id::box_type_parts_from_text") or
+        std::mem::equal_bytes(callee, "type_id::type_text_is_arena_handle");
 }
 
 // compiled_parser_external_callee_allowed mirrors the IR fact-side parser closure policy:
@@ -2473,6 +2589,8 @@ fn compiled_parser_ast_mutator_callee_allowed(callee: []u8) -> bool {
         std::mem::equal_bytes(callee, "ast.add_comptime_expr") or
         std::mem::equal_bytes(callee, "ast.add_comptime_if") or
         std::mem::equal_bytes(callee, "ast.add_continue") or
+        std::mem::equal_bytes(callee, "ast.add_contract_decl") or
+        std::mem::equal_bytes(callee, "ast.add_contract_decl_with_doc") or
         std::mem::equal_bytes(callee, "ast.add_defer") or
         std::mem::equal_bytes(callee, "ast.add_deref_expr") or
         std::mem::equal_bytes(callee, "ast.add_empty") or
@@ -2485,6 +2603,7 @@ fn compiled_parser_ast_mutator_callee_allowed(callee: []u8) -> bool {
         std::mem::equal_bytes(callee, "ast.add_for") or
         std::mem::equal_bytes(callee, "ast.add_if") or
         std::mem::equal_bytes(callee, "ast.add_impl_decl") or
+        std::mem::equal_bytes(callee, "ast.add_impl_decl_with_contract") or
         std::mem::equal_bytes(callee, "ast.add_import_decl") or
         std::mem::equal_bytes(callee, "ast.add_index_expr") or
         std::mem::equal_bytes(callee, "ast.add_int") or
@@ -2534,15 +2653,17 @@ fn compiled_callee_has_namespace(name: []u8) -> bool {
 }
 
 // compiled_callee_is_array_element_method reports whether a callee names a value-receiver
-// Array<T> element method (<receiver>.len / <receiver>.get / <receiver>.set /
-// <receiver>.append), i.e. a runtime builtin lowered inline through the element-size-generic
-// array ABI rather than a component function (issue 1165). Namespaced callees (carrying
-// '::') are excluded so a cross-module free function is never mistaken for a method.
+// Array<T> element method (<receiver>.len / <receiver>.get / <receiver>.get_or_panic /
+// <receiver>.set / <receiver>.append), i.e. a runtime builtin lowered inline through the
+// element-size-generic array ABI rather than a component function (issue 1165). Namespaced
+// callees (carrying '::') are excluded so a cross-module free function is never mistaken for
+// a method.
 fn compiled_callee_is_array_element_method(name: []u8) -> bool {
     if compiled_callee_has_namespace(name) {
         return false;
     }
     return compiled_name_ends_with(name, ".len") or compiled_name_ends_with(name, ".get") or
+        compiled_name_ends_with(name, ".get_or_panic") or
         compiled_name_ends_with(name, ".set") or compiled_name_ends_with(name, ".append");
 }
 
@@ -2712,6 +2833,7 @@ fn append_kizu_parser_reachable_roots(
     try pending.append("prefix_op");
     try pending.append("binary_op");
     try pending.append("parse_program");
+    try pending.append("parse_first_node");
     return;
 }
 
@@ -3516,6 +3638,12 @@ fn append_cli_check_blocks(out: &var std::string::String) -> !void {
 fn append_cli_stage_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "run_stage:");
     try append_line(out, "  %stage_io = call %kizu.owned @kizu_rt_io_blocking()");
+    try append_global_slice(out, "stage2", "dir", "stage2_dir", "22");
+    try append_line(out,
+        "  %stage2_mkdir = call %kizu.error.void @kizu_rt_fs_create_dir(%kizu.owned %stage_io, %kizu.slice.u8 %stage2_dir_slice)");
+    try append_line(out, "  %stage2_mkdir_ok = extractvalue %kizu.error.void %stage2_mkdir, 0");
+    try append_line(out, "  br i1 %stage2_mkdir_ok, label %stage2_mkdir_cont, label %check_failed");
+    try append_line(out, "stage2_mkdir_cont:");
     try append_stage_copy(out, "ll", "root_ll_path", "27", "stage2_ll_path", "34");
     try append_stage_copy(out, "meta", "root_meta_path", "32", "stage2_meta_path", "39");
     try append_stage_copy(
@@ -3574,6 +3702,21 @@ fn append_stage_copy(
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  %");
     try out.append_bytes(name);
+    try out.append_bytes("_read_ok = extractvalue %kizu.error.slice.u8 %");
+    try out.append_bytes(name);
+    try out.append_bytes("_read, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br i1 %");
+    try out.append_bytes(name);
+    try out.append_bytes("_read_ok, label %");
+    try out.append_bytes(name);
+    try out.append_bytes("_read_cont, label %check_failed");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(name);
+    try out.append_bytes("_read_cont:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(name);
     try out.append_bytes("_bytes = extractvalue %kizu.error.slice.u8 %");
     try out.append_bytes(name);
     try out.append_bytes("_read, 1");
@@ -3586,6 +3729,21 @@ fn append_stage_copy(
     try out.append_bytes("_target_slice, %kizu.slice.u8 %");
     try out.append_bytes(name);
     try out.append_bytes("_bytes)");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(name);
+    try out.append_bytes("_copy_ok = extractvalue %kizu.error.void %");
+    try out.append_bytes(name);
+    try out.append_bytes("_copy, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br i1 %");
+    try out.append_bytes(name);
+    try out.append_bytes("_copy_ok, label %");
+    try out.append_bytes(name);
+    try out.append_bytes("_copy_cont, label %check_failed");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(name);
+    try out.append_bytes("_copy_cont:");
     try out.append_byte(cast<u8>(10));
     return;
 }

@@ -11,6 +11,18 @@ fmt:
 test:
     go test ./...
 
+# Run the heavyweight selfhost conformance corpus explicitly.
+conformance-gate:
+    KIZU_RUN_CONFORMANCE=1 go test -timeout=30m ./cmd/kizu -run '^TestConformanceManifests$' -count=1 -v
+
+# Run process-level default-selfhost CLI smoke tests explicitly.
+selfhost-run-smoke-gate:
+    KIZU_RUN_SELFHOST_SMOKES=1 go test -timeout=30m ./cmd/kizu -run '^(TestRun(Command(Smoke|BorrowExample|ArenaExample)|PackageCommandSmoke|CompilerPhases(PackageSmoke|StopsAfterParseError))|TestStdKizuParserErrorSeeds)$' -count=1 -v
+
+# Run interpreted std Kizu parser parity over examples, selfhost, and std sources.
+std-kizu-parser-parity-gate:
+    KIZU_RUN_STD_KIZU_PARSER_PARITY=1 go test -timeout=30m ./cmd/kizu -run '^TestStdKizuParser(ParityExamples|ParitySelfhostPackage|ParsesFrontendStdSources)$' -count=1 -v
+
 # Run static analysis.
 lint:
     golangci-lint run
@@ -135,7 +147,7 @@ selfhost-run-parity-gate-from-scratch:
     just selfhost-bootstrap
     just selfhost-run-parity-gate
 
-# Run #1070 flip-path parity gate (KIZU_SELFHOST_RUN run_file_cli vs Go interp baseline).
+# Run #1070 default selfhost run path against the in-test Go interpreter oracle.
 selfhost-run-flip-parity-gate:
     KIZU_RUN_SELFHOST_FLIP_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunFlipParityGate$' -count=1 -v
 
@@ -143,7 +155,7 @@ selfhost-run-flip-parity-gate:
 selfhost-run-flip-one case:
     KIZU_RUN_SELFHOST_FLIP_PARITY=1 KIZU_RUN_SELFHOST_FLIP_PARITY_CASE='{{case}}' go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunFlipParityGate$' -count=1 -v
 
-# Run #1151 public `run` selfhost switch gate (KIZU_SELFHOST_RUN routing).
+# Run #1151 public `run` default-owner gate (no switch and no Go fallback).
 selfhost-run-cli-switch-gate:
     KIZU_RUN_SELFHOST_RUN_CLI_SWITCH=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunCliSwitch' -count=1 -v
 

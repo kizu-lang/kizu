@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,9 @@ type stdKizuParserErrorCase struct {
 
 // TestStdKizuParserErrorSeeds checks recoverable parser errors stay readable.
 func TestStdKizuParserErrorSeeds(t *testing.T) {
+	if os.Getenv("KIZU_RUN_SELFHOST_SMOKES") != "1" {
+		t.Skip("set KIZU_RUN_SELFHOST_SMOKES=1 to run selfhost parser error seeds")
+	}
 	if failures := countStdKizuParserErrorSeedFailures(t); failures > 0 {
 		t.Fatalf("parser error seed failures=%d", failures)
 	}

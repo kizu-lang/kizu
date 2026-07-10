@@ -104,17 +104,14 @@ func dispatch(cmd string, args []string) error {
 	}
 }
 
-// dispatchRun routes `kizu run` through the native, selfhost, or Go-owned path,
-// preserving the nativeRun → selfhostRun → runFile priority order.
+// dispatchRun routes `kizu run` through the selfhost compiler. The explicit
+// native delegate remains available for stage2 dogfooding; there is no Go
+// interpreter fallback in the public run path.
 func dispatchRun(args []string) error {
 	if nativeRunEnabled() {
 		return runNativeSelfhostDelegate("run", args)
 	}
-	if selfhostRunEnabled() {
-		return runSelfhostFrontendCommand("run", args)
-	}
-	path, programArgs := splitProgramArgs(args)
-	return runFile(path, programArgs)
+	return runSelfhostFrontendCommand("run", args)
 }
 
 // dispatchTest routes `kizu test` through the native, selfhost, or Go-owned path,
@@ -211,25 +208,6 @@ func nativeSelfhostRepoRoot(bin string) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(bin))))
 }
 
-// selfhostRunEnvVar is the rollback-friendly switch point for routing the public
-// `kizu run <file>` command through the selfhost-owned compiled artifact path
-// (selfhost::cli::execute::run_file_cli, which lowers a run-codegen program, links
-// it, and executes the native artifact) instead of the Go interpreter. It defaults
-// off so the general Go-owned run surface is unchanged; supported shapes that the
-// selfhost backend can lower are owned end to end when it is on, and unsupported
-// shapes surface explicit selfhost diagnostics rather than falling back to Go.
-//
-// This gate is the deliberate switch boundary for #1151 / parent #1070. It is not a
-// permanent compatibility branch: it is removed (default flipped to selfhost) once
-// `run` is selfhost-owned for the general language/runtime surface tracked by #1070.
-const selfhostRunEnvVar = "KIZU_SELFHOST_RUN"
-
-// selfhostRunEnabled reports whether the public `run` command is routed through the
-// selfhost-owned compiled artifact path. See selfhostRunEnvVar.
-func selfhostRunEnabled() bool {
-	return os.Getenv(selfhostRunEnvVar) == "1"
-}
-
 // selfhostTestEnvVar is the rollback-friendly switch point for routing the public
 // `kizu test <file>` command through the selfhost-owned compiled artifact path
 // (selfhost::cli::execute::test_file_cli, which lowers a test executable, emits
@@ -296,7 +274,7 @@ func selfhostFrontendProcessArgs(command string, args []string) ([]string, error
 	processArgs := make([]string, 0, len(args)+1)
 	processArgs = append(processArgs, command)
 	processArgs = append(processArgs, args...)
-	if len(args) == 1 && !strings.HasPrefix(args[0], "-") {
+	if selfhostFrontendHasLeadingTarget(command, args) {
 		absTarget, err := filepath.Abs(args[0])
 		if err != nil {
 			return nil, err
@@ -314,6 +292,17 @@ func selfhostFrontendProcessArgs(command string, args []string) ([]string, error
 	}
 	processArgs[2] = absTarget
 	return processArgs, nil
+}
+
+// selfhostFrontendHasLeadingTarget reports whether args begin with a source target.
+func selfhostFrontendHasLeadingTarget(command string, args []string) bool {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return false
+	}
+	if len(args) == 1 {
+		return true
+	}
+	return command == "run" && args[1] == "--"
 }
 
 // usage prints the supported command line shape.
@@ -342,38 +331,6 @@ func parseFile(path string) error {
 	}
 	_, _ = fmt.Println(program.String())
 	return nil
-}
-
-// runFile parses a source file and executes it with the interpreter.
-func runFile(path string, args []string) error {
-	if isPackageRoot(path) {
-		return runPackage(path, args)
-	}
-	program, errs, err := parsePathWithStd(path)
-	if err != nil {
-		return err
-	}
-	if len(errs) > 0 {
-		printParserDiagnostics(errs)
-		return fmt.Errorf("parse failed")
-	}
-	if err := checkProgram(program); err != nil {
-		return err
-	}
-	return interp.NewWithProcessIO(os.Stdout, os.Stderr, args).Run(program)
-}
-
-// runPackage resolves a package root and executes the root module main.
-func runPackage(path string, args []string) error {
-	graph, program, err := loadPackageProgram(path)
-	if err != nil {
-		return err
-	}
-	if err := checkProgram(program); err != nil {
-		return err
-	}
-	entry := graph.Root + "::main"
-	return interp.NewWithProcessIO(os.Stdout, os.Stderr, args).RunEntry(program, entry)
 }
 
 // checkFile parses a source file and runs static checks.

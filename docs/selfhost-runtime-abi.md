@@ -71,6 +71,7 @@ Kizu module and function symbols lower to deterministic LLVM symbol names:
 | std primitive `std::fs::write_file` | `@kizu_rt_fs_write_file` |
 | std primitive `std::fs::rename` | `@kizu_rt_fs_rename` |
 | std primitive `std::fs::create_dir` | `@kizu_rt_fs_create_dir` |
+| std primitive `std::fs::remove_dir` | `@kizu_rt_fs_remove_dir` |
 | std primitive `std::io::blocking` | `@kizu_rt_io_blocking` |
 | std primitive `std::io::write_stdout` | `@kizu_rt_io_write_stdout` |
 | std primitive `std::io::write_stderr` | `@kizu_rt_io_write_stderr` |
@@ -473,6 +474,7 @@ future issue-linked work; this ABI must not be widened by hidden fallback paths.
 | `std::fs::write_file` | `@kizu_rt_fs_write_file` | `(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8) -> %kizu.error.void` |
 | `std::fs::rename` | `@kizu_rt_fs_rename` | `(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8) -> %kizu.error.void` |
 | `std::fs::create_dir` | `@kizu_rt_fs_create_dir` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
+| `std::fs::remove_dir` | `@kizu_rt_fs_remove_dir` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
 | `std::io::write_stdout` | `@kizu_rt_io_write_stdout` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
 | `std::io::write_stderr` | `@kizu_rt_io_write_stderr` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
 | `std::process::arg_count` | `@kizu_rt_process_arg_count` | `() -> i64` |
@@ -483,6 +485,12 @@ future issue-linked work; this ABI must not be widened by hidden fallback paths.
 
 The first argument is the explicit `Io` capability. The runtime must not use a
 hidden global default capability.
+
+`std::fs::read_dir` returns the `%kizu.error.owned` ABI because the success
+payload is an owned `Array<std::fs::DirEntry>` handle. Each array element uses
+the `%kizu.fs.dir_entry = { %kizu.slice.u8, %kizu.slice.u8, i1 }` layout for
+`name`, `path`, and `is_dir`; consumers read it through the generic
+`@kizu_rt_array_at` element-view ABI.
 
 ## Stdlib And Runtime Capability Inventory
 

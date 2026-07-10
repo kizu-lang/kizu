@@ -110,6 +110,7 @@ pub fn collect_function_signatures_from_ast(
             file,
             ast,
             fn_decl.name,
+            fn_decl.type_params.len,
             fn_decl.params,
             fn_decl.return_type,
             arities,
@@ -149,6 +150,7 @@ fn collect_function_signature_from_ast(
     file: &source::SourceFile,
     ast: &std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
+    type_params: i64,
     params: std::kizu::ast::ChildRange,
     return_type: std::kizu::ast::NodeId,
     arities: &var std::map::Map<[]u8, i64>,
@@ -163,6 +165,12 @@ fn collect_function_signature_from_ast(
         return error("duplicate function");
     }
     try arities.insert(function_name, params.len);
+    var type_key = std::string::String(allocator);
+    try type_key.append_bytes(function_name);
+    try type_key.append_bytes("#type-arity");
+    let type_key_bytes = type_key.as_bytes();
+    try arities.insert(type_key_bytes, type_params);
+    type_key.deinit();
     try returns.insert(function_name, ast_return_type(file, ast, return_type));
     qualified.deinit();
     return;
@@ -202,6 +210,7 @@ pub fn collect_function_arities_from_ast(
             file,
             ast,
             fn_decl.name,
+            fn_decl.type_params.len,
             fn_decl.params.len,
             arities
         );,
@@ -230,6 +239,7 @@ fn collect_function_arity(
     file: &source::SourceFile,
     ast: &std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
+    type_params: i64,
     params: i64,
     arities: &var std::map::Map<[]u8, i64>
 ) -> !void {
@@ -242,6 +252,12 @@ fn collect_function_arity(
         return error("duplicate function");
     }
     try arities.insert(key, params);
+    var type_key = std::string::String(allocator);
+    try type_key.append_bytes(key);
+    try type_key.append_bytes("#type-arity");
+    let type_key_bytes = type_key.as_bytes();
+    try arities.insert(type_key_bytes, type_params);
+    type_key.deinit();
     qualified.deinit();
     return;
 }
@@ -831,8 +847,17 @@ fn function_call_error_for_ast_call(
     let key = resolved.as_bytes();
     let found = functions.contains(key);
     var expected = 0;
+    var expected_type_args = 0;
     if found {
         expected = try functions.get(key);
+        var type_key = std::string::String(allocator);
+        try type_key.append_bytes(key);
+        try type_key.append_bytes("#type-arity");
+        let type_key_bytes = type_key.as_bytes();
+        if functions.contains(type_key_bytes) {
+            expected_type_args = try functions.get(type_key_bytes);
+        }
+        type_key.deinit();
     }
     resolved.deinit();
     let callee_node = ast.get(callee);
@@ -847,6 +872,17 @@ fn function_call_error_for_ast_call(
             callee_node.span.end,
             expected,
             args.len
+        );
+    }
+    let observed_type_args = function_call_type_arg_count(ast, callee);
+    if expected_type_args != observed_type_args {
+        return function_call_summary(
+            true,
+            3,
+            callee_node.span.start,
+            callee_node.span.end,
+            expected_type_args,
+            observed_type_args
         );
     }
     return function_call_summary(false, 0, 0, 0, 0, 0);
@@ -876,6 +912,17 @@ pub fn function_call_name_text(
     }
 }
 
+pub fn function_call_type_arg_count(
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId
+) -> i64 {
+    let node = ast.get(callee);
+    match node.data {
+        TypeApplyExpr(type_apply) => return type_apply.type_args.len;,
+        _ => return 0;,
+    }
+}
+
 fn function_call_summary(
     found: bool,
     kind: i64,
@@ -898,6 +945,10 @@ pub fn should_skip_function_reference(name: []u8) -> bool {
     return std::mem::equal_bytes(name, "print") or
         std::mem::equal_bytes(name, "error") or
         std::mem::equal_bytes(name, "cast") or
+        std::mem::equal_bytes(name, "ptr_read") or
+        std::mem::equal_bytes(name, "ptr_write") or
+        std::mem::equal_bytes(name, "ptr_from_int") or
+        std::mem::equal_bytes(name, "int_from_ptr") or
         std::mem::equal_bytes(name, "return") or
         std::mem::equal_bytes(name, "or") or
         std::mem::equal_bytes(name, "and") or

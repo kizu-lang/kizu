@@ -21,6 +21,7 @@ source_filename = "target/selfhost/selfhost.host"
 
 declare ptr @kizu_host_page_allocator()
 declare ptr @kizu_host_io_blocking()
+declare ptr @kizu_host_io_failing()
 declare ptr @kizu_host_alloc(ptr, i64)
 declare void @kizu_host_free(ptr, ptr)
 declare void @kizu_host_fs_exists(ptr, ptr, %kizu.slice.u8)
@@ -29,6 +30,7 @@ declare void @kizu_host_fs_read_dir(ptr, ptr, %kizu.slice.u8)
 declare void @kizu_host_fs_read_file(ptr, ptr, %kizu.slice.u8)
 declare void @kizu_host_fs_write_file(ptr, ptr, %kizu.slice.u8, %kizu.slice.u8)
 declare void @kizu_host_fs_create_dir(ptr, ptr, %kizu.slice.u8)
+declare void @kizu_host_fs_remove_dir(ptr, ptr, %kizu.slice.u8)
 declare void @kizu_host_fs_rename(ptr, ptr, %kizu.slice.u8, %kizu.slice.u8)
 declare void @kizu_host_io_write_stdout(ptr, ptr, %kizu.slice.u8)
 declare void @kizu_host_io_write_stderr(ptr, ptr, %kizu.slice.u8)
@@ -63,6 +65,13 @@ entry:
 define %kizu.owned @kizu_rt_io_blocking() {
 entry:
   %raw = call ptr @kizu_host_io_blocking()
+  %handle = insertvalue %kizu.owned poison, ptr %raw, 0
+  ret %kizu.owned %handle
+}
+
+define %kizu.owned @kizu_rt_io_failing() {
+entry:
+  %raw = call ptr @kizu_host_io_failing()
   %handle = insertvalue %kizu.owned poison, ptr %raw, 0
   ret %kizu.owned %handle
 }
@@ -138,6 +147,15 @@ entry:
   %raw_io = extractvalue %kizu.owned %io, 0
   %slot = alloca %kizu.error.void
   call void @kizu_host_fs_create_dir(ptr %slot, ptr %raw_io, %kizu.slice.u8 %path)
+  %result = load %kizu.error.void, ptr %slot
+  ret %kizu.error.void %result
+}
+
+define %kizu.error.void @kizu_rt_fs_remove_dir(%kizu.owned %io, %kizu.slice.u8 %path) {
+entry:
+  %raw_io = extractvalue %kizu.owned %io, 0
+  %slot = alloca %kizu.error.void
+  call void @kizu_host_fs_remove_dir(ptr %slot, ptr %raw_io, %kizu.slice.u8 %path)
   %result = load %kizu.error.void, ptr %slot
   ret %kizu.error.void %result
 }

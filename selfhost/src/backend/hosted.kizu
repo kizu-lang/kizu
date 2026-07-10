@@ -41,6 +41,14 @@ pub fn run_linker_output_flag() -> []u8 {
     return "-o";
 }
 
+pub fn run_link_response_suffix() -> []u8 {
+    return ".link.rsp";
+}
+
+pub fn run_compiler_support_artifact() -> []u8 {
+    return "target/selfhost/selfhost.ll";
+}
+
 pub fn test_artifact_dir() -> []u8 {
     return "target/selfhost/test";
 }
@@ -236,20 +244,127 @@ pub fn run_artifact_executable_path(
 }
 
 pub fn link_run_artifact(
-    ll_path: &[]u8,
-    executable_path: &[]u8
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
 ) -> !i64 {
+    var ll_path = try run_artifact_ll_path(allocator, source_path);
+    defer ll_path.deinit();
+    var executable_path = try run_artifact_executable_path(allocator, source_path);
+    defer executable_path.deinit();
+    let ll_path_bytes = ll_path.as_bytes();
+    let executable_path_bytes = executable_path.as_bytes();
+    let artifact_bytes = try std::fs::read_file(io, ll_path_bytes);
+    let include_support = run_link_needs_compiler_support(artifact_bytes);
+    var response_path = std::string::String(allocator);
+    try response_path.append_bytes(executable_path_bytes);
+    try response_path.append_bytes(run_link_response_suffix());
+    defer response_path.deinit();
+    let response_path_bytes = response_path.as_bytes();
+    var response = std::string::String(allocator);
+    defer response.deinit();
+    try response.append_bytes(ll_path_bytes);
+    try response.append_byte(cast<u8>(10));
+    try append_static_link_response_args(response, include_support);
+    let response_bytes = response.as_bytes();
+    try std::fs::write_file(io, response_path_bytes, response_bytes);
+    var response_arg = std::string::String(allocator);
+    defer response_arg.deinit();
+    try response_arg.append_byte(cast<u8>(64));
+    try response_arg.append_bytes(response_path_bytes);
+    let response_arg_bytes = response_arg.as_bytes();
     return try std::process::spawn_wait8(
-        8,
+        6,
         run_linker_tool(),
         run_linker_llvm_module_flag(),
-        ll_path,
-        run_storage_runtime_artifact(),
-        run_host_runtime_artifact(),
-        run_host_runtime_source(),
+        run_linker_external_assembler_flag(),
+        response_arg_bytes,
         run_linker_output_flag(),
-        executable_path
+        executable_path_bytes,
+        "",
+        ""
     );
+}
+
+pub fn link_test_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
+) -> !i64 {
+    var ll_path = try test_artifact_ll_path(allocator, source_path);
+    defer ll_path.deinit();
+    var executable_path = try test_artifact_executable_path(allocator, source_path);
+    defer executable_path.deinit();
+    let ll_path_bytes = ll_path.as_bytes();
+    let executable_path_bytes = executable_path.as_bytes();
+    let artifact_bytes = try std::fs::read_file(io, ll_path_bytes);
+    let include_support = run_link_needs_compiler_support(artifact_bytes);
+    var response_path = std::string::String(allocator);
+    try response_path.append_bytes(executable_path_bytes);
+    try response_path.append_bytes(run_link_response_suffix());
+    defer response_path.deinit();
+    let response_path_bytes = response_path.as_bytes();
+    var response = std::string::String(allocator);
+    defer response.deinit();
+    try response.append_bytes(ll_path_bytes);
+    try response.append_byte(cast<u8>(10));
+    try append_static_link_response_args(response, include_support);
+    let response_bytes = response.as_bytes();
+    try std::fs::write_file(io, response_path_bytes, response_bytes);
+    var response_arg = std::string::String(allocator);
+    defer response_arg.deinit();
+    try response_arg.append_byte(cast<u8>(64));
+    try response_arg.append_bytes(response_path_bytes);
+    let response_arg_bytes = response_arg.as_bytes();
+    return try std::process::spawn_wait8(
+        6,
+        run_linker_tool(),
+        run_linker_llvm_module_flag(),
+        run_linker_external_assembler_flag(),
+        response_arg_bytes,
+        run_linker_output_flag(),
+        executable_path_bytes,
+        "",
+        ""
+    );
+}
+
+fn append_static_link_response_args(out: &var std::string::String, include_support: bool) -> !void {
+    if include_support {
+        try out.append_bytes(run_compiler_support_artifact());
+        try out.append_byte(cast<u8>(10));
+    }
+    try out.append_bytes(run_storage_runtime_artifact());
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(run_host_runtime_artifact());
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(run_host_runtime_source());
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn run_link_needs_compiler_support(artifact: []u8) -> bool {
+    return bytes_contains(artifact, "@kizu_kizu__parser_") or
+        bytes_contains(artifact, "call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get");
+}
+
+fn bytes_contains(bytes: []u8, needle: []u8) -> bool {
+    let needle_len = std::mem::len(needle);
+    if needle_len == 0 {
+        return true;
+    }
+    let length = std::mem::len(bytes);
+    if needle_len > length {
+        return false;
+    }
+    var start = 0;
+    while start + needle_len <= length {
+        if std::mem::equal_bytes(bytes[start..start + needle_len], needle) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
 }
 
 pub fn execute_run_artifact(executable_path: &[]u8) -> !i64 {
@@ -263,6 +378,116 @@ pub fn execute_run_artifact(executable_path: &[]u8) -> !i64 {
         "",
         "",
         ""
+    );
+}
+
+pub fn execute_run_artifact_with_process_args(
+    executable_path: &[]u8,
+    program_arg_start: i64,
+    cli_arg_count: i64
+) -> !i64 {
+    let program_arg_count = cli_arg_count - program_arg_start;
+    if program_arg_count <= 0 {
+        return try execute_run_artifact(executable_path);
+    }
+    if program_arg_count > 7 {
+        return error("run program args exceed spawn_wait8 limit");
+    }
+    let arg0 = try std::process::arg(program_arg_start);
+    if program_arg_count == 1 {
+        return try std::process::spawn_wait8(
+            2,
+            executable_path,
+            arg0,
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+        );
+    }
+    let arg1 = try std::process::arg(program_arg_start + 1);
+    if program_arg_count == 2 {
+        return try std::process::spawn_wait8(
+            3,
+            executable_path,
+            arg0,
+            arg1,
+            "",
+            "",
+            "",
+            "",
+            ""
+        );
+    }
+    let arg2 = try std::process::arg(program_arg_start + 2);
+    if program_arg_count == 3 {
+        return try std::process::spawn_wait8(
+            4,
+            executable_path,
+            arg0,
+            arg1,
+            arg2,
+            "",
+            "",
+            "",
+            ""
+        );
+    }
+    let arg3 = try std::process::arg(program_arg_start + 3);
+    if program_arg_count == 4 {
+        return try std::process::spawn_wait8(
+            5,
+            executable_path,
+            arg0,
+            arg1,
+            arg2,
+            arg3,
+            "",
+            "",
+            ""
+        );
+    }
+    let arg4 = try std::process::arg(program_arg_start + 4);
+    if program_arg_count == 5 {
+        return try std::process::spawn_wait8(
+            6,
+            executable_path,
+            arg0,
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            "",
+            ""
+        );
+    }
+    let arg5 = try std::process::arg(program_arg_start + 5);
+    if program_arg_count == 6 {
+        return try std::process::spawn_wait8(
+            7,
+            executable_path,
+            arg0,
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            arg5,
+            ""
+        );
+    }
+    let arg6 = try std::process::arg(program_arg_start + 6);
+    return try std::process::spawn_wait8(
+        8,
+        executable_path,
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+        arg6
     );
 }
 

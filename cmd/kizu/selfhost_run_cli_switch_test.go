@@ -10,28 +10,10 @@ import (
 	"testing"
 )
 
-// TestSelfhostRunCliSwitchEnvGate pins the rollback-friendly switch point for the
-// public `run` command (#1151 / parent #1070). It stays clang-free so it always
-// guards against the gate being removed or the run dispatch being hardcoded back
-// to the Go interpreter path.
-func TestSelfhostRunCliSwitchEnvGate(t *testing.T) {
-	// selfhostRunEnabled only reacts to the documented opt-in value.
-	t.Setenv(selfhostRunEnvVar, "")
-	if selfhostRunEnabled() {
-		t.Fatalf("expected run switch disabled when %s is empty", selfhostRunEnvVar)
-	}
-	t.Setenv(selfhostRunEnvVar, "0")
-	if selfhostRunEnabled() {
-		t.Fatalf("expected run switch disabled when %s=0", selfhostRunEnvVar)
-	}
-	t.Setenv(selfhostRunEnvVar, "1")
-	if !selfhostRunEnabled() {
-		t.Fatalf("expected run switch enabled when %s=1", selfhostRunEnvVar)
-	}
-
-	// The run dispatch must route through the selfhost frontend only behind the
-	// gate, with the Go interpreter path preserved as the default. Reading the
-	// dispatch source keeps this regression guard independent of clang/runtime.
+// TestSelfhostRunCliSwitchDefaultOwner pins selfhost as the unconditional public
+// `run` owner. It stays clang-free and rejects reintroduction of an environment
+// switch or Go interpreter fallback.
+func TestSelfhostRunCliSwitchDefaultOwner(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
@@ -40,14 +22,57 @@ func TestSelfhostRunCliSwitchEnvGate(t *testing.T) {
 	if dispatch == "" {
 		t.Fatalf("could not extract the run dispatch case from main.go")
 	}
-	for _, fragment := range []string{
-		"if selfhostRunEnabled() {",
-		"return runSelfhostFrontendCommand(\"run\", args)",
-		"return runFile(path, programArgs)",
-	} {
+	for _, fragment := range []string{"return runSelfhostFrontendCommand(\"run\", args)"} {
 		if !strings.Contains(dispatch, fragment) {
-			t.Fatalf("run dispatch missing %q; gate or default path changed:\n%s", fragment, dispatch)
+			t.Fatalf("run dispatch missing %q; default owner changed:\n%s", fragment, dispatch)
 		}
+	}
+	for _, forbidden := range []string{"selfhostRunEnabled", "KIZU_SELFHOST_RUN", "runFile("} {
+		if strings.Contains(dispatch, forbidden) {
+			t.Fatalf("run dispatch contains forbidden fallback/switch %q:\n%s", forbidden, dispatch)
+		}
+	}
+}
+
+// TestSelfhostRunFrontendArgsPreserveProgramArgs checks the run argument boundary.
+func TestSelfhostRunFrontendArgsPreserveProgramArgs(t *testing.T) {
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	temp := t.TempDir()
+	if err := os.Chdir(temp); err != nil {
+		t.Fatalf("chdir temp: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWd)
+	})
+
+	got, err := selfhostFrontendProcessArgs(
+		"run",
+		[]string{
+			"examples/std_io_process.kizu",
+			"--",
+			"examples/fixtures/config.txt",
+			"literal",
+		},
+	)
+	if err != nil {
+		t.Fatalf("selfhost frontend args: %v", err)
+	}
+	absTarget, err := filepath.Abs("examples/std_io_process.kizu")
+	if err != nil {
+		t.Fatalf("abs target: %v", err)
+	}
+	want := []string{
+		"run",
+		absTarget,
+		"--",
+		"examples/fixtures/config.txt",
+		"literal",
+	}
+	if !sameStringSlice(got, want) {
+		t.Fatalf("selfhost frontend args = %#v, want %#v", got, want)
 	}
 }
 
@@ -81,13 +106,12 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	}
 
 	const supported = "selfhost/tests/cli/run_hello.kizu"
-	const unsupported = "examples/atomic_flag.kizu"
-	const unsupportedGoOutput = "false\ntrue\n"
+	const broad = "examples/atomic_flag.kizu"
 
 	// Gate on: the supported shape is selfhost-owned end to end. The printed
 	// output comes from executing the linked native artifact, not the Go
 	// interpreter.
-	onStdout, _, onCode := runCliSwitchCommand(t, bin, repoRoot, true, supported)
+	onStdout, _, onCode := runCliSwitchCommand(t, bin, repoRoot, supported)
 	if onCode != 0 {
 		t.Fatalf("selfhost run %s exit = %d, want 0", supported, onCode)
 	}
@@ -95,35 +119,13 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 		t.Fatalf("selfhost run %s stdout = %q, want %q", supported, onStdout, "hello, kizu\n")
 	}
 
-	// Gate on: the unsupported shape is an explicit selfhost diagnostic, never the
-	// Go interpreter output. This is the no-Go-fallback guarantee.
-	badStdout, badStderr, badCode := runCliSwitchCommand(t, bin, repoRoot, true, unsupported)
-	if badCode == 0 {
-		t.Fatalf("selfhost run %s exit = 0, want explicit diagnostic", unsupported)
-	}
-	leakedStdout := strings.Contains(badStdout, unsupportedGoOutput)
-	leakedStderr := strings.Contains(badStderr, unsupportedGoOutput)
-	if leakedStdout || leakedStderr {
-		t.Fatalf("selfhost run %s leaked Go interpreter output:\nstdout=%q\nstderr=%q",
-			unsupported, badStdout, badStderr)
-	}
-	diagnostic := strings.TrimSpace(badStderr)
-	if diagnostic == "" {
-		diagnostic = strings.TrimSpace(badStdout)
+	broadStdout, broadStderr, broadCode := runCliSwitchCommand(t, bin, repoRoot, broad)
+	if broadCode != 0 || broadStderr != "" || broadStdout != "false\ntrue\n" {
+		t.Fatalf("default selfhost run %s = exit %d stdout %q stderr %q",
+			broad, broadCode, broadStdout, broadStderr)
 	}
 
-	// Gate off: the same unsupported shape stays on the default Go path, which
-	// runs it through the interpreter. This confirms the switch is gated rather
-	// than a broadened default.
-	offStdout, _, offCode := runCliSwitchCommand(t, bin, repoRoot, false, unsupported)
-	if offCode != 0 {
-		t.Fatalf("default Go run %s exit = %d, want 0", unsupported, offCode)
-	}
-	if offStdout != unsupportedGoOutput {
-		t.Fatalf("default Go run %s stdout = %q, want Go interpreter output", unsupported, offStdout)
-	}
-
-	if err := writeRunCliSwitchReport(supported, unsupported, diagnostic); err != nil {
+	if err := writeRunCliSwitchReport(supported, broad); err != nil {
 		t.Fatalf("write run cli switch report: %v", err)
 	}
 }
@@ -134,17 +136,12 @@ func runCliSwitchCommand(
 	t *testing.T,
 	bin string,
 	repoRoot string,
-	selfhost bool,
 	target string,
 ) (string, string, int) {
 	t.Helper()
 	cmd := exec.Command(bin, "run", target)
 	cmd.Dir = repoRoot
-	env := append(os.Environ(), selfhostRunEnvVar+"=0")
-	if selfhost {
-		env[len(env)-1] = selfhostRunEnvVar + "=1"
-	}
-	cmd.Env = env
+	cmd.Env = os.Environ()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -163,18 +160,17 @@ func runCliSwitchCommand(
 
 // writeRunCliSwitchReport records the switched run path and its fallback status as
 // stable production evidence for #1151.
-func writeRunCliSwitchReport(supported, unsupported, diagnostic string) error {
+func writeRunCliSwitchReport(supported, broad string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "kizu-selfhost-run-cli-switch-v0\n")
 	fmt.Fprintf(&b, "issue #1151\n")
 	fmt.Fprintf(&b, "switch.command run\n")
-	fmt.Fprintf(&b, "switch.point env:%s\n", selfhostRunEnvVar)
+	fmt.Fprintf(&b, "switch.point default-dispatch\n")
 	fmt.Fprintf(&b, "switch.owner selfhost::cli::execute::run_file_cli\n")
 	fmt.Fprintf(&b, "switch.path lower-run-codegen -> link -> execute-native-artifact\n")
 	fmt.Fprintf(&b, "supported.case %s\n", supported)
 	fmt.Fprintf(&b, "supported.stdout.sha256 %s\n", textFingerprint("hello, kizu\n"))
-	fmt.Fprintf(&b, "unsupported.case %s\n", unsupported)
-	fmt.Fprintf(&b, "unsupported.diagnostic %s\n", diagnostic)
+	fmt.Fprintf(&b, "broad.case %s\n", broad)
 	fmt.Fprintf(&b, "go.fallback none\n")
 	fmt.Fprintf(&b, "remaining.test_file_cli not-switched\n")
 	dir := filepath.Join("target", "selfhost", "reports")
@@ -197,4 +193,17 @@ func runCliSwitchDispatchSlice(source string) string {
 		return ""
 	}
 	return rest[:end]
+}
+
+// sameStringSlice reports whether two string slices are identical.
+func sameStringSlice(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

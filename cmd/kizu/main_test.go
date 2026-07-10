@@ -12,8 +12,17 @@ import (
 	"testing"
 )
 
+// requireSelfhostRunSmoke skips process-level default-selfhost smoke tests by default.
+func requireSelfhostRunSmoke(t *testing.T) {
+	t.Helper()
+	if os.Getenv("KIZU_RUN_SELFHOST_SMOKES") != "1" {
+		t.Skip("set KIZU_RUN_SELFHOST_SMOKES=1 to run selfhost CLI smoke tests")
+	}
+}
+
 // TestRunCommandSmoke checks the CLI can execute the hello example.
 func TestRunCommandSmoke(t *testing.T) {
+	requireSelfhostRunSmoke(t)
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/hello.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -27,6 +36,7 @@ func TestRunCommandSmoke(t *testing.T) {
 
 // TestRunCommandBorrowExample checks borrow parameters preserve ownership.
 func TestRunCommandBorrowExample(t *testing.T) {
+	requireSelfhostRunSmoke(t)
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/borrow.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -40,6 +50,7 @@ func TestRunCommandBorrowExample(t *testing.T) {
 
 // TestRunCommandArenaExample checks the CLI can execute the arena example.
 func TestRunCommandArenaExample(t *testing.T) {
+	requireSelfhostRunSmoke(t)
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/arena.kizu")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1131,6 +1142,7 @@ func TestCheckPackageCommandSmoke(t *testing.T) {
 
 // TestRunPackageCommandSmoke checks package roots can execute root module main.
 func TestRunPackageCommandSmoke(t *testing.T) {
+	requireSelfhostRunSmoke(t)
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/cross_module_types")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1199,6 +1211,7 @@ func TestTestFileCommandDoesNotRunMain(t *testing.T) {
 
 // TestRunCompilerPhasesPackageSmoke checks self-host phase-shaped APIs.
 func TestRunCompilerPhasesPackageSmoke(t *testing.T) {
+	requireSelfhostRunSmoke(t)
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/compiler_phases")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1211,6 +1224,7 @@ func TestRunCompilerPhasesPackageSmoke(t *testing.T) {
 
 // TestRunCompilerPhasesStopsAfterParseError checks try prevents later phases.
 func TestRunCompilerPhasesStopsAfterParseError(t *testing.T) {
+	requireSelfhostRunSmoke(t)
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/compiler_phases_fail")
 	out, err := cmd.CombinedOutput()
 	if err == nil {

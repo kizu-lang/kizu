@@ -20,6 +20,19 @@ func codegenCompiledClosureSeeds() []string {
 	}
 }
 
+// typeIDCompiledClosureSeeds lists the type-id roots compiled into selfhost.
+func typeIDCompiledClosureSeeds() []string {
+	return []string{
+		"type_record_from_node",
+		"function_return_type_id_from_node",
+		"function_param_type_id_from_node",
+		"type_record_from_id",
+		"type_record_from_text",
+		"map_type_parts_from_text",
+		"type_text_is_arena_handle",
+	}
+}
+
 // codegenCompiledClosureForbiddenFragments lists every handwritten cluster append
 // (quoted qualified name, quoted mangled symbol, and the per-member params_spec
 // literals that were unique to a registration) that must be gone now the cluster is
@@ -97,6 +110,37 @@ func TestSelfhostCodegenCompiledClosureDerivedFromSharedBFS(t *testing.T) {
 	for _, fragment := range codegenCompiledClosureForbiddenFragments() {
 		if strings.Contains(cli, fragment) {
 			t.Fatalf("codegen compiled cluster keeps hand-written fragment %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostTypeIDCompiledClosureDerivedFromSharedBFS pins TypeId as a real
+// compiled compiler component. Codegen's TypeRecord classifier calls into this
+// module, so stage artifacts must contain the TypeId bodies and not treat them as
+// unresolved externals.
+func TestSelfhostTypeIDCompiledClosureDerivedFromSharedBFS(t *testing.T) {
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+
+	assertComponentReachableCompiledClosure(
+		t,
+		cli,
+		"fn append_type_id_reachable_compiled_functions(",
+		"selfhost::types::type_id::",
+		true,
+		typeIDCompiledClosureSeeds(),
+	)
+
+	for _, fragment := range []string{
+		"try append_type_id_reachable_compiled_functions_profiled(",
+		"\"append_type_id_reachable\"",
+		"\"append_type_id_member\"",
+		"std::mem::equal_bytes(prefix, \"selfhost::types::type_id::\")",
+		"std::mem::equal_bytes(callee, \"ast.get\")",
+		"compiled_codegen_type_id_callee_allowed(callee)",
+		"std::mem::equal_bytes(callee, \"type_id::type_record_from_node\")",
+	} {
+		if !strings.Contains(cli, fragment) {
+			t.Fatalf("TypeId compiled closure missing %q", fragment)
 		}
 	}
 }

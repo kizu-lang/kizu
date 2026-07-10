@@ -706,8 +706,17 @@ type parserParityStats struct {
 	unsupportedSamples map[string]string
 }
 
+// requireStdKizuParserParity skips interpreted parser parity by default.
+func requireStdKizuParserParity(t *testing.T) {
+	t.Helper()
+	if os.Getenv("KIZU_RUN_STD_KIZU_PARSER_PARITY") != "1" {
+		t.Skip("set KIZU_RUN_STD_KIZU_PARSER_PARITY=1 to run std Kizu parser parity")
+	}
+}
+
 // TestStdKizuParserParityExamples checks examples against the std Kizu parser subset.
 func TestStdKizuParserParityExamples(t *testing.T) {
+	requireStdKizuParserParity(t)
 	examples, stats := collectParserParityExamples(t)
 	seeds := parserParitySeedCases(t)
 	cases := append(seeds, examples...)
@@ -730,6 +739,7 @@ func TestStdKizuParserParityExamples(t *testing.T) {
 
 // TestStdKizuParserParitySelfhostPackage gates the agreed selfhost source surface.
 func TestStdKizuParserParitySelfhostPackage(t *testing.T) {
+	requireStdKizuParserParity(t)
 	cases := collectParserParitySelfhostSources(t)
 	got := runStdKizuParserParityHarness(t, cases)
 	assertParserParityCases(t, cases, got)
@@ -738,6 +748,7 @@ func TestStdKizuParserParitySelfhostPackage(t *testing.T) {
 
 // TestStdKizuParserParsesFrontendStdSources gates std sources parsed by the selfhost frontend.
 func TestStdKizuParserParsesFrontendStdSources(t *testing.T) {
+	requireStdKizuParserParity(t)
 	cases := collectParserFrontendStdSources(t)
 	runStdKizuParserParityHarness(t, cases)
 	t.Logf("frontend std sources parsed=%d", len(cases))

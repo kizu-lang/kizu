@@ -6,6 +6,7 @@ import (
 )
 
 var parserClosureSeeds = []string{
+	"parse_first_node",
 	"is_double_colon",
 	"is_eof_token",
 	"is_left_brace_token",

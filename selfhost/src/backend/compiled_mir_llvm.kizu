@@ -2,6 +2,7 @@ import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_mir_llvm_call;
 import selfhost::backend::compiled_mir_llvm_const;
 import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_type_lower;
 import selfhost::backend::compiled_util;
 pub fn append_function(
     out: &var std::string::String,
@@ -506,12 +507,22 @@ fn append_try_call_bind_name(
     try out.append_bytes(bind_suffix);
     return;
 }
+
+fn append_try_call_temp_name(
+    out: &var std::string::String,
+    try_index: i64,
+    suffix: []u8
+) -> !void {
+    try out.append_bytes("%try");
+    try std::fmt::append_i64(out, try_index);
+    try out.append_bytes(suffix);
+    return;
+}
+
 // append_try_call_body renders a try-call over an error-union-returning free function. It
-// emits the call into %<name><bind_suffix>_call, extracts the ok flag (field 0), and branches
-// on a try_index-suffixed label pair: try<N>_fail re-wraps the callee message (field 2) into
-// own_error_union and returns it (propagation, never 'unreachable'); try<N>_cont extracts the
-// success value (field 1) into %<name><bind_suffix>. The bind_suffix namespaces every SSA name
-// so the let-position bind (suffix "") and the loop latch bind (suffix "_next") never collide.
+// emits helper temps under %try<N>_* and branches on try<N>_fail / try<N>_cont; the cont
+// block extracts the success value into %<name><bind_suffix>. Keeping helper temps out of
+// the source-local namespace avoids collisions with later user locals such as '<name>_ok'.
 fn append_try_call_body(
     out: &var std::string::String,
     llvm_symbol: []u8,
@@ -524,8 +535,8 @@ fn append_try_call_body(
         out, llvm_symbol, &stmt.call_args, local_prefix
     );
     try out.append_bytes("  ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_call = call ");
+    try append_try_call_temp_name(out, stmt.try_index, "_call");
+    try out.append_bytes(" = call ");
     try out.append_bytes(stmt.called_error_union);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -535,15 +546,15 @@ fn append_try_call_body(
     try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
     try append_ll_line(out, ")");
     try out.append_bytes("  ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_ok = extractvalue ");
+    try append_try_call_temp_name(out, stmt.try_index, "_ok");
+    try out.append_bytes(" = extractvalue ");
     try out.append_bytes(stmt.called_error_union);
     try out.append_bytes(" ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try append_ll_line(out, "_call, 0");
+    try append_try_call_temp_name(out, stmt.try_index, "_call");
+    try append_ll_line(out, ", 0");
     try out.append_bytes("  br i1 ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_ok, label %try");
+    try append_try_call_temp_name(out, stmt.try_index, "_ok");
+    try out.append_bytes(", label %try");
     try std::fmt::append_i64(out, stmt.try_index);
     try out.append_bytes("_cont, label %try");
     try std::fmt::append_i64(out, stmt.try_index);
@@ -552,33 +563,33 @@ fn append_try_call_body(
     try std::fmt::append_i64(out, stmt.try_index);
     try append_ll_line(out, "_fail:");
     try out.append_bytes("  ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_msg = extractvalue ");
+    try append_try_call_temp_name(out, stmt.try_index, "_msg");
+    try out.append_bytes(" = extractvalue ");
     try out.append_bytes(stmt.called_error_union);
     try out.append_bytes(" ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_call, ");
+    try append_try_call_temp_name(out, stmt.try_index, "_call");
+    try out.append_bytes(", ");
     try append_ll_line(out, error_union_msg_index_text(stmt.called_error_union));
     try out.append_bytes("  ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_fail_flag = insertvalue ");
+    try append_try_call_temp_name(out, stmt.try_index, "_fail_flag");
+    try out.append_bytes(" = insertvalue ");
     try out.append_bytes(stmt.own_error_union);
     try append_ll_line(out, " zeroinitializer, i1 false, 0");
     try out.append_bytes("  ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_fail_val = insertvalue ");
+    try append_try_call_temp_name(out, stmt.try_index, "_fail_val");
+    try out.append_bytes(" = insertvalue ");
     try out.append_bytes(stmt.own_error_union);
     try out.append_bytes(" ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_fail_flag, %kizu.slice.u8 ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try out.append_bytes("_msg, ");
+    try append_try_call_temp_name(out, stmt.try_index, "_fail_flag");
+    try out.append_bytes(", %kizu.slice.u8 ");
+    try append_try_call_temp_name(out, stmt.try_index, "_msg");
+    try out.append_bytes(", ");
     try append_ll_line(out, error_union_msg_index_text(stmt.own_error_union));
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.own_error_union);
     try out.append_bytes(" ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try append_ll_line(out, "_fail_val");
+    try append_try_call_temp_name(out, stmt.try_index, "_fail_val");
+    try out.append_byte(cast<u8>(10));
     try out.append_bytes("try");
     try std::fmt::append_i64(out, stmt.try_index);
     try append_ll_line(out, "_cont:");
@@ -587,8 +598,8 @@ fn append_try_call_body(
     try out.append_bytes(" = extractvalue ");
     try out.append_bytes(stmt.called_error_union);
     try out.append_bytes(" ");
-    try append_try_call_bind_name(out, stmt.name, bind_suffix);
-    try append_ll_line(out, "_call, 1");
+    try append_try_call_temp_name(out, stmt.try_index, "_call");
+    try append_ll_line(out, ", 1");
     return;
 }
 // append_multi_string_try_append renders a mutating 'try <receiver>.append_bytes(<arg>);' or
@@ -4285,16 +4296,24 @@ fn append_multi_match_traversal(
     out: &var std::string::String,
     stmt: &compiled_mir::MirMatchTraversalStmt
 ) -> !void {
-    try out.append_bytes("  %match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
-    try out.append_bytes(stmt.receiver_type);
-    try out.append_bytes(" %");
-    try out.append_bytes(stmt.receiver_name);
+    if std::mem::len(stmt.bound_node_name) == 0 {
+        try out.append_bytes("  %match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(");
+        try out.append_bytes(stmt.receiver_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(stmt.receiver_name);
+        try out.append_bytes(", ");
+        try out.append_bytes(stmt.index_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(stmt.index_name);
+        try append_ll_line(out, ")");
+    }
+    try out.append_bytes("  %match_data = extractvalue %kizu.kizu.ast.ast_node %");
+    if std::mem::len(stmt.bound_node_name) == 0 {
+        try out.append_bytes("match_node");
+    } else {
+        try out.append_bytes(stmt.bound_node_name);
+    }
     try out.append_bytes(", ");
-    try out.append_bytes(stmt.index_type);
-    try out.append_bytes(" %");
-    try out.append_bytes(stmt.index_name);
-    try append_ll_line(out, ")");
-    try out.append_bytes("  %match_data = extractvalue %kizu.kizu.ast.ast_node %match_node, ");
     try std::fmt::append_i64(out, stmt.data_field_index);
     try out.append_byte(cast<u8>(10));
     try append_ll_line(out, "  %match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0");
@@ -4945,7 +4964,7 @@ fn traversal_arm_call_type(
 }
 // append_return_call_result_name renders a standalone return-call's result SSA base name,
 // '<stmt.name>_<local_prefix>'. The render-local prefix is unique per top-level / if-body
-// statement slot (stmt_index at top level, if_index * 1000 + body_index + 1 inside an
+// statement slot (stmt_index at top level, (if_index + 1) * 1000 + body_index + 1 inside an
 // if-then-body), so it disambiguates the otherwise-fixed 'ret_val' when one function lowers
 // multiple standalone 'return parse_X(...)' bodies (parse_ident_top_level_decl emits three).
 fn append_return_call_result_name(
@@ -5354,13 +5373,9 @@ fn append_multi_let_array_get(
     try append_ll_line(out, "_ptr");
     return;
 }
-// append_error_union_failure_value renders a return error("...") failure value
-// for the %kizu.error.<success> ABI: field 0 is the i1 false ok flag, field 1 the
-// success value (left as zeroinitializer), and the error message %kizu.slice.u8 at
-// the failure index 2. The message must already be materialized by the caller
-// and can reference either a source SSA value or a %t<message_id> temp (tracker
-// 961). The %errfail<id> temps are keyed off the unique message temp id so
-// multiple return errors never collide.
+// append_error_union_failure_value renders a return error("...") failure value.
+// %kizu.error.void stores the message at field 1; value-carrying error unions
+// store it at field 2 with the success value left zeroinitialized.
 fn append_error_union_failure_value(
     out: &var std::string::String,
     return_type: []u8,
@@ -5381,7 +5396,8 @@ fn append_error_union_failure_value(
     try std::fmt::append_i64(out, message_result_id);
     try out.append_bytes("_flag, %kizu.slice.u8 ");
     try append_expr_value_ref(out, insts, message_result_id);
-    try out.append_bytes(", 2");
+    try out.append_bytes(", ");
+    try out.append_bytes(error_union_msg_index_text(return_type));
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ret ");
     try out.append_bytes(return_type);
@@ -5633,7 +5649,10 @@ fn append_expr_return_value(
     result_id: i64,
     local_prefix: i64
 ) -> !void {
-    let value_type = try expr_inst_type_by_id(insts, result_id);
+    var value_type = try expr_inst_type_by_id(insts, result_id);
+    if std::mem::len(value_type) == 0 and is_error_union_type(return_type) {
+        value_type = compiled_type_lower::error_union_success_llvm_or_empty(return_type);
+    }
     let needs_wrap = is_error_union_type(return_type) and
         std::mem::len(value_type) > 0 and
         !std::mem::equal_bytes(value_type, return_type);
@@ -6196,7 +6215,7 @@ fn append_void_then_body(
             out,
             function,
             body_stmt,
-            stmt.if_index * 1000 + body_index + 1
+            (stmt.if_index + 1) * 1000 + body_index + 1
         );
         body_index = body_index + 1;
     }
@@ -6224,7 +6243,7 @@ fn append_void_else_body(
             out,
             function,
             body_stmt,
-            stmt.if_index * 1000 + 500 + body_index + 1
+            (stmt.if_index + 1) * 1000 + 500 + body_index + 1
         );
         body_index = body_index + 1;
     }
@@ -7398,11 +7417,13 @@ fn append_expr_return(
     try out.append_bytes("entry:");
     try out.append_byte(cast<u8>(10));
     try append_expr_insts(out, function.name, &function.expr_insts);
-    try out.append_bytes("  ret ");
-    try out.append_bytes(function.return_type.llvm_name);
-    try out.append_bytes(" ");
-    try append_expr_value_ref(out, &function.expr_insts, function.entry.terminator.value.id);
-    try out.append_byte(cast<u8>(10));
+    try append_expr_return_value(
+        out,
+        function.return_type.llvm_name,
+        &function.expr_insts,
+        function.entry.terminator.value.id,
+        function.entry.terminator.value.id
+    );
     try out.append_bytes("}");
     try out.append_byte(cast<u8>(10));
     try out.append_byte(cast<u8>(10));
@@ -7440,6 +7461,7 @@ fn append_expr_inst(
         Slice(payload) => try append_slice_expr(out, payload, insts);,
         Call(payload) => try append_call_expr(out, llvm_symbol, payload);,
         ArrayLen(payload) => try append_array_len_expr(out, payload);,
+        ArrayGetOrPanic(payload) => try append_array_get_or_panic_expr(out, payload, insts);,
         StringLen(payload) => try append_string_len_expr(out, payload);,
         IntCast(payload) => try append_int_cast_expr(out, payload, insts);,
         UnionConstruct(payload) => try append_union_construct_expr(out, payload, insts);,
@@ -7596,6 +7618,80 @@ fn append_array_len_expr(
     try out.append_bytes(" = call i64 @kizu_rt_array_len(%kizu.owned %");
     try out.append_bytes(inst.receiver_name);
     try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_array_get_or_panic_expr renders value-receiver Array<T>.get_or_panic(index)
+// in expression context. It reuses the checked @kizu_rt_array_at runtime accessor;
+// failure traps with the runtime bounds message, while success loads T from the
+// borrowed element view into %t<id>.
+fn append_array_get_or_panic_expr(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirArrayGetOrPanicExpr,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %");
+    try out.append_bytes(inst.receiver_name);
+    try out.append_bytes(", i64 ");
+    try append_expr_value_ref(out, insts, inst.index);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ok = extractvalue %kizu.error.slice.u8 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_view, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br i1 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ok, label %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_array_get_ok, label %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_array_get_fail");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_array_get_fail:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_msg = extractvalue %kizu.error.slice.u8 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_view, 2");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  call void @kizu_rt_trap(%kizu.slice.u8 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_msg)");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  unreachable");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_array_get_ok:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_slice = extractvalue %kizu.error.slice.u8 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_view, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ptr = extractvalue %kizu.slice.u8 %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_slice, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes(" = load ");
+    try out.append_bytes(inst.llvm_type);
+    try out.append_bytes(", ptr %t");
+    try std::fmt::append_i64(out, inst.id);
+    try out.append_bytes("_ptr");
     try out.append_byte(cast<u8>(10));
     return;
 }
@@ -8106,13 +8202,18 @@ fn append_binary_expr_inst(
         return;
     }
     if std::mem::equal_bytes(inst.op, "add") or std::mem::equal_bytes(inst.op, "sub") or
-        std::mem::equal_bytes(inst.op, "mul") or std::mem::equal_bytes(inst.op, "div") {
+        std::mem::equal_bytes(inst.op, "mul") or std::mem::equal_bytes(inst.op, "div") or
+        std::mem::equal_bytes(inst.op, "mod") {
         let arith_type = try binary_operand_type(insts, inst.left);
         try out.append_bytes(" = ");
         if std::mem::equal_bytes(inst.op, "div") {
             try out.append_bytes("sdiv");
         } else {
-            try out.append_bytes(inst.op);
+            if std::mem::equal_bytes(inst.op, "mod") {
+                try out.append_bytes("srem");
+            } else {
+                try out.append_bytes(inst.op);
+            }
         }
         try out.append_byte(cast<u8>(32));
         try out.append_bytes(arith_type);

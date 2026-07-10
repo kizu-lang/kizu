@@ -55,7 +55,7 @@ pub fn infer_expression_type(
             local_types,
             function_returns
         );,
-        TypeApplyExpr(type_apply) => return ast_text::ast_node_text(file, ast, node_id);,
+        TypeApplyExpr(type_apply) => return type_apply_expression_type(file, ast, node_id, type_apply.callee);,
         IndexExpr(index_expr) => return index_expression_type(
             allocator,
             file,
@@ -87,6 +87,7 @@ pub fn infer_expression_type(
         StructDecl(struct_decl) => return "unknown";,
         EnumDecl(enum_decl) => return "unknown";,
         UnionDecl(union_decl) => return "unknown";,
+        ContractDecl(contract_decl) => return "unknown";,
         ImplDecl(impl_decl) => return "unknown";,
         UnionVariant(union_variant) => return "unknown";,
         Match(match_node) => return infer_match_expression_type(
@@ -103,6 +104,19 @@ pub fn infer_expression_type(
         FnDecl(fn_decl) => return "unknown";,
         TypeName(type_name) => return ast_text::ast_node_text(file, ast, node_id);,
     }
+}
+
+fn type_apply_expression_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId
+) -> []u8 {
+    let callee_text = ast_text::ast_node_text(file, ast, callee);
+    if std::mem::equal_bytes(callee_text, "type") {
+        return "type";
+    }
+    return ast_text::ast_node_text(file, ast, node_id);
 }
 
 fn infer_match_expression_type(
@@ -332,7 +346,8 @@ fn ast_node_id_field_type(receiver_type: []u8, field: []u8) -> bool {
     }
     if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructDeclNode") or
         std::mem::equal_bytes(receiver_type, "std::kizu::ast::EnumDeclNode") or
-        std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionDeclNode") {
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ContractDeclNode") {
         return std::mem::equal_bytes(field, "name");
     }
     if std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionVariantNode") or
@@ -465,6 +480,9 @@ fn ast_child_range_expression_field_type(receiver_type: []u8, field: []u8) -> bo
     if std::mem::equal_bytes(receiver_type, "std::kizu::ast::EnumDeclNode") {
         return std::mem::equal_bytes(field, "tags");
     }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ContractDeclNode") {
+        return std::mem::equal_bytes(field, "methods");
+    }
     if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ImportDeclNode") {
         return std::mem::equal_bytes(field, "path");
     }
@@ -519,15 +537,96 @@ fn call_expression_type(
     local_types: &std::map::Map<[]u8, []u8>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> ![]u8 {
-    let callee_text = ast_text::ast_node_text(file, ast, callee);
-    if is_generic_constructor_text(callee_text) {
-        return callee_text;
+    let raw_callee_text = ast_text::ast_node_text(file, ast, callee);
+    let callee_text = function_calls::function_call_name_text(file, &ast, callee);
+    if std::mem::equal_bytes(callee_text, "std::task::partition_mut") {
+        return "Partition";
+    }
+    if std::mem::equal_bytes(callee_text, "std::task::LocalBuffer") {
+        return "LocalBuffer";
+    }
+    if std::mem::equal_bytes(callee_text, "std::task::parallel_for") {
+        return "!void";
+    }
+    if std::mem::equal_bytes(callee_text, "std::task::parallel_map") {
+        return "void";
+    }
+    if is_generic_constructor_text(raw_callee_text) {
+        return raw_callee_text;
     }
     let method_type = try method_call_text_type(callee_text, local_types);
     if !std::mem::equal_bytes(method_type, "unknown") {
         return method_type;
     }
-    return resolved_function_return_type(allocator, file, callee_text, function_returns);
+    let resolved = try resolved_function_return_type(allocator, file, callee_text, function_returns);
+    return try specialize_call_type_arg_text(file, ast, callee, resolved);
+}
+
+pub fn specialize_call_type_arg_text(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    type_text: []u8
+) -> ![]u8 {
+    let node = ast.get(callee);
+    match node.data {
+        TypeApplyExpr(type_apply) => return specialize_single_type_arg_text(
+            file,
+            ast,
+            type_apply.type_args,
+            type_text
+        );,
+        _ => return type_text;,
+    }
+}
+
+pub fn specialize_single_type_arg_text(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_args: std::kizu::ast::ChildRange,
+    type_text: []u8
+) -> ![]u8 {
+    let trimmed = std::mem::trim_ascii(type_text);
+    if type_args.len != 1 {
+        return type_text;
+    }
+    if !is_type_parameter_text(trimmed) {
+        return type_text;
+    }
+    let arg = try ast.child_at(type_args, 0);
+    return ast_text::ast_return_type_text(file, ast, arg);
+}
+
+fn is_type_parameter_text(type_text: []u8) -> bool {
+    let length = std::mem::len(type_text);
+    if length == 0 {
+        return false;
+    }
+    let first = type_text[0];
+    if first < cast<u8>(65) or first > cast<u8>(90) {
+        return false;
+    }
+    var index = 1;
+    while index < length {
+        if !is_type_parameter_name_byte(type_text[index]) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn is_type_parameter_name_byte(byte: u8) -> bool {
+    if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        return true;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(122) {
+        return true;
+    }
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return true;
+    }
+    return byte == cast<u8>(95);
 }
 
 fn index_expression_type(
@@ -681,6 +780,12 @@ fn method_return_type(method: []u8, receiver_type: []u8) -> []u8 {
     if std::mem::equal_bytes(method, "get") or
         std::mem::equal_bytes(method, "at") or
         std::mem::equal_bytes(method, "at_mut") {
+        if std::mem::equal_bytes(receiver_type, "Partition") {
+            return "i64";
+        }
+        if std::mem::equal_bytes(receiver_type, "LocalBuffer") {
+            return "i64";
+        }
         return container_element_type(receiver_type);
     }
     return "unknown";
@@ -944,10 +1049,12 @@ pub fn is_scalar_comparable_type(type_name: []u8) -> bool {
     return std::mem::equal_bytes(value_type, "void") or
         std::mem::equal_bytes(value_type, "bool") or
         std::mem::equal_bytes(value_type, "i64") or
+        std::mem::equal_bytes(value_type, "i32") or
         std::mem::equal_bytes(value_type, "u8") or
         std::mem::equal_bytes(value_type, "Allocator") or
         std::mem::equal_bytes(value_type, "Io");
 }
+
 
 pub fn is_u8_slice(type_name: []u8) -> bool {
     return std::mem::equal_bytes(value_type_text(type_name), "[]u8");

@@ -35,6 +35,7 @@ pub enum MirCallArgKind {
     Slice,
     IntLiteral,
     Arith,
+    ArithVar,
     Temp,
     Call,
 }
@@ -51,8 +52,10 @@ pub enum MirCallArgKind {
 // temp before the call: when source_field_index >= 0 the base is the
 // source_field_index field extracted off the Var receiver (source_type %value),
 // otherwise the base is the Var %value directly; bool_value true selects sub
-// over add. These back the lexer's position(initial.line + 1, 1) style calls
-// (tracker 961, scope 4 prerequisite).
+// over add. ArithVar is the same scalar setup but uses slice_start_base as the
+// right-hand Var name instead of int_value. These back the lexer's
+// position(initial.line + 1, 1) style calls and run-codegen append/set indexes
+// such as record_base + record_pos (tracker 961 / issue 1165).
 //
 // For a Slice arg a bound is normally the static slice_*_base register plus a
 // constant slice_*_offset. When a bound is a single-level field read off a Var
@@ -254,6 +257,17 @@ pub struct MirArrayLenExpr {
     pub receiver_name: []u8,
 }
 
+// MirArrayGetOrPanicExpr backs a local/param 'items.get_or_panic(index)' read in
+// expression context. It uses the same checked @kizu_rt_array_at runtime accessor
+// as Array<T>.get, but the stdlib get_or_panic contract traps on failure and
+// returns bare T on success, so this expression does not carry an error union.
+pub struct MirArrayGetOrPanicExpr {
+    pub id: i64,
+    pub llvm_type: []u8,
+    pub receiver_name: []u8,
+    pub index: i64,
+}
+
 // MirStringLenExpr backs a local/param std::string::String.len() read in expression context.
 // The String value lowers to the same runtime-owned %kizu.owned handle as Array<T>, but it calls
 // the string runtime length helper instead of the array length helper.
@@ -305,6 +319,7 @@ pub union MirExprInst {
     Slice(MirSliceExpr),
     Call(MirCallExpr),
     ArrayLen(MirArrayLenExpr),
+    ArrayGetOrPanic(MirArrayGetOrPanicExpr),
     StringLen(MirStringLenExpr),
     IntCast(MirIntCastExpr),
     UnionConstruct(MirUnionConstructExpr),
@@ -1464,6 +1479,7 @@ pub struct MirOwnedDeinitStmt {
 // each arm returning a real value (no 'unreachable'). own_error_union is the node_count return
 // type the leaf arms wrap into. It owns the arm Array.
 pub struct MirMatchTraversalStmt {
+    pub bound_node_name: []u8,
     pub receiver_type: []u8,
     pub receiver_name: []u8,
     pub index_type: []u8,
@@ -1725,6 +1741,7 @@ impl MirExprInst {
             Slice(payload) => return;,
             Call(payload) => payload.deinit(),
             ArrayLen(payload) => return;,
+            ArrayGetOrPanic(payload) => return;,
             StringLen(payload) => return;,
             IntCast(payload) => return;,
             UnionConstruct(payload) => return;,
@@ -2725,6 +2742,43 @@ pub fn arith_var_call_arg(
     };
 }
 
+// arith_var_rhs_call_arg passes '<base> +/- <right_var>' as a call operand. The
+// base is either a Var (source_field_index == -1) or a field extracted from a Var,
+// matching arith_var_call_arg / arith_field_call_arg. slice_start_base carries the
+// right-hand Var name for this ArithVar variant.
+pub fn arith_var_rhs_call_arg(
+    ty: []u8,
+    source_type: []u8,
+    source_name: []u8,
+    source_field_index: i64,
+    right_name: []u8,
+    subtract: bool
+) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::ArithVar,
+        value: source_name,
+        bool_value: subtract,
+        string_index: -1,
+        int_value: 0,
+        source_type: source_type,
+        source_field_index: source_field_index,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: right_name,
+        slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
+        slice_end_base: "",
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
 // empty_struct_call_args backs the call_args field of non-call struct fields. It
 // allocates an empty Array so every MirStructField has a valid (if unused) args
 // array; only Call fields populate it (tracker 961).
@@ -3062,7 +3116,8 @@ pub fn prefix_not_expr_inst(id: i64, operand: i64) -> MirExprInst {
 
 fn binary_result_type(op: []u8) -> []u8 {
     if std::mem::equal_bytes(op, "add") or std::mem::equal_bytes(op, "sub") or
-        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") {
+        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") or
+        std::mem::equal_bytes(op, "mod") {
         return "i64";
     }
     return "i1";
@@ -3205,6 +3260,23 @@ pub fn array_len_expr_inst(id: i64, receiver_name: []u8) -> MirExprInst {
     });
 }
 
+// array_get_or_panic_expr_inst builds a local/param Array<T>.get_or_panic(index)
+// expression instruction. element_llvm_type is the lowered T, and index references
+// an earlier expression temp or literal instruction.
+pub fn array_get_or_panic_expr_inst(
+    id: i64,
+    element_llvm_type: []u8,
+    receiver_name: []u8,
+    index: i64
+) -> MirExprInst {
+    return MirExprInst::ArrayGetOrPanic(MirArrayGetOrPanicExpr {
+        id: id,
+        llvm_type: element_llvm_type,
+        receiver_name: receiver_name,
+        index: index
+    });
+}
+
 // string_len_expr_inst builds a local/param std::string::String.len() expression instruction.
 // The renderer reads the owned String handle and calls @kizu_rt_string_len -> i64.
 pub fn string_len_expr_inst(id: i64, receiver_name: []u8) -> MirExprInst {
@@ -3268,6 +3340,7 @@ pub fn expr_inst_id(inst: &MirExprInst) -> i64 {
         Slice(payload) => payload.id,
         Call(payload) => payload.id,
         ArrayLen(payload) => payload.id,
+        ArrayGetOrPanic(payload) => payload.id,
         StringLen(payload) => payload.id,
         IntCast(payload) => payload.id,
         UnionConstruct(payload) => payload.id,
@@ -3290,6 +3363,7 @@ pub fn expr_inst_llvm_type(inst: &MirExprInst) -> []u8 {
         Slice(payload) => payload.llvm_type,
         Call(payload) => payload.llvm_type,
         ArrayLen(payload) => payload.llvm_type,
+        ArrayGetOrPanic(payload) => payload.llvm_type,
         StringLen(payload) => payload.llvm_type,
         IntCast(payload) => payload.llvm_type,
         UnionConstruct(payload) => payload.llvm_type,
@@ -3440,6 +3514,12 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
             id: payload.id,
             llvm_type: payload.llvm_type,
             receiver_name: payload.receiver_name
+        }),
+        ArrayGetOrPanic(payload) => MirExprInst::ArrayGetOrPanic(MirArrayGetOrPanicExpr {
+            id: payload.id,
+            llvm_type: payload.llvm_type,
+            receiver_name: payload.receiver_name,
+            index: payload.index
         }),
         StringLen(payload) => MirExprInst::StringLen(MirStringLenExpr {
             id: payload.id,
@@ -4707,10 +4787,29 @@ pub fn match_traversal_stmt(
     arms: std::array::Array<MirTraversalArm>
 ) -> MirStmt {
     return MirStmt::MatchTraversal(MirMatchTraversalStmt {
+        bound_node_name: "",
         receiver_type: receiver_type,
         receiver_name: receiver_name,
         index_type: index_type,
         index_name: index_name,
+        data_field_index: data_field_index,
+        own_error_union: own_error_union,
+        arms: arms
+    });
+}
+
+pub fn match_bound_node_traversal_stmt(
+    bound_node_name: []u8,
+    data_field_index: i64,
+    own_error_union: []u8,
+    arms: std::array::Array<MirTraversalArm>
+) -> MirStmt {
+    return MirStmt::MatchTraversal(MirMatchTraversalStmt {
+        bound_node_name: bound_node_name,
+        receiver_type: "",
+        receiver_name: "",
+        index_type: "",
+        index_name: "",
         data_field_index: data_field_index,
         own_error_union: own_error_union,
         arms: arms

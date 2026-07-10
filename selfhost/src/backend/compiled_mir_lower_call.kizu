@@ -263,6 +263,25 @@ fn call_arg_digit_value(byte: u8) -> !i64 {
     return error("invalid IR artifact fact");
 }
 
+fn unsupported_call_arg_kind(
+    function_name: []u8,
+    arg_node: i64,
+    arg_kind: []u8,
+    arg_type: []u8
+) -> !compiled_mir::MirCallArg {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled mir: unsupported call arg kind: ");
+    try message.append_bytes(function_name);
+    try message.append_bytes(" node ");
+    try std::fmt::append_i64(&var message, arg_node);
+    try message.append_bytes(" kind ");
+    try message.append_bytes(arg_kind);
+    try message.append_bytes(" type ");
+    try message.append_bytes(arg_type);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
+}
+
 pub fn lower_single_call_arg(
     ir_bytes: []u8,
     function_name: []u8,
@@ -366,7 +385,7 @@ pub fn lower_single_call_arg(
             return compiled_mir::int_literal_call_arg(arg_type, literal);
         }
     }
-    return error("compiled mir: unsupported call arg kind");
+    return try unsupported_call_arg_kind(function_name, arg_node, arg_kind, arg_type);
 }
 
 pub fn lower_single_call_arg_with_aliases(
@@ -469,7 +488,7 @@ pub fn lower_single_call_arg_with_aliases(
             return compiled_mir::int_literal_call_arg(arg_type, literal);
         }
     }
-    return error("compiled mir: unsupported call arg kind");
+    return try unsupported_call_arg_kind(function_name, arg_node, arg_kind, arg_type);
 }
 
 pub fn lower_single_call_arg_with_aliases_cached(
@@ -583,7 +602,7 @@ pub fn lower_single_call_arg_with_aliases_cached(
             return compiled_mir::int_literal_call_arg(arg_type, literal);
         }
     }
-    return error("compiled mir: unsupported call arg kind");
+    return try unsupported_call_arg_kind(function_name, arg_node, arg_kind, arg_type);
 }
 
 pub fn lower_call_args(
@@ -1128,15 +1147,31 @@ fn lower_call_arith_arg(
         ir_bytes, function_name, arg_node, "right", 0, bs
     );
     let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right_node, bs);
-    if !std::mem::equal_bytes(right_kind, "Int") {
-        return error("compiled mir: arith call arg right operand must be an int literal");
+    var literal = 0;
+    var right_name = "";
+    var right_is_var = false;
+    if std::mem::equal_bytes(right_kind, "Int") {
+        literal = try ir_contract::body_int_value_from(ir_bytes, function_name, right_node, bs);
+    } else {
+        if std::mem::equal_bytes(right_kind, "Var") {
+            right_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, right_node, bs
+            );
+            right_is_var = true;
+        } else {
+            return error("compiled mir: arith call arg right operand must be an int literal or var");
+        }
     }
-    let literal = try ir_contract::body_int_value_from(ir_bytes, function_name, right_node, bs);
     let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left_node, bs);
     if std::mem::equal_bytes(left_kind, "Var") {
         let var_name = try ir_contract::body_token_or_empty_from(
             ir_bytes, function_name, left_node, bs
         );
+        if right_is_var {
+            return compiled_mir::arith_var_rhs_call_arg(
+                arg_type, "", var_name, -1, right_name, subtract
+            );
+        }
         return compiled_mir::arith_var_call_arg(arg_type, var_name, literal, subtract);
     }
     if !std::mem::equal_bytes(left_kind, "FieldExpr") {
@@ -1155,6 +1190,12 @@ fn lower_call_arith_arg(
     let field = try compiled_mir_types::resolve_field_expr(
         ir_bytes, function_name, module_prefix, params_spec, left_node, bs
     );
+    if right_is_var {
+        return compiled_mir::arith_var_rhs_call_arg(
+            arg_type, field.receiver_llvm_type, receiver_name, field.field_index,
+            right_name, subtract
+        );
+    }
     return compiled_mir::arith_field_call_arg(
         arg_type, field.receiver_llvm_type, receiver_name, field.field_index, literal, subtract
     );
@@ -1266,12 +1307,36 @@ fn lower_call_arith_arg_with_aliases_cached(
     let right_kind = try ir_contract::body_node_kind_from(
         ir_bytes, function_name, right_node, right_sf
     );
-    if !std::mem::equal_bytes(right_kind, "Int") {
-        return error("compiled mir: arith call arg right operand must be an int literal");
+    var literal = 0;
+    var right_name = "";
+    var right_is_var = false;
+    if std::mem::equal_bytes(right_kind, "Int") {
+        literal = try ir_contract::body_int_value_from(
+            ir_bytes, function_name, right_node, right_sf
+        );
+    } else {
+        if std::mem::equal_bytes(right_kind, "Var") {
+            let raw_right_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, right_node, right_sf
+            );
+            right_name = try aliased_name_or_original(
+                alias_sources, alias_currents, raw_right_name
+            );
+            right_is_var = true;
+        } else {
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled mir: arith call arg right operand must be an int literal or var: ");
+        try message.append_bytes(function_name);
+        try message.append_bytes(" node ");
+        try std::fmt::append_i64(&var message, arg_node);
+        try message.append_bytes(" right ");
+        try std::fmt::append_i64(&var message, right_node);
+        try message.append_bytes(" kind ");
+        try message.append_bytes(right_kind);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
+        }
     }
-    let literal = try ir_contract::body_int_value_from(
-        ir_bytes, function_name, right_node, right_sf
-    );
     let left_sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, left_node, bs);
     let left_kind = try ir_contract::body_node_kind_from(
         ir_bytes, function_name, left_node, left_sf
@@ -1280,9 +1345,15 @@ fn lower_call_arith_arg_with_aliases_cached(
         let var_name = try ir_contract::body_token_or_empty_from(
             ir_bytes, function_name, left_node, left_sf
         );
+        let left_name = try aliased_name_or_original(alias_sources, alias_currents, var_name);
+        if right_is_var {
+            return compiled_mir::arith_var_rhs_call_arg(
+                arg_type, "", left_name, -1, right_name, subtract
+            );
+        }
         return compiled_mir::arith_var_call_arg(
             arg_type,
-            try aliased_name_or_original(alias_sources, alias_currents, var_name),
+            left_name,
             literal,
             subtract
         );
@@ -1309,10 +1380,21 @@ fn lower_call_arith_arg_with_aliases_cached(
         ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
         left_node, left_sf, receiver_name, bs, call_arg_type_cache
     );
+    let left_name = try aliased_name_or_original(alias_sources, alias_currents, receiver_name);
+    if right_is_var {
+        return compiled_mir::arith_var_rhs_call_arg(
+            arg_type,
+            field.receiver_llvm_type,
+            left_name,
+            field.field_index,
+            right_name,
+            subtract
+        );
+    }
     return compiled_mir::arith_field_call_arg(
         arg_type,
         field.receiver_llvm_type,
-        try aliased_name_or_original(alias_sources, alias_currents, receiver_name),
+        left_name,
         field.field_index,
         literal,
         subtract

@@ -4,6 +4,8 @@ import selfhost::backend::executable;
 import selfhost::backend::hosted;
 import selfhost::backend::llvm;
 import selfhost::ir::code_render;
+import selfhost::parser;
+import selfhost::source;
 
 pub fn summarize(program_ir: ir::IrSummary) -> data::BackendSummary {
     return data::BackendSummary {
@@ -35,6 +37,117 @@ pub fn render_run_codegen_artifact(
     return rendered;
 }
 
+pub fn emit_run_sources_codegen_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8,
+    files: &std::array::Array<source::SourceFile>
+) -> !data::RunArtifact {
+    var combined = std::string::String(allocator);
+    defer combined.deinit();
+    try append_run_source_files(&var combined, files, 0);
+    let combined_bytes = combined.as_bytes();
+    try ensure_run_sources_temp_dir(io);
+    let combined_path = "target/selfhost/run_codegen_combined.kizu";
+    try std::fs::write_file(io, combined_path, &combined_bytes);
+    let combined_owned = try std::fs::read_file(io, combined_path);
+    let parsed = try parser::parse_checked_file(allocator, source_path, combined_owned);
+    defer parsed.deinit();
+    var rendered = try code_render::render_run_ast_artifact(
+        allocator,
+        source_path,
+        combined_owned,
+        parsed.ast,
+        parsed.root
+    );
+    defer rendered.deinit();
+    let rendered_bytes = rendered.as_bytes();
+    return try emit_rendered_run_artifact(
+        allocator,
+        io,
+        source_path,
+        rendered_bytes,
+        rendered.len()
+    );
+}
+
+fn ensure_run_sources_temp_dir(io: Io) -> !void {
+    if !(try std::fs::exists(io, "target")) {
+        try std::fs::create_dir(io, "target");
+    }
+    if !(try std::fs::exists(io, "target/selfhost")) {
+        try std::fs::create_dir(io, "target/selfhost");
+    }
+    return;
+}
+
+fn append_run_source_files(
+    out: &var std::string::String,
+    files: &std::array::Array<source::SourceFile>,
+    index: i64
+) -> !void {
+    if index >= files.len() {
+        return;
+    }
+    let file = try files.at(index);
+    if run_codegen_should_inline_source(&file) {
+        try append_run_source_module_marker(out, &file);
+        try append_run_source_with_module_markers(out, &file);
+        try out.append_byte(cast<u8>(10));
+    }
+    let after = index + 1;
+    try append_run_source_files(out, files, after);
+    return;
+}
+
+fn append_run_source_with_module_markers(
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let text = file.text;
+    let length = std::mem::len(text);
+    var chunk_start = 0;
+    var index = 0;
+    var lines = 0;
+    while index < length {
+        if text[index] == cast<u8>(10) {
+            lines = lines + 1;
+            if lines == 64 {
+                let after = index + 1;
+                try out.append_bytes(text[chunk_start..after]);
+                try append_run_source_module_marker(out, file);
+                chunk_start = after;
+                lines = 0;
+            }
+        }
+        index = index + 1;
+    }
+    if chunk_start < length {
+        try out.append_bytes(text[chunk_start..length]);
+    }
+    return;
+}
+
+fn run_codegen_should_inline_source(file: &source::SourceFile) -> bool {
+    if !source::is_source_code(file.kind) {
+        return false;
+    }
+    if file.kind != source::SourceKind::Std {
+        return true;
+    }
+    return std::mem::starts_with(file.path, "std/src/kizu/");
+}
+
+fn append_run_source_module_marker(
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    try out.append_bytes("// kizu:module ");
+    try source::append_qualified_module_name(out, file);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 pub fn emit_rendered_run_artifact(
     allocator: Allocator,
     io: Io,
@@ -60,14 +173,35 @@ pub fn run_artifact_executable_path(
 }
 
 pub fn link_run_artifact(
-    ll_path: &[]u8,
-    executable_path: &[]u8
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
 ) -> !i64 {
-    return try hosted::link_run_artifact(ll_path, executable_path);
+    return try hosted::link_run_artifact(allocator, io, source_path);
+}
+
+pub fn link_test_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
+) -> !i64 {
+    return try hosted::link_test_artifact(allocator, io, source_path);
 }
 
 pub fn execute_run_artifact(executable_path: &[]u8) -> !i64 {
     return try hosted::execute_run_artifact(executable_path);
+}
+
+pub fn execute_run_artifact_with_process_args(
+    executable_path: &[]u8,
+    program_arg_start: i64,
+    cli_arg_count: i64
+) -> !i64 {
+    return try hosted::execute_run_artifact_with_process_args(
+        executable_path,
+        program_arg_start,
+        cli_arg_count
+    );
 }
 
 pub fn emit_test_executable_artifact(

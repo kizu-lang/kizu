@@ -8,12 +8,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kizu-lang/kizu/internal/interp"
+	"github.com/kizu-lang/kizu/internal/project"
 )
 
 // flipParityCase is one #1070 flip-path parity manifest row.
 type flipParityCase struct {
 	name    string
 	fixture string
+	env     []string
+	args    []string
 }
 
 // flipParityResult captures both run paths for one fixture.
@@ -34,9 +39,10 @@ type flipCommandResult struct {
 const flipArtifactDir = "target/selfhost/cache/run"
 
 // TestSelfhostRunFlipParityGate compares the #1070 flip path against the Go
-// interpreter baseline. The flip path (KIZU_SELFHOST_RUN=1) routes `run` through
+// interpreter oracle. The public default path routes `run` through
 // selfhost::cli::execute::run_file_cli: full std::kizu::parser AST -> run-codegen
-// tape -> native artifact. The baseline is the default Go interpreter runFile.
+// tape -> native artifact. The oracle is an in-test call to the old Go
+// interpreter path, which production dispatch cannot reach.
 // Each fixture must produce byte-identical stdout and the same exit code on both
 // paths, and the flip path must leave its run-codegen artifact metadata behind so
 // the gate cannot silently degrade into "baseline vs baseline".
@@ -93,6 +99,29 @@ func TestSelectFlipParityCases(t *testing.T) {
 	}
 	if _, err := selectFlipParityCases(cases, "missing"); err == nil {
 		t.Fatalf("select missing succeeded")
+	}
+}
+
+// TestParseFlipParityLineOptionalRunContext checks env and arg manifest fields.
+func TestParseFlipParityLineOptionalRunContext(t *testing.T) {
+	item, ok, err := parseFlipParityLine(
+		"flip_process examples/std_io_process.kizu " +
+			"env:KIZU_TEST_ENV=dogfood arg:examples/fixtures/config.txt",
+	)
+	if err != nil {
+		t.Fatalf("parse optional line: %v", err)
+	}
+	if !ok {
+		t.Fatalf("parse optional line returned ok=false")
+	}
+	if item.name != "flip_process" || item.fixture != "examples/std_io_process.kizu" {
+		t.Fatalf("parse optional line identity = %#v", item)
+	}
+	if !sameStringSlice(item.env, []string{"KIZU_TEST_ENV=dogfood"}) {
+		t.Fatalf("parse optional line env = %#v", item.env)
+	}
+	if !sameStringSlice(item.args, []string{"examples/fixtures/config.txt"}) {
+		t.Fatalf("parse optional line args = %#v", item.args)
 	}
 }
 
@@ -180,7 +209,12 @@ func runFlipParityCase(
 	item flipParityCase,
 ) (flipParityResult, int) {
 	t.Helper()
-	metaPath := filepath.Join(flipArtifactDir, flipArtifactStem(item.fixture)+".ll.meta")
+	stem, err := flipArtifactStem(item.fixture)
+	if err != nil {
+		t.Errorf("flip parity %s resolve artifact stem: %v", item.name, err)
+		return flipParityResult{}, 1
+	}
+	metaPath := filepath.Join(flipArtifactDir, stem+".ll.meta")
 	result := flipParityResult{metaPath: metaPath}
 	// Remove any stale run-codegen artifact so its later presence proves THIS
 	// flip invocation produced it.
@@ -189,14 +223,14 @@ func runFlipParityCase(
 		return result, 1
 	}
 	failures := 0
-	result.baseline = runFlipCommand(t, bin, item.fixture, false)
+	result.baseline = runGoBaselineCommand(t, item)
 	// The Go interpreter baseline must not touch the run-codegen cache; if the
 	// artifact appears here the gate is silently running the flip path twice.
 	if _, err := os.Stat(metaPath); err == nil {
 		t.Errorf("flip parity %s baseline unexpectedly emitted %s", item.name, metaPath)
 		failures++
 	}
-	result.flip = runFlipCommand(t, bin, item.fixture, true)
+	result.flip = runFlipCommand(t, bin, item)
 	failures += countFlipPathProofFailures(t, item, metaPath)
 	if result.flip.stdout != result.baseline.stdout {
 		t.Errorf(
@@ -237,14 +271,17 @@ func countFlipPathProofFailures(t *testing.T, item flipParityCase, metaPath stri
 	return 0
 }
 
-// runFlipCommand invokes `kizu run <fixture>` with or without the flip switch.
-func runFlipCommand(t *testing.T, bin string, fixture string, flip bool) flipCommandResult {
+// runFlipCommand invokes the default `kizu run <fixture> [-- args...]` selfhost path.
+func runFlipCommand(t *testing.T, bin string, item flipParityCase) flipCommandResult {
 	t.Helper()
-	run := exec.Command(bin, "run", fixture)
-	env := flipParityBaseEnv()
-	if flip {
-		env = append(env, selfhostRunEnvVar+"=1")
+	commandArgs := []string{"run", item.fixture}
+	if len(item.args) > 0 {
+		commandArgs = append(commandArgs, "--")
+		commandArgs = append(commandArgs, item.args...)
 	}
+	run := exec.Command(bin, commandArgs...)
+	env := os.Environ()
+	env = append(env, item.env...)
 	run.Env = env
 	var stdout, stderr strings.Builder
 	run.Stdout = &stdout
@@ -257,23 +294,65 @@ func runFlipCommand(t *testing.T, bin string, fixture string, flip bool) flipCom
 	}
 }
 
-// flipParityBaseEnv returns the process environment with the flip switch cleared
-// so the baseline path is never accidentally routed through selfhost.
-func flipParityBaseEnv() []string {
-	prefix := selfhostRunEnvVar + "="
-	var env []string
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, prefix) {
-			continue
+// runGoBaselineCommand runs the old interpreter owner in-process for parity
+// evidence only. Production dispatch cannot reach this helper.
+func runGoBaselineCommand(t *testing.T, item flipParityCase) flipCommandResult {
+	t.Helper()
+	for _, assignment := range item.env {
+		name, value, ok := strings.Cut(assignment, "=")
+		if !ok {
+			t.Fatalf("invalid baseline environment assignment %q", assignment)
 		}
-		env = append(env, kv)
+		old, existed := os.LookupEnv(name)
+		if err := os.Setenv(name, value); err != nil {
+			t.Fatalf("set baseline environment %s: %v", name, err)
+		}
+		defer func() {
+			if existed {
+				_ = os.Setenv(name, old)
+				return
+			}
+			_ = os.Unsetenv(name)
+		}()
 	}
-	return env
+	var stdout, stderr strings.Builder
+	var err error
+	if isPackageRoot(item.fixture) {
+		graph, program, loadErr := loadPackageProgram(item.fixture)
+		err = loadErr
+		if err == nil {
+			err = checkProgram(program)
+		}
+		if err == nil {
+			err = interp.NewWithProcessIO(&stdout, &stderr, item.args).RunEntry(program, graph.Root+"::main")
+		}
+	} else {
+		program, diagnostics, parseErr := parsePathWithStd(item.fixture)
+		err = parseErr
+		if err == nil && len(diagnostics) > 0 {
+			err = fmt.Errorf("parse failed")
+		}
+		if err == nil {
+			err = checkProgram(program)
+		}
+		if err == nil {
+			err = interp.NewWithProcessIO(&stdout, &stderr, item.args).Run(program)
+		}
+	}
+	code := 0
+	if err != nil {
+		code = 1
+		fmt.Fprintf(&stderr, "error: %v\n", err)
+	}
+	return flipCommandResult{stdout: stdout.String(), stderr: stderr.String(), code: code}
 }
 
 // removeFlipArtifacts deletes the run-codegen artifacts for one fixture stem.
 func removeFlipArtifacts(fixture string) error {
-	stem := flipArtifactStem(fixture)
+	stem, err := flipArtifactStem(fixture)
+	if err != nil {
+		return err
+	}
 	for _, suffix := range []string{".ll", ".ll.meta", ""} {
 		path := filepath.Join(flipArtifactDir, stem+suffix)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -284,10 +363,43 @@ func removeFlipArtifacts(fixture string) error {
 }
 
 // flipArtifactStem mirrors the selfhost run path's artifact naming (source base
-// name without extension).
-func flipArtifactStem(fixture string) string {
-	base := filepath.Base(fixture)
-	return strings.TrimSuffix(base, filepath.Ext(base))
+// name without extension). Package fixtures render the manifest root source, so
+// their artifact stem comes from [modules].root rather than the package dir.
+func flipArtifactStem(fixture string) (string, error) {
+	sourcePath, err := flipArtifactSourcePath(fixture)
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Base(sourcePath)
+	return strings.TrimSuffix(base, filepath.Ext(base)), nil
+}
+
+// flipArtifactSourcePath resolves a file or package fixture to its source file.
+func flipArtifactSourcePath(fixture string) (string, error) {
+	info, err := os.Stat(fixture)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return flipPackageRootSourcePath(fixture)
+	}
+	if filepath.Base(fixture) == "kizu.toml" {
+		return flipPackageRootSourcePath(filepath.Dir(fixture))
+	}
+	return fixture, nil
+}
+
+// flipPackageRootSourcePath resolves the root source declared by kizu.toml.
+func flipPackageRootSourcePath(root string) (string, error) {
+	bytes, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
+	if err != nil {
+		return "", err
+	}
+	manifest, err := project.ParseManifest(string(bytes))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(filepath.Join(root, manifest.Root)), nil
 }
 
 // loadFlipParityCases parses the checked-in flip manifest.
@@ -312,17 +424,29 @@ func loadFlipParityCases(path string) ([]flipParityCase, error) {
 	return cases, nil
 }
 
-// parseFlipParityLine parses one manifest row (name, fixture).
+// parseFlipParityLine parses one manifest row (name, fixture, optional env:/arg: fields).
 func parseFlipParityLine(line string) (flipParityCase, bool, error) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 		return flipParityCase{}, false, nil
 	}
 	fields := strings.Fields(trimmed)
-	if len(fields) != 2 {
-		return flipParityCase{}, false, fmt.Errorf("expected 2 fields, got %d", len(fields))
+	if len(fields) < 2 {
+		return flipParityCase{}, false, fmt.Errorf("expected at least 2 fields, got %d", len(fields))
 	}
-	return flipParityCase{name: fields[0], fixture: fields[1]}, true, nil
+	item := flipParityCase{name: fields[0], fixture: fields[1]}
+	for _, field := range fields[2:] {
+		if strings.HasPrefix(field, "env:") {
+			item.env = append(item.env, strings.TrimPrefix(field, "env:"))
+			continue
+		}
+		if strings.HasPrefix(field, "arg:") {
+			item.args = append(item.args, strings.TrimPrefix(field, "arg:"))
+			continue
+		}
+		return flipParityCase{}, false, fmt.Errorf("unsupported field %q", field)
+	}
+	return item, true, nil
 }
 
 // selectFlipParityCases filters the manifest by case name or fixture path.
@@ -344,7 +468,7 @@ func appendFlipParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "kizu-selfhost-run-flip-parity-v0\n")
 	fmt.Fprintf(out, "issue #1070\n")
 	fmt.Fprintf(out, "manifest selfhost/tests/cli/run-flip-parity.tsv\n")
-	fmt.Fprintf(out, "flip.switch %s=1\n", selfhostRunEnvVar)
+	fmt.Fprintf(out, "flip.switch default-selfhost-dispatch\n")
 	fmt.Fprintf(out, "flip.path run_file_cli std::kizu::parser run-codegen native\n")
 	fmt.Fprintf(out, "baseline.path go-interpreter-runFile\n")
 	fmt.Fprintf(out, "artifact.dir %s\n", flipArtifactDir)
@@ -354,6 +478,12 @@ func appendFlipParityHeader(out *strings.Builder, count int) {
 // appendFlipParityResult writes one fixture's comparison record.
 func appendFlipParityResult(out *strings.Builder, item flipParityCase, result flipParityResult) {
 	fmt.Fprintf(out, "case.%s.fixture %s\n", item.name, item.fixture)
+	if len(item.args) > 0 {
+		fmt.Fprintf(out, "case.%s.program_args %s\n", item.name, strings.Join(item.args, " "))
+	}
+	if len(item.env) > 0 {
+		fmt.Fprintf(out, "case.%s.env %s\n", item.name, strings.Join(item.env, " "))
+	}
 	fmt.Fprintf(out, "case.%s.baseline.exit %d\n", item.name, result.baseline.code)
 	fmt.Fprintf(out, "case.%s.flip.exit %d\n", item.name, result.flip.code)
 	fmt.Fprintf(

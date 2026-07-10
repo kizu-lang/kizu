@@ -38,15 +38,14 @@ func TestNativeDelegateEnvGate(t *testing.T) {
 	}
 }
 
-// TestNativeDelegateEnvOffKeepsGoPaths verifies run and test stay on the Go-owned
-// paths when every delegate gate is off.
-func TestNativeDelegateEnvOffKeepsGoPaths(t *testing.T) {
+// TestNativeDelegateEnvOffKeepsDefaultPaths verifies run stays on the selfhost
+// owner and test stays on its current default owner when native delegates are off.
+func TestNativeDelegateEnvOffKeepsDefaultPaths(t *testing.T) {
 	root := t.TempDir()
 	writeFakeNativeSelfhost(t, root)
 	t.Setenv("KIZU_REPO_ROOT", root)
 	t.Setenv(nativeRunEnvVar, "0")
 	t.Setenv(nativeTestEnvVar, "0")
-	t.Setenv(selfhostRunEnvVar, "0")
 	t.Setenv(selfhostTestEnvVar, "0")
 
 	runPath := filepath.Join(t.TempDir(), "run.kizu")
@@ -82,7 +81,6 @@ func TestNativeDelegateExecsStage2WithTransparentArgs(t *testing.T) {
 	writeFakeNativeSelfhost(t, root)
 	t.Setenv("KIZU_REPO_ROOT", root)
 	t.Setenv("KIZU_FAKE_NATIVE_EXIT", "7")
-	t.Setenv(selfhostRunEnvVar, "0")
 	t.Setenv(selfhostTestEnvVar, "0")
 
 	for _, tt := range []struct {

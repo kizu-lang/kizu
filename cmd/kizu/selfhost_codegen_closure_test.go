@@ -15,7 +15,8 @@ func codegenClosureSeeds() []string {
 		"metadata_line",
 		"empty_int_env",
 		"lower_code_module",
-		"code_op_mem_page_allocator",
+		"code_op_array_read_i64",
+		"code_op_array_read",
 	}
 }
 
@@ -64,6 +65,137 @@ func TestSelfhostCodegenClosureUsesComponentCatalog(t *testing.T) {
 	assertCodegenClosureRoles(t, roleBody)
 	assertCodegenClosureExternalPolicy(t, policyBody, codegenPolicyBody)
 	assertCodegenPrivateHelpersReachedByBFS(t, closureBody, codegen)
+}
+
+// TestSelfhostCodegenTypeClassificationUsesRecords keeps run codegen type
+// classification on the central TypeRecord path instead of re-growing local
+// string-spelling branches for each container shape.
+func TestSelfhostCodegenTypeClassificationUsesRecords(t *testing.T) {
+	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	typeID := readSelfhostFile(t, "../../selfhost/src/types/type_id.kizu")
+	signature := readSelfhostFile(t, "../../selfhost/src/ir/function_signature.kizu")
+
+	assertCodegenTypeRecordClassifier(t, codegen)
+	assertTypesTypeIDSource(t, typeID)
+	assertSignatureTypeIDFacts(t, signature)
+	assertManualSignatureTypeIDFacts(t, executableFunctions)
+	assertTypeIDFunctionFacts(t, executableFunctions)
+}
+
+// assertCodegenTypeRecordClassifier pins run codegen param/return classification
+// to TypeId-derived records instead of local source-spelling parsing.
+func assertCodegenTypeRecordClassifier(t *testing.T, codegen string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"import selfhost::types::type_id;",
+		"return type_id::type_record_from_node(text, ast, type_node);",
+		"type_id::function_return_type_id_from_node(text, ast, return_type)",
+		"type_id::function_param_type_id_from_node(text, ast, type_node)",
+		"type_id::type_record_from_id(return_type_id)",
+		"type_id::type_record_from_id(param_type_id)",
+		"fn code_return_kind_from_record(",
+		"fn code_param_kind_from_record(",
+		"type_record_param_builtin_kind(shape)",
+	} {
+		if !strings.Contains(codegen, fragment) {
+			t.Fatalf("codegen TypeRecord classifier missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"struct TypeShape",
+		"struct TypeRecord",
+		"fn type_record_from_text(",
+		"fn type_generic_parts(",
+		"fn read_borrow_referent_kind(",
+		"\"std::map::Map<[]u8, i64>\"",
+		"\"std::map::Map<[]u8,i64>\"",
+		"\"std::map::Map <[]u8, i64>\"",
+	} {
+		if strings.Contains(codegen, fragment) {
+			t.Fatalf("codegen type classifier keeps string-spelling branch %q", fragment)
+		}
+	}
+}
+
+// assertTypesTypeIDSource pins the canonical TypeId source and its only
+// temporary spelling adapter.
+func assertTypesTypeIDSource(t *testing.T, typeID string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"pub struct TypeId",
+		"pub struct TypeRecord",
+		"pub struct TypeTable",
+		"pub fn function_return_type_id_from_node(",
+		"pub fn function_param_type_id_from_node(",
+		"pub fn type_record_from_id(",
+		"pub fn type_record_from_text(type_text: []u8) -> TypeRecord",
+		"fn type_generic_parts(",
+		"fn type_record_generic_from_text(",
+		"single compatibility adapter",
+		"Delete this adapter once every backend caller receives checker-emitted TypeId",
+	} {
+		if !strings.Contains(typeID, fragment) {
+			t.Fatalf("types TypeId source missing %q", fragment)
+		}
+	}
+}
+
+// assertSignatureTypeIDFacts pins AST-derived function signatures to emit
+// TypeId facts beside the legacy text facts.
+func assertSignatureTypeIDFacts(t *testing.T, signature string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"import selfhost::types::type_id;",
+		"function-signature-return-type-id ",
+		"function-signature-param-type-id ",
+		"type_id::type_record_from_node(text, ast, return_type)",
+		"type_id::type_record_from_node(text, ast, type_node)",
+	} {
+		if !strings.Contains(signature, fragment) {
+			t.Fatalf("function signature TypeId fact path missing %q", fragment)
+		}
+	}
+}
+
+// assertManualSignatureTypeIDFacts keeps handwritten signature facts from
+// bypassing the TypeId fact stream.
+func assertManualSignatureTypeIDFacts(t *testing.T, executableFunctions string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"import selfhost::types::type_id;",
+		"fn append_function_signature_return_type_id_fact(",
+		"fn append_function_signature_param_type_id_fact(",
+		"type_id::type_record_from_text(return_type)",
+		"type_id::type_record_from_text(param_type)",
+		"function-signature-return-type-id ast.",
+	} {
+		if !strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("manual signature TypeId fact path missing %q", fragment)
+		}
+	}
+}
+
+// assertTypeIDFunctionFacts keeps the canonical TypeId component in the IR
+// artifact instead of leaving codegen's TypeRecord calls as unresolved external
+// references.
+func assertTypeIDFunctionFacts(t *testing.T, executableFunctions string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"var type_id_found = false;",
+		"std::mem::equal_bytes(module, \"types/type_id\")",
+		"try append_type_id_function_facts(allocator, out, file);",
+		"return error(\"missing selfhost type id source\");",
+		"fn append_type_id_function_facts(",
+		"\"selfhost::types::type_id\"",
+		"\"selfhost::types::type_id::TypeRecord\"",
+		"\"checked-type-id-classifier\"",
+		"fn type_id_closure_external_callee_allowed(",
+	} {
+		if !strings.Contains(executableFunctions, fragment) {
+			t.Fatalf("TypeId fact source missing %q", fragment)
+		}
+	}
 }
 
 // assertCodegenClosureFactsPath pins the top-level codegen fact emitter to the
@@ -116,8 +248,8 @@ func assertRuntimeStdlibSymbolPreamble(t *testing.T, preambleBody string) {
 // directly seeding private helpers, except for the documented empty_int_env ABI root.
 func assertCodegenClosureSeeds(t *testing.T, closureBody string) {
 	t.Helper()
-	if strings.Count(closureBody, "append_codegen_closure_seed(") != len(codegenClosureSeeds()) {
-		t.Fatal("codegen closure seed count changed")
+	if !strings.Contains(closureBody, "append_codegen_opcode_closure_seeds(&var pending, catalog)") {
+		t.Fatal("codegen closure does not seed opcode accessors from the catalog")
 	}
 	for _, seed := range codegenClosureSeeds() {
 		fragment := "append_codegen_closure_seed(&var pending, catalog, \"" + seed + "\")"
@@ -208,6 +340,7 @@ func assertCodegenClosureExternalPolicy(t *testing.T, policyBody string, codegen
 	for _, fragment := range []string{
 		"std::mem::equal_bytes(callee_text, \"ast.get\")",
 		"std::mem::equal_bytes(callee_text, \"ast.child_at\")",
+		"codegen_closure_type_id_callee_allowed(callee_text)",
 		"std::mem::starts_with(callee_text, \"std::kizu::ast::binary_\")",
 		"codegen_closure_binary_op_accessor_allowed(callee_text)",
 	} {

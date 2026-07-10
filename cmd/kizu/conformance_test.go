@@ -12,6 +12,7 @@ import (
 )
 
 const conformanceManifestGlob = "../../tests/conformance/v0_*.json"
+const conformanceRunEnv = "KIZU_RUN_CONFORMANCE"
 
 var conformanceProcessMu sync.Mutex
 
@@ -33,6 +34,9 @@ type conformanceCase struct {
 
 // TestConformanceManifests runs reusable conformance manifests.
 func TestConformanceManifests(t *testing.T) {
+	if os.Getenv(conformanceRunEnv) != "1" {
+		t.Skip("set KIZU_RUN_CONFORMANCE=1 to run the heavyweight selfhost corpus")
+	}
 	for _, manifest := range loadConformanceManifests(t) {
 		for _, tt := range manifest.Cases {
 			name := manifest.Version + "/" + tt.Name

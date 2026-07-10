@@ -14,9 +14,9 @@ The current public command boundary is still mixed:
 
 - `cmd/kizu/main.go` owns public dispatch.
 - `parse`, `check`, and `fmt` enter selfhost code through the Go interpreter.
-- `run` and `test` have rollback-friendly env-var switches
-  (`KIZU_SELFHOST_RUN`, `KIZU_SELFHOST_TEST`) before the default Go interpreter
-  paths.
+- `run` is unconditionally selfhost-owned with no Go interpreter fallback;
+  `test` still has the rollback-friendly `KIZU_SELFHOST_TEST` switch before its
+  default Go interpreter path.
 - `target/selfhost/stage2/selfhost` owns the #458 production artifact path and
   bounded hosted parity rows, but it is not yet the public command owner.
 - Deferral diagnostics and cache logic for the selfhost path have landed.

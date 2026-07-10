@@ -234,7 +234,6 @@ exit-code
 			wantOut: "check: ok\nexit-code\n0\n",
 		},
 	}
-	cases = append(cases, selfhostCLIFrontendRunHappyCases(fixtures)...)
 	cases = append(cases, selfhostCLIFrontendTestHappyCases(fixtures)...)
 	return cases
 }
@@ -335,7 +334,7 @@ func selfhostCLIFrontendRunHappyCases(
 func selfhostCLIFrontendHeavyCheckCases(
 	fixtures selfhostCLIFrontendFixtures,
 ) []selfhostCLIFrontendCase {
-	return []selfhostCLIFrontendCase{
+	cases := []selfhostCLIFrontendCase{
 		{
 			name:    "check_temp_source",
 			args:    []string{"check", fixtures.source},
@@ -347,6 +346,8 @@ func selfhostCLIFrontendHeavyCheckCases(
 			wantOut: "check: ok\nexit-code\n0\n",
 		},
 	}
+	cases = append(cases, selfhostCLIFrontendRunHappyCases(fixtures)...)
+	return cases
 }
 
 // selfhostRunArtifactExpectations returns run artifact content checks.

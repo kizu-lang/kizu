@@ -89,10 +89,21 @@ fn first_type_error_in_ast_with_imports(
             import_alias_starts,
             import_alias_ends
         );,
-        ImplDecl(impl_decl) => return first_type_error_in_node_and_range_ast(
+        ContractDecl(contract_decl) => return first_type_error_in_ast_range(
             allocator,
             file,
             ast,
+            contract_decl.methods,
+            kinds,
+            arities,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        ImplDecl(impl_decl) => return first_type_error_in_two_nodes_and_range_ast(
+            allocator,
+            file,
+            ast,
+            impl_decl.contract_name,
             impl_decl.type_name,
             impl_decl.methods,
             kinds,
@@ -628,6 +639,56 @@ fn first_type_error_in_node_and_range_ast(
     );
 }
 
+fn first_type_error_in_two_nodes_and_range_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    let first_error = try first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        first,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
+    if first_error.found {
+        return first_error;
+    }
+    let second_error = try first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        second,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
+    if second_error.found {
+        return second_error;
+    }
+    return first_type_error_in_ast_range(
+        allocator,
+        file,
+        ast,
+        range,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
+}
+
 fn first_type_error_in_cast_ast(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -841,6 +902,7 @@ fn ast_node_text(
 pub fn should_ignore_type_name(name: []u8) -> bool {
     return std::mem::equal_bytes(name, "const") or
         std::mem::equal_bytes(name, "dyn") or
+        std::mem::equal_bytes(name, "Self") or
         std::mem::equal_bytes(name, "mut") or
         std::mem::equal_bytes(name, "var") or
         std::mem::equal_bytes(name, "comptime") or
@@ -878,7 +940,8 @@ pub fn type_path_end_in_text(text: []u8, start: i64) -> i64 {
 }
 
 pub fn is_generic_constructor_name(name: []u8) -> bool {
-    return std::mem::equal_bytes(name, "std::array::Array") or
+    return std::mem::equal_bytes(name, "ptr") or
+        std::mem::equal_bytes(name, "std::array::Array") or
         std::mem::equal_bytes(name, "std::map::Map") or
         std::mem::equal_bytes(name, "std::mem::Box") or
         std::mem::equal_bytes(name, "std::arena::Arena") or

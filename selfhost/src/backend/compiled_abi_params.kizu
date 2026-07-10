@@ -1,12 +1,10 @@
+import selfhost::backend::compiled_fact_lookup;
 import selfhost::backend::compiled_util;
 import selfhost::backend::ir_index;
 
 // kizu_type_to_abi maps a single Kizu parameter type spelling to its LLVM ABI
-// type. This is the strict ABI mapper (Agent B, tracker 1069): unlike
-// compiled_type_lower::kizu_type_to_llvm it never falls back to a fact lookup,
-// so an unsupported type is an explicit error rather than a silently-resolved
-// guess. Callers that derive a compiled params_spec from a function signature
-// route every parameter type through here.
+// type. This is the direct scalar/container mapper (Agent B, tracker 1069);
+// unsupported spellings are explicit errors rather than silently-resolved guesses.
 pub fn kizu_type_to_abi(kizu_type: []u8) -> ![]u8 {
     let type_len = std::mem::len(kizu_type);
     if type_len == 0 {
@@ -184,13 +182,73 @@ pub fn kizu_type_to_abi(kizu_type: []u8) -> ![]u8 {
     return error("abi mapper: unsupported parameter type");
 }
 
+pub fn kizu_type_to_abi_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    kizu_type: []u8
+) -> ![]u8 {
+    let type_len = std::mem::len(kizu_type);
+    if type_len == 0 {
+        return error("abi mapper: empty parameter type");
+    }
+    if kizu_type[0] == cast<u8>(38) {
+        return try kizu_type_to_abi_indexed(
+            index, ir_bytes, function_name, kizu_type[1..type_len]
+        );
+    }
+    if std::mem::starts_with(kizu_type, "var_") {
+        return try kizu_type_to_abi_indexed(
+            index, ir_bytes, function_name, kizu_type[4..type_len]
+        );
+    }
+    let fact_type = type_llvm_param_fact_or_empty(index, ir_bytes, function_name, kizu_type);
+    if std::mem::len(fact_type) > 0 {
+        return fact_type;
+    }
+    return try kizu_type_to_abi(kizu_type);
+}
+
+fn type_llvm_param_fact_or_empty(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    kizu_type: []u8
+) -> []u8 {
+    let module_prefix = function_module_prefix(function_name);
+    let local = compiled_fact_lookup::lookup_type_llvm_by_prefix_or_empty_indexed(
+        index, ir_bytes, module_prefix, kizu_type
+    );
+    if std::mem::len(local) > 0 {
+        return local;
+    }
+    return compiled_fact_lookup::lookup_type_llvm_by_suffix_or_empty_indexed(
+        index, ir_bytes, kizu_type
+    );
+}
+
+fn function_module_prefix(function_name: []u8) -> []u8 {
+    let len = std::mem::len(function_name);
+    var last = 0;
+    var index = 0;
+    while index + 1 < len {
+        if function_name[index] == cast<u8>(58) and function_name[index + 1] == cast<u8>(58) {
+            last = index + 2;
+            index = index + 2;
+        } else {
+            index = index + 1;
+        }
+    }
+    return function_name[0..last];
+}
+
 // append_params_spec derives the compiled params_spec string for one function
 // from its 'function-signature-param' facts and appends it to 'out'. The facts
 // are emitted in parameter order, so walking them top-to-bottom preserves the
 // signature order. Each entry is rendered as '<abi-type> <name>' joined by ';',
-// matching the layout consumed by compiled_signature::find_param_type. Any
-// parameter whose Kizu type is unsupported makes the whole derivation an
-// explicit error (no fallback).
+// matching the layout consumed by compiled_signature::find_param_type. Struct
+// params resolve through emitted type-llvm facts; otherwise unsupported Kizu
+// types remain explicit errors.
 pub fn append_params_spec(
     out: &var std::string::String,
     ir_bytes: []u8,
@@ -230,7 +288,7 @@ pub fn append_params_spec_indexed(
             }
             let param_name = entry[space1 + 1..colon1];
             let kizu_type = entry[colon2 + 1..entry_len];
-            let abi_type = try kizu_type_to_abi(kizu_type);
+            let abi_type = try kizu_type_to_abi_indexed(index, ir_bytes, function_name, kizu_type);
             if emitted > 0 {
                 try out.append_byte(semicolon);
             }
@@ -318,6 +376,23 @@ function-body source_file";
     std::testing::expect_equal<[]u8>(loader_expected, loader_spec_bytes);
     std::testing::expect_equal<[]u8>(loader_expected, indexed_loader_spec_bytes);
 
+    // Record params are ABI-mapped from emitted type-llvm facts. This keeps
+    // alias-qualified records such as type_id::TypeRecord out of the direct
+    // scalar/container table while still rejecting types that have no fact.
+    let record_facts = "type-llvm selfhost::types::type_id::TypeRecord %kizu.selfhost.types.type_id.type_record
+function-signature-param selfhost::ir::codegen::code_return_kind 0 shape:runtime:&type_id::TypeRecord
+function-body selfhost::ir::codegen::code_return_kind";
+
+    var record_spec = std::string::String(allocator);
+    try append_params_spec(
+        record_spec,
+        record_facts,
+        "selfhost::ir::codegen::code_return_kind"
+    );
+    let record_expected = "%kizu.selfhost.types.type_id.type_record shape";
+    let record_spec_bytes = record_spec.as_bytes();
+    std::testing::expect_equal<[]u8>(record_expected, record_spec_bytes);
+
     // Both SourceKind spellings (aliased and fully qualified) share the i64 ABI.
     std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("source::SourceKind"));
     std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("selfhost::source::SourceKind"));
@@ -335,6 +410,7 @@ function-body source_file";
     indexed_spec.deinit();
     loader_spec.deinit();
     indexed_loader_spec.deinit();
+    record_spec.deinit();
 
     print("abi-params-spec");
     print(expected);

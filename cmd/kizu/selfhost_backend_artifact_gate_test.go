@@ -624,7 +624,7 @@ func requiredLLVMAstAccessorFragments() []string {
 		"define i64 @kizu_kizu__ast_ast_len",
 		"%arg0_0_ex = extractvalue %kizu.kizu.ast.ast %self, 1",
 		"%result = call i64 @kizu_rt_array_len(%kizu.owned %arg0_0_ex)",
-		"define i64 @kizu_rt_array_len(%kizu.owned %array)",
+		"define private i64 @kizu_rt_array_len(%kizu.owned %array)",
 		"%len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2",
 	}
 }
@@ -676,7 +676,7 @@ func requiredLLVMArrayGetFragments() []string {
 		"%fail_value = insertvalue %kizu.error.related_span %fail_flag, " +
 			"%kizu.slice.u8 %fail_msg, 2",
 		"  ret %kizu.error.related_span %fail_value",
-		"define %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index)",
+		"define private %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index)",
 	}
 }
 
@@ -742,7 +742,7 @@ func requiredLLVMUnionAbiFragments() []string {
 		"%v0_0 = insertvalue %kizu.kizu.ast.parse_result poison, %kizu.kizu.ast.ast %ast, 0",
 		"%v0_1 = insertvalue %kizu.kizu.ast.parse_result %v0_0, %kizu.kizu.ast.node_id %root, 1",
 		"  ret %kizu.kizu.ast.parse_result %v0_1",
-		"define %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %value)",
+		"define private %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %value)",
 	}
 }
 
@@ -764,7 +764,7 @@ func requiredLLVMArenaGetFragments() []string {
 		"%elem = load %kizu.kizu.ast.ast_node, ptr %elem_ptr",
 		"  ret %kizu.kizu.ast.ast_node %elem",
 		"call void @kizu_rt_trap(%kizu.slice.u8 %fail_msg)",
-		"define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index)",
+		"define private %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index)",
 	}
 }
 
@@ -850,7 +850,10 @@ func requiredLLVMNodeCountTypeFragments() []string {
 		"%kizu.kizu.ast.union_decl_node = type { i1, %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, " +
 			"%kizu.kizu.ast.span }",
-		"%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
+		"%kizu.kizu.ast.contract_decl_node = type { i1, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.span }",
+		"%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.child_range }",
 		"%kizu.kizu.ast.union_variant_node = type { %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.span }",
 		"%kizu.kizu.ast.match_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
@@ -887,7 +890,7 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_ranges(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_fn_decl_parts(",
 		// node_count: bind the AstNode via Ast.get, extract the union tag, and dispatch over
-		// the exhaustive icmp/br arm chain (Program tag 0 first, FnDecl tag 43, ...).
+		// the exhaustive icmp/br arm chain (Program tag 0 first, FnDecl tag 44, ...).
 		"%match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %node_id)",
 		"%match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0",
@@ -914,9 +917,9 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"%count_next = add i64 %count, %nc",
 		// count_two: let-try the recursive node_count, propagate failure, bind the success,
 		// then return the arithmetic wrapped as the error-union success.
-		"%first_count_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
+		"%try0_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %first)",
-		"%first_count = extractvalue %kizu.error.i64 %first_count_call, 1",
+		"%first_count = extractvalue %kizu.error.i64 %try0_call, 1",
 		// count_one: return '1 + try node_count(...)' as a single return-try-binary.
 		"%rettry_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %first)",
@@ -1226,16 +1229,16 @@ func requiredLLVMFormatHelperFragments() []string {
 		"%index = phi i64 [ 0, %loop1_preheader ], [ %index_next, %try1001_cont ]",
 		// Pin that the latch update is the index_after_import try-call (resolved through the
 		// catalog/BFS, not a literal step) producing the loop-carried %kizu.error.i64.
-		"%index_next_call = call %kizu.error.i64 " +
+		"%try1001_call = call %kizu.error.i64 " +
 			"@kizu_selfhost__parser_format_index_after_import(%kizu.owned %tokens, i64 %index)",
 		// Pin that the phi's latch operand is the try-call success value (field 1), so the
 		// loop-carried counter advances by the callee result rather than a raw step.
-		"%index_next = extractvalue %kizu.error.i64 %index_next_call, 1",
+		"%index_next = extractvalue %kizu.error.i64 %try1001_call, 1",
 		// Pin the latch failure propagation: a try-call failure rewraps the callee message
 		// into this function's own %kizu.error.i64 and returns it, never a raw i64 or an
 		// 'unreachable', so a broken error-union propagation is caught (issue 1165).
-		"%index_next_fail_val = insertvalue %kizu.error.i64 %index_next_fail_flag, " +
-			"%kizu.slice.u8 %index_next_msg, 2",
+		"%try1001_fail_val = insertvalue %kizu.error.i64 %try1001_fail_flag, " +
+			"%kizu.slice.u8 %try1001_msg, 2",
 		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64
 		// wraps into %kizu.error.i64 rather than returning a raw i64 as the error union.
 		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
@@ -1243,7 +1246,7 @@ func requiredLLVMFormatHelperFragments() []string {
 		// tokenizer call and owned String return shape so the artifact cannot silently fall back to
 		// the old parse_format_alloc emitter.
 		"define %kizu.error.owned @kizu_selfhost__parser_format_format_source(",
-		"%format_tokens_call = call %kizu.error.owned @kizu_kizu__lexer_tokenize(",
+		"%try0_call = call %kizu.error.owned @kizu_kizu__lexer_tokenize(",
 		"%index = phi i64 [ %void.then.alias.13, %loop13_preheader ], [ %index_next, %loop13_latch ]",
 		"%t24 = icmp slt i64 %index, %t23",
 		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +

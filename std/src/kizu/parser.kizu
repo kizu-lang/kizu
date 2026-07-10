@@ -253,9 +253,77 @@ fn parse_ident_top_level_decl(
         return std::kizu::parser::parse_impl_decl(allocator, ast, text, token);
     }
     if try std::kizu::parser::is_token_text(text, token, "contract") {
-        return std::kizu::parser::parse_skipped_top_level_block(ast, text, token);
+        return std::kizu::parser::parse_contract_decl(
+            allocator,
+            ast,
+            text,
+            token,
+            public,
+            doc
+        );
     }
     return error("expected declaration");
+}
+
+fn parse_contract_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    contract_token: std::kizu::lexer::Token,
+    public: bool,
+    doc: std::kizu::ast::Span
+) -> !ParseNode {
+    let name_token = std::kizu::lexer::next_token(text, contract_token);
+    if !std::kizu::parser::is_ident_kind(name_token) {
+        return error("expected contract name");
+    }
+    let name_node = ast.add_var(
+        std::kizu::ast::span(name_token.start, name_token.end),
+        std::kizu::ast::symbol_id(name_token.start)
+    );
+    let open = try std::kizu::parser::expect_lbrace(
+        std::kizu::lexer::next_token(text, name_token)
+    );
+    var methods = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    defer methods.deinit();
+    var current = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_right_brace_token(current) {
+        if std::kizu::parser::is_eof_token(current) {
+            return error("expected right brace");
+        }
+        if !std::mem::equal_bytes(text[current.start..current.end], "fn") {
+            return error("expected contract method");
+        }
+        let method = try std::kizu::parser::parse_fn_decl(
+            allocator,
+            ast,
+            text,
+            current,
+            false,
+            false,
+            ast.add_empty(current.start),
+            false,
+            std::kizu::parser::token_doc_span(current)
+        );
+        let semicolon = try std::kizu::parser::expect_semicolon(method.next);
+        try methods.append(method.node);
+        current = std::kizu::lexer::next_token(text, semicolon);
+    }
+    let child_start = ast.begin_children();
+    var index = 0;
+    while index < methods.len() {
+        try ast.add_child(try methods.get(index));
+        index = index + 1;
+    }
+    let range = ast.finish_children(child_start);
+    let root = ast.add_contract_decl_with_doc(
+        std::kizu::ast::span(contract_token.start, current.end),
+        public,
+        name_node,
+        range,
+        doc
+    );
+    return std::kizu::parser::parse_node(root, std::kizu::lexer::next_token(text, current));
 }
 
 fn parse_impl_decl(
@@ -264,18 +332,28 @@ fn parse_impl_decl(
     text: []u8,
     impl_token: std::kizu::lexer::Token
 ) -> !ParseNode {
-    let type_token = std::kizu::lexer::next_token(text, impl_token);
-    if !std::kizu::parser::is_ident_kind(type_token) {
+    let first_token = std::kizu::lexer::next_token(text, impl_token);
+    if !std::kizu::parser::is_ident_kind(first_token) {
         return error("expected impl type name");
+    }
+    var contract_node = ast.add_empty(first_token.start);
+    var type_token = first_token;
+    var open = std::kizu::lexer::next_token(text, first_token);
+    if try std::kizu::parser::is_token_text(text, open, "for") {
+        contract_node = ast.add_var(
+            std::kizu::ast::span(first_token.start, first_token.end),
+            std::kizu::ast::symbol_id(first_token.start)
+        );
+        type_token = std::kizu::lexer::next_token(text, open);
+        if !std::kizu::parser::is_ident_kind(type_token) {
+            return error("expected impl type name");
+        }
+        open = std::kizu::lexer::next_token(text, type_token);
     }
     let type_node = ast.add_var(
         std::kizu::ast::span(type_token.start, type_token.end),
         std::kizu::ast::symbol_id(type_token.start)
     );
-    let open = std::kizu::lexer::next_token(text, type_token);
-    if try std::kizu::parser::is_token_text(text, open, "for") {
-        return error("contract impl outside std parser subset");
-    }
     if !std::kizu::parser::is_left_brace_token(open) {
         return error("expected left brace");
     }
@@ -323,8 +401,9 @@ fn parse_impl_decl(
         index = index + 1;
     }
     let range = ast.finish_children(child_start);
-    let root = ast.add_impl_decl(
+    let root = ast.add_impl_decl_with_contract(
         std::kizu::ast::span(impl_token.start, current.end),
+        contract_node,
         type_node,
         range
     );
@@ -4697,7 +4776,77 @@ fn is_type_apply_start(
         return false;
     }
     let node = ast.get(left.node);
-    return std::kizu::parser::is_namespace_path_span(text, &node.span);
+    if std::kizu::parser::is_namespace_path_span(text, &node.span) {
+        return true;
+    }
+    if std::kizu::parser::is_type_expr_callee_span(text, &node.span) {
+        return std::kizu::parser::type_apply_suffix_has_close(text, left.next);
+    }
+    if !std::kizu::parser::is_simple_name_span(text, &node.span) {
+        return false;
+    }
+    return std::kizu::parser::type_apply_suffix_is_call(text, left.next);
+}
+
+fn is_type_expr_callee_span(source: []u8, span: &std::kizu::ast::Span) -> bool {
+    return std::mem::equal_bytes(source[span.start..span.end], "type");
+}
+
+fn is_simple_name_span(source: []u8, span: &std::kizu::ast::Span) -> bool {
+    if span.start >= span.end {
+        return false;
+    }
+    var index = span.start;
+    while index < span.end {
+        if !std::kizu::parser::is_name_byte(source[index]) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn type_apply_suffix_has_close(
+    text: []u8,
+    open: std::kizu::lexer::Token
+) -> bool {
+    var current = std::kizu::lexer::next_token(text, open);
+    var depth = 1;
+    while !std::kizu::parser::is_eof_token(current) {
+        if std::kizu::parser::is_lt_token(current) {
+            depth = depth + 1;
+        }
+        if std::kizu::parser::is_gt_token(current) {
+            depth = depth - 1;
+            if depth == 0 {
+                return true;
+            }
+        }
+        current = std::kizu::lexer::next_token(text, current);
+    }
+    return false;
+}
+
+fn type_apply_suffix_is_call(
+    text: []u8,
+    open: std::kizu::lexer::Token
+) -> bool {
+    var current = std::kizu::lexer::next_token(text, open);
+    var depth = 1;
+    while !std::kizu::parser::is_eof_token(current) {
+        if std::kizu::parser::is_lt_token(current) {
+            depth = depth + 1;
+        }
+        if std::kizu::parser::is_gt_token(current) {
+            depth = depth - 1;
+            if depth == 0 {
+                let next = std::kizu::lexer::next_token(text, current);
+                return std::kizu::parser::is_left_paren_token(next);
+            }
+        }
+        current = std::kizu::lexer::next_token(text, current);
+    }
+    return false;
 }
 
 fn is_struct_literal_start(

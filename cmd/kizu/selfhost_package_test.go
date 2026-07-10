@@ -319,8 +319,6 @@ func assertSelfhostClosureUsesCommonCalleeCollector(
 		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
 		"std::mem::starts_with(callee_text, \"std::mem::\")",
 		"std::mem::starts_with(callee_text, qualified_prefix)",
-		"return error(unsupported_call_form_error);",
-		"return error(unsupported_qualified_callee_error);",
 	}
 	for _, fragment := range requiredGlobal {
 		if !strings.Contains(executableFunctions, fragment) {
@@ -705,6 +703,134 @@ func assertSelfhostASTClosureScope(
 	}
 }
 
+// TestSelfhostExecuteClosureUsesComponentCatalog keeps the CLI run/test
+// executable body facts seeded from the execute component catalog and expanded
+// through the shared BFS collector. This keeps run_source_cli/run_package_cli
+// facts on the real call graph instead of a hand-selected entry-only body.
+func TestSelfhostExecuteClosureUsesComponentCatalog(t *testing.T) {
+	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	executeFactsBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_execute_function_body_facts(",
+	)
+	executeClosureBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn append_execute_closure_body(",
+	)
+	policyBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn collect_catalog_closure_external_callee_allowed(",
+	)
+	seedRequired := []string{
+		"component_function_catalog::collect_from_ast(",
+		"\"selfhost::cli::execute\"",
+		"component_function_catalog::find_local_function_index(catalog, \"run_file_cli\")",
+		"component_function_catalog::find_local_function_index(catalog, \"test_file_cli\")",
+		"append_execute_closure_body(",
+		"closure_index_seen(&emitted, function_index)",
+	}
+	for _, fragment := range seedRequired {
+		if !strings.Contains(executeFactsBody, fragment) {
+			t.Fatalf("execute closure seed path missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"append_selected_function_with_body(",
+		"append_selected_function_signature(",
+	} {
+		if strings.Contains(executeFactsBody, fragment) {
+			t.Fatalf("execute body facts keep hand-written selection %q", fragment)
+		}
+	}
+	closureRequired := []string{
+		"component_function_catalog::local_function_name(catalog, function_index)",
+		"component_function_catalog::function_node_id(",
+		"function_signature::append_catalog(",
+		"executable_body::append_catalog_helper_body_ir(",
+		"execute_closure_role(local_name)",
+	}
+	for _, fragment := range closureRequired {
+		if !strings.Contains(executeClosureBody, fragment) {
+			t.Fatalf("execute closure body missing %q", fragment)
+		}
+	}
+	if strings.Contains(executeClosureBody, "try function_node(text, ast, root, local_name)") {
+		t.Fatal("execute closure keeps handwritten function_node lookup")
+	}
+	assertExecuteClosureRoleMapping(t, executableFunctions)
+	assertSelfhostClosureUsesCommonCalleeCollector(
+		t,
+		executableFunctions,
+		executeClosureBody,
+		"\"selfhost::cli::execute::\"",
+		"\"execute closure: unsupported call form\"",
+		"\"execute closure: unsupported qualified callee\"",
+	)
+	assertExecuteClosureExternalCalleePolicy(t, executableFunctions, policyBody)
+}
+
+// assertExecuteClosureRoleMapping checks the execute closure's artifact roles.
+func assertExecuteClosureRoleMapping(t *testing.T, executableFunctions string) {
+	t.Helper()
+	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn execute_closure_role(")
+	for _, fragment := range []string{
+		"std::mem::equal_bytes(local_name, \"run_file_cli\")",
+		"\"checked-run-artifact\"",
+		"std::mem::equal_bytes(local_name, \"test_file_cli\")",
+		"\"checked-test-artifact\"",
+		"\"checked-cli-execute-helper\"",
+	} {
+		if !strings.Contains(roleBody, fragment) {
+			t.Fatalf("execute closure role mapping missing %q", fragment)
+		}
+	}
+}
+
+// assertExecuteClosureExternalCalleePolicy checks execute-only external calls.
+func assertExecuteClosureExternalCalleePolicy(
+	t *testing.T,
+	executableFunctions string,
+	policyBody string,
+) {
+	t.Helper()
+	prefixBranch := "std::mem::equal_bytes(qualified_prefix, " +
+		"\"selfhost::cli::execute::\")"
+	if !strings.Contains(policyBody, prefixBranch) {
+		t.Fatal("execute external accessor policy missing prefix branch")
+	}
+	if !strings.Contains(policyBody, "execute_closure_external_callee_allowed(callee_text)") {
+		t.Fatal("execute prefix does not delegate to the execute closure allowlist")
+	}
+	executePolicyBody := selfhostKizuFunctionBody(
+		t,
+		executableFunctions,
+		"fn execute_closure_external_callee_allowed(",
+	)
+	for _, fragment := range []string{
+		"std::mem::equal_bytes(callee_text, \"parser::parse_validated_file\")",
+		"std::mem::equal_bytes(callee_text, \"check::checked_ast_node\")",
+		"std::mem::equal_bytes(callee_text, \"check::checked_package_sources\")",
+		"std::mem::equal_bytes(callee_text, \"backend::emit_run_sources_codegen_artifact\")",
+		"std::mem::equal_bytes(callee_text, \"diagnostics::parse_validation_error\")",
+	} {
+		if !strings.Contains(executePolicyBody, fragment) {
+			t.Fatalf("execute closure allowlist missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"std::mem::starts_with(callee_text, \"backend::\")",
+		"std::mem::starts_with(callee_text, \"parser::\")",
+		"std::mem::starts_with(callee_text, \"selfhost::\")",
+	} {
+		if strings.Contains(executePolicyBody, fragment) {
+			t.Fatalf("execute closure allowlist is too broad via %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostExecutableHelperClosureUsesComponentCatalog keeps the
 // selfhost::backend::executable shared-helper body facts seeded from the
 // component catalog and expanded by the common BFS callee collector instead of
@@ -795,7 +921,8 @@ func TestSelfhostBackendWrapperClosureUsesComponentCatalog(t *testing.T) {
 	seedRequired := []string{
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::backend\"",
-		"component_function_catalog::find_local_function_index(catalog, \"render_run_codegen_artifact\")",
+		"component_function_catalog::find_local_function_index(catalog, " +
+			"\"emit_run_sources_codegen_artifact\")",
 		"append_backend_wrapper_closure_body(",
 		"closure_index_seen(&emitted, function_index)",
 	}
@@ -835,7 +962,7 @@ func TestSelfhostBackendWrapperClosureUsesComponentCatalog(t *testing.T) {
 	assertBackendWrapperClosureExternalCalleePolicy(t, executableFunctions, policyBody)
 }
 
-// assertBackendWrapperClosureRoleMapping keeps render_run_codegen_artifact on its
+// assertBackendWrapperClosureRoleMapping keeps emit_run_sources_codegen_artifact on its
 // checked-run-codegen-wrapper role and emit_rendered_run_artifact on its
 // checked-run-codegen-artifact-wrapper role, both resolved through the role
 // mapping rather than the hand-written append_selected_function_with_body call.
@@ -843,7 +970,7 @@ func assertBackendWrapperClosureRoleMapping(t *testing.T, executableFunctions st
 	t.Helper()
 	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn backend_wrapper_role(")
 	for _, fragment := range []string{
-		"std::mem::equal_bytes(local_name, \"render_run_codegen_artifact\")",
+		"std::mem::equal_bytes(local_name, \"emit_run_sources_codegen_artifact\")",
 		"\"checked-run-codegen-wrapper\"",
 		"\"checked-run-codegen-artifact-wrapper\"",
 	} {
@@ -1614,7 +1741,7 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 		}
 	}
 	for _, signature := range []string{
-		"pub fn run_file_cli(",
+		"fn run_source_cli(",
 		"pub fn test_file_cli(",
 	} {
 		body := selfhostKizuFunctionBody(t, execute, signature)
@@ -1900,13 +2027,11 @@ func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
 func assertExecuteRoutesRunThroughCodegenIR(t *testing.T, execute string) {
 	t.Helper()
 	requiredExecute := []string{
-		"backend::render_run_codegen_artifact(",
-		"backend::emit_rendered_run_artifact(",
+		"backend::emit_run_sources_codegen_artifact(",
 		"artifact.bytes > 0 and artifact.metadata_bytes > 0",
-		"backend::run_artifact_ll_path(allocator, path)",
 		"backend::run_artifact_executable_path(allocator, path)",
-		"backend::link_run_artifact(ll_path_bytes, executable_path_bytes)",
-		"backend::execute_run_artifact(executable_path_bytes)",
+		"backend::link_run_artifact(allocator, io, path)",
+		"backend::execute_run_artifact_with_process_args(",
 	}
 	for _, fragment := range requiredExecute {
 		if !strings.Contains(execute, fragment) {
@@ -2208,15 +2333,19 @@ func assertCompiledSubModules(t *testing.T) {
 		"pub fn lower_string_return_function(", "pub fn lower_int_return_function(",
 		"pub fn lower_enum_field_return_function(",
 		"pub fn lower_call_return_function(", "pub fn lower_struct_return_function(",
-		"pub fn lower_expr_return_function(", "pub fn lower_multi_statement_function(")
+		"pub fn lower_expr_return_function(", "pub fn lower_multi_statement_function(",
+		"std::mem::equal_bytes(op, \"sub\")", "return 0 - step")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_lower_struct.kizu",
 		"pub fn lower_struct_fields(", "fn lower_struct_field(",
 		"fn lower_nested_struct_field_expr(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_types.kizu",
 		"pub fn resolve_value_llvm_type(", "pub fn resolve_value_kizu_type(",
-		"pub fn struct_lookup_kizu_type(")
+		"pub fn struct_lookup_kizu_type(",
+		"function-signature-return ", "return callee_name",
+		"std::mem::equal_bytes(value_kind, \"Prefix\")")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_llvm.kizu",
-		"pub fn append_function(", "fn append_struct_return(", "fn append_expr_return(")
+		"pub fn append_function(", "fn append_struct_return(", "fn append_expr_return(",
+		"std::mem::equal_bytes(inst.op, \"mod\")", "\"srem\"")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_llvm_call.kizu",
 		"pub fn append_call_return(", "pub fn append_call_arg_setup(",
 		"pub fn append_call_args(")
@@ -2628,6 +2757,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn lower_struct_return_function(",
 		"pub fn lower_expr_return_function(",
 		"pub fn lower_multi_statement_function(",
+		"std::mem::equal_bytes(op, \"sub\")",
+		"return 0 - step",
 		"ir_contract::body_token_or_empty_from(",
 		"ir_contract::body_int_value_from(",
 		"ir_contract::body_field_expr_name_from(",
@@ -2641,11 +2772,16 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn resolve_value_llvm_type(",
 		"pub fn resolve_value_kizu_type(",
 		"pub fn struct_lookup_kizu_type(",
+		"function-signature-return ",
+		"return callee_name",
+		"std::mem::equal_bytes(value_kind, \"Prefix\")",
 	},
 	"../../selfhost/src/backend/compiled_mir_llvm.kizu": {
 		"pub fn append_function(",
 		"fn append_struct_return(",
 		"fn append_expr_return(",
+		"std::mem::equal_bytes(inst.op, \"mod\")",
+		"\"srem\"",
 	},
 	"../../selfhost/src/backend/compiled_mir_llvm_call.kizu": {
 		"pub fn append_call_return(",
@@ -2759,8 +2895,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/cli/execute.kizu": {
 		"pub fn run_file_cli(",
 		"pub fn test_file_cli(",
-		"backend::render_run_codegen_artifact(",
-		"backend::emit_rendered_run_artifact(",
+		"backend::emit_run_sources_codegen_artifact(",
 		"backend::lower_test_executable(",
 	},
 	"../../selfhost/src/backend/executable.kizu": {
@@ -3134,6 +3269,18 @@ func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm str
 		}
 		if strings.HasPrefix(name, "selfhost::backend::executable::") {
 			assertExecutableCatalogSignatureOrigin(t, selected, fact)
+			return
+		}
+		if strings.HasPrefix(name, "selfhost::cli::execute::") {
+			for _, catalogFragment := range []string{
+				"component_function_catalog::collect_from_ast(",
+				"\"selfhost::cli::execute\"",
+				"function_signature::append_catalog(",
+			} {
+				if !strings.Contains(selected, catalogFragment) {
+					t.Fatalf("execute signature emitter missing %q for %q", catalogFragment, fact)
+				}
+			}
 			return
 		}
 		if name == "selfhost::backend::render_run_codegen_artifact" ||
@@ -3866,9 +4013,12 @@ func hostedExecutableCommonBodyContractFragments() []string {
 	return []string{
 		"ir_contract::require_body_call(",
 		`"selfhost::cli::execute::run_file_cli"`,
+		`"run_source_cli"`,
+		`"selfhost::cli::execute::run_source_cli"`,
 		`"check::checked_ast_node"`,
-		`"backend::render_run_codegen_artifact"`,
-		`"backend::emit_rendered_run_artifact"`,
+		`"selfhost::cli::execute::run_package_cli"`,
+		`"check::checked_package_sources"`,
+		`"backend::emit_run_sources_codegen_artifact"`,
 		`"code_render::render_run_ast_artifact"`,
 		`"hosted::emit_rendered_run_artifact"`,
 	}

@@ -1,6 +1,16 @@
 import selfhost::backend::compiled_fact_lookup;
 import selfhost::backend::ir_index;
 
+fn unsupported_error_type_message(context: []u8, inner: []u8) -> ![]u8 {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled function: unsupported error type: ");
+    try message.append_bytes(context);
+    try message.append_bytes(" ");
+    try message.append_bytes(inner);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
+}
+
 pub fn kizu_type_to_llvm(
     ir_bytes: []u8,
     module_prefix: []u8,
@@ -98,6 +108,24 @@ pub fn kizu_type_to_llvm(
         if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeEval") {
             return "%kizu.error.code_eval";
         }
+        if std::mem::equal_bytes(inner, "GenericInlineEval") {
+            return "%kizu.error.generic_inline_eval";
+        }
+        if std::mem::equal_bytes(inner, "selfhost::ir::codegen::GenericInlineEval") {
+            return "%kizu.error.generic_inline_eval";
+        }
+        if std::mem::equal_bytes(inner, "CodeConstBool") {
+            return "%kizu.error.code_const_bool";
+        }
+        if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeConstBool") {
+            return "%kizu.error.code_const_bool";
+        }
+        if std::mem::equal_bytes(inner, "CodeConstI64") {
+            return "%kizu.error.code_const_i64";
+        }
+        if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeConstI64") {
+            return "%kizu.error.code_const_i64";
+        }
         // !std::kizu::ast::ParseResult backs the full std::kizu::parser::parse_program
         // signature (issue 1157): parse_program returns the parsed AST + root node by
         // value in an error union. ParseResult lowers to the %kizu.kizu.ast.parse_result
@@ -150,11 +178,20 @@ pub fn kizu_type_to_llvm(
         if std::mem::equal_bytes(inner, "Token") {
             return "%kizu.error.token";
         }
+        if std::mem::equal_bytes(inner, "TypeRecord") {
+            return "%kizu.error.type_record";
+        }
+        if std::mem::equal_bytes(inner, "type_id::TypeRecord") {
+            return "%kizu.error.type_record";
+        }
+        if std::mem::equal_bytes(inner, "selfhost::types::type_id::TypeRecord") {
+            return "%kizu.error.type_record";
+        }
         let enum_error_union = error_union_enum_abi_or_empty(ir_bytes, module_prefix, inner);
         if std::mem::len(enum_error_union) > 0 {
             return enum_error_union;
         }
-        return error("compiled function: unsupported error type");
+        return try unsupported_error_type_message("kizu_type_to_llvm", inner);
     }
     if std::mem::equal_bytes(kizu_type, "i64") {
         return "i64";
@@ -317,7 +354,7 @@ pub fn error_union_inner_to_llvm(
     if std::mem::len(enum_error_union) > 0 {
         return enum_error_union;
     }
-    return error("compiled function: unsupported error type");
+    return try unsupported_error_type_message("error_union_inner_to_llvm", inner);
 }
 
 pub fn error_union_inner_to_llvm_indexed(
@@ -336,7 +373,7 @@ pub fn error_union_inner_to_llvm_indexed(
     if std::mem::len(enum_error_union) > 0 {
         return enum_error_union;
     }
-    return error("compiled function: unsupported error type");
+    return try unsupported_error_type_message("error_union_inner_to_llvm_indexed", inner);
 }
 
 // The indexed lowerer uses these direct maps before falling back to the non-indexed scanner.
@@ -381,6 +418,24 @@ fn error_union_type_llvm_direct_or_empty(inner: []u8) -> []u8 {
     if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeEval") {
         return "%kizu.error.code_eval";
     }
+    if std::mem::equal_bytes(inner, "GenericInlineEval") {
+        return "%kizu.error.generic_inline_eval";
+    }
+    if std::mem::equal_bytes(inner, "selfhost::ir::codegen::GenericInlineEval") {
+        return "%kizu.error.generic_inline_eval";
+    }
+    if std::mem::equal_bytes(inner, "CodeConstBool") {
+        return "%kizu.error.code_const_bool";
+    }
+    if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeConstBool") {
+        return "%kizu.error.code_const_bool";
+    }
+    if std::mem::equal_bytes(inner, "CodeConstI64") {
+        return "%kizu.error.code_const_i64";
+    }
+    if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeConstI64") {
+        return "%kizu.error.code_const_i64";
+    }
     if std::mem::equal_bytes(inner, "std::kizu::ast::ParseResult") {
         return "%kizu.error.parse_result";
     }
@@ -401,6 +456,15 @@ fn error_union_type_llvm_direct_or_empty(inner: []u8) -> []u8 {
     }
     if std::mem::equal_bytes(inner, "Token") {
         return "%kizu.error.token";
+    }
+    if std::mem::equal_bytes(inner, "TypeRecord") {
+        return "%kizu.error.type_record";
+    }
+    if std::mem::equal_bytes(inner, "type_id::TypeRecord") {
+        return "%kizu.error.type_record";
+    }
+    if std::mem::equal_bytes(inner, "selfhost::types::type_id::TypeRecord") {
+        return "%kizu.error.type_record";
     }
     return "";
 }
@@ -446,6 +510,73 @@ fn non_error_type_llvm_direct_or_empty(kizu_type: []u8) -> []u8 {
         return "%kizu.kizu.parser.parse_range";
     }
     if std::mem::equal_bytes(kizu_type, "CommentFormatState") {
+        return "%kizu.selfhost.parser.format.comment_format_state";
+    }
+    return "";
+}
+
+pub fn error_union_success_llvm_or_empty(error_union: []u8) -> []u8 {
+    if std::mem::equal_bytes(error_union, "%kizu.error.i64") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.bool") {
+        return "i1";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.owned") {
+        return "%kizu.owned";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.metadata") {
+        return "%kizu.fs.metadata";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.slice.u8") {
+        return "%kizu.slice.u8";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.run_ast") {
+        return "%kizu.selfhost.codegen.run_ast";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.payload_span") {
+        return "%kizu.selfhost.codegen.payload_span";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.code_eval") {
+        return "%kizu.selfhost.codegen.code_eval";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.generic_inline_eval") {
+        return "%kizu.selfhost.codegen.generic_inline_eval";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.code_const_bool") {
+        return "%kizu.selfhost.codegen.code_const_bool";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.code_const_i64") {
+        return "%kizu.selfhost.codegen.code_const_i64";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.type_record") {
+        return "%kizu.selfhost.types.type_id.type_record";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.parse_result") {
+        return "%kizu.kizu.ast.parse_result";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.node_id") {
+        return "%kizu.kizu.ast.node_id";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.parse_node") {
+        return "%kizu.kizu.parser.parse_node";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.parse_range") {
+        return "%kizu.kizu.parser.parse_range";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.token") {
+        return "%kizu.kizu.lexer.token";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.prefix_op") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.binary_op") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.related_span") {
+        return "%kizu.kizu.diagnostic.related_span";
+    }
+    if std::mem::equal_bytes(error_union, "%kizu.error.comment_format_state") {
         return "%kizu.selfhost.parser.format.comment_format_state";
     }
     return "";

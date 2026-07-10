@@ -730,18 +730,16 @@ pub fn cross_module_callee_qualified_name_or_empty(
     callee_name: []u8
 ) -> []u8 {
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
-        // A 'std::kizu::*' callee that carries its own function-signature-return fact
-        // is a compiled std component function (e.g. the std::kizu::ast BinaryOp
-        // accessors), not a runtime intrinsic: resolve it as a fully-qualified
-        // cross-module callee so its return type and symbol come from the real
-        // signature facts rather than the stdlib-symbol table.
-        if std::mem::starts_with(callee_name, "std::kizu::") {
-            let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-                ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
-            );
-            if std::mem::len(ret_kizu) > 0 {
-                return callee_name;
-            }
+        // A 'std::*' callee that carries its own function-signature-return fact is a
+        // compiled std component function (e.g. std::kizu::ast BinaryOp accessors or
+        // std::mem::trim_ascii), not a runtime intrinsic: resolve it as a fully-qualified
+        // cross-module callee so its return type and symbol come from the real signature
+        // facts rather than the stdlib-symbol table.
+        let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
+            ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
+        );
+        if std::mem::len(ret_kizu) > 0 {
+            return callee_name;
         }
         return ir_bytes[0..0];
     }
@@ -755,20 +753,18 @@ pub fn cross_module_callee_qualified_name_or_empty(
 }
 
 // cross_module_callee_qualified_name_or_empty_indexed mirrors the non-indexed resolver but routes
-// the 'std::kizu::*' signature-return probe and suffix lookup through the sorted index.
+// the 'std::*' signature-return probe and suffix lookup through the sorted index.
 pub fn cross_module_callee_qualified_name_or_empty_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
     callee_name: []u8
 ) -> []u8 {
     if compiled_fact_lookup::is_stdlib_callee(callee_name) {
-        if std::mem::starts_with(callee_name, "std::kizu::") {
-            let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
-                index, ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
-            );
-            if std::mem::len(ret_kizu) > 0 {
-                return callee_name;
-            }
+        let ret_kizu = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
+            index, ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
+        );
+        if std::mem::len(ret_kizu) > 0 {
+            return callee_name;
         }
         return ir_bytes[0..0];
     }
@@ -2965,6 +2961,17 @@ fn resolve_let_value_kizu_type_for_value_with_kind(
     if std::mem::equal_bytes(value_kind, "Int") {
         return "i64";
     }
+    if std::mem::equal_bytes(value_kind, "Prefix") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-prefix ", function_name, value, value_sf
+        );
+        if std::mem::equal_bytes(op, "neg") {
+            return "i64";
+        }
+        if std::mem::equal_bytes(op, "not") {
+            return "bool";
+        }
+    }
     // The formatter seeds its scalar carry locals with literal initializers: 'var previous = "";'
     // and 'var last_top_level_decl = "";' bind a byte slice, 'var at_line_start = true;' a bool. A
     // string literal is a []u8 slice and a bool literal is a bool, so the void then-body assignment
@@ -3068,7 +3075,8 @@ fn resolve_binary_kizu_type(
         ir_bytes, "body-binary ", function_name, binary_node, bs
     );
     if std::mem::equal_bytes(op, "add") or std::mem::equal_bytes(op, "sub") or
-        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") {
+        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") or
+        std::mem::equal_bytes(op, "mod") {
         return "i64";
     }
     return "bool";

@@ -549,7 +549,8 @@ func qualifySimpleType(module string, typ string) (string, bool) {
 			"BlockNode", "IfNode", "LetNode", "AssignNode", "ReturnNode", "DeferNode", "ExprStmtNode",
 			"WhileNode", "ForNode", "BreakNode", "ContinueNode", "ParamNode", "FieldNode",
 			"StructDeclNode", "ImportDeclNode", "EnumDeclNode", "UnionDeclNode",
-			"ImplDeclNode", "UnionVariantNode", "MatchNode", "MatchArmNode", "UnsafeNode", "ComptimeIfNode",
+			"ContractDeclNode", "ImplDeclNode", "UnionVariantNode", "MatchNode", "MatchArmNode",
+			"UnsafeNode", "ComptimeIfNode",
 			"FnDeclNode",
 			"ParseResult":
 			return "std::kizu::ast::" + typ, true

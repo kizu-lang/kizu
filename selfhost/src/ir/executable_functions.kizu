@@ -4,6 +4,7 @@ import selfhost::ir::component_function_catalog;
 import selfhost::ir::executable_body;
 import selfhost::ir::function_signature;
 import selfhost::source;
+import selfhost::types::type_id;
 
 pub fn append_facts(
     allocator: Allocator,
@@ -26,6 +27,7 @@ pub fn append_facts(
     var mem_found = false;
     var selfhost_ast_found = false;
     var types_checker_found = false;
+    var type_id_found = false;
     var format_found = false;
 
     var index = 0;
@@ -98,6 +100,10 @@ pub fn append_facts(
                 try append_types_checker_function_facts(allocator, out, file);
                 types_checker_found = true;
             }
+            if std::mem::equal_bytes(module, "types/type_id") {
+                try append_type_id_function_facts(allocator, out, file);
+                type_id_found = true;
+            }
             if std::mem::equal_bytes(module, "parser/format") {
                 try append_format_function_facts(allocator, out, file);
                 format_found = true;
@@ -146,6 +152,9 @@ pub fn append_facts(
     }
     if !types_checker_found {
         return error("missing selfhost types checker source");
+    }
+    if !type_id_found {
+        return error("missing selfhost type id source");
     }
     if !format_found {
         return error("missing selfhost parser format source");
@@ -456,6 +465,7 @@ fn append_kizu_parser_function_facts(
     );
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try append_kizu_parser_closure_seed(&var pending, &catalog, "parse_first_node");
     try append_kizu_parser_closure_seed(&var pending, &catalog, "is_double_colon");
     try append_kizu_parser_closure_seed(&var pending, &catalog, "is_eof_token");
     try append_kizu_parser_closure_seed(&var pending, &catalog, "is_left_brace_token");
@@ -1738,6 +1748,9 @@ fn append_ast_constructor_mutator_bodies(
     try append_selected_ast_mutator_body(out, text, ast, root, "add_union_decl_with_doc");
     try append_selected_ast_mutator_body(out, text, ast, root, "add_union_variant");
     try append_selected_ast_mutator_body(out, text, ast, root, "add_union_variant_with_doc");
+    try append_selected_ast_mutator_body(out, text, ast, root, "add_contract_decl");
+    try append_selected_ast_mutator_body(out, text, ast, root, "add_contract_decl_with_doc");
+    try append_selected_ast_mutator_body(out, text, ast, root, "add_impl_decl_with_contract");
     try append_selected_ast_mutator_body(out, text, ast, root, "add_match");
     try append_selected_ast_mutator_body(out, text, ast, root, "add_struct_literal_expr");
     try append_selected_ast_mutator_body(out, text, ast, root, "add_type_apply_expr");
@@ -2066,6 +2079,18 @@ fn append_ast_constructor_mutator_call_resolution_facts(
         "%kizu.kizu.ast.ast %kizu.kizu.ast.span %kizu.kizu.ast.node_id %kizu.kizu.ast.node_id %kizu.kizu.ast.span"
     );
     try append_ast_mutator_call_resolution_fact(
+        out, "add_contract_decl",
+        "%kizu.kizu.ast.ast %kizu.kizu.ast.span i1 %kizu.kizu.ast.node_id %kizu.kizu.ast.child_range"
+    );
+    try append_ast_mutator_call_resolution_fact(
+        out, "add_contract_decl_with_doc",
+        "%kizu.kizu.ast.ast %kizu.kizu.ast.span i1 %kizu.kizu.ast.node_id %kizu.kizu.ast.child_range %kizu.kizu.ast.span"
+    );
+    try append_ast_mutator_call_resolution_fact(
+        out, "add_impl_decl_with_contract",
+        "%kizu.kizu.ast.ast %kizu.kizu.ast.span %kizu.kizu.ast.node_id %kizu.kizu.ast.node_id %kizu.kizu.ast.child_range"
+    );
+    try append_ast_mutator_call_resolution_fact(
         out, "add_match",
         "%kizu.kizu.ast.ast %kizu.kizu.ast.span %kizu.kizu.ast.node_id %kizu.kizu.ast.child_range"
     );
@@ -2131,6 +2156,12 @@ fn append_ast_receiver_node_id_return_fact(
     try out.append_byte(cast<u8>(32));
     try out.append_bytes("std::kizu::ast::NodeId");
     try out.append_byte(cast<u8>(10));
+    try out.append_bytes("function-signature-return-type-id ast.");
+    try out.append_bytes(method_name);
+    try out.append_byte(cast<u8>(32));
+    let record = type_id::type_record_from_text("std::kizu::ast::NodeId");
+    try std::fmt::append_i64(out, record.id);
+    try out.append_byte(cast<u8>(10));
     return;
 }
 
@@ -2150,6 +2181,24 @@ fn append_function_signature_param_fact(
     try out.append_bytes(":runtime:");
     try out.append_bytes(param_type);
     try out.append_byte(cast<u8>(10));
+    try append_function_signature_param_type_id_fact(out, callee_name, index, param_type);
+    return;
+}
+
+fn append_function_signature_param_type_id_fact(
+    out: &var std::string::String,
+    callee_name: []u8,
+    index: i64,
+    param_type: []u8
+) -> !void {
+    let record = type_id::type_record_from_text(param_type);
+    try out.append_bytes("function-signature-param-type-id ");
+    try out.append_bytes(callee_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, record.id);
+    try out.append_byte(cast<u8>(10));
     return;
 }
 
@@ -2162,6 +2211,21 @@ fn append_function_signature_return_fact(
     try out.append_bytes(callee_name);
     try out.append_byte(cast<u8>(32));
     try out.append_bytes(return_type);
+    try out.append_byte(cast<u8>(10));
+    try append_function_signature_return_type_id_fact(out, callee_name, return_type);
+    return;
+}
+
+fn append_function_signature_return_type_id_fact(
+    out: &var std::string::String,
+    callee_name: []u8,
+    return_type: []u8
+) -> !void {
+    let record = type_id::type_record_from_text(return_type);
+    try out.append_bytes("function-signature-return-type-id ");
+    try out.append_bytes(callee_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, record.id);
     try out.append_byte(cast<u8>(10));
     return;
 }
@@ -2646,6 +2710,177 @@ fn append_types_checker_closure_helper_body(
         "selfhost::types::checker::",
         "types checker closure: unsupported call form",
         "types checker closure: unsupported qualified callee"
+    );
+    return;
+}
+
+fn append_type_id_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "selfhost::types::type_id"
+    );
+    defer catalog.deinit();
+
+    try append_qualified_type_llvm_fact(out, "selfhost::types::type_id::TypeId");
+    try append_qualified_type_llvm_fact(out, "selfhost::types::type_id::TypeRecord");
+    try append_qualified_type_llvm_fact(out, "selfhost::types::type_id::TypeTable");
+    try append_qualified_type_llvm_fact(out, "selfhost::types::type_id::TypeGenericParts");
+    try append_qualified_type_llvm_fact(out, "selfhost::types::type_id::TypeMapParts");
+    try append_qualified_type_llvm_fact(out, "selfhost::types::type_id::TypeBoxParts");
+    try append_selected_struct_field_facts(
+        out, file.text, parsed.ast, parsed.root,
+        "TypeId", "selfhost::types::type_id::TypeId"
+    );
+    try append_selected_struct_field_facts(
+        out, file.text, parsed.ast, parsed.root,
+        "TypeRecord", "selfhost::types::type_id::TypeRecord"
+    );
+    try append_selected_struct_field_facts(
+        out, file.text, parsed.ast, parsed.root,
+        "TypeTable", "selfhost::types::type_id::TypeTable"
+    );
+    try append_selected_struct_field_facts(
+        out, file.text, parsed.ast, parsed.root,
+        "TypeGenericParts", "selfhost::types::type_id::TypeGenericParts"
+    );
+    try append_selected_struct_field_facts(
+        out, file.text, parsed.ast, parsed.root,
+        "TypeMapParts", "selfhost::types::type_id::TypeMapParts"
+    );
+    try append_selected_struct_field_facts(
+        out, file.text, parsed.ast, parsed.root,
+        "TypeBoxParts", "selfhost::types::type_id::TypeBoxParts"
+    );
+    try append_type_id_alias_signature_facts(out);
+
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try append_codegen_closure_seed(&var pending, &catalog, "type_record_from_node");
+    try append_codegen_closure_seed(&var pending, &catalog, "function_return_type_id_from_node");
+    try append_codegen_closure_seed(&var pending, &catalog, "function_param_type_id_from_node");
+    try append_codegen_closure_seed(&var pending, &catalog, "type_record_from_id");
+    try append_codegen_closure_seed(&var pending, &catalog, "type_record_from_text");
+    try append_codegen_closure_seed(&var pending, &catalog, "map_type_parts_from_text");
+    try append_codegen_closure_seed(&var pending, &catalog, "box_type_parts_from_text");
+    try append_codegen_closure_seed(&var pending, &catalog, "type_text_is_arena_handle");
+    var index = 0;
+    while index < pending.len() {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
+            try append_type_id_closure_helper_body(
+                out,
+                file.text,
+                parsed.ast,
+                &catalog,
+                function_index,
+                &var pending
+            );
+            try emitted.append(function_index);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_type_id_alias_signature_facts(out: &var std::string::String) -> !void {
+    try append_function_signature_return_fact(
+        out, "type_id::type_record_from_node", "selfhost::types::type_id::TypeRecord"
+    );
+    try append_function_signature_param_fact(out, "type_id::type_record_from_node", 0, "text", "[]u8");
+    try append_function_signature_param_fact(
+        out, "type_id::type_record_from_node", 1, "ast", "std::kizu::ast::Ast"
+    );
+    try append_function_signature_param_fact(
+        out, "type_id::type_record_from_node", 2, "type_node", "std::kizu::ast::NodeId"
+    );
+
+    try append_function_signature_return_fact(out, "type_id::function_return_type_id_from_node", "i64");
+    try append_function_signature_param_fact(out, "type_id::function_return_type_id_from_node", 0, "text", "[]u8");
+    try append_function_signature_param_fact(
+        out, "type_id::function_return_type_id_from_node", 1, "ast", "std::kizu::ast::Ast"
+    );
+    try append_function_signature_param_fact(
+        out, "type_id::function_return_type_id_from_node", 2, "return_type", "std::kizu::ast::NodeId"
+    );
+
+    try append_function_signature_return_fact(out, "type_id::function_param_type_id_from_node", "i64");
+    try append_function_signature_param_fact(out, "type_id::function_param_type_id_from_node", 0, "text", "[]u8");
+    try append_function_signature_param_fact(
+        out, "type_id::function_param_type_id_from_node", 1, "ast", "std::kizu::ast::Ast"
+    );
+    try append_function_signature_param_fact(
+        out, "type_id::function_param_type_id_from_node", 2, "type_node", "std::kizu::ast::NodeId"
+    );
+
+    try append_function_signature_return_fact(
+        out, "type_id::type_record_from_id", "selfhost::types::type_id::TypeRecord"
+    );
+    try append_function_signature_param_fact(out, "type_id::type_record_from_id", 0, "type_id_value", "i64");
+
+    try append_function_signature_return_fact(
+        out, "type_id::type_record_from_text", "selfhost::types::type_id::TypeRecord"
+    );
+    try append_function_signature_param_fact(out, "type_id::type_record_from_text", 0, "type_text", "[]u8");
+
+    try append_function_signature_return_fact(
+        out, "type_id::unknown_type_record", "selfhost::types::type_id::TypeRecord"
+    );
+
+    try append_function_signature_return_fact(
+        out, "type_id::map_type_parts_from_text", "selfhost::types::type_id::TypeMapParts"
+    );
+    try append_function_signature_param_fact(out, "type_id::map_type_parts_from_text", 0, "type_text", "[]u8");
+
+    try append_function_signature_return_fact(
+        out, "type_id::box_type_parts_from_text", "selfhost::types::type_id::TypeBoxParts"
+    );
+    try append_function_signature_param_fact(out, "type_id::box_type_parts_from_text", 0, "type_text", "[]u8");
+
+    try append_function_signature_return_fact(out, "type_id::type_text_is_arena_handle", "bool");
+    try append_function_signature_param_fact(out, "type_id::type_text_is_arena_handle", 0, "type_text", "[]u8");
+    return;
+}
+
+fn append_type_id_closure_helper_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_catalog_helper_body_ir(
+        out,
+        text,
+        ast,
+        catalog,
+        function_index,
+        "checked-type-id-classifier",
+        body
+    );
+    try collect_catalog_closure_direct_callees(
+        text,
+        ast,
+        body,
+        catalog,
+        pending,
+        "selfhost::types::type_id::",
+        "type id closure: unsupported call form",
+        "type id closure: unsupported qualified callee"
     );
     return;
 }
@@ -3230,11 +3465,24 @@ fn collect_catalog_closure_call_callee(
     let node = ast.get(callee);
     match node.data {
         Var(_) => return collect_catalog_closure_var_callee(callee_text, catalog, pending);,
+        TypeApplyExpr(type_apply) => return collect_catalog_closure_call_callee(
+            text,
+            ast,
+            type_apply.callee,
+            catalog,
+            pending,
+            qualified_prefix,
+            unsupported_call_form_error,
+            unsupported_qualified_callee_error
+        );,
         FieldExpr(field) => return collect_catalog_closure_field_callee(
             text, ast, field.namespace, field.name, callee_text, catalog, pending,
             qualified_prefix, unsupported_call_form_error, unsupported_qualified_callee_error
         );,
-        _ => return error(unsupported_call_form_error);,
+        _ => return closure_unsupported_callee_error(
+            unsupported_call_form_error,
+            callee_text
+        );,
     }
     return;
 }
@@ -3268,13 +3516,15 @@ fn collect_catalog_closure_field_callee(
     if !namespace {
         let method = ast_node_text(text, ast, name_node);
         if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "get") or
+            std::mem::equal_bytes(method, "get_or_panic") or std::mem::equal_bytes(method, "at") or
             std::mem::equal_bytes(method, "set") or std::mem::equal_bytes(method, "append") or
             std::mem::equal_bytes(method, "append_bytes") or
             std::mem::equal_bytes(method, "append_byte") or
+            std::mem::equal_bytes(method, "as_bytes") or
             std::mem::equal_bytes(method, "deinit") {
             return;
         }
-        return error(unsupported_call_form_error);
+        return closure_unsupported_callee_error(unsupported_call_form_error, callee_text);
     }
     return collect_catalog_closure_qualified_callee(
         callee_text, catalog, pending, qualified_prefix, unsupported_qualified_callee_error
@@ -3317,8 +3567,14 @@ fn collect_catalog_closure_external_callee_allowed(
     if std::mem::equal_bytes(qualified_prefix, "selfhost::backend::") {
         return backend_wrapper_external_callee_allowed(callee_text);
     }
+    if std::mem::equal_bytes(qualified_prefix, "selfhost::cli::execute::") {
+        return execute_closure_external_callee_allowed(callee_text);
+    }
     if std::mem::equal_bytes(qualified_prefix, "selfhost::types::checker::") {
         return types_checker_closure_external_callee_allowed(callee_text);
+    }
+    if std::mem::equal_bytes(qualified_prefix, "selfhost::types::type_id::") {
+        return type_id_closure_external_callee_allowed(callee_text);
     }
     if !std::mem::equal_bytes(qualified_prefix, "selfhost::ast::") {
         return false;
@@ -3399,7 +3655,10 @@ fn parser_closure_ast_mutator_callee_allowed(callee_text: []u8) -> bool {
         std::mem::equal_bytes(callee_text, "ast.add_fn_decl_with_doc") or
         std::mem::equal_bytes(callee_text, "ast.add_for") or
         std::mem::equal_bytes(callee_text, "ast.add_if") or
+        std::mem::equal_bytes(callee_text, "ast.add_contract_decl") or
+        std::mem::equal_bytes(callee_text, "ast.add_contract_decl_with_doc") or
         std::mem::equal_bytes(callee_text, "ast.add_impl_decl") or
+        std::mem::equal_bytes(callee_text, "ast.add_impl_decl_with_contract") or
         std::mem::equal_bytes(callee_text, "ast.add_import_decl") or
         std::mem::equal_bytes(callee_text, "ast.add_index_expr") or
         std::mem::equal_bytes(callee_text, "ast.add_int") or
@@ -3447,6 +3706,10 @@ fn types_checker_closure_external_callee_allowed(callee_text: []u8) -> bool {
         std::mem::equal_bytes(callee_text, "ast.child_at");
 }
 
+fn type_id_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "ast.get");
+}
+
 // hosted_closure_external_callee_allowed enumerates the codegen module boundary
 // callees the seeded hosted helper closure is allowed to cross without emitting
 // their bodies. The closure now seeds from rendered_run_metadata_executable, whose
@@ -3459,15 +3722,56 @@ fn hosted_closure_external_callee_allowed(callee_text: []u8) -> bool {
 
 // backend_wrapper_external_callee_allowed enumerates the cross-component module
 // boundary callees the selected backend wrapper closure is allowed to cross
-// without emitting their bodies. render_run_codegen_artifact delegates to
-// code_render::render_run_ast_artifact and emit_rendered_run_artifact delegates to
-// hosted::emit_rendered_run_artifact, whose body facts are owned by the code_render
-// and hosted closures respectively. Anything outside this explicit allowlist
-// falls through to the shared collector's qualified-callee error instead of being
-// silently dropped.
+// without emitting their bodies. emit_run_sources_codegen_artifact parses the
+// combined source and delegates final rendering/writing to the code_render and
+// hosted closures. Source module markers are also rendered through the source
+// component so package module names stay owned by the shared source model.
+// Those component-owned callees are listed explicitly here.
+// Anything outside this exact allowlist falls through to the shared collector's
+// qualified-callee error instead of being silently dropped.
 fn backend_wrapper_external_callee_allowed(callee_text: []u8) -> bool {
-    return std::mem::equal_bytes(callee_text, "code_render::render_run_ast_artifact") or
+    return std::mem::equal_bytes(callee_text, "std::fs::exists") or
+        std::mem::equal_bytes(callee_text, "std::fs::create_dir") or
+        std::mem::equal_bytes(callee_text, "std::fs::write_file") or
+        std::mem::equal_bytes(callee_text, "std::fs::read_file") or
+        std::mem::equal_bytes(callee_text, "parser::parse_checked_file") or
+        std::mem::equal_bytes(callee_text, "source::is_source_code") or
+        std::mem::equal_bytes(callee_text, "source::append_qualified_module_name") or
+        std::mem::equal_bytes(callee_text, "code_render::render_run_ast_artifact") or
         std::mem::equal_bytes(callee_text, "hosted::emit_rendered_run_artifact");
+}
+
+fn execute_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "ast.get") or
+        std::mem::equal_bytes(callee_text, "ast.child_at") or
+        std::mem::equal_bytes(callee_text, "std::fs::metadata") or
+        std::mem::equal_bytes(callee_text, "std::fs::read_file") or
+        std::mem::equal_bytes(callee_text, "std::path::dirname") or
+        std::mem::equal_bytes(callee_text, "std::process::exit_code") or
+        std::mem::equal_bytes(callee_text, "source::is_manifest_text") or
+        std::mem::equal_bytes(callee_text, "source::is_frontend_source") or
+        std::mem::equal_bytes(callee_text, "loader::load_file_sources") or
+        std::mem::equal_bytes(callee_text, "loader::load_package_sources") or
+        std::mem::equal_bytes(callee_text, "parser::validate_diagnostic_file") or
+        std::mem::equal_bytes(callee_text, "parser::parse_validated_file") or
+        std::mem::equal_bytes(callee_text, "check::checked_ast_node") or
+        std::mem::equal_bytes(callee_text, "check::checked_package_sources") or
+        std::mem::equal_bytes(callee_text, "backend::emit_run_sources_codegen_artifact") or
+        std::mem::equal_bytes(callee_text, "backend::run_artifact_ll_path") or
+        std::mem::equal_bytes(callee_text, "backend::run_artifact_executable_path") or
+        std::mem::equal_bytes(callee_text, "backend::link_run_artifact") or
+        std::mem::equal_bytes(callee_text, "backend::execute_run_artifact") or
+        std::mem::equal_bytes(callee_text, "backend::execute_run_artifact_with_process_args") or
+        std::mem::equal_bytes(callee_text, "backend::lower_test_executable") or
+        std::mem::equal_bytes(callee_text, "backend::test_executable_supported") or
+        std::mem::equal_bytes(callee_text, "backend::emit_test_executable_artifact") or
+        std::mem::equal_bytes(callee_text, "backend::test_artifact_ll_path") or
+        std::mem::equal_bytes(callee_text, "backend::test_artifact_executable_path") or
+        std::mem::equal_bytes(callee_text, "backend::link_test_artifact") or
+        std::mem::equal_bytes(callee_text, "ast_text::ast_node_text") or
+        std::mem::equal_bytes(callee_text, "output::usage") or
+        std::mem::equal_bytes(callee_text, "output::unsupported_run_codegen") or
+        std::mem::equal_bytes(callee_text, "diagnostics::parse_validation_error");
 }
 
 // code_render_closure_external_callee_allowed enumerates the cross-module callees the
@@ -3492,6 +3796,9 @@ fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
         return true;
     }
     if std::mem::equal_bytes(callee_text, "ast.child_at") {
+        return true;
+    }
+    if codegen_closure_type_id_callee_allowed(callee_text) {
         return true;
     }
     if std::mem::starts_with(callee_text, "std::kizu::ast::binary_") {
@@ -3520,6 +3827,18 @@ fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
         return true;
     }
     return false;
+}
+
+fn codegen_closure_type_id_callee_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "type_id::type_record_from_node") or
+        std::mem::equal_bytes(callee_text, "type_id::function_return_type_id_from_node") or
+        std::mem::equal_bytes(callee_text, "type_id::function_param_type_id_from_node") or
+        std::mem::equal_bytes(callee_text, "type_id::type_record_from_id") or
+        std::mem::equal_bytes(callee_text, "type_id::type_record_from_text") or
+        std::mem::equal_bytes(callee_text, "type_id::unknown_type_record") or
+        std::mem::equal_bytes(callee_text, "type_id::map_type_parts_from_text") or
+        std::mem::equal_bytes(callee_text, "type_id::box_type_parts_from_text") or
+        std::mem::equal_bytes(callee_text, "type_id::type_text_is_arena_handle");
 }
 
 fn codegen_closure_binary_op_accessor_allowed(callee_text: []u8) -> bool {
@@ -3555,10 +3874,19 @@ fn collect_catalog_closure_qualified_callee(
     unsupported_qualified_callee_error: []u8
 ) -> !void {
     if !std::mem::starts_with(callee_text, qualified_prefix) {
-        return error(unsupported_qualified_callee_error);
+        return closure_unsupported_callee_error(unsupported_qualified_callee_error, callee_text);
     }
     try pending.append(try component_function_catalog::find_qualified_function_index(catalog, callee_text));
     return;
+}
+
+fn closure_unsupported_callee_error(prefix: []u8, callee_text: []u8) -> !void {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes(prefix);
+    try message.append_bytes(": ");
+    try message.append_bytes(callee_text);
+    let bytes = message.as_bytes();
+    return error(bytes);
 }
 
 fn append_loader_function_facts(
@@ -3824,9 +4152,36 @@ pub fn append_codegen_function_facts(
         "CodeEval",
         "selfhost::ir::codegen::CodeEval"
     );
+    try append_selected_struct_field_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "GenericInlineEval",
+        "selfhost::ir::codegen::GenericInlineEval"
+    );
+    try append_selected_struct_field_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "CodeConstBool",
+        "selfhost::ir::codegen::CodeConstBool"
+    );
+    try append_selected_struct_field_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "CodeConstI64",
+        "selfhost::ir::codegen::CodeConstI64"
+    );
     try append_type_llvm_fact(out, "selfhost::ir::codegen::PayloadSpan", "%kizu.selfhost.codegen.payload_span");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::IntEnv", "%kizu.selfhost.codegen.int_env");
     try append_type_llvm_fact(out, "selfhost::ir::codegen::CodeEval", "%kizu.selfhost.codegen.code_eval");
+    try append_type_llvm_fact(out, "selfhost::ir::codegen::GenericInlineEval", "%kizu.selfhost.codegen.generic_inline_eval");
+    try append_type_llvm_fact(out, "selfhost::ir::codegen::CodeConstBool", "%kizu.selfhost.codegen.code_const_bool");
+    try append_type_llvm_fact(out, "selfhost::ir::codegen::CodeConstI64", "%kizu.selfhost.codegen.code_const_i64");
     try append_runtime_stdlib_symbol_preamble(out);
     try append_codegen_reachable_helper_bodies(
         out,
@@ -3861,10 +4216,12 @@ fn append_codegen_reachable_helper_bodies(
     // the expression descent, and the record builders through the shared closure
     // BFS.
     try append_codegen_closure_seed(&var pending, catalog, "lower_code_module");
-    // code_op_mem_page_allocator is read by the code_render closure across the
-    // codegen module boundary, so it is a direct stage2 backend root like
-    // empty_int_env rather than a private helper reached from lower_code_module.
-    try append_codegen_closure_seed(&var pending, catalog, "code_op_mem_page_allocator");
+    // The renderer consumes the opcode catalog across the codegen component
+    // boundary. Seed every opcode accessor from the catalog so adding a generic
+    // lowering does not depend on an incidental call from lower_code_module.
+    try append_codegen_opcode_closure_seeds(&var pending, catalog);
+    try append_codegen_closure_seed(&var pending, catalog, "code_op_array_read_i64");
+    try append_codegen_closure_seed(&var pending, catalog, "code_op_array_read");
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);
@@ -3883,6 +4240,22 @@ fn append_codegen_reachable_helper_bodies(
     }
     pending.deinit();
     emitted.deinit();
+    return;
+}
+
+fn append_codegen_opcode_closure_seeds(
+    pending: &var std::array::Array<i64>,
+    catalog: &component_function_catalog::ComponentFunctionCatalog
+) -> !void {
+    var index = 0;
+    let count = component_function_catalog::len(catalog);
+    while index < count {
+        let local_name = try component_function_catalog::local_function_name(catalog, index);
+        if std::mem::starts_with(local_name, "code_op_") {
+            try pending.append(index);
+        }
+        index = index + 1;
+    }
     return;
 }
 
@@ -4680,34 +5053,93 @@ fn append_execute_function_facts(
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
 
-    try append_selected_function_with_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "run_file_cli",
-        "selfhost::cli::execute::run_file_cli",
-        "checked-run-artifact"
-    );
+    try append_execute_function_body_facts(allocator, out, file.text, parsed.ast, parsed.root);
+    return;
+}
 
-    try append_selected_function_with_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "test_file_cli",
-        "selfhost::cli::execute::test_file_cli",
-        "checked-test-artifact"
+fn append_execute_function_body_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    var catalog = try component_function_catalog::collect_from_ast(
+        allocator,
+        text,
+        ast,
+        root,
+        "selfhost::cli::execute"
     );
-    try append_selected_function_signature(
+    defer catalog.deinit();
+
+    var pending = std::array::Array<i64>(std::mem::page_allocator());
+    var emitted = std::array::Array<i64>(std::mem::page_allocator());
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "run_file_cli"));
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "test_file_cli"));
+    var index = 0;
+    while index < pending.len() {
+        let function_index = try pending.get(index);
+        if !(try closure_index_seen(&emitted, function_index)) {
+            try append_execute_closure_body(
+                out,
+                text,
+                ast,
+                &catalog,
+                function_index,
+                &var pending
+            );
+            try emitted.append(function_index);
+        }
+        index = index + 1;
+    }
+    pending.deinit();
+    emitted.deinit();
+    return;
+}
+
+fn append_execute_closure_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    function_index: i64,
+    pending: &var std::array::Array<i64>
+) -> !void {
+    let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+    let function_node_id = try component_function_catalog::function_node_id(catalog, function_index);
+    try function_signature::append_catalog(out, text, ast, function_node_id, catalog, function_index);
+    let body = try function_body_from_node(ast, function_node_id);
+    try executable_body::append_catalog_helper_body_ir(
         out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "write_parse_failure",
-        "selfhost::cli::execute::write_parse_failure"
+        text,
+        ast,
+        catalog,
+        function_index,
+        execute_closure_role(local_name),
+        body
+    );
+    try collect_catalog_closure_direct_callees(
+        text,
+        ast,
+        body,
+        catalog,
+        pending,
+        "selfhost::cli::execute::",
+        "execute closure: unsupported call form",
+        "execute closure: unsupported qualified callee"
     );
     return;
+}
+
+fn execute_closure_role(local_name: []u8) -> []u8 {
+    if std::mem::equal_bytes(local_name, "run_file_cli") {
+        return "checked-run-artifact";
+    }
+    if std::mem::equal_bytes(local_name, "test_file_cli") {
+        return "checked-test-artifact";
+    }
+    return "checked-cli-execute-helper";
 }
 
 fn append_backend_function_facts(
@@ -4740,8 +5172,7 @@ fn append_backend_wrapper_body_facts(
 
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
-    try pending.append(try component_function_catalog::find_local_function_index(catalog, "render_run_codegen_artifact"));
-    try pending.append(try component_function_catalog::find_local_function_index(catalog, "emit_rendered_run_artifact"));
+    try pending.append(try component_function_catalog::find_local_function_index(catalog, "emit_run_sources_codegen_artifact"));
     var index = 0;
     while index < pending.len() {
         let function_index = try pending.get(index);
@@ -4798,13 +5229,13 @@ fn append_backend_wrapper_closure_body(
 }
 
 // backend_wrapper_role keeps the catalog-driven backend wrapper closure on the
-// same body-fact roles the hand-written selection used: render_run_codegen_artifact
-// stays the checked-run-codegen-wrapper entry while emit_rendered_run_artifact
-// keeps the checked-run-codegen-artifact-wrapper entry. The two seeds delegate
-// only to allowlisted cross-component callees, so no other catalog member is
-// reachable through the closure.
+// same body-fact roles the hand-written selection used: emit_run_sources_codegen_artifact
+// is the checked-run-codegen-wrapper entry, while emit_rendered_run_artifact keeps
+// the checked-run-codegen-artifact-wrapper role when reached from that entry. The
+// seed delegates only to allowlisted cross-component callees, so no unrelated catalog
+// member is reachable through the closure.
 fn backend_wrapper_role(local_name: []u8) -> []u8 {
-    if std::mem::equal_bytes(local_name, "render_run_codegen_artifact") {
+    if std::mem::equal_bytes(local_name, "emit_run_sources_codegen_artifact") {
         return "checked-run-codegen-wrapper";
     }
     return "checked-run-codegen-artifact-wrapper";

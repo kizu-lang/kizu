@@ -483,22 +483,47 @@ fn require_selected_executable_body_ir(bytes: []u8) -> !void {
     try ir_contract::require_body_call(
         bytes,
         "selfhost::cli::execute::run_file_cli",
+        "run_file_cli_with_process_args"
+    );
+    try ir_contract::require_body_call(
+        bytes,
+        "selfhost::cli::execute::run_file_cli_with_process_args",
+        "run_source_cli"
+    );
+    try ir_contract::require_body_call(
+        bytes,
+        "selfhost::cli::execute::run_file_cli_with_process_args",
+        "run_package_cli"
+    );
+    try ir_contract::require_body_call(
+        bytes,
+        "selfhost::cli::execute::run_source_cli",
         "check::checked_ast_node"
     );
     try ir_contract::require_body_call(
         bytes,
-        "selfhost::cli::execute::run_file_cli",
-        "backend::render_run_codegen_artifact"
+        "selfhost::cli::execute::run_source_cli",
+        "backend::emit_run_sources_codegen_artifact"
     );
     try ir_contract::require_body_call(
         bytes,
-        "selfhost::cli::execute::run_file_cli",
-        "backend::emit_rendered_run_artifact"
+        "selfhost::cli::execute::run_package_cli",
+        "check::checked_package_sources"
     );
     try ir_contract::require_body_call(
         bytes,
-        "selfhost::backend::render_run_codegen_artifact",
+        "selfhost::cli::execute::run_package_cli",
+        "backend::emit_run_sources_codegen_artifact"
+    );
+    try ir_contract::require_body_call(
+        bytes,
+        "selfhost::backend::emit_run_sources_codegen_artifact",
         "code_render::render_run_ast_artifact"
+    );
+    try ir_contract::require_body_call(
+        bytes,
+        "selfhost::backend::emit_run_sources_codegen_artifact",
+        "emit_rendered_run_artifact"
     );
     try ir_contract::require_body_call(
         bytes,
@@ -794,6 +819,18 @@ fn render_llvm_module(
     try append_line(out,
         "%kizu.error.code_eval = type { i1, %kizu.selfhost.codegen.code_eval, %kizu.slice.u8 }");
     try append_line(out,
+        "%kizu.selfhost.codegen.generic_inline_eval = type { i1, i1, i64, i64 }");
+    try append_line(out,
+        "%kizu.error.generic_inline_eval = type { i1, %kizu.selfhost.codegen.generic_inline_eval, %kizu.slice.u8 }");
+    try append_line(out,
+        "%kizu.selfhost.codegen.code_const_bool = type { i1, i1 }");
+    try append_line(out,
+        "%kizu.error.code_const_bool = type { i1, %kizu.selfhost.codegen.code_const_bool, %kizu.slice.u8 }");
+    try append_line(out,
+        "%kizu.selfhost.codegen.code_const_i64 = type { i1, i64 }");
+    try append_line(out,
+        "%kizu.error.code_const_i64 = type { i1, %kizu.selfhost.codegen.code_const_i64, %kizu.slice.u8 }");
+    try append_line(out,
         "%kizu.kizu.ast.child_range = type { i64, i64 }");
     try append_line(out,
         "%kizu.selfhost.codegen.int_env = type { i64, %kizu.kizu.ast.child_range, %kizu.slice.u8, i64, %kizu.slice.u8, i64, %kizu.slice.u8, i64 }");
@@ -811,6 +848,20 @@ fn render_llvm_module(
     // compiled source_file helper. SourceKind is an enum and lowers to i64.
     try append_line(out,
         "%kizu.selfhost.source.source_file = type { i64, i64, %kizu.slice.u8, i64, i64, %kizu.slice.u8, %kizu.slice.u8 }");
+    try append_line(out,
+        "%kizu.selfhost.types.type_id.type_id = type { i64 }");
+    try append_line(out,
+        "%kizu.selfhost.types.type_id.type_record = type { i64, i64, i64, i64, i1 }");
+    try append_line(out,
+        "%kizu.error.type_record = type { i1, %kizu.selfhost.types.type_id.type_record, %kizu.slice.u8 }");
+    try append_line(out,
+        "%kizu.selfhost.types.type_id.type_table = type { i64, i64, i64, i64, i64, i64, i64 }");
+    try append_line(out,
+        "%kizu.selfhost.types.type_id.type_generic_parts = type { i1, i64, i64, i64, i64, i64, i64, i64 }");
+    try append_line(out,
+        "%kizu.selfhost.types.type_id.type_map_parts = type { i1, i64, i64, i1, i1 }");
+    try append_line(out,
+        "%kizu.selfhost.types.type_id.type_box_parts = type { i1, i64, i64 }");
     // NodeId is the children Array element type; Ast.child_at returns one by value as
     // !NodeId via the checked Array<NodeId>.get accessor (tracker 961).
     try append_line(out,
@@ -968,7 +1019,9 @@ fn render_llvm_module(
     try append_line(out,
         "%kizu.kizu.ast.union_decl_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, %kizu.kizu.ast.span }");
     try append_line(out,
-        "%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }");
+        "%kizu.kizu.ast.contract_decl_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range, %kizu.kizu.ast.span }");
+    try append_line(out,
+        "%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }");
     try append_line(out,
         "%kizu.kizu.ast.union_variant_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.span }");
     try append_line(out,
@@ -1064,7 +1117,7 @@ fn render_llvm_module(
     // module), reading the len field (index 2) out of the %kizu.owned-wrapped
     // %kizu.rt.array record. AstNode/AstData union access, Arena.get, and
     // array_get remain out of scope.
-    try append_line(out, "define i64 @kizu_rt_array_len(%kizu.owned %array) {");
+    try append_line(out, "define private i64 @kizu_rt_array_len(%kizu.owned %array) {");
     try append_line(out, "entry:");
     try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
     try append_line(out,
@@ -1090,7 +1143,7 @@ fn render_llvm_module(
     // %kizu.error.slice.u8 (ok flag, element view slice {ptr,element_size}, error
     // message); out-of-bounds or unset storage returns the failure message.
     try append_line(out,
-        "define %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index) {");
+        "define private %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index) {");
     try append_line(out, "entry:");
     try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
     try append_line(out,
@@ -1142,7 +1195,7 @@ fn render_llvm_module(
     // definitions; the hosted compiler module carries its own self-contained copies (it never
     // links the storage module), matching the embedded array_len / array_at / arena_add.
     try append_line(out,
-        "define %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, i64 %element_size) {");
+        "define private %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, i64 %element_size) {");
     try append_line(out, "entry:");
     try append_line(out, "  %allocator_ptr = extractvalue %kizu.owned %allocator, 0");
     try append_line(out, "  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 40)");
@@ -1166,7 +1219,7 @@ fn render_llvm_module(
     try append_line(out, "}");
     try append_line(out, "");
     try append_line(out,
-        "define %kizu.error.void @kizu_rt_array_append(%kizu.owned %array, %kizu.slice.u8 %element) {");
+        "define private %kizu.error.void @kizu_rt_array_append(%kizu.owned %array, %kizu.slice.u8 %element) {");
     try append_line(out, "entry:");
     try append_line(out, "  %element_ptr = extractvalue %kizu.slice.u8 %element, 0");
     try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
@@ -1214,7 +1267,7 @@ fn render_llvm_module(
     // message. The hosted compiler module carries its own self-contained copy (it
     // never links the storage module), matching the embedded array_new/append/at.
     try append_line(out,
-        "define %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 %index, %kizu.slice.u8 %element) {");
+        "define private %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 %index, %kizu.slice.u8 %element) {");
     try append_line(out, "entry:");
     try append_line(out, "  %element_ptr = extractvalue %kizu.slice.u8 %element, 0");
     try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
@@ -1263,7 +1316,7 @@ fn render_llvm_module(
     // compiler module carries its own self-contained copy (it never links the storage
     // module).
     try append_line(out,
-        "define %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %value) {");
+        "define private %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %value) {");
     try append_line(out, "entry:");
     try append_line(out, "  %value_ptr = extractvalue %kizu.slice.u8 %value, 0");
     try append_line(out, "  %raw = extractvalue %kizu.owned %arena, 0");
@@ -1311,7 +1364,7 @@ fn render_llvm_module(
     // reuses the %kizu.rt.array record layout; the hosted module carries its own
     // self-contained copy.
     try append_line(out,
-        "define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index) {");
+        "define private %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index) {");
     try append_line(out, "entry:");
     try append_line(out, "  %raw = extractvalue %kizu.owned %arena, 0");
     try append_line(out,
@@ -1432,7 +1485,7 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
     try append_line(out, "");
-    try append_line(out, "define %kizu.owned @kizu_rt_string_new(%kizu.owned %allocator) {");
+    try append_line(out, "define private %kizu.owned @kizu_rt_string_new(%kizu.owned %allocator) {");
     try append_line(out, "entry:");
     try append_line(out, "  %allocator_ptr = extractvalue %kizu.owned %allocator, 0");
     try append_line(out, "  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 32)");
@@ -1453,7 +1506,7 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
     try append_line(out, "}");
     try append_line(out, "");
     try append_line(out,
-        "define %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %string, %kizu.slice.u8 %bytes) {");
+        "define private %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %string, %kizu.slice.u8 %bytes) {");
     try append_line(out, "entry:");
     try append_line(out, "  %byte_ptr = extractvalue %kizu.slice.u8 %bytes, 0");
     try append_line(out, "  %byte_len = extractvalue %kizu.slice.u8 %bytes, 1");
@@ -1550,7 +1603,7 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
     try append_line(out, "}");
     try append_line(out, "");
     try append_line(out,
-        "define %kizu.error.void @kizu_rt_string_reserve(%kizu.owned %string, i64 %additional) {");
+        "define private %kizu.error.void @kizu_rt_string_reserve(%kizu.owned %string, i64 %additional) {");
     try append_line(out, "entry:");
     try append_line(out, "  %additional_nonnegative = icmp sge i64 %additional, 0");
     try append_line(out, "  br i1 %additional_nonnegative, label %load, label %negative");
@@ -1653,7 +1706,7 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
     try append_line(out, "}");
     try append_line(out, "");
     try append_line(out,
-        "define %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %string, i8 %byte) {");
+        "define private %kizu.error.void @kizu_rt_string_append_byte(%kizu.owned %string, i8 %byte) {");
     try append_line(out, "entry:");
     try append_line(out, "  %slot = alloca i8");
     try append_line(out, "  store i8 %byte, ptr %slot");
@@ -1664,7 +1717,7 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
     try append_line(out, "  ret %kizu.error.void %result");
     try append_line(out, "}");
     try append_line(out, "");
-    try append_line(out, "define i64 @kizu_rt_string_len(%kizu.owned %string) {");
+    try append_line(out, "define private i64 @kizu_rt_string_len(%kizu.owned %string) {");
     try append_line(out, "entry:");
     try append_line(out, "  %raw = extractvalue %kizu.owned %string, 0");
     try append_line(out,
@@ -1673,7 +1726,7 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
     try append_line(out, "  ret i64 %len");
     try append_line(out, "}");
     try append_line(out, "");
-    try append_line(out, "define %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %string) {");
+    try append_line(out, "define private %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %string) {");
     try append_line(out, "entry:");
     try append_line(out, "  %raw = extractvalue %kizu.owned %string, 0");
     try append_line(out,

@@ -4,10 +4,46 @@ import selfhost::cli::diagnostics;
 import selfhost::cli::output;
 import selfhost::diagnostic;
 import selfhost::parser;
+import selfhost::source;
 import selfhost::source::loader;
+import selfhost::types::ast_text;
 
 pub fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
+    return try run_file_cli_with_process_args(allocator, io, path, 3, 3);
+}
+
+pub fn run_file_cli_with_process_args(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    program_arg_start: i64,
+    cli_arg_count: i64
+) -> !i64 {
+    let metadata = try std::fs::metadata(io, path);
+    if metadata.is_dir {
+        return try run_package_cli(allocator, io, path, program_arg_start, cli_arg_count);
+    }
     let file_text = try std::fs::read_file(io, path);
+    if source::is_manifest_text(file_text) {
+        return try run_package_cli(
+            allocator,
+            io,
+            std::path::dirname(path),
+            program_arg_start,
+            cli_arg_count
+        );
+    }
+    return try run_source_cli(allocator, io, path, file_text, program_arg_start, cli_arg_count);
+}
+
+fn run_source_cli(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8,
+    program_arg_start: i64,
+    cli_arg_count: i64
+) -> !i64 {
     var parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
     defer parsed_validation.deinit();
     let validation_ok = parsed_validation.ok;
@@ -27,39 +63,160 @@ pub fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     if !(try check::checked_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
         return std::process::exit_code(1);
     }
-    var module = try backend::render_run_codegen_artifact(
-        allocator,
-        path,
-        file_text,
-        parsed.ast,
-        parsed.root
-    );
-    defer module.deinit();
-    let module_bytes = module.as_bytes();
-    let module_len = module.len();
-    let artifact = try backend::emit_rendered_run_artifact(
+    if !(try run_ast_has_main(file, parsed.ast, parsed.root)) {
+        return error("undefined function `main`");
+    }
+    let artifact = try backend::emit_run_sources_codegen_artifact(
         allocator,
         io,
         path,
-        module_bytes,
-        module_len
+        files
     );
     if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
-        var ll_path = try backend::run_artifact_ll_path(allocator, path);
-        defer ll_path.deinit();
-        var executable_path = try backend::run_artifact_executable_path(allocator, path);
-        defer executable_path.deinit();
-        let ll_path_bytes = ll_path.as_bytes();
-        let executable_path_bytes = executable_path.as_bytes();
-        let link_code = try backend::link_run_artifact(ll_path_bytes, executable_path_bytes);
+        let link_code = try backend::link_run_artifact(allocator, io, path);
         if link_code != 0 {
             try output::usage(allocator, io);
             return std::process::exit_code(64);
         }
-        return try backend::execute_run_artifact(executable_path_bytes);
+        var executable_path = try backend::run_artifact_executable_path(allocator, path);
+        defer executable_path.deinit();
+        let executable_path_bytes = executable_path.as_bytes();
+        return try backend::execute_run_artifact_with_process_args(
+            executable_path_bytes,
+            program_arg_start,
+            cli_arg_count
+        );
     }
     try output::unsupported_run_codegen(allocator, io);
     return std::process::exit_code(64);
+}
+
+fn run_package_cli(
+    allocator: Allocator,
+    io: Io,
+    root: []u8,
+    program_arg_start: i64,
+    cli_arg_count: i64
+) -> !i64 {
+    var files = try loader::load_package_sources(allocator, io, root);
+    defer files.deinit();
+    let root_index = try package_root_source_index(files);
+    let file = try files.at(root_index);
+    var parsed_validation = try parser::validate_diagnostic_file(allocator, file.path, file.text);
+    defer parsed_validation.deinit();
+    let validation_ok = parsed_validation.ok;
+    if !validation_ok {
+        return try write_parse_failure(allocator, io, file.path, &var parsed_validation);
+    }
+    let parsed = try parser::parse_validated_file(
+        allocator,
+        file.path,
+        file.text,
+        validation_ok
+    );
+    defer parsed.deinit();
+    if !(try check::checked_package_sources(allocator, io, files)) {
+        return std::process::exit_code(1);
+    }
+    if !(try run_ast_has_main(file, parsed.ast, parsed.root)) {
+        return error("undefined function `main`");
+    }
+    let artifact = try backend::emit_run_sources_codegen_artifact(
+        allocator,
+        io,
+        file.path,
+        files
+    );
+    if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
+        let link_code = try backend::link_run_artifact(allocator, io, file.path);
+        if link_code != 0 {
+            try output::usage(allocator, io);
+            return std::process::exit_code(64);
+        }
+        var executable_path = try backend::run_artifact_executable_path(allocator, file.path);
+        defer executable_path.deinit();
+        let executable_path_bytes = executable_path.as_bytes();
+        return try backend::execute_run_artifact_with_process_args(
+            executable_path_bytes,
+            program_arg_start,
+            cli_arg_count
+        );
+    }
+    try output::unsupported_run_codegen(allocator, io);
+    return std::process::exit_code(64);
+}
+
+fn package_root_source_index(files: &std::array::Array<source::SourceFile>) -> !i64 {
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_frontend_source(file.kind) and file.module_start == 0 and file.module_end == 0 {
+            return index;
+        }
+        index = index + 1;
+    }
+    return error("missing module root");
+}
+
+fn run_ast_has_main(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !bool {
+    let node = ast.get(root);
+    return match node.data {
+        Program(program) => try run_decl_range_has_main(file, ast, program.declarations, 0),
+        _ => false,
+    };
+}
+
+fn run_decl_range_has_main(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    index: i64
+) -> !bool {
+    if index >= declarations.len {
+        return false;
+    }
+    let child = try ast.child_at(declarations, index);
+    if run_decl_is_main(file, ast, child) {
+        return true;
+    }
+    let after = index + 1;
+    return try run_decl_range_has_main(file, ast, declarations, after);
+}
+
+fn run_decl_is_main(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    decl: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(decl);
+    return match node.data {
+        FnDecl(fn_decl) => run_fn_decl_is_main(file, ast, fn_decl.extern_abi, fn_decl.name),
+        _ => false,
+    };
+}
+
+fn run_fn_decl_is_main(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    extern_abi: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId
+) -> bool {
+    if !run_node_is_empty(ast, extern_abi) {
+        return false;
+    }
+    return std::mem::equal_bytes(ast_text::ast_node_text(file, ast, name), "main");
+}
+
+fn run_node_is_empty(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Empty => true,
+        _ => false,
+    };
 }
 
 pub fn test_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
@@ -92,17 +249,14 @@ pub fn test_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
             executable
         );
         if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
-            var ll_path = try backend::test_artifact_ll_path(allocator, path);
-            defer ll_path.deinit();
-            var executable_path = try backend::test_artifact_executable_path(allocator, path);
-            defer executable_path.deinit();
-            let ll_path_bytes = ll_path.as_bytes();
-            let executable_path_bytes = executable_path.as_bytes();
-            let link_code = try backend::link_run_artifact(ll_path_bytes, executable_path_bytes);
+            let link_code = try backend::link_test_artifact(allocator, io, path);
             if link_code != 0 {
                 try output::usage(allocator, io);
                 return std::process::exit_code(64);
             }
+            var executable_path = try backend::test_artifact_executable_path(allocator, path);
+            defer executable_path.deinit();
+            let executable_path_bytes = executable_path.as_bytes();
             return try backend::execute_run_artifact(executable_path_bytes);
         }
     }

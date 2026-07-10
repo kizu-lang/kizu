@@ -108,6 +108,14 @@ fn check_parsed_sources_core(
             arities,
             copyable
         );
+        try type_refs::collect_type_parameters_from_ast(
+            file,
+            parsed_source.ast,
+            parsed_source.root,
+            kinds,
+            arities,
+            copyable
+        );
         try function_calls::collect_function_signatures_from_ast(
             allocator,
             file,
@@ -169,7 +177,7 @@ fn check_parsed_sources_core(
     let summary = model::TypeSummary {
         modules: resolved.modules,
         symbols: kinds.len(),
-        functions: function_arities.len(),
+        functions: function_arities.len() / 2,
         typed_nodes: typed_nodes,
         diagnostics: diagnostics
     };
@@ -938,6 +946,13 @@ fn check_ast_statements(
         StructDecl(struct_decl) => return type_scan_summary(0, 0, 0);,
         EnumDecl(enum_decl) => return type_scan_summary(0, 0, 0);,
         UnionDecl(union_decl) => return type_scan_summary(0, 0, 0);,
+        ContractDecl(contract_decl) => return check_statement_declarations(
+            allocator,
+            file,
+            ast,
+            contract_decl.methods,
+            function_returns
+        );,
         ImplDecl(impl_decl) => return check_statement_declarations(
             allocator,
             file,
@@ -950,6 +965,7 @@ fn check_ast_statements(
             file,
             ast,
             fn_decl.name,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.return_type,
             fn_decl.body,
@@ -1020,6 +1036,7 @@ fn check_function_statements(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     return_type: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
@@ -1039,6 +1056,7 @@ fn check_function_statements(
         local_mutability,
         function_returns
     );
+    try insert_type_params_as_comptime_symbols(file, ast, type_params, local_types, 0);
     let expected_return = try local_facts::function_statement_return_type(
         allocator,
         file,
@@ -1574,10 +1592,23 @@ fn argument_type_mismatch_for_call(
     function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
-    let callee_text = ast_text::ast_node_text(file, ast, callee);
+    let raw_callee_text = ast_text::ast_node_text(file, ast, callee);
+    let callee_text = function_calls::function_call_name_text(file, &ast, callee);
+    let pointer_builtin = try pointer_builtin_argument_mismatch(
+        allocator,
+        file,
+        ast,
+        callee_text,
+        args,
+        local_types,
+        function_returns
+    );
+    if pointer_builtin.found {
+        return pointer_builtin;
+    }
     if function_calls::should_skip_function_reference(callee_text) or
         expression_infer::last_segment_starts_with_uppercase(callee_text) or
-        expression_infer::is_generic_constructor_text(callee_text) or
+        expression_infer::is_generic_constructor_text(raw_callee_text) or
         ast_text::is_qualified_name(callee_text) {
         return diagnostic_summary::no_argument_type_mismatch();
     }
@@ -1588,6 +1619,12 @@ fn argument_type_mismatch_for_call(
         if !expected.found {
             return diagnostic_summary::no_argument_type_mismatch();
         }
+        let expected_type = try expression_infer::specialize_call_type_arg_text(
+            file,
+            ast,
+            callee,
+            expected.type_name
+        );
         let actual = try expression_infer::infer_expression_type(
             allocator,
             file,
@@ -1596,17 +1633,55 @@ fn argument_type_mismatch_for_call(
             local_types,
             function_returns
         );
-        if expression_infer::known_type_mismatch(expected.type_name, actual) {
+        if expression_infer::known_type_mismatch(expected_type, actual) and
+            !contextual_integer_literal_accepts(file, ast, expected_type, arg) {
             let arg_node = ast.get(arg);
             return diagnostic_summary::argument_type_summary(
                 true,
                 arg_node.span.start,
                 arg_node.span.end,
-                expected.type_name,
+                expected_type,
                 actual
             );
         }
         index = index + 1;
+    }
+    return diagnostic_summary::no_argument_type_mismatch();
+}
+
+fn pointer_builtin_argument_mismatch(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee_text: []u8,
+    args: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    if !std::mem::equal_bytes(callee_text, "ptr_read") {
+        return diagnostic_summary::no_argument_type_mismatch();
+    }
+    if args.len != 1 {
+        return diagnostic_summary::no_argument_type_mismatch();
+    }
+    let arg = try ast.child_at(args, 0);
+    let actual = try expression_infer::infer_expression_type(
+        allocator,
+        file,
+        ast,
+        arg,
+        local_types,
+        function_returns
+    );
+    if std::mem::starts_with(std::mem::trim_ascii(actual), "?ptr") {
+        let arg_node = ast.get(arg);
+        return diagnostic_summary::argument_type_summary(
+            true,
+            arg_node.span.start,
+            arg_node.span.end,
+            "__ptr_read_non_null",
+            actual
+        );
     }
     return diagnostic_summary::no_argument_type_mismatch();
 }
@@ -1811,6 +1886,7 @@ fn first_binary_operand_type_mismatch_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.body,
             function_returns
@@ -1855,6 +1931,7 @@ fn first_binary_operand_type_mismatch_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     function_returns: &std::map::Map<[]u8, []u8>
@@ -1873,6 +1950,7 @@ fn first_binary_operand_type_mismatch_in_function(
         local_mutability,
         function_returns
     );
+    try insert_type_params_as_comptime_symbols(file, ast, type_params, local_types, 0);
     let found = try first_binary_operand_type_mismatch_in_statement(
         allocator,
         file,
@@ -2732,7 +2810,8 @@ fn assignment_type_mismatch_for_var_assign(
         local_types,
         function_returns
     );
-    if expression_infer::known_type_mismatch(expected, actual) {
+    if expression_infer::known_type_mismatch(expected, actual) and
+        !contextual_integer_literal_accepts(file, ast, expected, value) {
         let value_node = ast.get(value);
         return diagnostic_summary::assignment_type_summary(
             true,
@@ -3130,6 +3209,7 @@ fn invalid_assignment_target_for_assign(
         FieldExpr(field_expr_node) => return diagnostic_summary::no_invalid_assignment_target();,
         DerefExpr(deref_expr_node) => return diagnostic_summary::no_invalid_assignment_target();,
         IndexExpr(index_expr) => return diagnostic_summary::no_invalid_assignment_target();,
+        Call(call_node) => return diagnostic_summary::no_invalid_assignment_target();,
         _ => return diagnostic_summary::invalid_assignment_target_result(
             true,
             target_node.span.start,
@@ -3158,6 +3238,7 @@ fn first_undefined_variable_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.body,
             function_returns
@@ -3202,6 +3283,7 @@ fn first_undefined_variable_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     function_returns: &std::map::Map<[]u8, []u8>
@@ -3220,14 +3302,35 @@ fn first_undefined_variable_in_function(
         local_mutability,
         function_returns
     );
+    try insert_type_params_as_comptime_symbols(file, ast, type_params, local_types, 0);
     let found = try first_undefined_variable_in_statement(
         allocator,
         file,
         ast,
         body,
-        local_types
+        local_types,
+        function_returns
     );
     return found;
+}
+
+fn insert_type_params_as_comptime_symbols(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    index: i64
+) -> !void {
+    if index >= type_params.len {
+        return;
+    }
+    let param = try ast.child_at(type_params, index);
+    let name = ast_text::ast_node_text(file, ast, param);
+    if !local_types.contains(name) {
+        try local_types.insert(name, "type");
+    }
+    try insert_type_params_as_comptime_symbols(file, ast, type_params, local_types, index + 1);
+    return;
 }
 
 fn first_undefined_variable_in_statement(
@@ -3235,7 +3338,8 @@ fn first_undefined_variable_in_statement(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     let node = ast.get(node_id);
     match node.data {
@@ -3244,14 +3348,16 @@ fn first_undefined_variable_in_statement(
             file,
             ast,
             block.statements,
-            local_types
+            local_types,
+            function_returns
         );,
         Let(let_node) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             let_node.value,
-            local_types
+            local_types,
+            function_returns
         );,
         Assign(assign_node) => return first_undefined_variable_in_two_expressions(
             allocator,
@@ -3259,35 +3365,40 @@ fn first_undefined_variable_in_statement(
             ast,
             assign_node.target,
             assign_node.value,
-            local_types
+            local_types,
+            function_returns
         );,
         Return(return_node) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             return_node.value,
-            local_types
+            local_types,
+            function_returns
         );,
         Defer(defer_node) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             defer_node.expr,
-            local_types
+            local_types,
+            function_returns
         );,
         ErrDefer(err_defer_node) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             err_defer_node.expr,
-            local_types
+            local_types,
+            function_returns
         );,
         ExprStmt(expr_stmt) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             expr_stmt.expr,
-            local_types
+            local_types,
+            function_returns
         );,
         If(if_node) => return first_undefined_variable_in_if(
             allocator,
@@ -3296,7 +3407,8 @@ fn first_undefined_variable_in_statement(
             if_node.condition,
             if_node.then_block,
             if_node.else_block,
-            local_types
+            local_types,
+            function_returns
         );,
         While(while_node) => return first_undefined_variable_in_loop(
             allocator,
@@ -3304,7 +3416,8 @@ fn first_undefined_variable_in_statement(
             ast,
             while_node.condition,
             while_node.body,
-            local_types
+            local_types,
+            function_returns
         );,
         For(for_node) => return first_undefined_variable_in_for(
             allocator,
@@ -3312,7 +3425,8 @@ fn first_undefined_variable_in_statement(
             ast,
             for_node.start,
             for_node.end,
-            local_types
+            local_types,
+            function_returns
         );,
         Match(match_node) => return first_undefined_variable_in_match(
             allocator,
@@ -3320,21 +3434,24 @@ fn first_undefined_variable_in_statement(
             ast,
             match_node.value,
             match_node.arms,
-            local_types
+            local_types,
+            function_returns
         );,
         MatchArm(match_arm) => return first_undefined_variable_in_statement(
             allocator,
             file,
             ast,
             match_arm.body,
-            local_types
+            local_types,
+            function_returns
         );,
         Unsafe(unsafe_node) => return first_undefined_variable_in_statement(
             allocator,
             file,
             ast,
             unsafe_node.body,
-            local_types
+            local_types,
+            function_returns
         );,
         ComptimeIf(comptime_if_node) => return first_undefined_variable_in_if(
             allocator,
@@ -3343,7 +3460,8 @@ fn first_undefined_variable_in_statement(
             comptime_if_node.condition,
             comptime_if_node.then_block,
             comptime_if_node.else_block,
-            local_types
+            local_types,
+            function_returns
         );,
         _ => return diagnostic_summary::no_undefined_variable();,
     }
@@ -3354,7 +3472,8 @@ fn first_undefined_variable_in_statement_range(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     var index = 0;
     while index < statements.len {
@@ -3364,7 +3483,8 @@ fn first_undefined_variable_in_statement_range(
             file,
             ast,
             child,
-            local_types
+            local_types,
+            function_returns
         );
         if found.found {
             return found;
@@ -3379,17 +3499,26 @@ fn first_undefined_variable_in_expression(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     let node = ast.get(node_id);
     match node.data {
-        Var(var_node) => return undefined_variable_for_var(file, ast, node_id, local_types);,
+        Var(var_node) => return undefined_variable_for_var(
+            allocator,
+            file,
+            ast,
+            node_id,
+            local_types,
+            function_returns
+        );,
         Prefix(prefix_node) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             prefix_node.right,
-            local_types
+            local_types,
+            function_returns
         );,
         Binary(binary) => return first_undefined_variable_in_two_expressions(
             allocator,
@@ -3397,7 +3526,8 @@ fn first_undefined_variable_in_expression(
             ast,
             binary.left,
             binary.right,
-            local_types
+            local_types,
+            function_returns
         );,
         FieldExpr(field_expr_node) => return first_undefined_variable_in_field_expr(
             allocator,
@@ -3405,21 +3535,24 @@ fn first_undefined_variable_in_expression(
             ast,
             field_expr_node.receiver,
             field_expr_node.namespace,
-            local_types
+            local_types,
+            function_returns
         );,
         DerefExpr(deref_expr_node) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             deref_expr_node.receiver,
-            local_types
+            local_types,
+            function_returns
         );,
         Call(call_node) => return first_undefined_variable_in_expression_range(
             allocator,
             file,
             ast,
             call_node.args,
-            local_types
+            local_types,
+            function_returns
         );,
         TypeApplyExpr(type_apply) => return diagnostic_summary::no_undefined_variable();,
         CastExpr(cast_expr) => return first_undefined_variable_in_expression(
@@ -3427,7 +3560,8 @@ fn first_undefined_variable_in_expression(
             file,
             ast,
             cast_expr.value,
-            local_types
+            local_types,
+            function_returns
         );,
         IndexExpr(index_expr) => return first_undefined_variable_in_index(
             allocator,
@@ -3436,42 +3570,48 @@ fn first_undefined_variable_in_expression(
             index_expr.target,
             index_expr.start,
             index_expr.end,
-            local_types
+            local_types,
+            function_returns
         );,
         StructLiteralExpr(struct_literal) => return first_undefined_variable_in_expression_range(
             allocator,
             file,
             ast,
             struct_literal.fields,
-            local_types
+            local_types,
+            function_returns
         );,
         StructFieldInit(struct_field_init) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             struct_field_init.value,
-            local_types
+            local_types,
+            function_returns
         );,
         ArenaNewExpr(arena_new) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             arena_new.allocator,
-            local_types
+            local_types,
+            function_returns
         );,
         TryExpr(try_expr_node) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             try_expr_node.value,
-            local_types
+            local_types,
+            function_returns
         );,
         ComptimeExpr(comptime_expr_node) => return first_undefined_variable_in_expression(
             allocator,
             file,
             ast,
             comptime_expr_node.value,
-            local_types
+            local_types,
+            function_returns
         );,
         Match(match_node) => return first_undefined_variable_in_match(
             allocator,
@@ -3479,7 +3619,8 @@ fn first_undefined_variable_in_expression(
             ast,
             match_node.value,
             match_node.arms,
-            local_types
+            local_types,
+            function_returns
         );,
         _ => return diagnostic_summary::no_undefined_variable();,
     }
@@ -3490,7 +3631,8 @@ fn first_undefined_variable_in_expression_range(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     expressions: std::kizu::ast::ChildRange,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     var index = 0;
     while index < expressions.len {
@@ -3500,7 +3642,8 @@ fn first_undefined_variable_in_expression_range(
             file,
             ast,
             child,
-            local_types
+            local_types,
+            function_returns
         );
         if found.found {
             return found;
@@ -3516,19 +3659,28 @@ fn first_undefined_variable_in_two_expressions(
     ast: std::kizu::ast::Ast,
     first: std::kizu::ast::NodeId,
     second: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     let first_found = try first_undefined_variable_in_expression(
         allocator,
         file,
         ast,
         first,
-        local_types
+        local_types,
+        function_returns
     );
     if first_found.found {
         return first_found;
     }
-    return first_undefined_variable_in_expression(allocator, file, ast, second, local_types);
+    return first_undefined_variable_in_expression(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        function_returns
+    );
 }
 
 fn first_undefined_variable_in_if(
@@ -3538,14 +3690,16 @@ fn first_undefined_variable_in_if(
     condition: std::kizu::ast::NodeId,
     then_block: std::kizu::ast::NodeId,
     else_block: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     let condition_found = try first_undefined_variable_in_expression(
         allocator,
         file,
         ast,
         condition,
-        local_types
+        local_types,
+        function_returns
     );
     if condition_found.found {
         return condition_found;
@@ -3555,12 +3709,20 @@ fn first_undefined_variable_in_if(
         file,
         ast,
         then_block,
-        local_types
+        local_types,
+        function_returns
     );
     if then_found.found {
         return then_found;
     }
-    return first_undefined_variable_in_statement(allocator, file, ast, else_block, local_types);
+    return first_undefined_variable_in_statement(
+        allocator,
+        file,
+        ast,
+        else_block,
+        local_types,
+        function_returns
+    );
 }
 
 fn first_undefined_variable_in_match(
@@ -3569,14 +3731,16 @@ fn first_undefined_variable_in_match(
     ast: std::kizu::ast::Ast,
     value: std::kizu::ast::NodeId,
     arms: std::kizu::ast::ChildRange,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     let value_found = try first_undefined_variable_in_expression(
         allocator,
         file,
         ast,
         value,
-        local_types
+        local_types,
+        function_returns
     );
     if value_found.found {
         return value_found;
@@ -3586,7 +3750,8 @@ fn first_undefined_variable_in_match(
         file,
         ast,
         arms,
-        local_types
+        local_types,
+        function_returns
     );
 }
 
@@ -3596,19 +3761,28 @@ fn first_undefined_variable_in_loop(
     ast: std::kizu::ast::Ast,
     condition: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     let condition_found = try first_undefined_variable_in_expression(
         allocator,
         file,
         ast,
         condition,
-        local_types
+        local_types,
+        function_returns
     );
     if condition_found.found {
         return condition_found;
     }
-    return first_undefined_variable_in_statement(allocator, file, ast, body, local_types);
+    return first_undefined_variable_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        function_returns
+    );
 }
 
 fn first_undefined_variable_in_for(
@@ -3617,7 +3791,8 @@ fn first_undefined_variable_in_for(
     ast: std::kizu::ast::Ast,
     start: std::kizu::ast::NodeId,
     end: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     return first_undefined_variable_in_two_expressions(
         allocator,
@@ -3625,7 +3800,8 @@ fn first_undefined_variable_in_for(
         ast,
         start,
         end,
-        local_types
+        local_types,
+        function_returns
     );
 }
 
@@ -3636,14 +3812,16 @@ fn first_undefined_variable_in_index(
     target: std::kizu::ast::NodeId,
     start: std::kizu::ast::NodeId,
     end: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     let target_found = try first_undefined_variable_in_expression(
         allocator,
         file,
         ast,
         target,
-        local_types
+        local_types,
+        function_returns
     );
     if target_found.found {
         return target_found;
@@ -3654,7 +3832,8 @@ fn first_undefined_variable_in_index(
         ast,
         start,
         end,
-        local_types
+        local_types,
+        function_returns
     );
 }
 
@@ -3664,22 +3843,35 @@ fn first_undefined_variable_in_field_expr(
     ast: std::kizu::ast::Ast,
     receiver: std::kizu::ast::NodeId,
     namespace: bool,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     if namespace {
         return diagnostic_summary::no_undefined_variable();
     }
-    return first_undefined_variable_in_expression(allocator, file, ast, receiver, local_types);
+    return first_undefined_variable_in_expression(
+        allocator,
+        file,
+        ast,
+        receiver,
+        local_types,
+        function_returns
+    );
 }
 
 fn undefined_variable_for_var(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]u8, []u8>
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     let name = ast_text::ast_node_text(file, ast, node_id);
     if local_types.contains(name) {
+        return diagnostic_summary::no_undefined_variable();
+    }
+    if try undefined_variable_function_exists(allocator, file, name, function_returns) {
         return diagnostic_summary::no_undefined_variable();
     }
     let node = ast.get(node_id);
@@ -3689,6 +3881,43 @@ fn undefined_variable_for_var(
         node.span.end,
         name
     );
+}
+
+fn undefined_variable_function_exists(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    name: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !bool {
+    if function_calls::should_skip_function_reference(name) {
+        return false;
+    }
+    var resolved = std::string::String(allocator);
+    defer resolved.deinit();
+    try append_undefined_variable_resolved_function_name(resolved, file, name);
+    let key = resolved.as_bytes();
+    return function_returns.contains(key);
+}
+
+fn append_undefined_variable_resolved_function_name(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    name: []u8
+) -> !void {
+    if source::is_absolute_name_for_file(file, name) {
+        try out.append_bytes(name);
+        return;
+    }
+    if ast_text::is_qualified_name(name) {
+        try source::append_package_prefix(out, file);
+        try out.append_bytes("::");
+        try out.append_bytes(name);
+        return;
+    }
+    try source::append_qualified_module_name(out, file);
+    try out.append_bytes("::");
+    try out.append_bytes(name);
+    return;
 }
 
 fn check_statement_node(
@@ -3856,6 +4085,7 @@ fn check_statement_node(
         StructDecl(struct_decl) => return type_scan_summary(0, 0, 0);,
         EnumDecl(enum_decl) => return type_scan_summary(0, 0, 0);,
         UnionDecl(union_decl) => return type_scan_summary(0, 0, 0);,
+        ContractDecl(contract_decl) => return type_scan_summary(0, 0, 0);,
         ImplDecl(impl_decl) => return type_scan_summary(0, 0, 0);,
         UnionVariant(union_variant) => return type_scan_summary(0, 0, 0);,
         FnDecl(fn_decl) => return type_scan_summary(0, 0, 0);,
@@ -3996,6 +4226,16 @@ fn check_assign_statement(
         FieldExpr(field_expr_node) => return type_scan_summary(0, 1, 0);,
         DerefExpr(deref_expr_node) => return type_scan_summary(0, 1, 0);,
         IndexExpr(index_expr) => return type_scan_summary(0, 1, 0);,
+        Call(call_node) => return check_assign_call_statement(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            value,
+            local_types,
+            function_returns
+        );,
         Empty => return invalid_assignment_target_summary();,
         Int(int_node) => return invalid_assignment_target_summary();,
         String(string_node) => return invalid_assignment_target_summary();,
@@ -4003,7 +4243,6 @@ fn check_assign_statement(
         Bool(bool_node) => return invalid_assignment_target_summary();,
         Prefix(prefix_node) => return invalid_assignment_target_summary();,
         Binary(binary) => return invalid_assignment_target_summary();,
-        Call(call_node) => return invalid_assignment_target_summary();,
         TypeApplyExpr(type_apply) => return invalid_assignment_target_summary();,
         CastExpr(cast_expr) => return invalid_assignment_target_summary();,
         StructLiteralExpr(struct_literal) => return invalid_assignment_target_summary();,
@@ -4029,6 +4268,7 @@ fn check_assign_statement(
         StructDecl(struct_decl) => return invalid_assignment_target_summary();,
         EnumDecl(enum_decl) => return invalid_assignment_target_summary();,
         UnionDecl(union_decl) => return invalid_assignment_target_summary();,
+        ContractDecl(contract_decl) => return invalid_assignment_target_summary();,
         ImplDecl(impl_decl) => return invalid_assignment_target_summary();,
         UnionVariant(union_variant) => return invalid_assignment_target_summary();,
         Match(match_node) => return invalid_assignment_target_summary();,
@@ -4068,7 +4308,96 @@ fn check_assign_var_statement(
         local_types,
         function_returns
     );
-    if expression_infer::known_type_mismatch(target_type, value_type) {
+    if expression_infer::known_type_mismatch(target_type, value_type) and
+        !contextual_integer_literal_accepts(file, ast, target_type, value) {
+        diagnostics = diagnostics + 1;
+    }
+    return type_scan_summary(0, 1, diagnostics);
+}
+
+fn check_assign_call_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let callee_node = ast.get(callee);
+    match callee_node.data {
+        FieldExpr(field_expr_node) => return check_assign_field_call_statement(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            field_expr_node.name,
+            field_expr_node.namespace,
+            args,
+            value,
+            local_types,
+            function_returns
+        );,
+        _ => return invalid_assignment_target_summary();,
+    }
+}
+
+fn check_assign_field_call_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool,
+    args: std::kizu::ast::ChildRange,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    if namespace {
+        return invalid_assignment_target_summary();
+    }
+    let method = ast_text::ast_node_text(file, ast, name);
+    if !std::mem::equal_bytes(method, "at") {
+        return invalid_assignment_target_summary();
+    }
+    let receiver_type = try expression_infer::infer_expression_type(
+        allocator,
+        file,
+        ast,
+        receiver,
+        local_types,
+        function_returns
+    );
+    if !std::mem::equal_bytes(receiver_type, "Partition") {
+        return invalid_assignment_target_summary();
+    }
+    if args.len != 1 {
+        return type_scan_summary(0, 1, 1);
+    }
+    let index_arg = try ast.child_at(args, 0);
+    let index_type = try expression_infer::infer_expression_type(
+        allocator,
+        file,
+        ast,
+        index_arg,
+        local_types,
+        function_returns
+    );
+    var diagnostics = 0;
+    if expression_infer::known_type_mismatch("i64", index_type) {
+        diagnostics = diagnostics + 1;
+    }
+    let value_type = try expression_infer::infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    if expression_infer::known_type_mismatch("i64", value_type) {
         diagnostics = diagnostics + 1;
     }
     return type_scan_summary(0, 1, diagnostics);
@@ -4096,10 +4425,35 @@ fn check_return_statement(
         function_returns
     );
     var diagnostics = 0;
-    if expression_infer::known_type_mismatch(expected_return, value_type) {
+    if expression_infer::known_type_mismatch(expected_return, value_type) and
+        !contextual_integer_literal_accepts(file, ast, expected_return, value) {
         diagnostics = 1;
     }
     return type_scan_summary(0, 1, diagnostics);
+}
+
+fn contextual_integer_literal_accepts(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expected_type: []u8,
+    value: std::kizu::ast::NodeId
+) -> bool {
+    if !expected_type_accepts_contextual_integer(expected_type) {
+        return false;
+    }
+    let node = ast.get(value);
+    return match node.data {
+        Int(int_node) => true,
+        Prefix(prefix_node) => prefix_node.op == std::kizu::ast::prefix_neg() and
+            contextual_integer_literal_accepts(file, ast, expected_type, prefix_node.right),
+        _ => false,
+    };
+}
+
+fn expected_type_accepts_contextual_integer(expected_type: []u8) -> bool {
+    let trimmed = std::mem::trim_ascii(expected_type);
+    return std::mem::equal_bytes(trimmed, "u8") or
+        std::mem::equal_bytes(trimmed, "i32");
 }
 
 fn check_expr_statement(
@@ -4335,6 +4689,7 @@ fn collect_match_enum_types(
         ImportDecl(import_decl) => return;,
         StructDecl(struct_decl) => return;,
         UnionDecl(union_decl) => return;,
+        ContractDecl(contract_decl) => return;,
         ImplDecl(impl_decl) => return;,
         FnDecl(fn_decl) => return;,
         Empty => return;,
@@ -4463,6 +4818,15 @@ fn first_match_diagnostic_node(
             ast,
             fn_decl.params,
             fn_decl.body,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        ContractDecl(contract_decl) => return first_match_diagnostic_in_range(
+            allocator,
+            file,
+            ast,
+            contract_decl.methods,
             enum_counts,
             enum_tags,
             function_returns
@@ -4757,6 +5121,7 @@ fn first_match_diagnostic_in_statement(
         StructDecl(struct_decl) => return diagnostic_summary::no_match_diagnostic();,
         EnumDecl(enum_decl) => return diagnostic_summary::no_match_diagnostic();,
         UnionDecl(union_decl) => return diagnostic_summary::no_match_diagnostic();,
+        ContractDecl(contract_decl) => return diagnostic_summary::no_match_diagnostic();,
         ImplDecl(impl_decl) => return diagnostic_summary::no_match_diagnostic();,
         UnionVariant(union_variant) => return diagnostic_summary::no_match_diagnostic();,
         FnDecl(fn_decl) => return diagnostic_summary::no_match_diagnostic();,
@@ -5012,6 +5377,7 @@ fn first_match_diagnostic_in_expression(
         StructDecl(struct_decl) => return diagnostic_summary::no_match_diagnostic();,
         EnumDecl(enum_decl) => return diagnostic_summary::no_match_diagnostic();,
         UnionDecl(union_decl) => return diagnostic_summary::no_match_diagnostic();,
+        ContractDecl(contract_decl) => return diagnostic_summary::no_match_diagnostic();,
         ImplDecl(impl_decl) => return diagnostic_summary::no_match_diagnostic();,
         UnionVariant(union_variant) => return diagnostic_summary::no_match_diagnostic();,
         MatchArm(match_arm) => return diagnostic_summary::no_match_diagnostic();,
@@ -5286,6 +5652,7 @@ fn current_enum_match_arm_scan(
         StructDecl(struct_decl) => return no_match_arm_scan(wildcard);,
         EnumDecl(enum_decl) => return no_match_arm_scan(wildcard);,
         UnionDecl(union_decl) => return no_match_arm_scan(wildcard);,
+        ContractDecl(contract_decl) => return no_match_arm_scan(wildcard);,
         ImplDecl(impl_decl) => return no_match_arm_scan(wildcard);,
         FnDecl(fn_decl) => return no_match_arm_scan(wildcard);,
         Int(int_node) => return no_match_arm_scan(wildcard);,
@@ -5402,6 +5769,7 @@ fn match_arm_pattern_equals(
         StructDecl(struct_decl) => return false;,
         EnumDecl(enum_decl) => return false;,
         UnionDecl(union_decl) => return false;,
+        ContractDecl(contract_decl) => return false;,
         ImplDecl(impl_decl) => return false;,
         FnDecl(fn_decl) => return false;,
         Int(int_node) => return false;,

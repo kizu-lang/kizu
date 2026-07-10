@@ -106,7 +106,7 @@ any additional production behavior by itself.
 | `parse <file>` | mixed: Go general CLI, hosted artifact for bounded parity rows | `selfhost::cli`, `selfhost::parser` | no fallback in hosted parity rows | `just selfhost-parse-parity-gate` | broader parse recovery and diagnostics are deferred to command-slice issues |
 | `check selfhost` | hosted stage2 artifact | `selfhost::cli::check` plus selfhost source/resolver/type/ownership gates | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
 | `check <file>` | mixed: Go general CLI, hosted artifact for bounded parity rows | `selfhost::cli::check` | no fallback in hosted parity rows | `just selfhost-check-parity-gate` | broader type/ownership surface remains deferred |
-| `run <file>` | mixed: Go general CLI by default, hosted artifact for bounded run rows, public CLI selfhost path behind `KIZU_SELFHOST_RUN` (#1151) | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows; no Go fallback in the gated public CLI path | `just selfhost-run-parity-gate`, `just selfhost-run-cli-switch-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader execution and default-on switch deferred to #1157 (parent #1070) |
+| `run <file>` | selfhost compiler through `selfhost::cli::execute::run_file_cli`; checked AST lowers to a native run artifact | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | none; production dispatch has no environment switch or Go interpreter fallback | `just selfhost-run-flip-parity-gate`, `just selfhost-run-cli-switch-gate`, `just selfhost-native-source-gate` when executable lowering changes | keep the examples corpus and general language/runtime dogfood green (#1070) |
 | `test <file>` | mixed: Go general CLI by default, hosted artifact for bounded test rows, public CLI selfhost path behind `KIZU_SELFHOST_TEST` (#1157) | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows; no Go fallback in the gated public CLI path | `just selfhost-test-parity-gate`, `just selfhost-test-cli-switch-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader discovery and default-on switch deferred to #1157 (parent #1070) |
 | `stage selfhost` | hosted stage2 artifact | `selfhost::backend`, hosted runtime ABI | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
 | `fmt <file>` / `fmt --write <file>` | mixed: Go general CLI, hosted artifact for #1073 formatter parity rows (currently the hand-written `parse_format_alloc` token re-spacer, **not** the real `format_source`) | selfhost formatter writer | no fallback in hosted rows | `just selfhost-fmt-parity-gate` (**red** pending #1162; remaining capability work tracked by #1165) | indentation/import-sort/comment parity blocked until `fmt` routes through compiled `format_source`; see the Formatter (`fmt`) Boundary section |
@@ -215,7 +215,7 @@ straight from `codegen::Program`.
 | prior path | `hosted_executable_from_codegen(run_print_executable(), program)` + `render_hosted_llvm` template |
 | parity | emitted `.ll` bytes, metadata, link, and execution are byte-for-byte identical to the prior template renderer; the stage2 hosted artifact bounded renderer (`cli_hosted_renderer_llvm::cli_hosted_write_stdout_ll`) is unchanged |
 | regression guard | `TestSelfhostHostedRunConsumesCodegenIR` asserts the slice renders through `render_main_print_llvm` and never regresses onto `run_print_executable` / `hosted_executable_from_codegen` / `render_hosted_llvm` |
-| gate | `KIZU_SELFHOST_RUN` stays gated; `just selfhost-native-source-gate`, `just selfhost-run-parity-gate-from-scratch`, `just selfhost-run-cli-switch-gate` |
+| gate | default selfhost dispatch; `just selfhost-native-source-gate`, `just selfhost-run-flip-parity-gate`, `just selfhost-run-cli-switch-gate` |
 
 ### Return-Void Codegen Renderer (#1161)
 
@@ -244,7 +244,7 @@ its `kizu.run.stdout` constants directly instead of reading them from
 | converter removed | `hosted_executable_from_codegen` deleted once both run slices render straight from `codegen::Program` |
 | parity | emitted `.ll` bytes, metadata, link, and execution are byte-for-byte identical to the prior template renderer; the stage2 hosted artifact bounded renderer (`cli_hosted_renderer_llvm`) and its `run_return_void_executable` row are unchanged |
 | regression guard | `TestSelfhostHostedRunConsumesCodegenIR` asserts the slice renders through `render_return_void_llvm` and never regresses onto `run_print_executable` / `run_return_void_executable` / `hosted_executable_from_codegen` / `render_hosted_llvm` |
-| gate | `KIZU_SELFHOST_RUN` stays gated; `just selfhost-native-source-gate`, `just selfhost-run-parity-gate-from-scratch`, `just selfhost-run-cli-switch-gate` |
+| gate | default selfhost dispatch; `just selfhost-native-source-gate`, `just selfhost-run-flip-parity-gate`, `just selfhost-run-cli-switch-gate` |
 
 The hosted artifact mode and the stage2 bounded renderer remain as artifact
 writers and must not grow new run/test-specific template branches.
@@ -292,29 +292,24 @@ is wired into `fmt` / `fmt --write` and the from-scratch parity gates are green.
 
 ## Run CLI Switch Point For #1151
 
-The first public `cmd/kizu` CLI command routed through the selfhost-owned
-compiled artifact path (beyond the `target/selfhost/stage2/selfhost` parity
-gates) is `run <file>`, behind the rollback-friendly switch point
-`KIZU_SELFHOST_RUN=1`.
+The first public `cmd/kizu` CLI command routed unconditionally through the
+selfhost-owned compiled artifact path (beyond the
+`target/selfhost/stage2/selfhost` parity gates) is `run <file>`. The former
+`KIZU_SELFHOST_RUN` opt-in and the default Go interpreter branch have been
+removed.
 
 | Field | Value |
 | --- | --- |
 | switched path | `selfhost::cli::execute::run_file_cli` (lower run-codegen program → link → execute native artifact) |
-| switch point | env `KIZU_SELFHOST_RUN` (default off → Go interpreter path unchanged) |
-| Go fallback when enabled | none; unsupported shapes raise explicit selfhost diagnostics |
+| switch point | default `dispatchRun` owner; no environment-sensitive branch |
+| Go fallback | none; unsupported shapes raise explicit selfhost diagnostics |
 | evidence report | `target/selfhost/reports/run-cli-switch.txt` (`go.fallback none`) |
 | gate | `just selfhost-run-cli-switch-gate` |
-| deletion condition | flip default to selfhost and remove the gate once `run` is selfhost-owned for the general surface (#1157, parent #1070) |
+| regression condition | reject any reintroduced environment switch, `runFile` dispatch, source/fixture dispatch, or Go fallback |
 
-Deliberately not switched by #1151, kept explicit in #1157:
-
-- General `run` shapes the selfhost backend cannot lower yet stay explicit
-  diagnostics under the gate (for example arena allocation, unsupported integer
-  expressions, package/directory targets), so the default stays on the Go path.
-- `test <file>` is not switched: through the public CLI the selfhost `test` path
-  only emits a test-executable artifact without executing it, so routing it would
-  regress the Go `testFile` behavior. It needs test-artifact execution semantics
-  first.
+The `run` owner switch does not switch `test <file>`; that command retains its
+separate #1157 transition described below. Unsupported future `run` shapes must
+fail explicitly in selfhost and must never re-enter the Go interpreter.
 
 ## Test CLI Switch Point For #1157
 
