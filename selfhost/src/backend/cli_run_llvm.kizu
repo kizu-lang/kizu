@@ -17,16 +17,6 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_llvm_constant_bytes(out, "run_linker_external_assembler_flag", hosted::run_linker_external_assembler_flag());
     try append_llvm_constant_bytes(out, "run_host_runtime_source", hosted::run_host_runtime_source());
     try append_llvm_constant_bytes(out, "run_linker_output_flag", hosted::run_linker_output_flag());
-    try append_llvm_constant_bytes(
-        out,
-        "run_support_parse_program_call",
-        "call %kizu.error.parse_result @kizu_kizu__parser_parse_program"
-    );
-    try append_llvm_constant_bytes(
-        out,
-        "run_support_ast_get_call",
-        "call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get"
-    );
     try cli_hosted_metadata_llvm::append_prefix_constant(
         out,
         "run_meta_prefix",
@@ -48,8 +38,6 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
 }
 
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
-    try append_slice_contains_function(out);
-    try append_run_link_needs_compiler_support_function(out);
     try append_emit_run_codegen_artifact_function(out, ir_bytes);
     return;
 }
@@ -130,14 +118,8 @@ pub fn append_cli_run_blocks(out: &var std::string::String, ir_bytes: []u8) -> !
     try append_line(out, "  %run_rsp_body = call %kizu.owned @kizu_rt_string_new(%kizu.owned %run_allocator)");
     try append_line(out, "  %run_rsp_append0 = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %run_rsp_body, %kizu.slice.u8 %run_ll_path)");
     try append_line(out, "  %run_rsp_append0_nl = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %run_rsp_body, %kizu.slice.u8 %run_rsp_newline_slice)");
-    try append_line(out,
-        "  %run_include_support = call i1 @kizu_selfhost__cli_run_link_needs_compiler_support(%kizu.slice.u8 %run_render_bytes)");
-    try append_line(out, "  br i1 %run_include_support, label %run_rsp_support, label %run_rsp_static");
-    try append_line(out, "run_rsp_support:");
     try append_line(out, "  %run_rsp_append1 = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %run_rsp_body, %kizu.slice.u8 %run_stage2_ll_slice)");
     try append_line(out, "  %run_rsp_append1_nl = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %run_rsp_body, %kizu.slice.u8 %run_rsp_newline_slice)");
-    try append_line(out, "  br label %run_rsp_static");
-    try append_line(out, "run_rsp_static:");
     try append_line(out, "  %run_rsp_append2 = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %run_rsp_body, %kizu.slice.u8 %run_stage2_storage_slice)");
     try append_line(out, "  %run_rsp_append2_nl = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %run_rsp_body, %kizu.slice.u8 %run_rsp_newline_slice)");
     try append_line(out, "  %run_rsp_append3 = call %kizu.error.void @kizu_rt_string_append_bytes(%kizu.owned %run_rsp_body, %kizu.slice.u8 %run_stage2_host_slice)");
@@ -169,76 +151,6 @@ pub fn append_cli_run_blocks(out: &var std::string::String, ir_bytes: []u8) -> !
     try append_line(out, "run_return_artifact_code:");
     try append_line(out, "  %run_artifact_code = extractvalue %kizu.error.i64 %run_artifact_result, 1");
     try append_line(out, "  ret i64 %run_artifact_code");
-    return;
-}
-
-fn append_slice_contains_function(out: &var std::string::String) -> !void {
-    try append_line(out, "define i1 @kizu_selfhost__slice_contains(");
-    try append_line(out, "  %kizu.slice.u8 %haystack,");
-    try append_line(out, "  %kizu.slice.u8 %needle");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_line(out, "  %hay_len = extractvalue %kizu.slice.u8 %haystack, 1");
-    try append_line(out, "  %needle_len = extractvalue %kizu.slice.u8 %needle, 1");
-    try append_line(out, "  %needle_empty = icmp eq i64 %needle_len, 0");
-    try append_line(out, "  br i1 %needle_empty, label %true, label %nonempty");
-    try append_line(out, "nonempty:");
-    try append_line(out, "  %needle_too_long = icmp sgt i64 %needle_len, %hay_len");
-    try append_line(out, "  br i1 %needle_too_long, label %false, label %loop");
-    try append_line(out, "loop:");
-    try append_line(out, "  %index = phi i64 [ 0, %nonempty ], [ %next, %advance ]");
-    try append_line(out, "  %remaining = sub i64 %hay_len, %index");
-    try append_line(out, "  %can_fit = icmp sge i64 %remaining, %needle_len");
-    try append_line(out, "  br i1 %can_fit, label %check, label %false");
-    try append_line(out, "check:");
-    try append_line(out, "  %hay_ptr = extractvalue %kizu.slice.u8 %haystack, 0");
-    try append_line(out, "  %at_ptr = getelementptr i8, ptr %hay_ptr, i64 %index");
-    try append_line(out, "  %candidate_base = insertvalue %kizu.slice.u8 poison, ptr %at_ptr, 0");
-    try append_line(out, "  %candidate = insertvalue %kizu.slice.u8 %candidate_base, i64 %needle_len, 1");
-    try append_line(out, "  %same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %candidate, %kizu.slice.u8 %needle)");
-    try append_line(out, "  br i1 %same, label %true, label %advance");
-    try append_line(out, "advance:");
-    try append_line(out, "  %next = add i64 %index, 1");
-    try append_line(out, "  br label %loop");
-    try append_line(out, "true:");
-    try append_line(out, "  ret i1 true");
-    try append_line(out, "false:");
-    try append_line(out, "  ret i1 false");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
-fn append_run_link_needs_compiler_support_function(out: &var std::string::String) -> !void {
-    try append_line(out, "define i1 @kizu_selfhost__cli_run_link_needs_compiler_support(");
-    try append_line(out, "  %kizu.slice.u8 %artifact");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_line(out,
-        "  %parse_ptr = getelementptr inbounds [62 x i8], ptr @.kizu.cli.run_support_parse_program_call, i64 0, i64 0");
-    try append_line(out,
-        "  %parse_base = insertvalue %kizu.slice.u8 poison, ptr %parse_ptr, 0");
-    try append_line(out,
-        "  %parse_slice = insertvalue %kizu.slice.u8 %parse_base, i64 62, 1");
-    try append_line(out,
-        "  %has_parse = call i1 @kizu_selfhost__slice_contains(%kizu.slice.u8 %artifact, %kizu.slice.u8 %parse_slice)");
-    try append_line(out, "  br i1 %has_parse, label %true, label %check_ast");
-    try append_line(out, "check_ast:");
-    try append_line(out,
-        "  %ast_ptr = getelementptr inbounds [52 x i8], ptr @.kizu.cli.run_support_ast_get_call, i64 0, i64 0");
-    try append_line(out,
-        "  %ast_base = insertvalue %kizu.slice.u8 poison, ptr %ast_ptr, 0");
-    try append_line(out,
-        "  %ast_slice = insertvalue %kizu.slice.u8 %ast_base, i64 52, 1");
-    try append_line(out,
-        "  %has_ast = call i1 @kizu_selfhost__slice_contains(%kizu.slice.u8 %artifact, %kizu.slice.u8 %ast_slice)");
-    try append_line(out, "  br i1 %has_ast, label %true, label %false");
-    try append_line(out, "true:");
-    try append_line(out, "  ret i1 true");
-    try append_line(out, "false:");
-    try append_line(out, "  ret i1 false");
-    try append_line(out, "}");
-    try append_line(out, "");
     return;
 }
 
