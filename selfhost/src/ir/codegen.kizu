@@ -10192,8 +10192,8 @@ fn lower_code_runtime_constructor(
 }
 
 // code_callee_is_atomic_bool validates the constructor from its parsed generic
-// type shape: exactly Atomic<bool>. This is a type identity check only; emitted
-// control flow never depends on a function symbol or generated LLVM spelling.
+// type shape: exactly the namespace chain std::atomic::Atomic with one bool type
+// argument. It never compares the flattened callee/source spelling.
 fn code_callee_is_atomic_bool(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -10215,13 +10215,89 @@ fn code_type_apply_is_atomic_bool(
     if type_args.len != 1 {
         return false;
     }
-    let callee_text = ast_node_text(text, ast, type_callee);
-    if !std::mem::equal_bytes(callee_text, "std::atomic::Atomic") {
+    let atomic_type = code_type_callee_is_std_atomic(text, ast, type_callee);
+    if !atomic_type {
         return false;
     }
     let type_arg = try ast.child_at(type_args, 0);
-    let type_text = ast_node_text(text, ast, type_arg);
-    return std::mem::equal_bytes(type_text, "bool");
+    return code_type_node_is_bool(text, ast, type_arg);
+}
+
+// code_type_callee_is_std_atomic matches the qualified type as nested namespace
+// AST nodes. The field components are type-identity labels; they are not a
+// function/symbol dispatch over a flattened source or emitted artifact string.
+fn code_type_callee_is_std_atomic(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_callee: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(type_callee);
+    return match node.data {
+        FieldExpr(field_expr) => code_type_outer_atomic_field(text, ast, field_expr.receiver, field_expr.name, field_expr.namespace),
+        _ => false,
+    };
+}
+
+fn code_type_outer_atomic_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool
+) -> bool {
+    if !namespace {
+        return false;
+    }
+    let name_node = ast.get(name);
+    let name_is_atomic = match name_node.data {
+        Var(var_node) => std::mem::equal_bytes(ast_node_text(text, ast, name), "Atomic"),
+        _ => false,
+    };
+    if !name_is_atomic {
+        return false;
+    }
+    let receiver_node = ast.get(receiver);
+    return match receiver_node.data {
+        FieldExpr(field_expr) => code_type_inner_atomic_field(text, ast, field_expr.receiver, field_expr.name, field_expr.namespace),
+        _ => false,
+    };
+}
+
+fn code_type_inner_atomic_field(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    namespace: bool
+) -> bool {
+    if !namespace {
+        return false;
+    }
+    let name_node = ast.get(name);
+    let name_is_module = match name_node.data {
+        Var(var_node) => std::mem::equal_bytes(ast_node_text(text, ast, name), "atomic"),
+        _ => false,
+    };
+    if !name_is_module {
+        return false;
+    }
+    let receiver_node = ast.get(receiver);
+    return match receiver_node.data {
+        Var(var_node) => std::mem::equal_bytes(ast_node_text(text, ast, receiver), "std"),
+        _ => false,
+    };
+}
+
+fn code_type_node_is_bool(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(type_node);
+    return match node.data {
+        TypeName(type_name) => std::mem::equal_bytes(ast_node_text(text, ast, type_node), "bool"),
+        _ => false,
+    };
 }
 
 fn lower_code_atomic_bool_new(
