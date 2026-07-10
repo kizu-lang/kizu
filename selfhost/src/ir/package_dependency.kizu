@@ -1,0 +1,282 @@
+// Package-wide numeric identities used after name resolution. Names are kept by
+// the catalog for diagnostics and resolver lookup only; closure and backend
+// consumers use ComponentId / FunctionId exclusively.
+
+pub struct ComponentId {
+    pub value: i64,
+}
+
+pub struct FunctionId {
+    pub value: i64,
+}
+
+pub struct FunctionTarget {
+    pub component: ComponentId,
+    pub function: FunctionId,
+}
+
+pub struct CallDependency {
+    pub call_node: std::kizu::ast::NodeId,
+    pub caller: FunctionTarget,
+    pub target: FunctionTarget,
+}
+
+// DependencyRecord is the explicit IR handoff. It intentionally contains no
+// source, callee, symbol, or LLVM spelling.
+pub struct DependencyRecord {
+    pub caller_component_id: i64,
+    pub caller_function_id: i64,
+    pub target_component_id: i64,
+    pub target_function_id: i64,
+}
+
+pub struct DependencyGraph {
+    caller_component_ids: std::array::Array<i64>,
+    caller_function_ids: std::array::Array<i64>,
+    target_component_ids: std::array::Array<i64>,
+    target_function_ids: std::array::Array<i64>,
+}
+
+pub fn dependency_graph(allocator: Allocator) -> DependencyGraph {
+    return DependencyGraph {
+        caller_component_ids: std::array::Array<i64>(allocator),
+        caller_function_ids: std::array::Array<i64>(allocator),
+        target_component_ids: std::array::Array<i64>(allocator),
+        target_function_ids: std::array::Array<i64>(allocator)
+    };
+}
+
+pub fn append_dependency(graph: &var DependencyGraph, record: DependencyRecord) -> !void {
+    try graph.caller_component_ids.append(record.caller_component_id);
+    try graph.caller_function_ids.append(record.caller_function_id);
+    try graph.target_component_ids.append(record.target_component_id);
+    try graph.target_function_ids.append(record.target_function_id);
+    return;
+}
+
+pub struct PackageFunctionCatalog {
+    component_names: std::array::Array<[]u8>,
+    function_component_ids: std::array::Array<i64>,
+    function_local_ids: std::array::Array<i64>,
+    function_names: std::array::Array<[]u8>,
+    function_nodes: std::array::Array<std::kizu::ast::NodeId>,
+    next_local_ids: std::array::Array<i64>,
+}
+
+pub fn init(allocator: Allocator) -> PackageFunctionCatalog {
+    return PackageFunctionCatalog {
+        component_names: std::array::Array<[]u8>(allocator),
+        function_component_ids: std::array::Array<i64>(allocator),
+        function_local_ids: std::array::Array<i64>(allocator),
+        function_names: std::array::Array<[]u8>(allocator),
+        function_nodes: std::array::Array<std::kizu::ast::NodeId>(allocator),
+        next_local_ids: std::array::Array<i64>(allocator)
+    };
+}
+
+// register_component assigns a stable dense ID in parsed package order.
+pub fn register_component(
+    catalog: &var PackageFunctionCatalog,
+    component_name: []u8
+) -> !ComponentId {
+    if find_component(catalog, component_name) >= 0 {
+        return error("duplicate package component");
+    }
+    let id = catalog.component_names.len();
+    try catalog.component_names.append(component_name);
+    try catalog.next_local_ids.append(0);
+    return ComponentId { value: id };
+}
+
+// register_function assigns a dense per-component ID in parsed declaration
+// order. The node is retained so codegen can emit the exact resolved definition.
+pub fn register_function(
+    catalog: &var PackageFunctionCatalog,
+    component: ComponentId,
+    local_name: []u8,
+    node: std::kizu::ast::NodeId
+) -> !FunctionTarget {
+    let component_value = component.value;
+    try require_component(catalog, component_value);
+    if find_function(catalog, component_value, local_name) >= 0 {
+        return error("duplicate package function");
+    }
+    let local_id = try catalog.next_local_ids.get(component_value);
+    try catalog.next_local_ids.set(component_value, local_id + 1);
+    try catalog.function_component_ids.append(component_value);
+    try catalog.function_local_ids.append(local_id);
+    try catalog.function_names.append(local_name);
+    try catalog.function_nodes.append(node);
+    return FunctionTarget {
+        component: ComponentId { value: component_value },
+        function: FunctionId { value: local_id }
+    };
+}
+
+// resolve_call is the only name-bearing boundary. A resolver records its exact
+// target on the call node; later phases never repeat this lookup.
+pub fn resolve_call(
+    catalog: &PackageFunctionCatalog,
+    component_name: []u8,
+    local_name: []u8
+) -> !FunctionTarget {
+    let component_value = find_component(catalog, component_name);
+    if component_value < 0 {
+        return error("unresolved call target component");
+    }
+    let entry_index = find_function(catalog, component_value, local_name);
+    if entry_index < 0 {
+        return error("unresolved call target function");
+    }
+    return target_at(catalog, entry_index);
+}
+
+pub fn definition_node(
+    catalog: &PackageFunctionCatalog,
+    target: FunctionTarget
+) -> !std::kizu::ast::NodeId {
+    let index = find_target(catalog, target);
+    if index < 0 {
+        return error("resolved function target not found");
+    }
+    return try catalog.function_nodes.get(index);
+}
+
+pub fn dependency_record(edge: CallDependency) -> DependencyRecord {
+    return DependencyRecord {
+        caller_component_id: edge.caller.component.value,
+        caller_function_id: edge.caller.function.value,
+        target_component_id: edge.target.component.value,
+        target_function_id: edge.target.function.value
+    };
+}
+
+pub fn dependency_target(record: DependencyRecord) -> FunctionTarget {
+    return FunctionTarget {
+        component: ComponentId { value: record.target_component_id },
+        function: FunctionId { value: record.target_function_id }
+    };
+}
+
+pub fn same_target(left: FunctionTarget, right: FunctionTarget) -> bool {
+    return left.component.value == right.component.value and
+        left.function.value == right.function.value;
+}
+
+// append_closure_targets is a numeric BFS step. The caller decides which roots
+// are seeded and repeatedly invokes it for newly reached functions.
+pub fn append_closure_targets(
+    function: FunctionTarget,
+    graph: &DependencyGraph,
+    pending_components: &var std::array::Array<i64>,
+    pending_functions: &var std::array::Array<i64>
+) -> !void {
+    var index = 0;
+    while index < graph.caller_component_ids.len() {
+        if try graph.caller_component_ids.get(index) == function.component.value and
+            try graph.caller_function_ids.get(index) == function.function.value {
+            let target_component_id = try graph.target_component_ids.get(index);
+            let target_function_id = try graph.target_function_ids.get(index);
+            if !contains_target(
+                pending_components, pending_functions, target_component_id, target_function_id
+            ) {
+                try pending_components.append(target_component_id);
+                try pending_functions.append(target_function_id);
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn contains_target(
+    components: &std::array::Array<i64>,
+    functions: &std::array::Array<i64>,
+    target_component_id: i64,
+    target_function_id: i64
+) -> bool {
+    var index = 0;
+    while index < components.len() {
+        if components.get_or_panic(index) == target_component_id and
+            functions.get_or_panic(index) == target_function_id {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn find_component(catalog: &PackageFunctionCatalog, name: []u8) -> i64 {
+    var index = 0;
+    while index < catalog.component_names.len() {
+        if std::mem::equal_bytes(catalog.component_names.get_or_panic(index), name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn find_function(
+    catalog: &PackageFunctionCatalog,
+    component_value: i64,
+    name: []u8
+) -> i64 {
+    var index = 0;
+    while index < catalog.function_names.len() {
+        if catalog.function_component_ids.get_or_panic(index) == component_value and
+            std::mem::equal_bytes(catalog.function_names.get_or_panic(index), name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn find_target(catalog: &PackageFunctionCatalog, target: FunctionTarget) -> i64 {
+    var index = 0;
+    while index < catalog.function_names.len() {
+        if catalog.function_component_ids.get_or_panic(index) == target.component.value and
+            catalog.function_local_ids.get_or_panic(index) == target.function.value {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn target_at(catalog: &PackageFunctionCatalog, index: i64) -> !FunctionTarget {
+    return FunctionTarget {
+        component: ComponentId { value: try catalog.function_component_ids.get(index) },
+        function: FunctionId { value: try catalog.function_local_ids.get(index) }
+    };
+}
+
+fn require_component(catalog: &PackageFunctionCatalog, component_value: i64) -> !void {
+    if component_value < 0 or component_value >= catalog.component_names.len() {
+        return error("package component id out of range");
+    }
+    return;
+}
+
+impl PackageFunctionCatalog {
+    fn deinit(self: PackageFunctionCatalog) -> void {
+        self.component_names.deinit();
+        self.function_component_ids.deinit();
+        self.function_local_ids.deinit();
+        self.function_names.deinit();
+        self.function_nodes.deinit();
+        self.next_local_ids.deinit();
+        return;
+    }
+}
+
+impl DependencyGraph {
+    fn deinit(self: DependencyGraph) -> void {
+        self.caller_component_ids.deinit();
+        self.caller_function_ids.deinit();
+        self.target_component_ids.deinit();
+        self.target_function_ids.deinit();
+        return;
+    }
+}
