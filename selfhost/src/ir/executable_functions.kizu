@@ -31,6 +31,18 @@ fn resolver_test_file(id: i64, module: []u8, text: []u8) -> source::SourceFile {
     };
 }
 
+fn resolver_std_test_file(id: i64, module: []u8, text: []u8) -> source::SourceFile {
+    return source::SourceFile {
+        id: id,
+        kind: source::SourceKind::Std,
+        package_name: "std",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    };
+}
+
 fn resolve_test_files(allocator: Allocator, files: &std::array::Array<source::SourceFile>) -> !package_dependency::ResolvedCallTargets {
     var parsed = try parser::parse_source_files(allocator, files);
     var catalog = try package_dependency::collect_from_parsed_files(allocator, files, &parsed);
@@ -42,10 +54,44 @@ pub fn package_resolver_builtin_gate() -> !void {
     let allocator = std::mem::page_allocator();
     var files = std::array::Array<source::SourceFile>(allocator);
     defer files.deinit();
-    try files.append(resolver_test_file(0, "resolver/builtin", "fn root() -> void { std::mem::page_allocator(); }"));
+    try files.append(resolver_test_file(0, "resolver/builtin", "fn root() -> void { std::mem::page_allocator(); Missing::init(); }"));
     var calls = try resolve_test_files(allocator, &files);
     defer calls.deinit();
     std::testing::expect_equal<i64>(0, package_dependency::resolved_call_len(&calls));
+    return;
+}
+
+pub fn package_resolver_std_function_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/std_function", "fn root() -> void { std::resolver_fixture::present(); }"));
+    try files.append(resolver_std_test_file(1, "resolver_fixture", "pub fn present() -> void {}"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    std::testing::expect_equal<i64>(1, package_dependency::resolved_call_len(&calls));
+    return;
+}
+
+pub fn package_resolver_missing_std_function_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/std_missing", "fn root() -> void { std::resolver_fixture::missing(); }"));
+    try files.append(resolver_std_test_file(1, "resolver_fixture", "pub fn present() -> void {}"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_missing_std_method_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/std_method", "fn root(value: std::resolver_fixture::Widget) -> void { value.missing(); }"));
+    try files.append(resolver_std_test_file(1, "resolver_fixture", "pub struct Widget {} impl Widget { fn present(self: Widget) -> void {} }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
     return;
 }
 

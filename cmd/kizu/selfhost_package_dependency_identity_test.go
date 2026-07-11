@@ -74,6 +74,17 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 		wantError string
 	}{
 		{name: "known runtime builtin is deliberately omitted", entry: "package_resolver_builtin_gate"},
+		{name: "std source function resolves", entry: "package_resolver_std_function_gate"},
+		{
+			name:      "missing function in catalogued std component",
+			entry:     "package_resolver_missing_std_function_gate",
+			wantError: "unresolved qualified package call target",
+		},
+		{
+			name:      "missing method on catalogued std owner",
+			entry:     "package_resolver_missing_std_method_gate",
+			wantError: "unresolved receiver package method target",
+		},
 		{
 			name: "unresolved qualified call", entry: "package_resolver_unresolved_qualified_gate",
 			wantError: "unresolved qualified package call target",
