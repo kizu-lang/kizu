@@ -60,6 +60,39 @@ pub struct FunctionTargetQueue {
     enqueued: std::array::Array<i64>,
 }
 
+pub struct EmittedTargets {
+    slots: std::array::Array<i64>,
+}
+
+pub fn emitted_targets(allocator: Allocator, catalog: &PackageFunctionCatalog) -> !EmittedTargets {
+    var emitted = EmittedTargets { slots: std::array::Array<i64>(allocator) };
+    var index = 0;
+    while index < function_len(catalog) {
+        try emitted.slots.append(0);
+        index = index + 1;
+    }
+    return emitted;
+}
+
+pub fn claim(
+    emitted: &var EmittedTargets,
+    catalog: &PackageFunctionCatalog,
+    target: &FunctionTarget
+) -> !bool {
+    let slot = try target_slot(catalog, copy_target(target));
+    if try emitted.slots.get(slot) != 0 { return false; }
+    try emitted.slots.set(slot, 1);
+    return true;
+}
+
+pub fn source_function_target(
+    catalog: &PackageFunctionCatalog,
+    file: &source::SourceFile,
+    local_name: []u8
+) -> !FunctionTarget {
+    return resolve_call(catalog, package_prefix(file), source::module_path(file), local_name);
+}
+
 pub fn function_target_queue(allocator: Allocator, catalog: &PackageFunctionCatalog) -> !FunctionTargetQueue {
     var queue = FunctionTargetQueue {
         component_ids: std::array::Array<i64>(allocator),
@@ -289,7 +322,8 @@ fn resolve_calls_node(
 }
 
 fn resolve_function_calls(text: []u8, ast: &std::kizu::ast::Ast, declaration: std::kizu::ast::NodeId, name: std::kizu::ast::NodeId, params: std::kizu::ast::ChildRange, body: std::kizu::ast::NodeId, catalog: &PackageFunctionCatalog, component_id: i64, calls: &var ResolvedCallTargets) -> !void {
-    let entry = find_function(catalog, component_id, node_text(text, ast, name));
+    let name_span = ast.get(name).span;
+    let entry = find_function_by_span(catalog, component_id, name_span.start, name_span.end);
     if entry < 0 { return error("resolver caller not found"); }
     return resolve_calls_node(text, ast, body, catalog, component_id, try target_at(catalog, entry), params, calls);
 }
@@ -352,12 +386,21 @@ fn find_type_method(catalog: &PackageFunctionCatalog, type_name: []u8, method: [
     while index < catalog.function_names.len() {
         let component = catalog.function_component_ids.get_or_panic(index);
         if std::mem::equal_bytes(catalog.function_names.get_or_panic(index), method) and
-            type_mentions_component(type_name, catalog.component_package_names.get_or_panic(component), catalog.component_names.get_or_panic(component)) {
+            type_mentions_component(type_name, catalog.component_package_names.get_or_panic(component), catalog.component_names.get_or_panic(component)) and
+            type_mentions_owner(type_name, catalog.function_owner_type_names.get_or_panic(index)) {
             return index;
         }
         index = index + 1;
     }
     return -1;
+}
+
+fn type_mentions_owner(value: []u8, owner: []u8) -> bool {
+    if std::mem::len(owner) == 0 { return false; }
+    let trimmed = std::mem::trim_ascii(value);
+    let owner_len = std::mem::len(owner);
+    if std::mem::len(trimmed) < owner_len { return false; }
+    return std::mem::equal_bytes(trimmed[std::mem::len(trimmed) - owner_len..std::mem::len(trimmed)], owner);
 }
 
 fn qualified_matches(value: []u8, package_name: []u8, component_name: []u8, function_name: []u8) -> bool {
@@ -381,13 +424,14 @@ fn type_mentions_component(value: []u8, package_name: []u8, component_name: []u8
             if std::mem::starts_with(trimmed, "var ") { start = 4; }
         }
     }
-    let suffix = "::Ast";
-    let expected_len = std::mem::len(package_name) + 2 + std::mem::len(component_name) + std::mem::len(suffix);
-    if std::mem::len(trimmed) - start != expected_len { return false; }
+    let minimum_len = std::mem::len(package_name) + 2 + std::mem::len(component_name) + 2 + 1;
+    if std::mem::len(trimmed) - start < minimum_len { return false; }
     let package_end = start + std::mem::len(package_name);
     let component_start = package_end + 2;
     let component_end = component_start + std::mem::len(component_name);
-    return std::mem::equal_bytes(trimmed[start..package_end], package_name) and std::mem::equal_bytes(trimmed[component_start..component_end], component_name) and std::mem::equal_bytes(trimmed[component_end..std::mem::len(trimmed)], suffix);
+    return std::mem::equal_bytes(trimmed[start..package_end], package_name) and
+        std::mem::equal_bytes(trimmed[component_start..component_end], component_name) and
+        std::mem::equal_bytes(trimmed[component_end..component_end + 2], "::");
 }
 
 fn node_text(text: []u8, ast: &std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> []u8 {
@@ -461,6 +505,9 @@ pub struct PackageFunctionCatalog {
     function_component_ids: std::array::Array<i64>,
     function_local_ids: std::array::Array<i64>,
     function_names: std::array::Array<[]u8>,
+    function_owner_type_names: std::array::Array<[]u8>,
+    function_name_starts: std::array::Array<i64>,
+    function_name_ends: std::array::Array<i64>,
     // Stable top-level declaration ordinals, never NodeIds borrowed from a
     // temporary parsed AST.
     function_decl_ordinals: std::array::Array<i64>,
@@ -476,6 +523,9 @@ pub fn init(allocator: Allocator) -> PackageFunctionCatalog {
         function_component_ids: std::array::Array<i64>(allocator),
         function_local_ids: std::array::Array<i64>(allocator),
         function_names: std::array::Array<[]u8>(allocator),
+        function_owner_type_names: std::array::Array<[]u8>(allocator),
+        function_name_starts: std::array::Array<i64>(allocator),
+        function_name_ends: std::array::Array<i64>(allocator),
         function_decl_ordinals: std::array::Array<i64>(allocator),
         function_method_ordinals: std::array::Array<i64>(allocator),
         next_local_ids: std::array::Array<i64>(allocator)
@@ -571,8 +621,11 @@ fn register_ast_function(
         catalog,
         ComponentId { value: component_value },
         std::mem::trim_ascii(text[name_span.start..name_span.end]),
+        "",
         declaration_ordinal,
-        -1
+        -1,
+        name_span.start,
+        name_span.end
     );
     if ignored.function.value < 0 {
         return error("package function id out of range");
@@ -610,7 +663,8 @@ fn register_ast_declaration(
             catalog, component_value, text, ast, declaration_ordinal, fn_decl.name
         );,
         ImplDecl(impl_decl) => return register_impl_methods(
-            catalog, component_value, text, ast, declaration_ordinal, impl_decl.methods
+            catalog, component_value, text, ast, declaration_ordinal,
+            node_text(text, ast, impl_decl.type_name), impl_decl.methods
         );,
         _ => return;,
     }
@@ -623,6 +677,7 @@ fn register_impl_methods(
     text: []u8,
     ast: &std::kizu::ast::Ast,
     declaration_ordinal: i64,
+    owner_type_name: []u8,
     methods: std::kizu::ast::ChildRange
 ) -> !void {
     var method_ordinal = 0;
@@ -632,7 +687,7 @@ fn register_impl_methods(
         match node.data {
             FnDecl(fn_decl) => try register_impl_method(
                 catalog, component_value, text, ast, declaration_ordinal,
-                method_ordinal, fn_decl.name
+                owner_type_name, method_ordinal, fn_decl.name
             );,
             _ => return error("impl member is not function");,
         }
@@ -647,6 +702,7 @@ fn register_impl_method(
     text: []u8,
     ast: &std::kizu::ast::Ast,
     declaration_ordinal: i64,
+    owner_type_name: []u8,
     method_ordinal: i64,
     name: std::kizu::ast::NodeId
 ) -> !void {
@@ -655,8 +711,11 @@ fn register_impl_method(
         catalog,
         ComponentId { value: component_value },
         std::mem::trim_ascii(text[span.start..span.end]),
+        owner_type_name,
         declaration_ordinal,
-        method_ordinal
+        method_ordinal,
+        span.start,
+        span.end
     );
     if ignored.function.value < 0 {
         return error("package method id out of range");
@@ -687,12 +746,15 @@ pub fn register_function(
     catalog: &var PackageFunctionCatalog,
     component: ComponentId,
     local_name: []u8,
+    owner_type_name: []u8,
     declaration_ordinal: i64,
-    method_ordinal: i64
+    method_ordinal: i64,
+    name_start: i64,
+    name_end: i64
 ) -> !FunctionTarget {
     let component_value = component.value;
     try require_component(catalog, component_value);
-    if find_function(catalog, component_value, local_name) >= 0 {
+    if find_owned_function(catalog, component_value, owner_type_name, local_name) >= 0 {
         return error("duplicate package function");
     }
     let local_id = try catalog.next_local_ids.get(component_value);
@@ -700,6 +762,9 @@ pub fn register_function(
     try catalog.function_component_ids.append(component_value);
     try catalog.function_local_ids.append(local_id);
     try catalog.function_names.append(local_name);
+    try catalog.function_owner_type_names.append(owner_type_name);
+    try catalog.function_name_starts.append(name_start);
+    try catalog.function_name_ends.append(name_end);
     try catalog.function_decl_ordinals.append(declaration_ordinal);
     try catalog.function_method_ordinals.append(method_ordinal);
     return FunctionTarget {
@@ -861,9 +926,32 @@ fn find_function(
     var index = 0;
     while index < catalog.function_names.len() {
         if catalog.function_component_ids.get_or_panic(index) == component_value and
+            std::mem::len(catalog.function_owner_type_names.get_or_panic(index)) == 0 and
             std::mem::equal_bytes(catalog.function_names.get_or_panic(index), name) {
             return index;
         }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn find_function_by_span(catalog: &PackageFunctionCatalog, component_value: i64, start: i64, end: i64) -> i64 {
+    var index = 0;
+    while index < catalog.function_names.len() {
+        if catalog.function_component_ids.get_or_panic(index) == component_value and
+            catalog.function_name_starts.get_or_panic(index) == start and
+            catalog.function_name_ends.get_or_panic(index) == end { return index; }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn find_owned_function(catalog: &PackageFunctionCatalog, component_value: i64, owner: []u8, name: []u8) -> i64 {
+    var index = 0;
+    while index < catalog.function_names.len() {
+        if catalog.function_component_ids.get_or_panic(index) == component_value and
+            std::mem::equal_bytes(catalog.function_owner_type_names.get_or_panic(index), owner) and
+            std::mem::equal_bytes(catalog.function_names.get_or_panic(index), name) { return index; }
         index = index + 1;
     }
     return -1;
@@ -903,6 +991,9 @@ impl PackageFunctionCatalog {
         self.function_component_ids.deinit();
         self.function_local_ids.deinit();
         self.function_names.deinit();
+        self.function_owner_type_names.deinit();
+        self.function_name_starts.deinit();
+        self.function_name_ends.deinit();
         self.function_decl_ordinals.deinit();
         self.function_method_ordinals.deinit();
         self.next_local_ids.deinit();
@@ -940,6 +1031,13 @@ impl FunctionTargetQueue {
         self.component_ids.deinit();
         self.function_ids.deinit();
         self.enqueued.deinit();
+        return;
+    }
+}
+
+impl EmittedTargets {
+    fn deinit(self: EmittedTargets) -> void {
+        self.slots.deinit();
         return;
     }
 }

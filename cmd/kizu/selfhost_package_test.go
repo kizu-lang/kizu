@@ -592,8 +592,12 @@ func TestSelfhostASTClosureUsesComponentCatalog(t *testing.T) {
 	astFactsBody := selfhostKizuFunctionBody(
 		t,
 		executableFunctions,
-		"fn append_selfhost_ast_function_facts(",
+		"fn append_selfhost_ast_function_facts_claimed(",
 	)
+	astWrapperBody := selfhostKizuFunctionBody(
+		t, executableFunctions, "pub fn append_selfhost_ast_function_facts(",
+	)
+	productionBody := selfhostKizuFunctionBody(t, executableFunctions, "pub fn append_facts(")
 	astClosureBody := selfhostKizuFunctionBody(
 		t,
 		executableFunctions,
@@ -604,15 +608,38 @@ func TestSelfhostASTClosureUsesComponentCatalog(t *testing.T) {
 		executableFunctions,
 		"fn collect_catalog_closure_external_callee_allowed(",
 	)
-	assertSelfhostASTClosureCatalogSeed(t, astFactsBody)
+	assertSelfhostASTClosureCatalogSeed(t, astWrapperBody, productionBody, astFactsBody)
 	assertSelfhostASTClosureBody(t, astClosureBody)
 	assertSelfhostASTExternalAccessorPolicy(t, policyBody)
 	assertSelfhostASTClosureScope(t, astFactsBody, astClosureBody, policyBody)
 }
 
 // assertSelfhostASTClosureCatalogSeed pins the selfhost::ast BFS seeds.
-func assertSelfhostASTClosureCatalogSeed(t *testing.T, astFactsBody string) {
+func assertSelfhostASTClosureCatalogSeed(
+	t *testing.T,
+	wrapperBody string,
+	productionBody string,
+	astFactsBody string,
+) {
 	t.Helper()
+	for _, fragment := range []string{
+		"parser::parse_source_files(allocator, &files)",
+		"package_dependency::collect_from_parsed_files(",
+		"package_dependency::emitted_targets(allocator, &package_catalog)",
+		"append_selfhost_ast_function_facts_claimed(",
+	} {
+		if !strings.Contains(wrapperBody, fragment) {
+			t.Fatalf("selfhost ast public wrapper missing package catalog path %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"append_selfhost_ast_function_facts_claimed(",
+		"&package_catalog, &var emitted_targets",
+	} {
+		if !strings.Contains(productionBody, fragment) {
+			t.Fatalf("production selfhost ast path does not share package claims %q", fragment)
+		}
+	}
 	for _, fragment := range []string{
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::ast\"",
@@ -624,6 +651,9 @@ func assertSelfhostASTClosureCatalogSeed(t *testing.T, astFactsBody string) {
 		if !strings.Contains(astFactsBody, fragment) {
 			t.Fatalf("selfhost ast closure seed path missing %q", fragment)
 		}
+	}
+	if strings.Contains(wrapperBody, "component_function_catalog::collect_from_ast(") {
+		t.Fatal("selfhost ast public wrapper bypasses package catalog with a component catalog")
 	}
 }
 

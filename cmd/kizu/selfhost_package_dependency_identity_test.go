@@ -134,6 +134,66 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 	}
 }
 
+// TestSelfhostPackageMethodIdentityIncludesOwnerType pins the catalog key that
+// lets Ast.deinit and ParseResult.deinit coexist and resolve to distinct numeric targets.
+func TestSelfhostPackageMethodIdentityIncludesOwnerType(t *testing.T) {
+	dependency := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency.kizu")
+	for _, fragment := range []string{
+		"function_owner_type_names: std::array::Array<[]u8>",
+		"node_text(text, ast, impl_decl.type_name)",
+		"find_owned_function(catalog, component_value, owner_type_name, local_name)",
+	} {
+		if !strings.Contains(dependency, fragment) {
+			t.Fatalf("method catalog owner identity missing %q", fragment)
+		}
+	}
+	lookup := dependencyFunctionBody(t, dependency, "find_type_method")
+	for _, fragment := range []string{"function_owner_type_names", "type_mentions_owner"} {
+		if !strings.Contains(lookup, fragment) {
+			t.Fatalf(
+				"receiver method lookup does not select the owner-specific numeric target: missing %q",
+				fragment,
+			)
+		}
+	}
+	topLevel := dependencyFunctionBody(t, dependency, "find_function")
+	ownerIsEmpty := "std::mem::len(" +
+		"catalog.function_owner_type_names.get_or_panic(index)) == 0"
+	if !strings.Contains(topLevel, ownerIsEmpty) {
+		t.Fatal("top-level lookup can select an impl method with the same spelling")
+	}
+}
+
+// TestSelfhostPackageMethodCallerIdentityUsesNameSpan pins caller resolution
+// when two impl owner types declare methods with the same spelling.
+func TestSelfhostPackageMethodCallerIdentityUsesNameSpan(t *testing.T) {
+	dependency := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency.kizu")
+	for _, fragment := range []string{
+		"function_name_starts: std::array::Array<i64>",
+		"function_name_ends: std::array::Array<i64>",
+		"find_function_by_span(catalog, component_id, name_span.start, name_span.end)",
+	} {
+		if !strings.Contains(dependency, fragment) {
+			t.Fatalf("same-name impl caller identity missing %q", fragment)
+		}
+	}
+	lookup := dependencyFunctionBody(t, dependency, "find_function_by_span")
+	callerIdentityFields := []string{
+		"function_component_ids",
+		"function_name_starts",
+		"function_name_ends",
+	}
+	for _, fragment := range callerIdentityFields {
+		if !strings.Contains(lookup, fragment) {
+			t.Fatalf("span caller lookup cannot distinguish owner method declarations: missing %q", fragment)
+		}
+	}
+	resolver := dependencyFunctionBody(t, dependency, "resolve_function_calls")
+	if strings.Contains(resolver, "find_function(catalog") {
+		t.Fatal("caller resolution still collapses same-name impl methods through top-level name lookup")
+	}
+}
+
 // dependencyFunctionBody extracts one Kizu function for focused hardcoding audits.
 func dependencyFunctionBody(t *testing.T, source, name string) string {
 	t.Helper()

@@ -20,7 +20,7 @@ func codegenClosureSeeds() []string {
 }
 
 // TestSelfhostCodegenClosureUsesComponentCatalog keeps selfhost::ir::codegen
-// IR body-fact selection on component-catalog closure roots instead of the old
+// IR body-fact selection on package-owned component-catalog closure roots instead of the old
 // handwritten append_selected_function_with_body / append_selected_helper_body list.
 func TestSelfhostCodegenClosureUsesComponentCatalog(t *testing.T) {
 	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
@@ -28,8 +28,12 @@ func TestSelfhostCodegenClosureUsesComponentCatalog(t *testing.T) {
 	factsBody := selfhostKizuFunctionBody(
 		t,
 		executableFunctions,
-		"fn append_codegen_function_facts(",
+		"fn append_codegen_function_facts_claimed(",
 	)
+	wrapperBody := selfhostKizuFunctionBody(
+		t, executableFunctions, "pub fn append_codegen_function_facts(",
+	)
+	productionBody := selfhostKizuFunctionBody(t, executableFunctions, "pub fn append_facts(")
 	closureBody := selfhostKizuFunctionBody(
 		t,
 		executableFunctions,
@@ -57,7 +61,7 @@ func TestSelfhostCodegenClosureUsesComponentCatalog(t *testing.T) {
 		"fn codegen_closure_external_callee_allowed(",
 	)
 
-	assertCodegenClosureFactsPath(t, factsBody)
+	assertCodegenClosureFactsPath(t, wrapperBody, productionBody, factsBody)
 	assertRuntimeStdlibSymbolPreamble(t, preambleBody)
 	assertCodegenClosureSeeds(t, closureBody)
 	assertCodegenClosureSharedBody(t, helperBody)
@@ -68,8 +72,31 @@ func TestSelfhostCodegenClosureUsesComponentCatalog(t *testing.T) {
 
 // assertCodegenClosureFactsPath pins the top-level codegen fact emitter to the
 // component catalog while keeping the non-body facts in place.
-func assertCodegenClosureFactsPath(t *testing.T, factsBody string) {
+func assertCodegenClosureFactsPath(
+	t *testing.T,
+	wrapperBody string,
+	productionBody string,
+	factsBody string,
+) {
 	t.Helper()
+	for _, fragment := range []string{
+		"parser::parse_source_files(allocator, &files)",
+		"package_dependency::collect_from_parsed_files(",
+		"package_dependency::emitted_targets(allocator, &package_catalog)",
+		"append_codegen_function_facts_claimed(",
+	} {
+		if !strings.Contains(wrapperBody, fragment) {
+			t.Fatalf("codegen public wrapper missing package catalog path %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"append_codegen_function_facts_claimed(",
+		"&package_catalog, &var emitted_targets",
+	} {
+		if !strings.Contains(productionBody, fragment) {
+			t.Fatalf("production codegen path does not share package claims %q", fragment)
+		}
+	}
 	for _, fragment := range []string{
 		"component_function_catalog::collect_from_ast(",
 		"\"selfhost::ir::codegen\"",
@@ -81,6 +108,9 @@ func assertCodegenClosureFactsPath(t *testing.T, factsBody string) {
 		if !strings.Contains(factsBody, fragment) {
 			t.Fatalf("codegen closure facts path missing %q", fragment)
 		}
+	}
+	if strings.Contains(wrapperBody, "component_function_catalog::collect_from_ast(") {
+		t.Fatal("codegen public wrapper bypasses package catalog with a component catalog")
 	}
 	for _, fragment := range []string{
 		"append_selected_function_with_body(",
