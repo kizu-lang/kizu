@@ -47,6 +47,56 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 	}
 }
 
+// TestSelfhostPackageResolverClassificationBehavior exercises the production
+// resolver boundary for package dependencies and deliberate runtime omissions.
+func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		entry     string
+		wantError string
+	}{
+		{name: "known runtime builtin is deliberately omitted", entry: "package_resolver_builtin_gate"},
+		{
+			name: "unresolved qualified call", entry: "package_resolver_unresolved_qualified_gate",
+			wantError: "unresolved qualified package call target",
+		},
+		{
+			name: "unknown typed receiver method", entry: "package_resolver_unknown_typed_method_gate",
+			wantError: "unresolved receiver package method target",
+		},
+		{
+			name: "same spelling in wrong component", entry: "package_resolver_wrong_component_gate",
+			wantError: "unresolved qualified package call target",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := interp.New(&out).RunEntry(program, "selfhost::ir::executable_functions::"+tc.entry)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("resolver gate failed: %v\n%s", err, out.String())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("resolver error = %v, want %q", err, tc.wantError)
+			}
+		})
+	}
+}
+
 // TestSelfhostPackageDependencyIdentityFlow guards the numeric handoff boundaries.
 func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 	dependency := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency.kizu")
@@ -116,7 +166,7 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 	dependency := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency.kizu")
 	executable := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 
-	resolver := dependencyFunctionBody(t, dependency, "resolve_field_callee_index")
+	resolver := dependencyFunctionBody(t, dependency, "resolve_field_callee")
 	for _, fragment := range []string{
 		"find_param_type", "find_type_method", "namespace",
 	} {

@@ -19,6 +19,69 @@ fn copy_source_file(file: &source::SourceFile) -> source::SourceFile {
     };
 }
 
+fn resolver_test_file(id: i64, module: []u8, text: []u8) -> source::SourceFile {
+    return source::SourceFile {
+        id: id,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    };
+}
+
+fn resolve_test_files(allocator: Allocator, files: &std::array::Array<source::SourceFile>) -> !package_dependency::ResolvedCallTargets {
+    var parsed = try parser::parse_source_files(allocator, files);
+    var catalog = try package_dependency::collect_from_parsed_files(allocator, files, &parsed);
+    defer catalog.deinit();
+    return package_dependency::resolve_package_calls(allocator, files, &parsed, &catalog);
+}
+
+pub fn package_resolver_builtin_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/builtin", "fn root() -> void { std::mem::page_allocator(); }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    std::testing::expect_equal<i64>(0, package_dependency::resolved_call_len(&calls));
+    return;
+}
+
+pub fn package_resolver_unresolved_qualified_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/a", "fn root() -> void { selfhost::resolver::b::missing(); }"));
+    try files.append(resolver_test_file(1, "resolver/b", "fn present() -> void {}"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_unknown_typed_method_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/method", "fn root(value: Unknown) -> void { value.missing(); }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_wrong_component_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/a", "fn root() -> void { selfhost::resolver::c::wanted(); }"));
+    try files.append(resolver_test_file(1, "resolver/b", "fn wanted() -> void {}"));
+    try files.append(resolver_test_file(2, "resolver/c", "fn other() -> void {}"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
 pub fn append_facts(
     allocator: Allocator,
     out: &var std::string::String,
