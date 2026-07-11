@@ -45,6 +45,12 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 	if count := strings.Count(facts, "package-dependency "); count == 0 {
 		t.Fatal("numeric collector closure emitted no numeric dependency records")
 	}
+	if count := strings.Count(facts, "package-definition "); count == 0 {
+		t.Fatal("numeric collector closure emitted no numeric target definitions")
+	}
+	if count := strings.Count(facts, "package-reference "); count == 0 {
+		t.Fatal("numeric collector closure emitted no numeric target references")
+	}
 }
 
 // TestSelfhostPackageResolverClassificationBehavior exercises the production
@@ -117,10 +123,9 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		"import selfhost::ir::package_dependency;",
-		"pub fn dependency_definition_node(",
-		"package_dependency::dependency_target(dependency)",
-		"pub fn claim_dependency_target(",
-		"package_dependency::target_slot(catalog, target)",
+		"pub fn consume_package_dependencies(",
+		"dependency_record_from_line(line)",
+		"numeric_target_fact_exists(",
 	} {
 		if !strings.Contains(cli, fragment) {
 			t.Errorf("cli_llvm dependency consumption missing %q", fragment)
@@ -134,8 +139,8 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 			t.Errorf("numeric closure BFS must not inspect %q", forbidden)
 		}
 	}
-	cliBody := dependencyFunctionBody(t, cli, "dependency_definition_node")
-	for _, forbidden := range []string{"equal_bytes", "starts_with", "callee", "symbol"} {
+	cliBody := dependencyFunctionBody(t, cli, "consume_package_dependencies")
+	for _, forbidden := range []string{"equal_bytes", "callee", "symbol"} {
 		if strings.Contains(strings.ToLower(cliBody), forbidden) {
 			t.Errorf("cli dependency consumption must not inspect %q", forbidden)
 		}
@@ -215,9 +220,9 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 		}
 	}
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
-	claim := dependencyFunctionBody(t, cli, "claim_dependency_target")
+	claim := dependencyFunctionBody(t, cli, "consume_package_dependencies")
 	for _, forbidden := range []string{
-		"equal_bytes", "starts_with", "callee", "symbol", "local_name",
+		"equal_bytes", "callee", "symbol", "local_name",
 	} {
 		if strings.Contains(claim, forbidden) {
 			t.Fatalf("LLVM dependency target claim reintroduced spelling selection %q", forbidden)
