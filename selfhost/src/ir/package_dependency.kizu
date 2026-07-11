@@ -1,3 +1,6 @@
+import selfhost::parser;
+import selfhost::source;
+
 // Package-wide numeric identities used after name resolution. Names are kept by
 // the catalog for diagnostics and resolver lookup only; closure and backend
 // consumers use ComponentId / FunctionId exclusively.
@@ -55,34 +58,148 @@ pub fn append_dependency(graph: &var DependencyGraph, record: DependencyRecord) 
 }
 
 pub struct PackageFunctionCatalog {
+    component_package_names: std::array::Array<[]u8>,
     component_names: std::array::Array<[]u8>,
     function_component_ids: std::array::Array<i64>,
     function_local_ids: std::array::Array<i64>,
     function_names: std::array::Array<[]u8>,
-    function_nodes: std::array::Array<std::kizu::ast::NodeId>,
+    // Stable top-level declaration ordinals, never NodeIds borrowed from a
+    // temporary parsed AST.
+    function_decl_ordinals: std::array::Array<i64>,
     next_local_ids: std::array::Array<i64>,
 }
 
 pub fn init(allocator: Allocator) -> PackageFunctionCatalog {
     return PackageFunctionCatalog {
+        component_package_names: std::array::Array<[]u8>(allocator),
         component_names: std::array::Array<[]u8>(allocator),
         function_component_ids: std::array::Array<i64>(allocator),
         function_local_ids: std::array::Array<i64>(allocator),
         function_names: std::array::Array<[]u8>(allocator),
-        function_nodes: std::array::Array<std::kizu::ast::NodeId>(allocator),
+        function_decl_ordinals: std::array::Array<i64>(allocator),
         next_local_ids: std::array::Array<i64>(allocator)
     };
+}
+
+// collect_from_files is pass one of executable fact construction. Every source
+// component is parsed and registered before any component closure is emitted.
+// Parsed ASTs are released after registration. The catalog retains only source-
+// backed names and declaration ordinals; consumers explicitly re-resolve a
+// definition in the AST they currently own.
+pub fn collect_from_files(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>
+) -> !PackageFunctionCatalog {
+    var catalog = init(allocator);
+    var file_index = 0;
+    while file_index < files.len() {
+        let file = try files.at(file_index);
+        if source::is_source_code(file.kind) {
+            let component = try register_component(
+                &var catalog, package_prefix(file), source::module_path(file)
+            );
+            let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+            try register_ast_functions(&var catalog, component.value, file.text, &parsed.ast, parsed.root);
+            parsed.deinit();
+        }
+        file_index = file_index + 1;
+    }
+    return catalog;
+}
+
+fn package_prefix(file: &source::SourceFile) -> []u8 borrows file {
+    if file.kind == source::SourceKind::Std {
+        return "std";
+    }
+    if std::mem::len(file.package_name) > 0 {
+        return file.package_name;
+    }
+    return "selfhost";
+}
+
+fn register_ast_functions(
+    catalog: &var PackageFunctionCatalog,
+    component_value: i64,
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return register_ast_function_range(
+            catalog, component_value, text, ast, program.declarations
+        );,
+        _ => return;,
+    }
+    return;
+}
+
+fn register_ast_function(
+    catalog: &var PackageFunctionCatalog,
+    component_value: i64,
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    declaration_ordinal: i64,
+    name: std::kizu::ast::NodeId
+) -> !void {
+    let name_span = ast.get(name).span;
+    let ignored = try register_function(
+        catalog,
+        ComponentId { value: component_value },
+        std::mem::trim_ascii(text[name_span.start..name_span.end]),
+        declaration_ordinal
+    );
+    if ignored.function.value < 0 {
+        return error("package function id out of range");
+    }
+    return;
+}
+
+fn register_ast_function_range(
+    catalog: &var PackageFunctionCatalog,
+    component_value: i64,
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> !void {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        try register_ast_declaration(catalog, component_value, text, ast, child, index);
+        index = index + 1;
+    }
+    return;
+}
+
+fn register_ast_declaration(
+    catalog: &var PackageFunctionCatalog,
+    component_value: i64,
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    declaration_ordinal: i64
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return register_ast_function(
+            catalog, component_value, text, ast, declaration_ordinal, fn_decl.name
+        );,
+        _ => return;,
+    }
+    return;
 }
 
 // register_component assigns a stable dense ID in parsed package order.
 pub fn register_component(
     catalog: &var PackageFunctionCatalog,
+    package_name: []u8,
     component_name: []u8
 ) -> !ComponentId {
-    if find_component(catalog, component_name) >= 0 {
+    if find_component(catalog, package_name, component_name) >= 0 {
         return error("duplicate package component");
     }
     let id = catalog.component_names.len();
+    try catalog.component_package_names.append(package_name);
     try catalog.component_names.append(component_name);
     try catalog.next_local_ids.append(0);
     return ComponentId { value: id };
@@ -94,7 +211,7 @@ pub fn register_function(
     catalog: &var PackageFunctionCatalog,
     component: ComponentId,
     local_name: []u8,
-    node: std::kizu::ast::NodeId
+    declaration_ordinal: i64
 ) -> !FunctionTarget {
     let component_value = component.value;
     try require_component(catalog, component_value);
@@ -106,7 +223,7 @@ pub fn register_function(
     try catalog.function_component_ids.append(component_value);
     try catalog.function_local_ids.append(local_id);
     try catalog.function_names.append(local_name);
-    try catalog.function_nodes.append(node);
+    try catalog.function_decl_ordinals.append(declaration_ordinal);
     return FunctionTarget {
         component: ComponentId { value: component_value },
         function: FunctionId { value: local_id }
@@ -117,10 +234,11 @@ pub fn register_function(
 // target on the call node; later phases never repeat this lookup.
 pub fn resolve_call(
     catalog: &PackageFunctionCatalog,
+    package_name: []u8,
     component_name: []u8,
     local_name: []u8
 ) -> !FunctionTarget {
-    let component_value = find_component(catalog, component_name);
+    let component_value = find_component(catalog, package_name, component_name);
     if component_value < 0 {
         return error("unresolved call target component");
     }
@@ -133,13 +251,21 @@ pub fn resolve_call(
 
 pub fn definition_node(
     catalog: &PackageFunctionCatalog,
-    target: FunctionTarget
+    target: FunctionTarget,
+    ast: &std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
 ) -> !std::kizu::ast::NodeId {
     let index = find_target(catalog, target);
     if index < 0 {
         return error("resolved function target not found");
     }
-    return try catalog.function_nodes.get(index);
+    let ordinal = try catalog.function_decl_ordinals.get(index);
+    let root_node = ast.get(root);
+    match root_node.data {
+        Program(program) => return ast.child_at(program.declarations, ordinal);,
+        _ => return error("package definition root is not program");,
+    }
+    return error("package definition root is not program");
 }
 
 pub fn dependency_record(edge: CallDependency) -> DependencyRecord {
@@ -206,10 +332,16 @@ fn contains_target(
     return false;
 }
 
-fn find_component(catalog: &PackageFunctionCatalog, name: []u8) -> i64 {
+fn find_component(
+    catalog: &PackageFunctionCatalog,
+    package_name: []u8,
+    name: []u8
+) -> i64 {
     var index = 0;
     while index < catalog.component_names.len() {
-        if std::mem::equal_bytes(catalog.component_names.get_or_panic(index), name) {
+        if std::mem::equal_bytes(
+            catalog.component_package_names.get_or_panic(index), package_name
+        ) and std::mem::equal_bytes(catalog.component_names.get_or_panic(index), name) {
             return index;
         }
         index = index + 1;
@@ -261,11 +393,12 @@ fn require_component(catalog: &PackageFunctionCatalog, component_value: i64) -> 
 
 impl PackageFunctionCatalog {
     fn deinit(self: PackageFunctionCatalog) -> void {
+        self.component_package_names.deinit();
         self.component_names.deinit();
         self.function_component_ids.deinit();
         self.function_local_ids.deinit();
         self.function_names.deinit();
-        self.function_nodes.deinit();
+        self.function_decl_ordinals.deinit();
         self.next_local_ids.deinit();
         return;
     }
