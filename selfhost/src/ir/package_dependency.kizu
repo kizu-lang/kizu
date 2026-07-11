@@ -46,6 +46,8 @@ pub struct ResolvedCallTargets {
     caller_component_ids: std::array::Array<i64>,
     caller_function_ids: std::array::Array<i64>,
     call_nodes: std::array::Array<std::kizu::ast::NodeId>,
+    call_starts: std::array::Array<i64>,
+    call_ends: std::array::Array<i64>,
     target_component_ids: std::array::Array<i64>,
     target_function_ids: std::array::Array<i64>,
 }
@@ -86,13 +88,15 @@ pub fn queue_append(queue: &var FunctionTargetQueue, target: FunctionTarget) -> 
 pub fn resolved_call_target(
     calls: &ResolvedCallTargets,
     caller_component_id: i64,
+    ast: &std::kizu::ast::Ast,
     call_node: std::kizu::ast::NodeId
 ) -> !FunctionTarget {
+    let call_span = ast.get(call_node).span;
     var index = 0;
     while index < calls.call_nodes.len() {
-        let candidate = try calls.call_nodes.get(index);
         if try calls.caller_component_ids.get(index) == caller_component_id and
-            candidate == call_node {
+            try calls.call_starts.get(index) == call_span.start and
+            try calls.call_ends.get(index) == call_span.end {
             return FunctionTarget {
                 component: ComponentId { value: try calls.target_component_ids.get(index) },
                 function: FunctionId { value: try calls.target_function_ids.get(index) }
@@ -108,6 +112,8 @@ pub fn resolved_call_targets(allocator: Allocator) -> ResolvedCallTargets {
         caller_component_ids: std::array::Array<i64>(allocator),
         caller_function_ids: std::array::Array<i64>(allocator),
         call_nodes: std::array::Array<std::kizu::ast::NodeId>(allocator),
+        call_starts: std::array::Array<i64>(allocator),
+        call_ends: std::array::Array<i64>(allocator),
         target_component_ids: std::array::Array<i64>(allocator),
         target_function_ids: std::array::Array<i64>(allocator)
     };
@@ -115,6 +121,7 @@ pub fn resolved_call_targets(allocator: Allocator) -> ResolvedCallTargets {
 
 pub fn append_resolved_call(
     calls: &var ResolvedCallTargets,
+    ast: &std::kizu::ast::Ast,
     call_node: std::kizu::ast::NodeId,
     caller: FunctionTarget,
     target: FunctionTarget
@@ -126,6 +133,9 @@ pub fn append_resolved_call(
     try calls.caller_component_ids.append(caller_component_id);
     try calls.caller_function_ids.append(caller_function_id);
     try calls.call_nodes.append(call_node);
+    let call_span = ast.get(call_node).span;
+    try calls.call_starts.append(call_span.start);
+    try calls.call_ends.append(call_span.end);
     try calls.target_component_ids.append(target_component_id);
     try calls.target_function_ids.append(target_function_id);
     return;
@@ -174,6 +184,7 @@ pub struct PackageFunctionCatalog {
     // Stable top-level declaration ordinals, never NodeIds borrowed from a
     // temporary parsed AST.
     function_decl_ordinals: std::array::Array<i64>,
+    function_method_ordinals: std::array::Array<i64>,
     next_local_ids: std::array::Array<i64>,
 }
 
@@ -185,6 +196,7 @@ pub fn init(allocator: Allocator) -> PackageFunctionCatalog {
         function_local_ids: std::array::Array<i64>(allocator),
         function_names: std::array::Array<[]u8>(allocator),
         function_decl_ordinals: std::array::Array<i64>(allocator),
+        function_method_ordinals: std::array::Array<i64>(allocator),
         next_local_ids: std::array::Array<i64>(allocator)
     };
 }
@@ -278,7 +290,8 @@ fn register_ast_function(
         catalog,
         ComponentId { value: component_value },
         std::mem::trim_ascii(text[name_span.start..name_span.end]),
-        declaration_ordinal
+        declaration_ordinal,
+        -1
     );
     if ignored.function.value < 0 {
         return error("package function id out of range");
@@ -315,7 +328,57 @@ fn register_ast_declaration(
         FnDecl(fn_decl) => return register_ast_function(
             catalog, component_value, text, ast, declaration_ordinal, fn_decl.name
         );,
+        ImplDecl(impl_decl) => return register_impl_methods(
+            catalog, component_value, text, ast, declaration_ordinal, impl_decl.methods
+        );,
         _ => return;,
+    }
+    return;
+}
+
+fn register_impl_methods(
+    catalog: &var PackageFunctionCatalog,
+    component_value: i64,
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    declaration_ordinal: i64,
+    methods: std::kizu::ast::ChildRange
+) -> !void {
+    var method_ordinal = 0;
+    while method_ordinal < methods.len {
+        let method_node = try ast.child_at(methods, method_ordinal);
+        let node = ast.get(method_node);
+        match node.data {
+            FnDecl(fn_decl) => try register_impl_method(
+                catalog, component_value, text, ast, declaration_ordinal,
+                method_ordinal, fn_decl.name
+            );,
+            _ => return error("impl member is not function");,
+        }
+        method_ordinal = method_ordinal + 1;
+    }
+    return;
+}
+
+fn register_impl_method(
+    catalog: &var PackageFunctionCatalog,
+    component_value: i64,
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    declaration_ordinal: i64,
+    method_ordinal: i64,
+    name: std::kizu::ast::NodeId
+) -> !void {
+    let span = ast.get(name).span;
+    let ignored = try register_function(
+        catalog,
+        ComponentId { value: component_value },
+        std::mem::trim_ascii(text[span.start..span.end]),
+        declaration_ordinal,
+        method_ordinal
+    );
+    if ignored.function.value < 0 {
+        return error("package method id out of range");
     }
     return;
 }
@@ -342,7 +405,8 @@ pub fn register_function(
     catalog: &var PackageFunctionCatalog,
     component: ComponentId,
     local_name: []u8,
-    declaration_ordinal: i64
+    declaration_ordinal: i64,
+    method_ordinal: i64
 ) -> !FunctionTarget {
     let component_value = component.value;
     try require_component(catalog, component_value);
@@ -355,6 +419,7 @@ pub fn register_function(
     try catalog.function_local_ids.append(local_id);
     try catalog.function_names.append(local_name);
     try catalog.function_decl_ordinals.append(declaration_ordinal);
+    try catalog.function_method_ordinals.append(method_ordinal);
     return FunctionTarget {
         component: ComponentId { value: component_value },
         function: FunctionId { value: local_id }
@@ -391,12 +456,33 @@ pub fn definition_node(
         return error("resolved function target not found");
     }
     let ordinal = try catalog.function_decl_ordinals.get(index);
+    let method_ordinal = try catalog.function_method_ordinals.get(index);
     let root_node = ast.get(root);
     match root_node.data {
-        Program(program) => return ast.child_at(program.declarations, ordinal);,
+        Program(program) => return definition_node_in_program(
+            ast, program.declarations, ordinal, method_ordinal
+        );,
         _ => return error("package definition root is not program");,
     }
     return error("package definition root is not program");
+}
+
+fn definition_node_in_program(
+    ast: &std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    declaration_ordinal: i64,
+    method_ordinal: i64
+) -> !std::kizu::ast::NodeId {
+    let declaration = try ast.child_at(declarations, declaration_ordinal);
+    if method_ordinal < 0 {
+        return declaration;
+    }
+    let node = ast.get(declaration);
+    match node.data {
+        ImplDecl(impl_decl) => return ast.child_at(impl_decl.methods, method_ordinal);,
+        _ => return error("package method owner is not impl");,
+    }
+    return error("package method owner is not impl");
 }
 
 pub fn dependency_record(edge: CallDependency) -> DependencyRecord {
@@ -530,6 +616,7 @@ impl PackageFunctionCatalog {
         self.function_local_ids.deinit();
         self.function_names.deinit();
         self.function_decl_ordinals.deinit();
+        self.function_method_ordinals.deinit();
         self.next_local_ids.deinit();
         return;
     }
@@ -550,6 +637,8 @@ impl ResolvedCallTargets {
         self.caller_component_ids.deinit();
         self.caller_function_ids.deinit();
         self.call_nodes.deinit();
+        self.call_starts.deinit();
+        self.call_ends.deinit();
         self.target_component_ids.deinit();
         self.target_function_ids.deinit();
         return;
