@@ -5,6 +5,7 @@ import selfhost::ir::executable_body;
 import selfhost::ir::function_signature;
 import selfhost::ir::package_dependency;
 import selfhost::source;
+import selfhost::source::loader;
 
 fn copy_source_file(file: &source::SourceFile) -> source::SourceFile {
     return source::SourceFile {
@@ -196,6 +197,70 @@ pub fn append_facts(
     return;
 }
 
+// numeric_package_collector_gate drives the production package parser,
+// numeric call resolver, dependency graph, and definition emitter from the
+// real constructor-facts collector root.
+pub fn numeric_package_collector_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
+    defer files.deinit();
+    var facts_files = std::array::Array<source::SourceFile>(allocator);
+    defer facts_files.deinit();
+    var file_index = 0;
+    while file_index < files.len() {
+        let file = try files.at(file_index);
+        let module = source::module_path(file);
+        if (file.kind == source::SourceKind::Selfhost and std::mem::equal_bytes(module, "types/constructor_facts")) or
+            (file.kind == source::SourceKind::Std and std::mem::equal_bytes(module, "kizu/ast")) {
+            try facts_files.append(copy_source_file(file));
+        }
+        file_index = file_index + 1;
+    }
+    std::testing::expect_equal<i64>(2, facts_files.len());
+    var parsed = try parser::parse_source_files(allocator, &facts_files);
+    var catalog = try package_dependency::collect_from_parsed_files(allocator, &facts_files, &parsed);
+    defer catalog.deinit();
+    var calls = try package_dependency::resolve_package_calls(allocator, &facts_files, &parsed, &catalog);
+    defer calls.deinit();
+    var graph = try package_dependency::dependency_graph(allocator, &catalog);
+    defer graph.deinit();
+    try package_dependency::append_resolved_dependencies(&var graph, &catalog, &calls);
+    var emitted = try package_dependency::emitted_targets(allocator, &catalog);
+    defer emitted.deinit();
+    var out = std::string::String(allocator);
+    defer out.deinit();
+    var pending = try package_dependency::function_target_queue(allocator, &catalog);
+    defer pending.deinit();
+    try package_dependency::queue_append(
+        &var pending, &catalog,
+        try package_dependency::resolve_call(&catalog, "selfhost", "types/constructor_facts", "collect_into")
+    );
+    var index = 0;
+    while index < package_dependency::queue_len(&pending) {
+        let target = try package_dependency::queue_target(&pending, index);
+        let target_name = try package_dependency::target_local_name(&catalog, package_dependency::FunctionTarget {
+            component: package_dependency::ComponentId { value: target.component.value },
+            function: package_dependency::FunctionId { value: target.function.value }
+        });
+        if std::mem::equal_bytes(target_name, "get") or std::mem::equal_bytes(target_name, "child_at") {
+            if try package_dependency::claim(&var emitted, &catalog, &target) {
+                try append_numeric_package_definition(&var out, &facts_files, &parsed, &catalog, package_dependency::FunctionTarget {
+                    component: package_dependency::ComponentId { value: target.component.value },
+                    function: package_dependency::FunctionId { value: target.function.value }
+                });
+            }
+        }
+        try package_dependency::queue_append_dependencies(&var pending, &catalog, &graph, target);
+        index = index + 1;
+    }
+    try append_numeric_dependency_records(&var out, &graph);
+    let output = out.as_bytes();
+    print(output);
+    try parser::deinit_parsed_source_files(parsed);
+    return;
+}
+
 fn append_numeric_package_closure(
     allocator: Allocator,
     out: &var std::string::String,
@@ -210,7 +275,7 @@ fn append_numeric_package_closure(
     try package_dependency::queue_append(
         &var pending, catalog,
         try package_dependency::resolve_call(
-            catalog, "selfhost", "ir/component_function_catalog", "collect_range"
+            catalog, "selfhost", "types/constructor_facts", "collect_into"
         )
     );
     var index = 0;

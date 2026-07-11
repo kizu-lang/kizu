@@ -1,10 +1,51 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/kizu-lang/kizu/internal/interp"
 )
+
+// TestSelfhostNumericPackageCollectorBehavior parses the actual package and
+// drives the production resolver, dependency graph, closure, and emitter from
+// constructor_facts::collect_into. The emitted facts prove Ast parameter
+// receiver calls resolved to the numeric std::kizu::ast method definitions.
+func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	const entry = "selfhost::ir::executable_functions::numeric_package_collector_gate"
+	err = interp.New(&out).RunEntry(program, entry)
+	if err != nil {
+		t.Fatalf("numeric collector gate failed: %v\n%s", err, out.String())
+	}
+	facts := out.String()
+	for _, name := range []string{"std::kizu/ast::get", "std::kizu/ast::child_at"} {
+		marker := "function-signature-return " + name + " "
+		if count := strings.Count(facts, marker); count != 1 {
+			t.Fatalf(
+				"numeric closure emitted %s definition %d times, want exactly once\n%s",
+				name, count, facts,
+			)
+		}
+	}
+	if count := strings.Count(facts, "package-dependency "); count == 0 {
+		t.Fatal("numeric collector closure emitted no numeric dependency records")
+	}
+}
 
 // TestSelfhostPackageDependencyIdentityFlow guards the numeric handoff boundaries.
 func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
