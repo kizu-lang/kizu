@@ -192,7 +192,8 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 		"import selfhost::ir::package_dependency;",
 		"pub fn consume_package_dependencies(",
 		"dependency_record_from_line(line)",
-		"numeric_target_fact_exists(",
+		"package identity table size overflow",
+		"package identity table exceeds fact input",
 	} {
 		if !strings.Contains(cli, fragment) {
 			t.Errorf("cli_llvm dependency consumption missing %q", fragment)
@@ -220,7 +221,7 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 	if linearClaimArrays {
 		t.Fatal("cli dependency consumer reintroduced a linear claimed-target pair scan")
 	}
-	for _, fragment := range []string{"function_stride", "claim_slot", "claimed.set(claim_slot, 1)"} {
+	for _, fragment := range []string{"function_stride", "identity_slot_count", "definitions.get(caller_slot)", "references.get(claim_slot)"} {
 		if !strings.Contains(cliBody, fragment) {
 			t.Fatalf("cli dependency consumer dense numeric claimed set missing %q", fragment)
 		}
