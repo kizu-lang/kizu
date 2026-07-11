@@ -62,6 +62,62 @@ struct CalleeResolution {
     target_index: i64,
 }
 
+// BuiltinIdentity is the closed resolver-owned classification for calls which
+// do not name package functions. Source spellings are accepted only here.
+struct BuiltinIdentity {
+    kind: i64,
+}
+
+fn builtin_none_kind() -> i64 { return 0; }
+fn builtin_language_kind() -> i64 { return 1; }
+fn builtin_runtime_kind() -> i64 { return 2; }
+fn builtin_external_shape_kind() -> i64 { return 3; }
+
+fn builtin_identity(name: []u8) -> BuiltinIdentity {
+    let value = std::mem::trim_ascii(name);
+    if std::mem::equal_bytes(value, "print") or
+        std::mem::equal_bytes(value, "error") {
+        return BuiltinIdentity { kind: builtin_language_kind() };
+    }
+    if std::mem::equal_bytes(value, "std::mem::page_allocator") or
+        std::mem::equal_bytes(value, "std::mem::byte_at") or
+        std::mem::equal_bytes(value, "std::mem::equal_bytes") or
+        std::mem::equal_bytes(value, "std::mem::is_ascii_space") or
+        std::mem::equal_bytes(value, "std::mem::len") or
+        std::mem::equal_bytes(value, "std::mem::slice") or
+        std::mem::equal_bytes(value, "std::mem::starts_with") or
+        std::mem::equal_bytes(value, "std::mem::trim_ascii") or
+        std::mem::equal_bytes(value, "std::fmt::append_bool") or
+        std::mem::equal_bytes(value, "std::fmt::append_bytes_literal") or
+        std::mem::equal_bytes(value, "std::fmt::append_i64") or
+        std::mem::equal_bytes(value, "std::io::blocking") or
+        std::mem::equal_bytes(value, "std::io::write_stdout") or
+        std::mem::equal_bytes(value, "std::io::write_stderr") or
+        std::mem::equal_bytes(value, "std::fs::create_dir") or
+        std::mem::equal_bytes(value, "std::fs::exists") or
+        std::mem::equal_bytes(value, "std::fs::metadata") or
+        std::mem::equal_bytes(value, "std::fs::read_dir") or
+        std::mem::equal_bytes(value, "std::fs::read_file") or
+        std::mem::equal_bytes(value, "std::fs::remove_file") or
+        std::mem::equal_bytes(value, "std::fs::rename") or
+        std::mem::equal_bytes(value, "std::fs::write_file") or
+        std::mem::equal_bytes(value, "std::process::arg") or
+        std::mem::equal_bytes(value, "std::process::arg_count") or
+        std::mem::equal_bytes(value, "std::process::env") or
+        std::mem::equal_bytes(value, "std::process::env_or_empty") or
+        std::mem::equal_bytes(value, "std::process::exit_code") or
+        std::mem::equal_bytes(value, "std::process::monotonic_millis") {
+        return BuiltinIdentity { kind: builtin_runtime_kind() };
+    }
+    return BuiltinIdentity { kind: builtin_none_kind() };
+}
+
+fn is_constructor_identity(name: []u8) -> bool {
+    if std::mem::len(name) == 0 { return false; }
+    let first = name[0];
+    return first >= cast<u8>(65) and first <= cast<u8>(90);
+}
+
 fn callee_resolved_kind() -> i64 { return 1; }
 fn callee_non_package_kind() -> i64 { return 2; }
 fn callee_unresolved_kind() -> i64 { return 3; }
@@ -382,14 +438,33 @@ fn resolve_callee(text: []u8, ast: &std::kizu::ast::Ast, callee: std::kizu::ast:
     match node.data {
         Var(_) => return resolve_var_callee(text, ast, callee, catalog, component_id);,
         FieldExpr(field) => return resolve_field_callee(text, ast, callee, field.receiver, field.name, field.namespace, params, catalog);,
+        TypeApplyExpr(type_apply) => return resolve_type_apply_callee(text, ast, type_apply.callee, params, catalog, component_id);,
         _ => return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };,
     }
     return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };
 }
 
 fn resolve_var_callee(text: []u8, ast: &std::kizu::ast::Ast, callee: std::kizu::ast::NodeId, catalog: &PackageFunctionCatalog, component_id: i64) -> CalleeResolution {
-    let target = find_function(catalog, component_id, node_text(text, ast, callee));
+    let name = node_text(text, ast, callee);
+    let target = find_function(catalog, component_id, name);
     if target >= 0 { return CalleeResolution { kind: callee_resolved_kind(), target_index: target }; }
+    if builtin_identity(name).kind != builtin_none_kind() {
+        return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };
+    }
+    return CalleeResolution { kind: callee_unresolved_kind(), target_index: -1 };
+}
+
+fn resolve_type_apply_callee(text: []u8, ast: &std::kizu::ast::Ast, callee: std::kizu::ast::NodeId, params: std::kizu::ast::ChildRange, catalog: &PackageFunctionCatalog, component_id: i64) -> !CalleeResolution {
+    let node = ast.get(callee);
+    match node.data {
+        Var(_) => return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };,
+        FieldExpr(field) => return resolve_type_apply_field_callee(text, ast, callee, field.receiver, field.name, field.namespace, params, catalog);,
+        _ => return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };,
+    }
+    return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };
+}
+
+fn resolve_type_apply_field_callee(text: []u8, ast: &std::kizu::ast::Ast, callee: std::kizu::ast::NodeId, receiver: std::kizu::ast::NodeId, name: std::kizu::ast::NodeId, namespace: bool, params: std::kizu::ast::ChildRange, catalog: &PackageFunctionCatalog) -> !CalleeResolution {
     return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };
 }
 
@@ -398,10 +473,13 @@ fn resolve_field_callee(text: []u8, ast: &std::kizu::ast::Ast, callee: std::kizu
         let qualified = node_text(text, ast, callee);
         let target = find_qualified_function(catalog, qualified);
         if target >= 0 { return CalleeResolution { kind: callee_resolved_kind(), target_index: target }; }
-        if qualified_mentions_catalog_component(qualified, catalog) {
-            return CalleeResolution { kind: callee_unresolved_kind(), target_index: -1 };
+        if builtin_identity(qualified).kind != builtin_none_kind() {
+            return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };
         }
-        return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };
+        if is_constructor_identity(node_text(text, ast, name)) {
+            return CalleeResolution { kind: callee_non_package_kind(), target_index: -1 };
+        }
+        return CalleeResolution { kind: callee_unresolved_kind(), target_index: -1 };
     }
     let receiver_type = try find_param_type(text, ast, params, node_text(text, ast, receiver));
     if std::mem::len(receiver_type) == 0 {
@@ -410,30 +488,6 @@ fn resolve_field_callee(text: []u8, ast: &std::kizu::ast::Ast, callee: std::kizu
     let target = find_type_method(catalog, receiver_type, node_text(text, ast, name));
     if target >= 0 { return CalleeResolution { kind: callee_resolved_kind(), target_index: target }; }
     return CalleeResolution { kind: callee_unresolved_method_kind(), target_index: -1 };
-}
-
-fn qualified_mentions_catalog_component(qualified: []u8, catalog: &PackageFunctionCatalog) -> bool {
-    let trimmed = std::mem::trim_ascii(qualified);
-    var component = 0;
-    while component < catalog.component_names.len() {
-        let package_name = catalog.component_package_names.get_or_panic(component);
-        let component_name = catalog.component_names.get_or_panic(component);
-        if component_has_catalog_function(catalog, component) and
-            qualified_has_component_prefix(trimmed, package_name, component_name) {
-            return true;
-        }
-        component = component + 1;
-    }
-    return false;
-}
-
-fn component_has_catalog_function(catalog: &PackageFunctionCatalog, component: i64) -> bool {
-    var index = 0;
-    while index < catalog.function_component_ids.len() {
-        if catalog.function_component_ids.get_or_panic(index) == component { return true; }
-        index = index + 1;
-    }
-    return false;
 }
 
 fn qualified_has_component_prefix(value: []u8, package_name: []u8, component_name: []u8) -> bool {
