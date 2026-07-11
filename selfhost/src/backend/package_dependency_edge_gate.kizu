@@ -12,6 +12,27 @@ fn ensure_target_dir(io: Io) -> !void {
     return;
 }
 
+fn exact_occurrence_count(bytes: []u8, needle: []u8) -> i64 {
+    var count = 0;
+    var start = 0;
+    while start + std::mem::len(needle) <= std::mem::len(bytes) {
+        if std::mem::equal_bytes(bytes[start..start + std::mem::len(needle)], needle) {
+            count = count + 1;
+            start = start + std::mem::len(needle);
+        } else {
+            start = start + 1;
+        }
+    }
+    return count;
+}
+
+fn require_single_definition(llvm: []u8, symbol: []u8) -> !void {
+    if exact_occurrence_count(llvm, symbol) != 1 {
+        return error("numeric package LLVM definition missing or duplicate");
+    }
+    return;
+}
+
 // Exercises the production numeric dependency consumer through an owned
 // on-disk handoff, matching the CLI boundary rather than borrowing a String.
 pub fn consume_constructor_facts_gate() -> !void {
@@ -27,8 +48,24 @@ pub fn consume_constructor_facts_gate() -> !void {
     try std::fs::remove_file(io, &path);
     var index = try ir_index::build(owned);
     defer index.deinit();
-    let claimed = try cli_llvm::consume_package_dependencies(&index, owned);
+    var llvm = std::string::String(allocator);
+    defer llvm.deinit();
+    let claimed = try cli_llvm::consume_package_dependencies(&var llvm, &index, owned);
     if claimed < 2 { return error("constructor facts dependency claims missing"); }
+    let llvm_bytes = llvm.as_bytes();
+    let llvm_path = "target/selfhost/constructor-facts-edge-gate.ll";
+    try std::fs::write_file(io, llvm_path, llvm_bytes);
+    let owned_llvm = try std::fs::read_file(io, llvm_path);
+    try std::fs::remove_file(io, &llvm_path);
+    try require_single_definition(
+        owned_llvm, "define %kizu.error.void @kizu_selfhost__types_constructor_facts_collect_into("
+    );
+    try require_single_definition(
+        owned_llvm, "define %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get("
+    );
+    try require_single_definition(
+        owned_llvm, "define %kizu.error.node_id @kizu_kizu__ast_ast_child_at("
+    );
     print("constructor-facts-dependencies-ok");
     return;
 }
@@ -77,7 +114,9 @@ fn consume_mutated_constructor_facts(path: []u8, bad_caller: bool) -> !void {
     try std::fs::remove_file(io, &path);
     var index = try ir_index::build(owned);
     defer index.deinit();
-    let claimed = try cli_llvm::consume_package_dependencies(&index, owned);
+    var llvm = std::string::String(allocator);
+    defer llvm.deinit();
+    let claimed = try cli_llvm::consume_package_dependencies(&var llvm, &index, owned);
     if claimed >= 0 { return error("mutated constructor dependency was accepted"); }
     return;
 }
