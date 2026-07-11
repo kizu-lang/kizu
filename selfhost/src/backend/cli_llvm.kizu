@@ -77,18 +77,32 @@ fn numeric_target_fact_exists(index: &ir_index::IrIndex, ir_bytes: []u8, prefix:
 // Production compiled-closure boundary: consume every numeric dependency record,
 // require its emitted reference and definition, and claim each target ID once.
 pub fn consume_package_dependencies(lookup_index: &ir_index::IrIndex, ir_bytes: []u8) -> !i64 {
-    var claimed_components = std::array::Array<i64>(std::mem::page_allocator());
-    defer claimed_components.deinit();
-    var claimed_functions = std::array::Array<i64>(std::mem::page_allocator());
-    defer claimed_functions.deinit();
     let prefix = "package-dependency ";
     var entry = ir_index::first_entry_with_fact_prefix(lookup_index, ir_bytes, prefix);
+    var max_function_id = -1;
+    var max_component_id = -1;
+    while entry >= 0 and ir_index::entry_key_starts_with(lookup_index, ir_bytes, entry, prefix) {
+        let line = ir_bytes[ir_index::entry_line_start(lookup_index, entry)..ir_index::entry_line_end(lookup_index, entry)];
+        let dependency = try dependency_record_from_line(line);
+        if dependency.target_component_id > max_component_id { max_component_id = dependency.target_component_id; }
+        if dependency.target_function_id > max_function_id { max_function_id = dependency.target_function_id; }
+        entry = entry + 1;
+    }
+    let function_stride = max_function_id + 1;
+    var claimed = std::array::Array<i64>(std::mem::page_allocator());
+    defer claimed.deinit();
+    var slot = 0;
+    while slot < (max_component_id + 1) * function_stride {
+        try claimed.append(0);
+        slot = slot + 1;
+    }
+    var claimed_count = 0;
+    entry = ir_index::first_entry_with_fact_prefix(lookup_index, ir_bytes, prefix);
     while entry >= 0 and ir_index::entry_key_starts_with(lookup_index, ir_bytes, entry, prefix) {
         let line = ir_bytes[ir_index::entry_line_start(lookup_index, entry)..ir_index::entry_line_end(lookup_index, entry)];
         let dependency = try dependency_record_from_line(line);
         if !try numeric_target_fact_exists(lookup_index, ir_bytes, "package-definition ", dependency.caller_component_id, dependency.caller_function_id) {
-            entry = entry + 1;
-            continue;
+            return error("package dependency caller definition missing");
         }
         if !try numeric_target_fact_exists(lookup_index, ir_bytes, "package-reference ", dependency.target_component_id, dependency.target_function_id) {
             return error("package dependency target reference missing");
@@ -96,19 +110,14 @@ pub fn consume_package_dependencies(lookup_index: &ir_index::IrIndex, ir_bytes: 
         if !try numeric_target_fact_exists(lookup_index, ir_bytes, "package-definition ", dependency.target_component_id, dependency.target_function_id) {
             return error("package dependency target definition missing");
         }
-        var found = false;
-        var claim_index = 0;
-        while claim_index < claimed_components.len() {
-            if claimed_components.get_or_panic(claim_index) == dependency.target_component_id and claimed_functions.get_or_panic(claim_index) == dependency.target_function_id { found = true; }
-            claim_index = claim_index + 1;
-        }
-        if !found {
-            try claimed_components.append(dependency.target_component_id);
-            try claimed_functions.append(dependency.target_function_id);
+        let claim_slot = dependency.target_component_id * function_stride + dependency.target_function_id;
+        if try claimed.get(claim_slot) == 0 {
+            try claimed.set(claim_slot, 1);
+            claimed_count = claimed_count + 1;
         }
         entry = entry + 1;
     }
-    return claimed_components.len();
+    return claimed_count;
 }
 
 pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {

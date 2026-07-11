@@ -156,6 +156,19 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 			t.Errorf("cli dependency consumption must not inspect %q", forbidden)
 		}
 	}
+	if !strings.Contains(cliBody, `return error("package dependency caller definition missing")`) {
+		t.Fatal("cli dependency consumer does not reject a missing or wrong numeric caller")
+	}
+	linearClaimArrays := strings.Contains(cliBody, "claimed_components") ||
+		strings.Contains(cliBody, "claimed_functions")
+	if linearClaimArrays {
+		t.Fatal("cli dependency consumer reintroduced a linear claimed-target pair scan")
+	}
+	for _, fragment := range []string{"function_stride", "claim_slot", "claimed.set(claim_slot, 1)"} {
+		if !strings.Contains(cliBody, fragment) {
+			t.Fatalf("cli dependency consumer dense numeric claimed set missing %q", fragment)
+		}
+	}
 }
 
 // TestSelfhostPackageDependencyIdentityUsesBothNumericIDs rejects spelling-only identity.
