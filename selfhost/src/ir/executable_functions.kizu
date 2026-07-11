@@ -15,7 +15,10 @@ pub fn append_facts(
 
     // Pass one owns package identity construction. No closure is emitted until
     // every parsed component and function has received its stable numeric ID.
-    var package_catalog = try package_dependency::collect_from_files(allocator, files);
+    var parsed_package = try parser::parse_source_files(allocator, files);
+    var package_catalog = try package_dependency::collect_from_parsed_files(
+        allocator, files, &parsed_package
+    );
     defer package_catalog.deinit();
 
     var execute_found = false;
@@ -156,6 +159,7 @@ pub fn append_facts(
     if !format_found {
         return error("missing selfhost parser format source");
     }
+    try parser::deinit_parsed_source_files(parsed_package);
     return;
 }
 
@@ -2943,7 +2947,7 @@ fn collect_catalog_closure_direct_callees(
             unsupported_call_form_error, unsupported_qualified_callee_error
         );,
         Call(call) => try collect_catalog_closure_call_parts(
-            text, ast, call.callee, call.args, catalog, pending, qualified_prefix,
+            text, ast, node_id, call.callee, call.args, catalog, pending, qualified_prefix,
             unsupported_call_form_error, unsupported_qualified_callee_error
         );,
         TypeApplyExpr(type_apply) => try collect_catalog_closure_node_range_callees(
@@ -3181,6 +3185,7 @@ fn collect_catalog_closure_node_range_callees(
 fn collect_catalog_closure_call_parts(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    call_node: std::kizu::ast::NodeId,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     catalog: &component_function_catalog::ComponentFunctionCatalog,
@@ -3190,7 +3195,7 @@ fn collect_catalog_closure_call_parts(
     unsupported_qualified_callee_error: []u8
 ) -> !void {
     try collect_catalog_closure_call_callee(
-        text, ast, callee, catalog, pending, qualified_prefix,
+        text, ast, call_node, callee, catalog, pending, qualified_prefix,
         unsupported_call_form_error, unsupported_qualified_callee_error
     );
     try collect_catalog_closure_direct_callees_in_range(
@@ -3203,6 +3208,7 @@ fn collect_catalog_closure_call_parts(
 fn collect_catalog_closure_call_callee(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    call_node: std::kizu::ast::NodeId,
     callee: std::kizu::ast::NodeId,
     catalog: &component_function_catalog::ComponentFunctionCatalog,
     pending: &var std::array::Array<i64>,

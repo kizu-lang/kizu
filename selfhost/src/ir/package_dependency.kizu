@@ -40,6 +40,61 @@ pub struct DependencyGraph {
     target_function_ids: std::array::Array<i64>,
 }
 
+// ResolvedCallTargets is the checker/resolver-owned per-call-node handoff.
+// NodeId values are used only while their owning parsed AST remains alive.
+pub struct ResolvedCallTargets {
+    caller_component_ids: std::array::Array<i64>,
+    caller_function_ids: std::array::Array<i64>,
+    call_nodes: std::array::Array<std::kizu::ast::NodeId>,
+    target_component_ids: std::array::Array<i64>,
+    target_function_ids: std::array::Array<i64>,
+}
+
+pub fn resolved_call_targets(allocator: Allocator) -> ResolvedCallTargets {
+    return ResolvedCallTargets {
+        caller_component_ids: std::array::Array<i64>(allocator),
+        caller_function_ids: std::array::Array<i64>(allocator),
+        call_nodes: std::array::Array<std::kizu::ast::NodeId>(allocator),
+        target_component_ids: std::array::Array<i64>(allocator),
+        target_function_ids: std::array::Array<i64>(allocator)
+    };
+}
+
+pub fn append_resolved_call(
+    calls: &var ResolvedCallTargets,
+    call_node: std::kizu::ast::NodeId,
+    caller: FunctionTarget,
+    target: FunctionTarget
+) -> !void {
+    let caller_component_id = caller.component.value;
+    let caller_function_id = caller.function.value;
+    let target_component_id = target.component.value;
+    let target_function_id = target.function.value;
+    try calls.caller_component_ids.append(caller_component_id);
+    try calls.caller_function_ids.append(caller_function_id);
+    try calls.call_nodes.append(call_node);
+    try calls.target_component_ids.append(target_component_id);
+    try calls.target_function_ids.append(target_function_id);
+    return;
+}
+
+pub fn append_resolved_dependencies(
+    graph: &var DependencyGraph,
+    calls: &ResolvedCallTargets
+) -> !void {
+    var index = 0;
+    while index < calls.call_nodes.len() {
+        try append_dependency(graph, DependencyRecord {
+            caller_component_id: try calls.caller_component_ids.get(index),
+            caller_function_id: try calls.caller_function_ids.get(index),
+            target_component_id: try calls.target_component_ids.get(index),
+            target_function_id: try calls.target_function_ids.get(index)
+        });
+        index = index + 1;
+    }
+    return;
+}
+
 pub fn dependency_graph(allocator: Allocator) -> DependencyGraph {
     return DependencyGraph {
         caller_component_ids: std::array::Array<i64>(allocator),
@@ -103,6 +158,29 @@ pub fn collect_from_files(
             parsed.deinit();
         }
         file_index = file_index + 1;
+    }
+    return catalog;
+}
+
+pub fn collect_from_parsed_files(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles
+) -> !PackageFunctionCatalog {
+    var catalog = init(allocator);
+    let parsed_results = &parsed_files.parsed;
+    var parsed_index = 0;
+    while parsed_index < parsed_results.len() {
+        let source_index = try parsed_files.source_indexes.get(parsed_index);
+        let file = try files.at(source_index);
+        let parsed = try parsed_results.at(parsed_index);
+        let component = try register_component(
+            &var catalog, package_prefix(file), source::module_path(file)
+        );
+        try register_ast_functions(
+            &var catalog, component.value, file.text, &parsed.ast, parsed.root
+        );
+        parsed_index = parsed_index + 1;
     }
     return catalog;
 }
@@ -408,6 +486,17 @@ impl DependencyGraph {
     fn deinit(self: DependencyGraph) -> void {
         self.caller_component_ids.deinit();
         self.caller_function_ids.deinit();
+        self.target_component_ids.deinit();
+        self.target_function_ids.deinit();
+        return;
+    }
+}
+
+impl ResolvedCallTargets {
+    fn deinit(self: ResolvedCallTargets) -> void {
+        self.caller_component_ids.deinit();
+        self.caller_function_ids.deinit();
+        self.call_nodes.deinit();
         self.target_component_ids.deinit();
         self.target_function_ids.deinit();
         return;
