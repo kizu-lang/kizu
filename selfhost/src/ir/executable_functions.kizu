@@ -29,6 +29,9 @@ pub fn append_facts(
     try package_dependency::append_resolved_dependencies(
         &var package_dependencies, &resolved_package_calls
     );
+    try append_numeric_package_closure(
+        allocator, out, files, &parsed_package, &package_catalog, &package_dependencies
+    );
 
     var execute_found = false;
     var codegen_found = false;
@@ -169,6 +172,73 @@ pub fn append_facts(
         return error("missing selfhost parser format source");
     }
     try parser::deinit_parsed_source_files(parsed_package);
+    return;
+}
+
+fn append_numeric_package_closure(
+    allocator: Allocator,
+    out: &var std::string::String,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles,
+    catalog: &package_dependency::PackageFunctionCatalog,
+    graph: &package_dependency::DependencyGraph
+) -> !void {
+    var pending = package_dependency::function_target_queue(allocator);
+    defer pending.deinit();
+    try package_dependency::queue_append(
+        &var pending,
+        try package_dependency::resolve_call(
+            catalog, "selfhost", "ir/component_function_catalog", "collect_range"
+        )
+    );
+    var index = 0;
+    while index < package_dependency::queue_len(&pending) {
+        let target = try package_dependency::queue_target(&pending, index);
+        try validate_numeric_package_definition(files, parsed_files, catalog, target);
+        if index == 0 {
+            let dependency_source = try package_dependency::queue_target(&pending, index);
+            try package_dependency::queue_append_dependencies(&var pending, graph, dependency_source);
+        }
+        index = index + 1;
+    }
+    try append_numeric_dependency_records(out, graph);
+    return;
+}
+
+fn validate_numeric_package_definition(
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles,
+    catalog: &package_dependency::PackageFunctionCatalog,
+    target: package_dependency::FunctionTarget
+) -> !void {
+    let parsed_index = target.component.value;
+    let source_index = try parsed_files.source_indexes.get(parsed_index);
+    let ignored_file = try files.at(source_index);
+    let parsed_results = &parsed_files.parsed;
+    let parsed = try parsed_results.at(parsed_index);
+    let definition = try package_dependency::definition_node(catalog, target, &parsed.ast, parsed.root);
+    let ignored_body = try function_body_from_node(parsed.ast, definition);
+    return;
+}
+
+fn append_numeric_dependency_records(
+    out: &var std::string::String,
+    graph: &package_dependency::DependencyGraph
+) -> !void {
+    var index = 0;
+    while index < package_dependency::dependency_len(graph) {
+        let record = try package_dependency::dependency_at(graph, index);
+        try out.append_bytes("package-dependency ");
+        try std::fmt::append_i64(out, record.caller_component_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, record.caller_function_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, record.target_component_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, record.target_function_id);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
     return;
 }
 

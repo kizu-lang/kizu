@@ -96,9 +96,19 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 	for _, fragment := range []string{
 		"package_dependency::resolve_package_calls(",
 		"package_dependency::append_resolved_dependencies(",
+		"append_numeric_package_closure(",
+		"package_dependency::queue_append_dependencies(",
+		"package_dependency::definition_node(",
+		"package_dependency::DependencyGraph",
 	} {
 		if !strings.Contains(executable, fragment) {
 			t.Fatalf("append_facts does not consume resolver numeric targets: missing %q", fragment)
+		}
+	}
+	numericClosure := dependencyFunctionBody(t, executable, "append_numeric_package_closure")
+	for _, forbidden := range []string{"allowed", "starts_with", "equal_bytes", "callee_text"} {
+		if strings.Contains(numericClosure, forbidden) {
+			t.Fatalf("numeric package closure reintroduced name policy %q", forbidden)
 		}
 	}
 }
