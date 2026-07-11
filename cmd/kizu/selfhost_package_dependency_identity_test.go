@@ -53,6 +53,60 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 	}
 }
 
+// TestSelfhostNumericPackageCollectorBackendConsumer crosses the owned-file backend boundary.
+func TestSelfhostNumericPackageCollectorBackendConsumer(t *testing.T) {
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	const entry = "selfhost::backend::package_dependency_edge_gate::consume_constructor_facts_gate"
+	err = interp.New(&out).RunEntry(program, entry)
+	if err != nil {
+		t.Fatalf("production dependency consumer gate failed: %v\n%s", err, out.String())
+	}
+	if strings.TrimSpace(out.String()) != "constructor-facts-dependencies-ok" {
+		t.Fatalf("consumer output = %q", out.String())
+	}
+}
+
+// TestSelfhostNumericPackageCollectorBackendConsumerRejectsWrongIDs guards both numeric identities.
+func TestSelfhostNumericPackageCollectorBackendConsumerRejectsWrongIDs(t *testing.T) {
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ entry, want string }{
+		{"reject_constructor_facts_bad_caller_gate", "package dependency caller definition missing"},
+		{"reject_constructor_facts_bad_target_gate", "package dependency target reference missing"},
+	} {
+		t.Run(tc.entry, func(t *testing.T) {
+			var out bytes.Buffer
+			entry := "selfhost::backend::package_dependency_edge_gate::" + tc.entry
+			err := interp.New(&out).RunEntry(program, entry)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("consumer error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // TestSelfhostPackageResolverClassificationBehavior exercises the production
 // resolver boundary for package dependencies and deliberate runtime omissions.
 func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {

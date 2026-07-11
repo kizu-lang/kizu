@@ -310,6 +310,16 @@ pub fn append_facts(
 // numeric call resolver, dependency graph, and definition emitter from the
 // real constructor-facts collector root.
 pub fn numeric_package_collector_gate() -> !void {
+    var out = try numeric_package_collector_facts();
+    defer out.deinit();
+    let output = out.as_bytes();
+    print(output);
+    return;
+}
+
+// numeric_package_collector_facts returns the owned production resolver output
+// so backend gates exercise the same file handoff as the CLI.
+pub fn numeric_package_collector_facts() -> !std::string::String {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
     var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
@@ -332,42 +342,96 @@ pub fn numeric_package_collector_gate() -> !void {
     defer catalog.deinit();
     var calls = try package_dependency::resolve_package_calls(allocator, &facts_files, &parsed, &catalog);
     defer calls.deinit();
+    try assert_constructor_ast_method_edges(&facts_files, &parsed, &catalog, &calls);
     var graph = try package_dependency::dependency_graph(allocator, &catalog);
     defer graph.deinit();
     try package_dependency::append_resolved_dependencies(&var graph, &catalog, &calls);
     var emitted = try package_dependency::emitted_targets(allocator, &catalog);
     defer emitted.deinit();
     var out = std::string::String(allocator);
-    defer out.deinit();
-    var pending = try package_dependency::function_target_queue(allocator, &catalog);
-    defer pending.deinit();
-    try package_dependency::queue_append(
-        &var pending, &catalog,
-        try package_dependency::resolve_call(&catalog, "selfhost", "types/constructor_facts", "collect_into")
+    try append_numeric_package_closure(
+        allocator, &var out, &facts_files, &parsed, &catalog, &graph, &var emitted
     );
+    try parser::deinit_parsed_source_files(parsed);
+    return out;
+}
+
+fn assert_constructor_ast_method_edges(
+    files: &std::array::Array<source::SourceFile>,
+    parsed: &parser::ParsedSourceFiles,
+    catalog: &package_dependency::PackageFunctionCatalog,
+    calls: &package_dependency::ResolvedCallTargets
+) -> !void {
+    let caller = try package_dependency::resolve_call(
+        catalog, "selfhost", "types/constructor_facts", "collect_into"
+    );
+    let get_target = try package_dependency::resolve_method(catalog, "std", "kizu/ast", "Ast", "get");
+    let child_target = try package_dependency::resolve_method(catalog, "std", "kizu/ast", "Ast", "child_at");
+    var get_found = 0;
+    var child_found = 0;
     var index = 0;
-    while index < package_dependency::queue_len(&pending) {
-        let target = try package_dependency::queue_target(&pending, index);
-        let target_name = try package_dependency::target_local_name(&catalog, package_dependency::FunctionTarget {
-            component: package_dependency::ComponentId { value: target.component.value },
-            function: package_dependency::FunctionId { value: target.function.value }
-        });
-        if std::mem::equal_bytes(target_name, "get") or std::mem::equal_bytes(target_name, "child_at") {
-            if try package_dependency::claim(&var emitted, &catalog, &target) {
-                try append_numeric_package_definition(&var out, &facts_files, &parsed, &catalog, package_dependency::FunctionTarget {
-                    component: package_dependency::ComponentId { value: target.component.value },
-                    function: package_dependency::FunctionId { value: target.function.value }
-                });
-            }
+    while index < package_dependency::resolved_call_len(calls) {
+        let call_node = try package_dependency::resolved_call_node(calls, index);
+        let record = try package_dependency::resolved_call_record(calls, index);
+        if record.caller_component_id != caller.component.value {
+            index = index + 1;
+            continue;
         }
-        try package_dependency::queue_append_dependencies(&var pending, &catalog, &graph, target);
+        let file_index = 0;
+        let file = try files.at(file_index);
+        let parsed_array = &parsed.parsed;
+        let parsed_file = try parsed_array.at(file_index);
+        let kind = try assert_constructor_ast_call(
+            file.text, &parsed_file.ast, call_node, record, caller, get_target, child_target
+        );
+        if kind == 1 { get_found = get_found + 1; }
+        if kind == 2 { child_found = child_found + 1; }
         index = index + 1;
     }
-    try append_numeric_dependency_records(&var out, &graph);
-    let output = out.as_bytes();
-    print(output);
-    try parser::deinit_parsed_source_files(parsed);
+    if get_found == 0 or child_found == 0 { return error("constructor Ast call spans missing"); }
     return;
+}
+
+fn assert_constructor_ast_call(text: []u8, ast: &std::kizu::ast::Ast, call_node: std::kizu::ast::NodeId, record: package_dependency::DependencyRecord, caller: package_dependency::FunctionTarget, get_target: package_dependency::FunctionTarget, child_target: package_dependency::FunctionTarget) -> !i64 {
+    let node = ast.get(call_node);
+    match node.data {
+        Call(call) => return assert_constructor_ast_callee(text, ast, call.callee, record, caller, get_target, child_target);,
+        _ => return 0;,
+    }
+    return 0;
+}
+
+fn assert_constructor_ast_callee(text: []u8, ast: &std::kizu::ast::Ast, callee_node: std::kizu::ast::NodeId, record: package_dependency::DependencyRecord, caller: package_dependency::FunctionTarget, get_target: package_dependency::FunctionTarget, child_target: package_dependency::FunctionTarget) -> !i64 {
+    let callee = ast.get(callee_node);
+    match callee.data {
+        FieldExpr(field) => return assert_constructor_ast_field(text, ast, field.receiver, field.name, record, caller, get_target, child_target);,
+        _ => return 0;,
+    }
+    return 0;
+}
+
+fn assert_constructor_ast_field(text: []u8, ast: &std::kizu::ast::Ast, receiver_node: std::kizu::ast::NodeId, name_node: std::kizu::ast::NodeId, record: package_dependency::DependencyRecord, caller: package_dependency::FunctionTarget, get_target: package_dependency::FunctionTarget, child_target: package_dependency::FunctionTarget) -> !i64 {
+    let receiver = ast.get(receiver_node);
+    match receiver.data {
+        Var(_) => return assert_constructor_ast_var_field(text, ast, receiver_node, name_node, record, caller, get_target, child_target);,
+        _ => return 0;,
+    }
+    return 0;
+}
+
+fn assert_constructor_ast_var_field(text: []u8, ast: &std::kizu::ast::Ast, receiver_node: std::kizu::ast::NodeId, name_node: std::kizu::ast::NodeId, record: package_dependency::DependencyRecord, caller: package_dependency::FunctionTarget, get_target: package_dependency::FunctionTarget, child_target: package_dependency::FunctionTarget) -> !i64 {
+    let receiver = ast.get(receiver_node);
+    if !std::mem::equal_bytes(text[receiver.span.start..receiver.span.end], "ast") { return 0; }
+    let name = ast.get(name_node);
+    let field = text[name.span.start..name.span.end];
+    if !std::mem::equal_bytes(field, "get") and !std::mem::equal_bytes(field, "child_at") { return 0; }
+    if record.caller_component_id != caller.component.value { return error("constructor Ast call caller component mismatch"); }
+    if std::mem::equal_bytes(field, "get") {
+        if record.target_component_id != get_target.component.value or record.target_function_id != get_target.function.value { return error("constructor Ast get target identity mismatch"); }
+        return 1;
+    }
+    if record.target_component_id != child_target.component.value or record.target_function_id != child_target.function.value { return error("constructor Ast child_at target identity mismatch"); }
+    return 2;
 }
 
 fn append_numeric_package_closure(
@@ -397,7 +461,7 @@ fn append_numeric_package_closure(
         try package_dependency::queue_append_dependencies(&var pending, catalog, graph, dependency_source);
         index = index + 1;
     }
-    try append_numeric_dependency_records(out, graph);
+    try append_numeric_dependency_records(out, catalog, graph, emitted_targets);
     return;
 }
 
@@ -452,11 +516,21 @@ fn append_numeric_package_definition_body(
 
 fn append_numeric_dependency_records(
     out: &var std::string::String,
-    graph: &package_dependency::DependencyGraph
+    catalog: &package_dependency::PackageFunctionCatalog,
+    graph: &package_dependency::DependencyGraph,
+    emitted: &package_dependency::EmittedTargets
 ) -> !void {
     var index = 0;
     while index < package_dependency::dependency_len(graph) {
         let record = try package_dependency::dependency_at(graph, index);
+        let caller = package_dependency::FunctionTarget {
+            component: package_dependency::ComponentId { value: record.caller_component_id },
+            function: package_dependency::FunctionId { value: record.caller_function_id }
+        };
+        if !(try package_dependency::is_claimed(emitted, catalog, caller)) {
+            index = index + 1;
+            continue;
+        }
         try out.append_bytes("package-dependency ");
         try std::fmt::append_i64(out, record.caller_component_id);
         try out.append_byte(cast<u8>(32));
