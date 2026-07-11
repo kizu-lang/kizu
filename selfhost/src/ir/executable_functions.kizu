@@ -24,10 +24,10 @@ pub fn append_facts(
         allocator, files, &parsed_package, &package_catalog
     );
     defer resolved_package_calls.deinit();
-    var package_dependencies = package_dependency::dependency_graph(allocator);
+    var package_dependencies = try package_dependency::dependency_graph(allocator, &package_catalog);
     defer package_dependencies.deinit();
     try package_dependency::append_resolved_dependencies(
-        &var package_dependencies, &resolved_package_calls
+        &var package_dependencies, &package_catalog, &resolved_package_calls
     );
     try append_numeric_package_closure(
         allocator, out, files, &parsed_package, &package_catalog, &package_dependencies
@@ -183,10 +183,10 @@ fn append_numeric_package_closure(
     catalog: &package_dependency::PackageFunctionCatalog,
     graph: &package_dependency::DependencyGraph
 ) -> !void {
-    var pending = package_dependency::function_target_queue(allocator);
+    var pending = try package_dependency::function_target_queue(allocator, catalog);
     defer pending.deinit();
     try package_dependency::queue_append(
-        &var pending,
+        &var pending, catalog,
         try package_dependency::resolve_call(
             catalog, "selfhost", "ir/component_function_catalog", "collect_range"
         )
@@ -194,18 +194,17 @@ fn append_numeric_package_closure(
     var index = 0;
     while index < package_dependency::queue_len(&pending) {
         let target = try package_dependency::queue_target(&pending, index);
-        try validate_numeric_package_definition(files, parsed_files, catalog, target);
-        if index == 0 {
-            let dependency_source = try package_dependency::queue_target(&pending, index);
-            try package_dependency::queue_append_dependencies(&var pending, graph, dependency_source);
-        }
+        try append_numeric_package_definition(out, files, parsed_files, catalog, target);
+        let dependency_source = try package_dependency::queue_target(&pending, index);
+        try package_dependency::queue_append_dependencies(&var pending, catalog, graph, dependency_source);
         index = index + 1;
     }
     try append_numeric_dependency_records(out, graph);
     return;
 }
 
-fn validate_numeric_package_definition(
+fn append_numeric_package_definition(
+    out: &var std::string::String,
     files: &std::array::Array<source::SourceFile>,
     parsed_files: &parser::ParsedSourceFiles,
     catalog: &package_dependency::PackageFunctionCatalog,
@@ -213,11 +212,38 @@ fn validate_numeric_package_definition(
 ) -> !void {
     let parsed_index = target.component.value;
     let source_index = try parsed_files.source_indexes.get(parsed_index);
-    let ignored_file = try files.at(source_index);
+    let file = try files.at(source_index);
     let parsed_results = &parsed_files.parsed;
     let parsed = try parsed_results.at(parsed_index);
-    let definition = try package_dependency::definition_node(catalog, target, &parsed.ast, parsed.root);
-    let ignored_body = try function_body_from_node(parsed.ast, definition);
+    let definition_target = package_dependency::FunctionTarget {
+        component: package_dependency::ComponentId { value: target.component.value },
+        function: package_dependency::FunctionId { value: target.function.value }
+    };
+    let definition = try package_dependency::definition_node(catalog, definition_target, &parsed.ast, parsed.root);
+    var qualified_name = std::string::String(std::mem::page_allocator());
+    defer qualified_name.deinit();
+    try package_dependency::append_target_qualified_name(&var qualified_name, catalog, target);
+    let qualified_name_bytes = qualified_name.as_bytes();
+    let body = try function_body_from_node(parsed.ast, definition);
+    try append_numeric_package_definition_body(
+        out, file.text, parsed.ast, definition, body, &qualified_name_bytes
+    );
+    return;
+}
+
+fn append_numeric_package_definition_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    definition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    qualified_name: &[]u8
+) -> !void {
+    let name = qualified_name.*;
+    try function_signature::append(out, text, ast, definition, name);
+    try executable_body::append_helper_body_ir(
+        out, text, ast, name, "numeric-package-dependency", body
+    );
     return;
 }
 

@@ -28,6 +28,8 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 		"import selfhost::ir::package_dependency;",
 		"pub fn dependency_definition_node(",
 		"package_dependency::dependency_target(dependency)",
+		"pub fn claim_dependency_target(",
+		"package_dependency::target_slot(catalog, target)",
 	} {
 		if !strings.Contains(cli, fragment) {
 			t.Errorf("cli_llvm dependency consumption missing %q", fragment)
@@ -109,6 +111,25 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 	for _, forbidden := range []string{"allowed", "starts_with", "equal_bytes", "callee_text"} {
 		if strings.Contains(numericClosure, forbidden) {
 			t.Fatalf("numeric package closure reintroduced name policy %q", forbidden)
+		}
+	}
+	emitter := dependencyFunctionBody(t, executable, "append_numeric_package_definition")
+	for _, fragment := range []string{
+		"package_dependency::definition_node(",
+		"package_dependency::append_target_qualified_name(",
+		"append_numeric_package_definition_body(",
+	} {
+		if !strings.Contains(emitter, fragment) {
+			t.Fatalf("numeric dependency emitter missing %q", fragment)
+		}
+	}
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	claim := dependencyFunctionBody(t, cli, "claim_dependency_target")
+	for _, forbidden := range []string{
+		"equal_bytes", "starts_with", "callee", "symbol", "local_name",
+	} {
+		if strings.Contains(claim, forbidden) {
+			t.Fatalf("LLVM dependency target claim reintroduced spelling selection %q", forbidden)
 		}
 	}
 }
