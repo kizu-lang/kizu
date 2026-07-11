@@ -65,6 +65,44 @@ func TestSelfhostPackageDependencyIdentityUsesBothNumericIDs(t *testing.T) {
 	}
 }
 
+// TestSelfhostPackageCallResolverOwnsAstChildAtEdge pins the first real
+// cross-component numeric dependency: a parameter value method on Ast resolves
+// to the child_at ImplDecl method in std::kizu::ast, never to a same-name method
+// in another component.
+func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
+	dependency := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency.kizu")
+	executable := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+
+	resolver := dependencyFunctionBody(t, dependency, "resolve_field_callee_index")
+	for _, fragment := range []string{
+		"find_param_type", "find_type_method", "namespace",
+	} {
+		if !strings.Contains(resolver, fragment) {
+			t.Fatalf("parameter value-method resolver missing %q", fragment)
+		}
+	}
+	methodLookup := dependencyFunctionBody(t, dependency, "find_type_method")
+	for _, fragment := range []string{
+		"function_component_ids", "component_package_names", "component_names",
+		"type_mentions_component", "function_names",
+	} {
+		if !strings.Contains(methodLookup, fragment) {
+			t.Fatalf("numeric method lookup missing component-safe check %q", fragment)
+		}
+	}
+	if strings.Contains(methodLookup, "return find_function") {
+		t.Fatal("method resolver can select a same-name function without receiver component identity")
+	}
+	for _, fragment := range []string{
+		"package_dependency::resolve_package_calls(",
+		"package_dependency::append_resolved_dependencies(",
+	} {
+		if !strings.Contains(executable, fragment) {
+			t.Fatalf("append_facts does not consume resolver numeric targets: missing %q", fragment)
+		}
+	}
+}
+
 // dependencyFunctionBody extracts one Kizu function for focused hardcoding audits.
 func dependencyFunctionBody(t *testing.T, source, name string) string {
 	t.Helper()
