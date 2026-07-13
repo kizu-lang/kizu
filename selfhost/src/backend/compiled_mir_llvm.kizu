@@ -1,8 +1,60 @@
 import selfhost::backend::compiled_mir;
+import selfhost::backend::compiled_mir_function;
 import selfhost::backend::compiled_mir_llvm_call;
 import selfhost::backend::compiled_mir_llvm_const;
 import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_util;
+
+pub fn union_dispatch_renderer_gate() -> !void {
+    var union_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try union_scrutinee.append(compiled_mir::var_expr_inst(0, "%test.union", "value"));
+    var union_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    try union_arms.append(compiled_mir::enum_dispatch_arm(3, false, try dispatch_gate_arm(11)));
+    try union_arms.append(compiled_mir::enum_dispatch_arm(-1, true, try dispatch_gate_arm(22)));
+    var union_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try union_stmts.append(compiled_mir::enum_dispatch_stmt(
+        union_scrutinee, 0, "%test.union", true, union_arms
+    ));
+    var union_function = compiled_mir_function::multi_statement_function(
+        "union_dispatch_gate", "i64", "%test.union value", union_stmts
+    );
+    defer union_function.deinit();
+    var union_out = std::string::String(std::mem::page_allocator());
+    defer union_out.deinit();
+    try append_function(&var union_out, &union_function);
+    let union_bytes = union_out.as_bytes();
+    print("union-dispatch-llvm\n");
+    print(union_bytes);
+
+    var enum_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try enum_scrutinee.append(compiled_mir::var_expr_inst(0, "i64", "value"));
+    var enum_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    try enum_arms.append(compiled_mir::enum_dispatch_arm(3, false, try dispatch_gate_arm(11)));
+    try enum_arms.append(compiled_mir::enum_dispatch_arm(-1, true, try dispatch_gate_arm(22)));
+    var enum_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try enum_stmts.append(compiled_mir::enum_dispatch_stmt(
+        enum_scrutinee, 0, "i64", false, enum_arms
+    ));
+    var enum_function = compiled_mir_function::multi_statement_function(
+        "enum_dispatch_gate", "i64", "i64 value", enum_stmts
+    );
+    defer enum_function.deinit();
+    var enum_out = std::string::String(std::mem::page_allocator());
+    defer enum_out.deinit();
+    try append_function(&var enum_out, &enum_function);
+    let enum_bytes = enum_out.as_bytes();
+    print("enum-dispatch-llvm\n");
+    print(enum_bytes);
+    return;
+}
+
+fn dispatch_gate_arm(value: i64) -> !std::array::Array<compiled_mir::MirStmt> {
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try insts.append(compiled_mir::int_expr_inst(1, value));
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::return_expr_stmt(0, 1, insts));
+    return stmts;
+}
 pub fn append_function(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction
@@ -4522,6 +4574,16 @@ fn append_multi_enum_dispatch(
     local_prefix: i64
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.scrutinee_insts);
+    if stmt.scrutinee_is_union {
+        try out.append_bytes("  %");
+        try append_dispatch_label(out, local_prefix, "tag", 0);
+        try out.append_bytes(" = extractvalue ");
+        try out.append_bytes(stmt.scrutinee_llvm_type);
+        try out.append_byte(cast<u8>(32));
+        try append_expr_value_ref(out, &stmt.scrutinee_insts, stmt.scrutinee_result_id);
+        try out.append_bytes(", 0");
+        try out.append_byte(cast<u8>(10));
+    }
     let arms = &stmt.arms;
     let arm_count = arms.len();
     // Phase 1: the icmp/br dispatch chain. The last arm is the exhaustive fallthrough.
@@ -4540,7 +4602,12 @@ fn append_multi_enum_dispatch(
             try out.append_bytes("  %");
             try append_dispatch_label(out, local_prefix, "is_", index);
             try out.append_bytes(" = icmp eq i64 ");
-            try append_expr_value_ref(out, &stmt.scrutinee_insts, stmt.scrutinee_result_id);
+            if stmt.scrutinee_is_union {
+                try out.append_bytes("%");
+                try append_dispatch_label(out, local_prefix, "tag", 0);
+            } else {
+                try append_expr_value_ref(out, &stmt.scrutinee_insts, stmt.scrutinee_result_id);
+            }
             try out.append_bytes(", ");
             try std::fmt::append_i64(out, arm.tag);
             try out.append_byte(cast<u8>(10));

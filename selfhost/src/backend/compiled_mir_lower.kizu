@@ -11817,6 +11817,12 @@ fn lower_multi_match_statement(
         bs,
         ir_lookup_index, call_arg_type_cache
     );
+    let scrutinee_llvm_type = try expr_inst_llvm_type_by_id(
+        &scrutinee_insts, scrutinee_result_id
+    );
+    let scrutinee_is_union = compiled_fact_lookup::is_union_type_indexed(
+        ir_lookup_index, ir_bytes, ir_bytes[0..0], enum_kizu
+    );
     let scrutinee_temps = scrutinee_insts.len();
     let scrutinee_strings = try count_strings_in_insts(&scrutinee_insts);
     let arm_temp_base = temp_counter + scrutinee_temps;
@@ -11842,9 +11848,16 @@ fn lower_multi_match_statement(
         let is_default = std::mem::equal_bytes(variant_name, "_");
         var tag = 0 - 1;
         if !is_default {
-            tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
-                ir_lookup_index, ir_bytes, ir_bytes[0..0], enum_kizu, variant_name
-            );
+            if scrutinee_is_union {
+                let union_variant = try compiled_fact_lookup::lookup_union_variant_by_prefix_indexed(
+                    ir_lookup_index, ir_bytes, ir_bytes[0..0], enum_kizu, variant_name
+                );
+                tag = union_variant.tag;
+            } else {
+                tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+                    ir_lookup_index, ir_bytes, ir_bytes[0..0], enum_kizu, variant_name
+                );
+            }
         }
         // Each arm body is a single 'return <expr>'. Reuse lower_multi_return_statement off the
         // arm's private SSA window so its temps/strings stay disjoint from the other arms.
@@ -11871,7 +11884,9 @@ fn lower_multi_match_statement(
         try arms.append(compiled_mir::enum_dispatch_arm(tag, is_default, arm_stmts));
         index = index + 1;
     }
-    return compiled_mir::enum_dispatch_stmt(scrutinee_insts, scrutinee_result_id, arms);
+    return compiled_mir::enum_dispatch_stmt(
+        scrutinee_insts, scrutinee_result_id, scrutinee_llvm_type, scrutinee_is_union, arms
+    );
 }
 // resolve_dispatch_enum_kizu_type resolves the fully-qualified enum kizu type of an
 // enum-dispatch match scrutinee: a bare Var reads its parameter/local kizu type, and a
