@@ -33,6 +33,18 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 		t.Fatalf("numeric collector gate failed: %v\n%s", err, out.String())
 	}
 	facts := out.String()
+	requireSourceFragments(t, "ConstructorFacts source ABI facts", facts, []string{
+		"type-llvm selfhost::types::constructor_facts::ConstructorFacts " +
+			"%kizu.selfhost.types.constructor_facts.constructor_facts",
+		"struct-field selfhost::types::constructor_facts::ConstructorFacts 0 " +
+			"node_starts std::array::Array<i64>",
+		"struct-field selfhost::types::constructor_facts::ConstructorFacts 1 " +
+			"node_ends std::array::Array<i64>",
+		"struct-field selfhost::types::constructor_facts::ConstructorFacts 2 " +
+			"constructor_ids std::array::Array<i64>",
+		"struct-field selfhost::types::constructor_facts::ConstructorFacts 3 " +
+			"type_arg0_ids std::array::Array<i64>",
+	})
 	for _, name := range []string{"std::kizu::ast::ast_get", "std::kizu::ast::ast_child_at"} {
 		marker := "function-signature-return " + name + " "
 		if count := strings.Count(facts, marker); count != 1 {
@@ -54,8 +66,9 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 }
 
 // TestSelfhostNumericPackageCollectorBackendConsumer crosses the owned-file backend boundary
-// and pins the next real-path blocker after numeric closure selection: the compiled ABI mapper
-// does not yet lower the collector's &var ConstructorFacts parameter.
+// and pins the next interpreted-consumer blocker after ConstructorFacts ABI mapping: lowering
+// the collector body reaches a mutable struct-field assignment that the interpreter does not
+// yet represent as a struct value. The native stage path is checked separately from this gate.
 func TestSelfhostNumericPackageCollectorBackendConsumer(t *testing.T) {
 	restore, err := chdirRepoRoot()
 	if err != nil {
@@ -72,8 +85,12 @@ func TestSelfhostNumericPackageCollectorBackendConsumer(t *testing.T) {
 	var out bytes.Buffer
 	const entry = "selfhost::backend::package_dependency_edge_gate::consume_constructor_facts_gate"
 	err = interp.New(&out).RunEntry(program, entry)
-	if err == nil || !strings.Contains(err.Error(), "abi mapper: unsupported parameter type") {
-		t.Fatalf("production dependency consumer error = %v, want ConstructorFacts ABI blocker\n%s", err, out.String())
+	if err == nil || !strings.Contains(err.Error(), "field assignment expects struct") {
+		t.Fatalf(
+			"production dependency consumer error = %v, want mutable struct-field blocker\n%s",
+			err,
+			out.String(),
+		)
 	}
 }
 
@@ -127,8 +144,18 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 		wantError string
 	}{
 		{name: "known runtime builtin is deliberately omitted", entry: "package_resolver_builtin_gate"},
-		{name: "unknown local call", entry: "package_resolver_unknown_local_gate", wantError: "unresolved qualified package call target"},
-		{name: "unknown qualified component", entry: "package_resolver_unknown_component_gate", wantError: "unresolved qualified package call target"},
+		{
+			name: "unknown builtin is not hidden", entry: "package_resolver_unknown_builtin_gate",
+			wantError: "unresolved qualified package call target",
+		},
+		{
+			name: "unknown local call", entry: "package_resolver_unknown_local_gate",
+			wantError: "unresolved qualified package call target",
+		},
+		{
+			name: "unknown qualified component", entry: "package_resolver_unknown_component_gate",
+			wantError: "unresolved qualified package call target",
+		},
 		{name: "std source function resolves", entry: "package_resolver_std_function_gate"},
 		{
 			name:      "missing function in catalogued std component",
@@ -172,9 +199,10 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 // TestSelfhostPackageDependencyIdentityFlow guards the numeric handoff boundaries.
 func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 	dependency := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency.kizu")
-	cli := readSelfhostFile(t, "../../selfhost/src/backend/package_dependency_llvm.kizu")
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
 
-	for _, fragment := range []string{
+	requireSourceFragments(t, "package dependency identity", dependency, []string{
 		"pub struct ComponentId",
 		"pub struct FunctionId",
 		"pub struct CallDependency",
@@ -182,11 +210,11 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 		"pub fn resolve_call(",
 		"pub fn append_closure_targets(",
 		"pub fn definition_node(",
-	} {
-		if !strings.Contains(dependency, fragment) {
-			t.Errorf("package dependency identity missing %q", fragment)
-		}
-	}
+	})
+	requireSourceFragments(t, "ConstructorFacts LLVM ABI", llvm, []string{
+		"%kizu.selfhost.types.constructor_facts.constructor_facts = type { " +
+			"%kizu.owned, %kizu.owned, %kizu.owned, %kizu.owned }",
+	})
 	for _, fragment := range []string{
 		"import selfhost::ir::package_dependency;",
 		"pub fn consume_package_dependencies(",
@@ -226,7 +254,10 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 	if linearClaimArrays {
 		t.Fatal("cli dependency consumer reintroduced a linear claimed-target pair scan")
 	}
-	for _, fragment := range []string{"function_stride", "identity_slot_count", "definitions.get(caller_slot)", "references.get(claim_slot)"} {
+	for _, fragment := range []string{
+		"function_stride", "identity_slot_count",
+		"definitions.get(caller_slot)", "references.get(claim_slot)",
+	} {
 		if !strings.Contains(cliBody, fragment) {
 			t.Fatalf("cli dependency consumer dense numeric claimed set missing %q", fragment)
 		}
@@ -258,13 +289,9 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 	executable := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 
 	resolver := dependencyFunctionBody(t, dependency, "resolve_field_callee")
-	for _, fragment := range []string{
+	requireSourceFragments(t, "parameter value-method resolver", resolver, []string{
 		"find_param_type", "find_type_method", "namespace",
-	} {
-		if !strings.Contains(resolver, fragment) {
-			t.Fatalf("parameter value-method resolver missing %q", fragment)
-		}
-	}
+	})
 	methodLookup := dependencyFunctionBody(t, dependency, "find_type_method")
 	for _, fragment := range []string{
 		"function_component_ids", "component_package_names", "component_names",
@@ -305,7 +332,7 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 			t.Fatalf("numeric dependency emitter missing %q", fragment)
 		}
 	}
-	cli := readSelfhostFile(t, "../../selfhost/src/backend/package_dependency_llvm.kizu")
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	claim := dependencyFunctionBody(t, cli, "consume_package_dependencies")
 	dependencyLoopStart := strings.Index(claim, "var dependency_index = 0")
 	emissionLoopStart := strings.Index(claim, "var emitted_count = 0")
@@ -322,6 +349,16 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 	}
 }
 
+// requireSourceFragments checks structural source/fact guards with a shared diagnostic.
+func requireSourceFragments(t *testing.T, label, source string, fragments []string) {
+	t.Helper()
+	for _, fragment := range fragments {
+		if !strings.Contains(source, fragment) {
+			t.Errorf("%s missing %q", label, fragment)
+		}
+	}
+}
+
 // TestSelfhostPackageMethodIdentityIncludesOwnerType pins the catalog key that
 // lets Ast.deinit and ParseResult.deinit coexist and resolve to distinct numeric targets.
 func TestSelfhostPackageMethodIdentityIncludesOwnerType(t *testing.T) {
@@ -330,8 +367,8 @@ func TestSelfhostPackageMethodIdentityIncludesOwnerType(t *testing.T) {
 		"function_owner_type_names: std::array::Array<[]u8>",
 		"node_text(text, ast, impl_decl.type_name)",
 		"find_owned_function(catalog, component_value, owner_type_name, local_name)",
-		"append_owner_symbol_name(out, owner)",
-		"append_component_path(out, try catalog.component_names.get(component))",
+		"let owner = try catalog.function_owner_type_names.get(index)",
+		"component_name[component_index] == cast<u8>(47)",
 	} {
 		if !strings.Contains(dependency, fragment) {
 			t.Fatalf("method catalog owner identity missing %q", fragment)

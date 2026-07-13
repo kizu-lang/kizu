@@ -61,6 +61,16 @@ pub fn package_resolver_builtin_gate() -> !void {
     return;
 }
 
+pub fn package_resolver_unknown_builtin_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/builtin_missing", "fn root() -> void { std::builtin::missing(); }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
 pub fn package_resolver_unknown_local_gate() -> !void {
     let allocator = std::mem::page_allocator();
     var files = std::array::Array<source::SourceFile>(allocator);
@@ -470,12 +480,23 @@ fn append_numeric_package_closure(
     try out.append_byte(cast<u8>(10));
     var pending = try package_dependency::function_target_queue(allocator, catalog);
     defer pending.deinit();
-    try package_dependency::queue_append(
-        &var pending, catalog,
-        try package_dependency::resolve_call(
-            catalog, "selfhost", "types/constructor_facts", "collect_into"
-        )
+    let root_target = try package_dependency::resolve_call(
+        catalog, "selfhost", "types/constructor_facts", "collect_into"
     );
+    let root_parsed_index = root_target.component.value;
+    let root_source_index = try parsed_files.source_indexes.get(root_parsed_index);
+    let root_file = try files.at(root_source_index);
+    let parsed_results = &parsed_files.parsed;
+    let root_parsed = try parsed_results.at(root_parsed_index);
+    try append_qualified_struct_type_facts(
+        out,
+        root_file.text,
+        root_parsed.ast,
+        root_parsed.root,
+        "ConstructorFacts",
+        "selfhost::types::constructor_facts::ConstructorFacts"
+    );
+    try package_dependency::queue_append(&var pending, catalog, root_target);
     var index = 0;
     while index < package_dependency::queue_len(&pending) {
         let target = try package_dependency::queue_target(&pending, index);
@@ -1644,10 +1665,9 @@ pub fn append_ast_function_facts(
         "std::kizu::ast::ast_len",
         "checked-ast-readonly"
     );
-    // Ast.child_at composes the checked Array<NodeId>.get accessor with a bounds-check
-    // return error(...) (tracker 961). It needs the ChildRange struct fields (range.start
-    // = field 0, range.len = field 1) for its index expression and bound, plus the NodeId
-    // element type-llvm mapping so self.children.get(...) can load the NodeId by value.
+    // The numeric package closure emits Ast.child_at's signature and body. Keep only
+    // the value-layout facts it consumes here: ChildRange fields for range.start/len
+    // and the NodeId mapping for the Array<NodeId>.get result.
     try append_selected_struct_field_facts(
         out,
         file.text,
@@ -1660,16 +1680,6 @@ pub fn append_ast_function_facts(
         out,
         "std::kizu::ast::NodeId",
         "%kizu.kizu.ast.node_id"
-    );
-    try append_selected_impl_method_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "Ast",
-        "child_at",
-        "std::kizu::ast::ast_child_at",
-        "checked-ast-readonly"
     );
     // Ast.add_node constructs an AstNode (Span + AstData union) and appends it to the
     // nodes Arena, exercising the AstNode/AstData tagged-union value-type ABI (tracker
@@ -1986,21 +1996,6 @@ pub fn append_ast_function_facts(
         "synth_ctor_array",
         "std::kizu::ast::synth_ctor_array",
         "checked-ast-constructor"
-    );
-    // Ast.get reads an AstNode back out of the nodes Arena by value (tracker 961). It
-    // reuses the AstNode/AstData union value-type ABI: self.nodes.get(id.raw) calls the
-    // checked @kizu_rt_arena_get and loads the AstNode element, trapping on an
-    // out-of-bounds index. It needs only the already-emitted Ast/NodeId struct fields
-    // and the AstNode type-llvm mapping.
-    try append_selected_impl_method_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "Ast",
-        "get",
-        "std::kizu::ast::ast_get",
-        "checked-ast-readonly"
     );
     // The five leaf AstData payload structs were previously union-variant only; parser
     // construction needs their source-derived type-llvm + struct-field facts as well.
@@ -4255,6 +4250,7 @@ fn append_core_stdlib_return_facts(out: &var std::string::String) -> !void {
 pub fn append_runtime_stdlib_symbol_preamble(out: &var std::string::String) -> !void {
     try append_stdlib_symbol_fact(out, "std::mem::equal_bytes", "kizu_selfhost__slice_equal", "bool");
     try append_stdlib_symbol_fact(out, "std::mem::len", "kizu_selfhost__slice_len", "i64");
+    try append_stdlib_symbol_fact(out, "std::builtin::mem_len", "kizu_selfhost__slice_len", "i64");
     // The std::string::String value constructor lowers to the runtime-owned byte-buffer
     // handle: std::string::String(allocator) calls @kizu_rt_string_new, taking the Allocator
     // capability (%kizu.owned) and returning a String, which the compiled type lowering maps
