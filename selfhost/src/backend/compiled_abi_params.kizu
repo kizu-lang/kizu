@@ -88,14 +88,26 @@ pub fn kizu_type_to_abi(kizu_type: []u8) -> ![]u8 {
     // std::kizu::ast:: path; each maps to its existing stage2 LLVM value type so the
     // closure derives its params_spec from signature facts without a handwritten
     // table.
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::Ast") {
+    if std::mem::equal_bytes(kizu_type, "Ast") or
+        std::mem::equal_bytes(kizu_type, "std::kizu::ast::Ast") {
         return "%kizu.kizu.ast.ast";
     }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::NodeId") {
+    if std::mem::equal_bytes(kizu_type, "NodeId") or
+        std::mem::equal_bytes(kizu_type, "std::kizu::ast::NodeId") {
         return "%kizu.kizu.ast.node_id";
     }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::ChildRange") {
+    if std::mem::equal_bytes(kizu_type, "ChildRange") or
+        std::mem::equal_bytes(kizu_type, "std::kizu::ast::ChildRange") {
         return "%kizu.kizu.ast.child_range";
+    }
+    // ConstructorFacts is the numeric package collector's source-defined state.
+    // Its four Array<i64> fields are emitted as struct facts from the collector
+    // root and share the corresponding four-%kizu.owned LLVM value layout.
+    if std::mem::equal_bytes(kizu_type, "ConstructorFacts") or
+        std::mem::equal_bytes(
+            kizu_type, "selfhost::types::constructor_facts::ConstructorFacts"
+        ) {
+        return "%kizu.selfhost.types.constructor_facts.constructor_facts";
     }
     // SourceFile is the std::kizu::ast source record { path: []u8, text: []u8 }
     // the full std::kizu::parser::parse_program takes by value as its 'source'
@@ -181,7 +193,11 @@ pub fn kizu_type_to_abi(kizu_type: []u8) -> ![]u8 {
     if std::mem::equal_bytes(kizu_type, "String") {
         return "%kizu.owned";
     }
-    return error("abi mapper: unsupported parameter type");
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("abi mapper: unsupported parameter type: ");
+    try message.append_bytes(kizu_type);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }
 
 // append_params_spec derives the compiled params_spec string for one function
@@ -289,6 +305,13 @@ function-body demo";
     std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("i64"));
     std::testing::expect_equal<[]u8>("%kizu.slice.u8", try kizu_type_to_abi("[]u8"));
     std::testing::expect_equal<[]u8>("%kizu.slice.u8", try kizu_type_to_abi("&[]u8"));
+    std::testing::expect_equal<[]u8>("%kizu.kizu.ast.ast", try kizu_type_to_abi("Ast"));
+    std::testing::expect_equal<[]u8>("%kizu.kizu.ast.node_id", try kizu_type_to_abi("NodeId"));
+    std::testing::expect_equal<[]u8>("%kizu.kizu.ast.child_range", try kizu_type_to_abi("ChildRange"));
+    std::testing::expect_equal<[]u8>(
+        "%kizu.selfhost.types.constructor_facts.constructor_facts",
+        try kizu_type_to_abi("ConstructorFacts")
+    );
 
     // The loader 'source_file' closure mixes a SourceKind enum (i64 ABI) with
     // scalar and slice params, so derive its compiled params_spec end-to-end to

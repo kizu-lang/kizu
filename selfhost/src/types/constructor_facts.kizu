@@ -1,0 +1,173 @@
+pub struct ConstructorFacts {
+    pub node_starts: std::array::Array<i64>,
+    pub node_ends: std::array::Array<i64>,
+    pub constructor_ids: std::array::Array<i64>,
+    pub type_arg0_ids: std::array::Array<i64>,
+}
+
+pub fn constructor_atomic() -> i64 { return 1; }
+pub fn type_bool() -> i64 { return 1; }
+pub fn no_identity() -> i64 { return 0; }
+
+pub fn collect(
+    allocator: Allocator,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !ConstructorFacts {
+    var facts = ConstructorFacts {
+        node_starts: std::array::Array<i64>(allocator),
+        node_ends: std::array::Array<i64>(allocator),
+        constructor_ids: std::array::Array<i64>(allocator),
+        type_arg0_ids: std::array::Array<i64>(allocator)
+    };
+    try collect_node(text, ast, root, &var facts);
+    return facts;
+}
+
+pub fn collect_into(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    facts: &var ConstructorFacts
+) -> !void {
+    try collect_node(text, ast, root, facts);
+    return;
+}
+
+impl ConstructorFacts {
+    fn deinit(self: ConstructorFacts) -> void {
+        self.node_starts.deinit();
+        self.node_ends.deinit();
+        self.constructor_ids.deinit();
+        self.type_arg0_ids.deinit();
+    }
+}
+
+pub fn identity_at(
+    facts: &ConstructorFacts,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(node_id);
+    var index = 0;
+    while index < facts.node_starts.len() {
+        let start = try facts.node_starts.get(index);
+        let end = try facts.node_ends.get(index);
+        if start == node.span.start and end == node.span.end {
+            return try facts.constructor_ids.get(index);
+        }
+        index = index + 1;
+    }
+    return no_identity();
+}
+
+pub fn type_arg0_at(
+    facts: &ConstructorFacts,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(node_id);
+    var index = 0;
+    while index < facts.node_starts.len() {
+        let start = try facts.node_starts.get(index);
+        let end = try facts.node_ends.get(index);
+        if start == node.span.start and end == node.span.end {
+            return try facts.type_arg0_ids.get(index);
+        }
+        index = index + 1;
+    }
+    return no_identity();
+}
+
+fn collect_node(text: []u8, ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId, facts: &var ConstructorFacts) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(value) => return collect_range(text, ast, value.declarations, facts);,
+        ImportDecl(value) => return;,
+        StructDecl(value) => return collect_ranges(text, ast, value.type_params, value.fields, facts);,
+        EnumDecl(value) => return collect_range(text, ast, value.tags, facts);,
+        UnionDecl(value) => return collect_ranges(text, ast, value.type_params, value.variants, facts);,
+        ImplDecl(value) => return collect_one_range(text, ast, value.type_name, value.methods, facts);,
+        UnionVariant(value) => return collect_node(text, ast, value.payload, facts);,
+        FnDecl(value) => return collect_fn(text, ast, value.type_params, value.params, value.body, facts);,
+        Param(value) => return collect_node(text, ast, value.type_node, facts);,
+        Field(value) => return collect_node(text, ast, value.type_node, facts);,
+        Block(value) => return collect_range(text, ast, value.statements, facts);,
+        Let(value) => return collect_node(text, ast, value.value, facts);,
+        Assign(value) => return collect_two(text, ast, value.target, value.value, facts);,
+        Return(value) => return collect_node(text, ast, value.value, facts);,
+        Defer(value) => return collect_node(text, ast, value.expr, facts);,
+        ErrDefer(value) => return collect_node(text, ast, value.expr, facts);,
+        ExprStmt(value) => return collect_node(text, ast, value.expr, facts);,
+        If(value) => return collect_three(text, ast, value.condition, value.then_block, value.else_block, facts);,
+        While(value) => return collect_two(text, ast, value.condition, value.body, facts);,
+        For(value) => return collect_three(text, ast, value.start, value.end, value.body, facts);,
+        Break(value) => return;,
+        Continue(value) => return;,
+        Match(value) => return collect_one_range(text, ast, value.value, value.arms, facts);,
+        MatchArm(value) => return collect_two(text, ast, value.pattern, value.body, facts);,
+        Unsafe(value) => return collect_node(text, ast, value.body, facts);,
+        ComptimeIf(value) => return collect_three(text, ast, value.condition, value.then_block, value.else_block, facts);,
+        Prefix(value) => return collect_node(text, ast, value.right, facts);,
+        Binary(value) => return collect_two(text, ast, value.left, value.right, facts);,
+        FieldExpr(value) => return collect_node(text, ast, value.receiver, facts);,
+        DerefExpr(value) => return collect_node(text, ast, value.receiver, facts);,
+        Call(value) => return collect_call(text, ast, value.callee, value.args, facts);,
+        TypeApplyExpr(value) => return collect_one_range(text, ast, value.callee, value.type_args, facts);,
+        CastExpr(value) => return collect_two(text, ast, value.type_node, value.value, facts);,
+        IndexExpr(value) => return collect_three(text, ast, value.target, value.start, value.end, facts);,
+        StructLiteralExpr(value) => return collect_one_range(text, ast, value.type_name, value.fields, facts);,
+        StructFieldInit(value) => return collect_node(text, ast, value.value, facts);,
+        ArenaNewExpr(value) => return collect_two(text, ast, value.type_node, value.allocator, facts);,
+        TryExpr(value) => return collect_node(text, ast, value.value, facts);,
+        ComptimeExpr(value) => return collect_node(text, ast, value.value, facts);,
+        TypeName(value) => return;,
+        Var(value) => return;,
+        Int(value) => return;,
+        String(value) => return;,
+        Bool(value) => return;,
+        Empty => return;,
+    }
+}
+
+fn collect_call(text: []u8, ast: std::kizu::ast::Ast, callee: std::kizu::ast::NodeId, args: std::kizu::ast::ChildRange, facts: &var ConstructorFacts) -> !void {
+    let node = ast.get(callee);
+    match node.data {
+        TypeApplyExpr(value) => try append_resolved(text, ast, callee, value.callee, value.type_args, facts);,
+        _ => return collect_call_children(text, ast, callee, args, facts);,
+    }
+    try collect_node(text, ast, callee, facts);
+    try collect_range(text, ast, args, facts);
+    return;
+}
+
+fn collect_call_children(text: []u8, ast: std::kizu::ast::Ast, callee: std::kizu::ast::NodeId, args: std::kizu::ast::ChildRange, facts: &var ConstructorFacts) -> !void {
+    try collect_node(text, ast, callee, facts);
+    try collect_range(text, ast, args, facts);
+    return;
+}
+
+fn append_resolved(text: []u8, ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId, callee: std::kizu::ast::NodeId, args: std::kizu::ast::ChildRange, facts: &var ConstructorFacts) -> !void {
+    if args.len != 1 { return; }
+    if !std::mem::equal_bytes(node_text(text, ast, callee), "std::atomic::Atomic") { return; }
+    let arg = try ast.child_at(args, 0);
+    if !std::mem::equal_bytes(node_text(text, ast, arg), "bool") { return; }
+    let node = ast.get(node_id);
+    try facts.node_starts.append(node.span.start);
+    try facts.node_ends.append(node.span.end);
+    try facts.constructor_ids.append(constructor_atomic());
+    try facts.type_arg0_ids.append(type_bool());
+    return;
+}
+
+fn collect_fn(text: []u8, ast: std::kizu::ast::Ast, type_params: std::kizu::ast::ChildRange, params: std::kizu::ast::ChildRange, body: std::kizu::ast::NodeId, facts: &var ConstructorFacts) -> !void {
+    try collect_range(text, ast, type_params, facts); try collect_range(text, ast, params, facts); try collect_node(text, ast, body, facts); return;
+}
+fn collect_ranges(text: []u8, ast: std::kizu::ast::Ast, first: std::kizu::ast::ChildRange, second: std::kizu::ast::ChildRange, facts: &var ConstructorFacts) -> !void { try collect_range(text, ast, first, facts); try collect_range(text, ast, second, facts); return; }
+fn collect_one_range(text: []u8, ast: std::kizu::ast::Ast, node: std::kizu::ast::NodeId, range: std::kizu::ast::ChildRange, facts: &var ConstructorFacts) -> !void { try collect_node(text, ast, node, facts); try collect_range(text, ast, range, facts); return; }
+fn collect_two(text: []u8, ast: std::kizu::ast::Ast, first: std::kizu::ast::NodeId, second: std::kizu::ast::NodeId, facts: &var ConstructorFacts) -> !void { try collect_node(text, ast, first, facts); try collect_node(text, ast, second, facts); return; }
+fn collect_three(text: []u8, ast: std::kizu::ast::Ast, first: std::kizu::ast::NodeId, second: std::kizu::ast::NodeId, third: std::kizu::ast::NodeId, facts: &var ConstructorFacts) -> !void { try collect_two(text, ast, first, second, facts); try collect_node(text, ast, third, facts); return; }
+fn collect_five(text: []u8, ast: std::kizu::ast::Ast, first: std::kizu::ast::NodeId, second: std::kizu::ast::NodeId, third: std::kizu::ast::NodeId, fourth: std::kizu::ast::NodeId, fifth: std::kizu::ast::NodeId, facts: &var ConstructorFacts) -> !void { try collect_three(text, ast, first, second, third, facts); try collect_two(text, ast, fourth, fifth, facts); return; }
+fn collect_range(text: []u8, ast: std::kizu::ast::Ast, range: std::kizu::ast::ChildRange, facts: &var ConstructorFacts) -> !void { var index = 0; while index < range.len { let child = try ast.child_at(range, index); try collect_node(text, ast, child, facts); index = index + 1; } return; }
+fn node_text(text: []u8, ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> []u8 { let node = ast.get(node_id); return text[node.span.start..node.span.end]; }

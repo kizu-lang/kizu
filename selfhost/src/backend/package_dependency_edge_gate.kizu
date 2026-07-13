@@ -1,0 +1,122 @@
+import selfhost::backend::cli_llvm;
+import selfhost::backend::ir_index;
+import selfhost::ir::executable_functions;
+
+fn ensure_target_dir(io: Io) -> !void {
+    if !(try std::fs::exists(io, "target")) {
+        try std::fs::create_dir(io, "target");
+    }
+    if !(try std::fs::exists(io, "target/selfhost")) {
+        try std::fs::create_dir(io, "target/selfhost");
+    }
+    return;
+}
+
+fn exact_occurrence_count(bytes: []u8, needle: []u8) -> i64 {
+    var count = 0;
+    var start = 0;
+    while start + std::mem::len(needle) <= std::mem::len(bytes) {
+        if std::mem::equal_bytes(bytes[start..start + std::mem::len(needle)], needle) {
+            count = count + 1;
+            start = start + std::mem::len(needle);
+        } else {
+            start = start + 1;
+        }
+    }
+    return count;
+}
+
+fn require_single_definition(llvm: []u8, symbol: []u8) -> !void {
+    if exact_occurrence_count(llvm, symbol) != 1 {
+        return error("numeric package LLVM definition missing or duplicate");
+    }
+    return;
+}
+
+// Exercises the production numeric dependency consumer through an owned
+// on-disk handoff, matching the CLI boundary rather than borrowing a String.
+pub fn consume_constructor_facts_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    try ensure_target_dir(io);
+    let path = "target/selfhost/constructor-facts-edge-gate.facts";
+    var facts = try executable_functions::numeric_package_collector_facts();
+    defer facts.deinit();
+    let fact_bytes = facts.as_bytes();
+    try std::fs::write_file(io, path, fact_bytes);
+    let owned = try std::fs::read_file(io, path);
+    try std::fs::remove_file(io, &path);
+    var index = try ir_index::build(owned);
+    defer index.deinit();
+    var llvm = std::string::String(allocator);
+    defer llvm.deinit();
+    let claimed = try cli_llvm::consume_package_dependencies(&var llvm, &index, owned);
+    if claimed < 2 { return error("constructor facts dependency claims missing"); }
+    let llvm_bytes = llvm.as_bytes();
+    let llvm_path = "target/selfhost/constructor-facts-edge-gate.ll";
+    try std::fs::write_file(io, llvm_path, llvm_bytes);
+    let owned_llvm = try std::fs::read_file(io, llvm_path);
+    try std::fs::remove_file(io, &llvm_path);
+    try require_single_definition(
+        owned_llvm, "define %kizu.error.void @kizu_selfhost__types_constructor_facts_collect_into("
+    );
+    try require_single_definition(
+        owned_llvm, "define %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get("
+    );
+    try require_single_definition(
+        owned_llvm, "define %kizu.error.node_id @kizu_kizu__ast_ast_child_at("
+    );
+    print("constructor-facts-dependencies-ok");
+    return;
+}
+
+pub fn reject_constructor_facts_bad_caller_gate() -> !void {
+    return consume_mutated_constructor_facts(
+        "target/selfhost/constructor-facts-edge-bad-caller.facts", true
+    );
+}
+
+pub fn reject_constructor_facts_bad_target_gate() -> !void {
+    return consume_mutated_constructor_facts(
+        "target/selfhost/constructor-facts-edge-bad-target.facts", false
+    );
+}
+
+fn consume_mutated_constructor_facts(path: []u8, bad_caller: bool) -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    try ensure_target_dir(io);
+    var facts = try executable_functions::numeric_package_collector_facts();
+    defer facts.deinit();
+    let original = facts.as_bytes();
+    try std::fs::write_file(io, path, original);
+    let original_owned = try std::fs::read_file(io, path);
+    var original_index = try ir_index::build(original_owned);
+    let entry = ir_index::first_entry_with_fact_prefix(&original_index, original_owned, "package-dependency ");
+    if entry < 0 { return error("constructor dependency record missing"); }
+    let line = original_owned[ir_index::entry_line_start(&original_index, entry)..ir_index::entry_line_end(&original_index, entry)];
+    let record = try cli_llvm::dependency_record_from_line(line);
+    original_index.deinit();
+    try facts.append_bytes("package-dependency ");
+    if bad_caller { try std::fmt::append_i64(&var facts, record.caller_component_id + 1000000); }
+    else { try std::fmt::append_i64(&var facts, record.caller_component_id); }
+    try facts.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(&var facts, record.caller_function_id);
+    try facts.append_byte(cast<u8>(32));
+    if bad_caller { try std::fmt::append_i64(&var facts, record.target_component_id); }
+    else { try std::fmt::append_i64(&var facts, record.target_component_id + 1000000); }
+    try facts.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(&var facts, record.target_function_id);
+    try facts.append_byte(cast<u8>(10));
+    let mutated = facts.as_bytes();
+    try std::fs::write_file(io, path, mutated);
+    let owned = try std::fs::read_file(io, path);
+    try std::fs::remove_file(io, &path);
+    var index = try ir_index::build(owned);
+    defer index.deinit();
+    var llvm = std::string::String(allocator);
+    defer llvm.deinit();
+    let claimed = try cli_llvm::consume_package_dependencies(&var llvm, &index, owned);
+    if claimed >= 0 { return error("mutated constructor dependency was accepted"); }
+    return;
+}

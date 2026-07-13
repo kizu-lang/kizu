@@ -3,7 +3,160 @@ import selfhost::backend::compiled_signature;
 import selfhost::ir::component_function_catalog;
 import selfhost::ir::executable_body;
 import selfhost::ir::function_signature;
+import selfhost::ir::package_dependency;
 import selfhost::source;
+import selfhost::source::loader;
+
+fn copy_source_file(file: &source::SourceFile) -> source::SourceFile {
+    return source::SourceFile {
+        id: file.id,
+        kind: file.kind,
+        package_name: file.package_name,
+        module_start: file.module_start,
+        module_end: file.module_end,
+        path: file.path,
+        text: file.text
+    };
+}
+
+fn resolver_test_file(id: i64, module: []u8, text: []u8) -> source::SourceFile {
+    return source::SourceFile {
+        id: id,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    };
+}
+
+fn resolver_std_test_file(id: i64, module: []u8, text: []u8) -> source::SourceFile {
+    return source::SourceFile {
+        id: id,
+        kind: source::SourceKind::Std,
+        package_name: "std",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    };
+}
+
+fn resolve_test_files(allocator: Allocator, files: &std::array::Array<source::SourceFile>) -> !package_dependency::ResolvedCallTargets {
+    var parsed = try parser::parse_source_files(allocator, files);
+    var catalog = try package_dependency::collect_from_parsed_files(allocator, files, &parsed);
+    defer catalog.deinit();
+    return package_dependency::resolve_package_calls(allocator, files, &parsed, &catalog);
+}
+
+pub fn package_resolver_builtin_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/builtin", "fn root() -> void { print(1); error(); cast<i64>(1); std::mem::page_allocator(); std::io::blocking(); std::array::Array<i64>(std::mem::page_allocator()); }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    std::testing::expect_equal<i64>(0, package_dependency::resolved_call_len(&calls));
+    return;
+}
+
+pub fn package_resolver_unknown_builtin_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/builtin_missing", "fn root() -> void { std::builtin::missing(); }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_unknown_local_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/local_missing", "fn root() -> void { missing(); }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_unknown_component_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/component_missing", "fn root() -> void { Missing::init(); }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_std_function_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/std_function", "fn root() -> void { std::resolver_fixture::present(); }"));
+    try files.append(resolver_std_test_file(1, "resolver_fixture", "pub fn present() -> void {}"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    std::testing::expect_equal<i64>(1, package_dependency::resolved_call_len(&calls));
+    return;
+}
+
+pub fn package_resolver_missing_std_function_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/std_missing", "fn root() -> void { std::resolver_fixture::missing(); }"));
+    try files.append(resolver_std_test_file(1, "resolver_fixture", "pub fn present() -> void {}"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_missing_std_method_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/std_method", "fn root(value: std::resolver_fixture::Widget) -> void { value.missing(); }"));
+    try files.append(resolver_std_test_file(1, "resolver_fixture", "pub struct Widget {} impl Widget { fn present(self: Widget) -> void {} }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_unresolved_qualified_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/a", "fn root() -> void { selfhost::resolver::b::missing(); }"));
+    try files.append(resolver_test_file(1, "resolver/b", "fn present() -> void {}"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_unknown_typed_method_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/method", "fn root(value: Unknown) -> void { value.missing(); }"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
+
+pub fn package_resolver_wrong_component_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(resolver_test_file(0, "resolver/a", "fn root() -> void { selfhost::resolver::c::wanted(); }"));
+    try files.append(resolver_test_file(1, "resolver/b", "fn wanted() -> void {}"));
+    try files.append(resolver_test_file(2, "resolver/c", "fn other() -> void {}"));
+    var calls = try resolve_test_files(allocator, &files);
+    defer calls.deinit();
+    return;
+}
 
 pub fn append_facts(
     allocator: Allocator,
@@ -11,6 +164,29 @@ pub fn append_facts(
     files: &std::array::Array<source::SourceFile>
 ) -> !void {
     try append_core_stdlib_return_facts(out);
+
+    // Pass one owns package identity construction. No closure is emitted until
+    // every parsed component and function has received its stable numeric ID.
+    var parsed_package = try parser::parse_source_files(allocator, files);
+    var package_catalog = try package_dependency::collect_from_parsed_files(
+        allocator, files, &parsed_package
+    );
+    defer package_catalog.deinit();
+    var resolved_package_calls = try package_dependency::resolve_package_calls(
+        allocator, files, &parsed_package, &package_catalog
+    );
+    defer resolved_package_calls.deinit();
+    var package_dependencies = try package_dependency::dependency_graph(allocator, &package_catalog);
+    defer package_dependencies.deinit();
+    try package_dependency::append_resolved_dependencies(
+        &var package_dependencies, &package_catalog, &resolved_package_calls
+    );
+    var emitted_targets = try package_dependency::emitted_targets(allocator, &package_catalog);
+    defer emitted_targets.deinit();
+    try append_numeric_package_closure(
+        allocator, out, files, &parsed_package, &package_catalog, &package_dependencies,
+        &var emitted_targets
+    );
 
     var execute_found = false;
     var codegen_found = false;
@@ -46,10 +222,10 @@ pub fn append_facts(
                 mem_found = true;
             }
             if std::mem::equal_bytes(std_module, "kizu/lexer") {
-                try append_kizu_lexer_function_facts(allocator, out, file);
+                try append_kizu_lexer_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
             }
             if std::mem::equal_bytes(std_module, "kizu/parser") {
-                try append_kizu_parser_function_facts(allocator, out, file);
+                try append_kizu_parser_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
             }
         }
         if file.kind == source::SourceKind::Selfhost {
@@ -59,47 +235,53 @@ pub fn append_facts(
                 execute_found = true;
             }
             if std::mem::equal_bytes(module, "ir/codegen") {
-                try append_codegen_function_facts(allocator, out, file);
+                try append_codegen_function_facts_claimed(
+                    allocator, out, file, &package_catalog, &var emitted_targets
+                );
                 codegen_found = true;
             }
             if std::mem::equal_bytes(module, "ir/code_render") {
-                try append_code_render_function_facts(allocator, out, file);
+                try append_code_render_function_facts_claimed(
+                    allocator, out, file, &package_catalog, &var emitted_targets
+                );
                 code_render_found = true;
             }
             if std::mem::equal_bytes(module, "backend") {
-                try append_backend_function_facts(allocator, out, file);
+                try append_backend_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
                 backend_found = true;
             }
             if std::mem::equal_bytes(module, "backend/executable") {
-                try append_executable_function_facts(allocator, out, file);
+                try append_executable_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
                 executable_found = true;
             }
             if std::mem::equal_bytes(module, "backend/hosted") {
-                try append_hosted_function_facts(allocator, out, file);
+                try append_hosted_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
                 hosted_found = true;
             }
             if std::mem::equal_bytes(module, "lexer") {
-                try append_lexer_function_facts(allocator, out, file);
+                try append_lexer_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
                 lexer_found = true;
             }
             if std::mem::equal_bytes(module, "source") {
-                try append_source_function_facts(allocator, out, file);
+                try append_source_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
                 source_found = true;
             }
             if std::mem::equal_bytes(module, "source/loader") {
-                try append_loader_function_facts(allocator, out, file);
+                try append_loader_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
                 loader_found = true;
             }
             if std::mem::equal_bytes(module, "ast") {
-                try append_selfhost_ast_function_facts(allocator, out, file);
+                try append_selfhost_ast_function_facts_claimed(
+                    allocator, out, file, &package_catalog, &var emitted_targets
+                );
                 selfhost_ast_found = true;
             }
             if std::mem::equal_bytes(module, "types/checker") {
-                try append_types_checker_function_facts(allocator, out, file);
+                try append_types_checker_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
                 types_checker_found = true;
             }
             if std::mem::equal_bytes(module, "parser/format") {
-                try append_format_function_facts(allocator, out, file);
+                try append_format_function_facts(allocator, out, file, &package_catalog, &var emitted_targets);
                 format_found = true;
             }
         }
@@ -149,6 +331,276 @@ pub fn append_facts(
     }
     if !format_found {
         return error("missing selfhost parser format source");
+    }
+    try parser::deinit_parsed_source_files(parsed_package);
+    return;
+}
+
+// numeric_package_collector_gate drives the production package parser,
+// numeric call resolver, dependency graph, and definition emitter from the
+// real constructor-facts collector root.
+pub fn numeric_package_collector_gate() -> !void {
+    var out = try numeric_package_collector_facts();
+    defer out.deinit();
+    let output = out.as_bytes();
+    print(output);
+    return;
+}
+
+// numeric_package_collector_facts returns the owned production resolver output
+// so backend gates exercise the same file handoff as the CLI.
+pub fn numeric_package_collector_facts() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
+    defer files.deinit();
+    var facts_files = std::array::Array<source::SourceFile>(allocator);
+    defer facts_files.deinit();
+    var file_index = 0;
+    while file_index < files.len() {
+        let file = try files.at(file_index);
+        let module = source::module_path(file);
+        if (file.kind == source::SourceKind::Selfhost and std::mem::equal_bytes(module, "types/constructor_facts")) or
+            (file.kind == source::SourceKind::Std and std::mem::equal_bytes(module, "kizu/ast")) {
+            try facts_files.append(copy_source_file(file));
+        }
+        file_index = file_index + 1;
+    }
+    std::testing::expect_equal<i64>(2, facts_files.len());
+    var parsed = try parser::parse_source_files(allocator, &facts_files);
+    var catalog = try package_dependency::collect_from_parsed_files(allocator, &facts_files, &parsed);
+    defer catalog.deinit();
+    var calls = try package_dependency::resolve_package_calls(allocator, &facts_files, &parsed, &catalog);
+    defer calls.deinit();
+    try assert_constructor_ast_method_edges(&facts_files, &parsed, &catalog, &calls);
+    var graph = try package_dependency::dependency_graph(allocator, &catalog);
+    defer graph.deinit();
+    try package_dependency::append_resolved_dependencies(&var graph, &catalog, &calls);
+    var emitted = try package_dependency::emitted_targets(allocator, &catalog);
+    defer emitted.deinit();
+    var out = std::string::String(allocator);
+    try append_numeric_package_closure(
+        allocator, &var out, &facts_files, &parsed, &catalog, &graph, &var emitted
+    );
+    try parser::deinit_parsed_source_files(parsed);
+    return out;
+}
+
+fn assert_constructor_ast_method_edges(
+    files: &std::array::Array<source::SourceFile>,
+    parsed: &parser::ParsedSourceFiles,
+    catalog: &package_dependency::PackageFunctionCatalog,
+    calls: &package_dependency::ResolvedCallTargets
+) -> !void {
+    let caller = try package_dependency::resolve_call(
+        catalog, "selfhost", "types/constructor_facts", "collect_into"
+    );
+    let get_target = try package_dependency::resolve_method(catalog, "std", "kizu/ast", "Ast", "get");
+    let child_target = try package_dependency::resolve_method(catalog, "std", "kizu/ast", "Ast", "child_at");
+    var get_found = 0;
+    var child_found = 0;
+    var index = 0;
+    while index < package_dependency::resolved_call_len(calls) {
+        let call_node = try package_dependency::resolved_call_node(calls, index);
+        let record = try package_dependency::resolved_call_record(calls, index);
+        if record.caller_component_id != caller.component.value {
+            index = index + 1;
+            continue;
+        }
+        let file_index = 0;
+        let file = try files.at(file_index);
+        let parsed_array = &parsed.parsed;
+        let parsed_file = try parsed_array.at(file_index);
+        let kind = try assert_constructor_ast_call(
+            file.text, &parsed_file.ast, call_node, record, caller, get_target, child_target
+        );
+        if kind == 1 { get_found = get_found + 1; }
+        if kind == 2 { child_found = child_found + 1; }
+        index = index + 1;
+    }
+    if get_found == 0 or child_found == 0 { return error("constructor Ast call spans missing"); }
+    return;
+}
+
+fn assert_constructor_ast_call(text: []u8, ast: &std::kizu::ast::Ast, call_node: std::kizu::ast::NodeId, record: package_dependency::DependencyRecord, caller: package_dependency::FunctionTarget, get_target: package_dependency::FunctionTarget, child_target: package_dependency::FunctionTarget) -> !i64 {
+    let node = ast.get(call_node);
+    match node.data {
+        Call(call) => return assert_constructor_ast_callee(text, ast, call.callee, record, caller, get_target, child_target);,
+        _ => return 0;,
+    }
+    return 0;
+}
+
+fn assert_constructor_ast_callee(text: []u8, ast: &std::kizu::ast::Ast, callee_node: std::kizu::ast::NodeId, record: package_dependency::DependencyRecord, caller: package_dependency::FunctionTarget, get_target: package_dependency::FunctionTarget, child_target: package_dependency::FunctionTarget) -> !i64 {
+    let callee = ast.get(callee_node);
+    match callee.data {
+        FieldExpr(field) => return assert_constructor_ast_field(text, ast, field.receiver, field.name, record, caller, get_target, child_target);,
+        _ => return 0;,
+    }
+    return 0;
+}
+
+fn assert_constructor_ast_field(text: []u8, ast: &std::kizu::ast::Ast, receiver_node: std::kizu::ast::NodeId, name_node: std::kizu::ast::NodeId, record: package_dependency::DependencyRecord, caller: package_dependency::FunctionTarget, get_target: package_dependency::FunctionTarget, child_target: package_dependency::FunctionTarget) -> !i64 {
+    let receiver = ast.get(receiver_node);
+    match receiver.data {
+        Var(_) => return assert_constructor_ast_var_field(text, ast, receiver_node, name_node, record, caller, get_target, child_target);,
+        _ => return 0;,
+    }
+    return 0;
+}
+
+fn assert_constructor_ast_var_field(text: []u8, ast: &std::kizu::ast::Ast, receiver_node: std::kizu::ast::NodeId, name_node: std::kizu::ast::NodeId, record: package_dependency::DependencyRecord, caller: package_dependency::FunctionTarget, get_target: package_dependency::FunctionTarget, child_target: package_dependency::FunctionTarget) -> !i64 {
+    let receiver = ast.get(receiver_node);
+    if !std::mem::equal_bytes(text[receiver.span.start..receiver.span.end], "ast") { return 0; }
+    let name = ast.get(name_node);
+    let field = text[name.span.start..name.span.end];
+    if !std::mem::equal_bytes(field, "get") and !std::mem::equal_bytes(field, "child_at") { return 0; }
+    if record.caller_component_id != caller.component.value { return error("constructor Ast call caller component mismatch"); }
+    if std::mem::equal_bytes(field, "get") {
+        if record.target_component_id != get_target.component.value or record.target_function_id != get_target.function.value { return error("constructor Ast get target identity mismatch"); }
+        return 1;
+    }
+    if record.target_component_id != child_target.component.value or record.target_function_id != child_target.function.value { return error("constructor Ast child_at target identity mismatch"); }
+    return 2;
+}
+
+fn append_numeric_package_closure(
+    allocator: Allocator,
+    out: &var std::string::String,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles,
+    catalog: &package_dependency::PackageFunctionCatalog,
+    graph: &package_dependency::DependencyGraph,
+    emitted_targets: &var package_dependency::EmittedTargets
+) -> !void {
+    try out.append_bytes("package-identity-bounds ");
+    try std::fmt::append_i64(out, package_dependency::component_len(catalog));
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, package_dependency::function_len(catalog));
+    try out.append_byte(cast<u8>(10));
+    var pending = try package_dependency::function_target_queue(allocator, catalog);
+    defer pending.deinit();
+    let root_target = try package_dependency::resolve_call(
+        catalog, "selfhost", "types/constructor_facts", "collect_into"
+    );
+    let root_parsed_index = root_target.component.value;
+    let root_source_index = try parsed_files.source_indexes.get(root_parsed_index);
+    let root_file = try files.at(root_source_index);
+    let parsed_results = &parsed_files.parsed;
+    let root_parsed = try parsed_results.at(root_parsed_index);
+    try append_qualified_struct_type_facts(
+        out,
+        root_file.text,
+        root_parsed.ast,
+        root_parsed.root,
+        "ConstructorFacts",
+        "selfhost::types::constructor_facts::ConstructorFacts"
+    );
+    try package_dependency::queue_append(&var pending, catalog, root_target);
+    var index = 0;
+    while index < package_dependency::queue_len(&pending) {
+        let target = try package_dependency::queue_target(&pending, index);
+        if try package_dependency::claim(emitted_targets, catalog, &target) {
+            try append_numeric_package_definition(out, files, parsed_files, catalog, target);
+        }
+        let dependency_source = try package_dependency::queue_target(&pending, index);
+        try package_dependency::queue_append_dependencies(&var pending, catalog, graph, dependency_source);
+        index = index + 1;
+    }
+    try append_numeric_dependency_records(out, catalog, graph, emitted_targets);
+    return;
+}
+
+fn append_numeric_package_definition(
+    out: &var std::string::String,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles,
+    catalog: &package_dependency::PackageFunctionCatalog,
+    target: package_dependency::FunctionTarget
+) -> !void {
+    let component_id = target.component.value;
+    let function_id = target.function.value;
+    try out.append_bytes("package-definition ");
+    try std::fmt::append_i64(out, component_id);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, function_id);
+    try out.append_byte(cast<u8>(10));
+    let parsed_index = component_id;
+    let source_index = try parsed_files.source_indexes.get(parsed_index);
+    let file = try files.at(source_index);
+    let parsed_results = &parsed_files.parsed;
+    let parsed = try parsed_results.at(parsed_index);
+    let definition_target = package_dependency::FunctionTarget {
+        component: package_dependency::ComponentId { value: component_id },
+        function: package_dependency::FunctionId { value: function_id }
+    };
+    let definition = try package_dependency::definition_node(catalog, definition_target, &parsed.ast, parsed.root);
+    var qualified_name = std::string::String(std::mem::page_allocator());
+    defer qualified_name.deinit();
+    try package_dependency::append_target_qualified_name(&var qualified_name, catalog, target);
+    let qualified_name_bytes = qualified_name.as_bytes();
+    try out.append_bytes("package-definition-name ");
+    try std::fmt::append_i64(out, component_id);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, function_id);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(qualified_name_bytes);
+    try out.append_byte(cast<u8>(10));
+    let body = try function_body_from_node(parsed.ast, definition);
+    try append_numeric_package_definition_body(
+        out, file.text, parsed.ast, definition, body, &qualified_name_bytes
+    );
+    return;
+}
+
+fn append_numeric_package_definition_body(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    definition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    qualified_name: &[]u8
+) -> !void {
+    let name = qualified_name.*;
+    try function_signature::append(out, text, ast, definition, name);
+    try executable_body::append_helper_body_ir(
+        out, text, ast, name, "numeric-package-dependency", body
+    );
+    return;
+}
+
+fn append_numeric_dependency_records(
+    out: &var std::string::String,
+    catalog: &package_dependency::PackageFunctionCatalog,
+    graph: &package_dependency::DependencyGraph,
+    emitted: &package_dependency::EmittedTargets
+) -> !void {
+    var index = 0;
+    while index < package_dependency::dependency_len(graph) {
+        let record = try package_dependency::dependency_at(graph, index);
+        let caller = package_dependency::FunctionTarget {
+            component: package_dependency::ComponentId { value: record.caller_component_id },
+            function: package_dependency::FunctionId { value: record.caller_function_id }
+        };
+        if !(try package_dependency::is_claimed(emitted, catalog, caller)) {
+            index = index + 1;
+            continue;
+        }
+        try out.append_bytes("package-dependency ");
+        try std::fmt::append_i64(out, record.caller_component_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, record.caller_function_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, record.target_component_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, record.target_function_id);
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("package-reference ");
+        try std::fmt::append_i64(out, record.target_component_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, record.target_function_id);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
     }
     return;
 }
@@ -223,7 +675,9 @@ fn append_mem_function_facts(
 fn append_kizu_lexer_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -277,7 +731,10 @@ fn append_kizu_lexer_function_facts(
         out,
         file.text,
         parsed.ast,
-        &catalog
+        &catalog,
+        file,
+        package_catalog,
+        emitted_targets
     );
     // tokenize builds the Array<Token> by folding first_token / next_token; it is the tokenizer's
     // top-level driver feeding the parser (tracker 961, scope 4 prerequisite).
@@ -292,7 +749,10 @@ fn append_kizu_lexer_reachable_helper_bodies(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    catalog: &component_function_catalog::ComponentFunctionCatalog
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
@@ -302,14 +762,13 @@ fn append_kizu_lexer_reachable_helper_bodies(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_kizu_lexer_closure_helper_body(
-                out,
-                text,
-                ast,
-                catalog,
-                function_index,
-                &var pending
-            );
+            let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_kizu_lexer_closure_helper_body(
+                    out, text, ast, catalog, function_index, &var pending
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -381,7 +840,9 @@ fn kizu_lexer_closure_role(local_name: []u8) -> []u8 {
 fn append_kizu_parser_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -499,14 +960,13 @@ fn append_kizu_parser_function_facts(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_kizu_parser_closure_helper_body(
-                out,
-                file.text,
-                parsed.ast,
-                &catalog,
-                function_index,
-                &var pending
-            );
+            let local_name = try component_function_catalog::local_function_name(&catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_kizu_parser_closure_helper_body(
+                    out, file.text, parsed.ast, &catalog, function_index, &var pending
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -588,7 +1048,9 @@ fn append_kizu_parser_closure_helper_body(
 fn append_format_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -855,14 +1317,13 @@ fn append_format_function_facts(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_format_closure_helper_body(
-                out,
-                file.text,
-                parsed.ast,
-                &catalog,
-                function_index,
-                &var pending
-            );
+            let local_name = try component_function_catalog::local_function_name(&catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_format_closure_helper_body(
+                    out, file.text, parsed.ast, &catalog, function_index, &var pending
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -1204,10 +1665,9 @@ pub fn append_ast_function_facts(
         "std::kizu::ast::ast_len",
         "checked-ast-readonly"
     );
-    // Ast.child_at composes the checked Array<NodeId>.get accessor with a bounds-check
-    // return error(...) (tracker 961). It needs the ChildRange struct fields (range.start
-    // = field 0, range.len = field 1) for its index expression and bound, plus the NodeId
-    // element type-llvm mapping so self.children.get(...) can load the NodeId by value.
+    // The numeric package closure emits Ast.child_at's signature and body. Keep only
+    // the value-layout facts it consumes here: ChildRange fields for range.start/len
+    // and the NodeId mapping for the Array<NodeId>.get result.
     try append_selected_struct_field_facts(
         out,
         file.text,
@@ -1220,16 +1680,6 @@ pub fn append_ast_function_facts(
         out,
         "std::kizu::ast::NodeId",
         "%kizu.kizu.ast.node_id"
-    );
-    try append_selected_impl_method_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "Ast",
-        "child_at",
-        "std::kizu::ast::ast_child_at",
-        "checked-ast-readonly"
     );
     // Ast.add_node constructs an AstNode (Span + AstData union) and appends it to the
     // nodes Arena, exercising the AstNode/AstData tagged-union value-type ABI (tracker
@@ -1546,21 +1996,6 @@ pub fn append_ast_function_facts(
         "synth_ctor_array",
         "std::kizu::ast::synth_ctor_array",
         "checked-ast-constructor"
-    );
-    // Ast.get reads an AstNode back out of the nodes Arena by value (tracker 961). It
-    // reuses the AstNode/AstData union value-type ABI: self.nodes.get(id.raw) calls the
-    // checked @kizu_rt_arena_get and loads the AstNode element, trapping on an
-    // out-of-bounds index. It needs only the already-emitted Ast/NodeId struct fields
-    // and the AstNode type-llvm mapping.
-    try append_selected_impl_method_body(
-        out,
-        file.text,
-        parsed.ast,
-        parsed.root,
-        "Ast",
-        "get",
-        "std::kizu::ast::ast_get",
-        "checked-ast-readonly"
     );
     // The five leaf AstData payload structs were previously union-variant only; parser
     // construction needs their source-derived type-llvm + struct-field facts as well.
@@ -2497,6 +2932,30 @@ pub fn append_selfhost_ast_function_facts(
     out: &var std::string::String,
     file: &source::SourceFile
 ) -> !void {
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(copy_source_file(file));
+    var parsed_package = try parser::parse_source_files(allocator, &files);
+    defer parsed_package.deinit();
+    var package_catalog = try package_dependency::collect_from_parsed_files(
+        allocator, &files, &parsed_package
+    );
+    defer package_catalog.deinit();
+    var emitted_targets = try package_dependency::emitted_targets(allocator, &package_catalog);
+    defer emitted_targets.deinit();
+    try append_selfhost_ast_function_facts_claimed(
+        allocator, out, file, &package_catalog, &var emitted_targets
+    );
+    return;
+}
+
+fn append_selfhost_ast_function_facts_claimed(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
+) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
     var catalog = try component_function_catalog::collect_from_ast(
@@ -2516,14 +2975,13 @@ pub fn append_selfhost_ast_function_facts(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_selfhost_ast_closure_helper_body(
-                out,
-                file.text,
-                parsed.ast,
-                &catalog,
-                function_index,
-                &var pending
-            );
+            let local_name = try component_function_catalog::local_function_name(&catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_selfhost_ast_closure_helper_body(
+                    out, file.text, parsed.ast, &catalog, function_index, &var pending
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -2577,7 +3035,9 @@ fn selfhost_ast_closure_role(local_name: []u8) -> []u8 {
 fn append_types_checker_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -2600,14 +3060,13 @@ fn append_types_checker_function_facts(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_types_checker_closure_helper_body(
-                out,
-                file.text,
-                parsed.ast,
-                &catalog,
-                function_index,
-                &var pending
-            );
+            let local_name = try component_function_catalog::local_function_name(&catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_types_checker_closure_helper_body(
+                    out, file.text, parsed.ast, &catalog, function_index, &var pending
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -2765,7 +3224,9 @@ fn union_node_matches(
 fn append_source_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -2806,7 +3267,7 @@ fn append_source_function_facts(
         out,
         file.text,
         parsed.ast,
-        &catalog
+        &catalog, file, package_catalog, emitted_targets
     );
     return;
 }
@@ -2817,7 +3278,10 @@ fn append_source_reachable_helper_bodies(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    catalog: &component_function_catalog::ComponentFunctionCatalog
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
@@ -2829,14 +3293,18 @@ fn append_source_reachable_helper_bodies(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_source_closure_helper_body(
+            let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_source_closure_helper_body(
                 out,
                 text,
                 ast,
                 catalog,
                 function_index,
                 &var pending
-            );
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -2937,7 +3405,7 @@ fn collect_catalog_closure_direct_callees(
             unsupported_call_form_error, unsupported_qualified_callee_error
         );,
         Call(call) => try collect_catalog_closure_call_parts(
-            text, ast, call.callee, call.args, catalog, pending, qualified_prefix,
+            text, ast, node_id, call.callee, call.args, catalog, pending, qualified_prefix,
             unsupported_call_form_error, unsupported_qualified_callee_error
         );,
         TypeApplyExpr(type_apply) => try collect_catalog_closure_node_range_callees(
@@ -3175,6 +3643,7 @@ fn collect_catalog_closure_node_range_callees(
 fn collect_catalog_closure_call_parts(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    call_node: std::kizu::ast::NodeId,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     catalog: &component_function_catalog::ComponentFunctionCatalog,
@@ -3184,7 +3653,7 @@ fn collect_catalog_closure_call_parts(
     unsupported_qualified_callee_error: []u8
 ) -> !void {
     try collect_catalog_closure_call_callee(
-        text, ast, callee, catalog, pending, qualified_prefix,
+        text, ast, call_node, callee, catalog, pending, qualified_prefix,
         unsupported_call_form_error, unsupported_qualified_callee_error
     );
     try collect_catalog_closure_direct_callees_in_range(
@@ -3197,6 +3666,7 @@ fn collect_catalog_closure_call_parts(
 fn collect_catalog_closure_call_callee(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    call_node: std::kizu::ast::NodeId,
     callee: std::kizu::ast::NodeId,
     catalog: &component_function_catalog::ComponentFunctionCatalog,
     pending: &var std::array::Array<i64>,
@@ -3564,7 +4034,9 @@ fn collect_catalog_closure_qualified_callee(
 fn append_loader_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -3581,7 +4053,7 @@ fn append_loader_function_facts(
         out,
         file.text,
         parsed.ast,
-        &catalog
+        &catalog, file, package_catalog, emitted_targets
     );
     return;
 }
@@ -3590,7 +4062,10 @@ fn append_loader_reachable_helper_bodies(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    catalog: &component_function_catalog::ComponentFunctionCatalog
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
@@ -3602,14 +4077,18 @@ fn append_loader_reachable_helper_bodies(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_loader_closure_helper_body(
+            let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_loader_closure_helper_body(
                 out,
                 text,
                 ast,
                 catalog,
                 function_index,
                 &var pending
-            );
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -3655,7 +4134,9 @@ fn append_loader_closure_helper_body(
 fn append_lexer_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -3671,7 +4152,7 @@ fn append_lexer_function_facts(
         out,
         file.text,
         parsed.ast,
-        &catalog
+        &catalog, file, package_catalog, emitted_targets
     );
     return;
 }
@@ -3680,7 +4161,10 @@ fn append_lexer_reachable_helper_bodies(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    catalog: &component_function_catalog::ComponentFunctionCatalog
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
@@ -3695,14 +4179,18 @@ fn append_lexer_reachable_helper_bodies(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_lexer_closure_helper_body(
+            let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_lexer_closure_helper_body(
                 out,
                 text,
                 ast,
                 catalog,
                 function_index,
                 &var pending
-            );
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -3762,6 +4250,7 @@ fn append_core_stdlib_return_facts(out: &var std::string::String) -> !void {
 pub fn append_runtime_stdlib_symbol_preamble(out: &var std::string::String) -> !void {
     try append_stdlib_symbol_fact(out, "std::mem::equal_bytes", "kizu_selfhost__slice_equal", "bool");
     try append_stdlib_symbol_fact(out, "std::mem::len", "kizu_selfhost__slice_len", "i64");
+    try append_stdlib_symbol_fact(out, "std::builtin::mem_len", "kizu_selfhost__slice_len", "i64");
     // The std::string::String value constructor lowers to the runtime-owned byte-buffer
     // handle: std::string::String(allocator) calls @kizu_rt_string_new, taking the Allocator
     // capability (%kizu.owned) and returning a String, which the compiled type lowering maps
@@ -3782,6 +4271,30 @@ pub fn append_codegen_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
     file: &source::SourceFile
+) -> !void {
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(copy_source_file(file));
+    var parsed_package = try parser::parse_source_files(allocator, &files);
+    defer parsed_package.deinit();
+    var package_catalog = try package_dependency::collect_from_parsed_files(
+        allocator, &files, &parsed_package
+    );
+    defer package_catalog.deinit();
+    var emitted_targets = try package_dependency::emitted_targets(allocator, &package_catalog);
+    defer emitted_targets.deinit();
+    try append_codegen_function_facts_claimed(
+        allocator, out, file, &package_catalog, &var emitted_targets
+    );
+    return;
+}
+
+fn append_codegen_function_facts_claimed(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -3832,7 +4345,10 @@ pub fn append_codegen_function_facts(
         out,
         file.text,
         parsed.ast,
-        &catalog
+        &catalog,
+        file,
+        package_catalog,
+        emitted_targets
     );
     return;
 }
@@ -3841,7 +4357,10 @@ fn append_codegen_reachable_helper_bodies(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    catalog: &component_function_catalog::ComponentFunctionCatalog
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
@@ -3869,14 +4388,13 @@ fn append_codegen_reachable_helper_bodies(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_codegen_closure_helper_body(
-                out,
-                text,
-                ast,
-                catalog,
-                function_index,
-                &var pending
-            );
+            let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_codegen_closure_helper_body(
+                    out, text, ast, catalog, function_index, &var pending
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -3900,6 +4418,30 @@ pub fn append_code_render_function_facts(
     out: &var std::string::String,
     file: &source::SourceFile
 ) -> !void {
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(copy_source_file(file));
+    var parsed_package = try parser::parse_source_files(allocator, &files);
+    defer parsed_package.deinit();
+    var package_catalog = try package_dependency::collect_from_parsed_files(
+        allocator, &files, &parsed_package
+    );
+    defer package_catalog.deinit();
+    var emitted_targets = try package_dependency::emitted_targets(allocator, &package_catalog);
+    defer emitted_targets.deinit();
+    try append_code_render_function_facts_claimed(
+        allocator, out, file, &package_catalog, &var emitted_targets
+    );
+    return;
+}
+
+fn append_code_render_function_facts_claimed(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
+) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
     var catalog = try component_function_catalog::collect_from_ast(
@@ -3911,7 +4453,9 @@ pub fn append_code_render_function_facts(
     );
     defer catalog.deinit();
     try append_runtime_stdlib_symbol_preamble(out);
-    try append_code_render_reachable_helper_bodies(out, file.text, parsed.ast, &catalog);
+    try append_code_render_reachable_helper_bodies(
+        out, file.text, parsed.ast, &catalog, file, package_catalog, emitted_targets
+    );
     return;
 }
 
@@ -3919,7 +4463,10 @@ fn append_code_render_reachable_helper_bodies(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    catalog: &component_function_catalog::ComponentFunctionCatalog
+    catalog: &component_function_catalog::ComponentFunctionCatalog,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var pending = std::array::Array<i64>(std::mem::page_allocator());
     var emitted = std::array::Array<i64>(std::mem::page_allocator());
@@ -3929,9 +4476,13 @@ fn append_code_render_reachable_helper_bodies(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_code_render_closure_helper_body(
-                out, text, ast, catalog, function_index, &var pending
-            );
+            let local_name = try component_function_catalog::local_function_name(catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_code_render_closure_helper_body(
+                    out, text, ast, catalog, function_index, &var pending
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -4713,12 +5264,14 @@ fn append_execute_function_facts(
 fn append_backend_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
 
-    try append_backend_wrapper_body_facts(allocator, out, file.text, parsed.ast, parsed.root);
+    try append_backend_wrapper_body_facts(allocator, out, file.text, parsed.ast, parsed.root, file, package_catalog, emitted_targets);
     return;
 }
 
@@ -4727,7 +5280,10 @@ fn append_backend_wrapper_body_facts(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId
+    root: std::kizu::ast::NodeId,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var catalog = try component_function_catalog::collect_from_ast(
         allocator,
@@ -4746,14 +5302,18 @@ fn append_backend_wrapper_body_facts(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_backend_wrapper_closure_body(
+            let local_name = try component_function_catalog::local_function_name(&catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_backend_wrapper_closure_body(
                 out,
                 text,
                 ast,
                 &catalog,
                 function_index,
                 &var pending
-            );
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -4813,12 +5373,14 @@ fn backend_wrapper_role(local_name: []u8) -> []u8 {
 fn append_executable_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
 
-    try append_executable_helper_body_facts(allocator, out, file.text, parsed.ast, parsed.root);
+    try append_executable_helper_body_facts(allocator, out, file.text, parsed.ast, parsed.root, file, package_catalog, emitted_targets);
     return;
 }
 
@@ -4827,7 +5389,10 @@ fn append_executable_helper_body_facts(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId
+    root: std::kizu::ast::NodeId,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var catalog = try component_function_catalog::collect_from_ast(
         allocator,
@@ -4848,14 +5413,18 @@ fn append_executable_helper_body_facts(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_executable_helper_closure_body(
+            let local_name = try component_function_catalog::local_function_name(&catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_executable_helper_closure_body(
                 out,
                 text,
                 ast,
                 &catalog,
                 function_index,
                 &var pending
-            );
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
@@ -4913,7 +5482,9 @@ fn executable_closure_role(local_name: []u8) -> []u8 {
 fn append_hosted_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
@@ -4961,7 +5532,7 @@ fn append_hosted_function_facts(
         "selfhost::backend::hosted::artifact_stem"
     );
     try append_hosted_writer_helper_signatures(out, file.text, parsed.ast, parsed.root);
-    try append_hosted_helper_body_facts(allocator, out, file.text, parsed.ast, parsed.root);
+    try append_hosted_helper_body_facts(allocator, out, file.text, parsed.ast, parsed.root, file, package_catalog, emitted_targets);
     return;
 }
 
@@ -5059,7 +5630,10 @@ fn append_hosted_helper_body_facts(
     out: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId
+    root: std::kizu::ast::NodeId,
+    file: &source::SourceFile,
+    package_catalog: &package_dependency::PackageFunctionCatalog,
+    emitted_targets: &var package_dependency::EmittedTargets
 ) -> !void {
     var catalog = try component_function_catalog::collect_from_ast(
         allocator,
@@ -5078,14 +5652,18 @@ fn append_hosted_helper_body_facts(
     while index < pending.len() {
         let function_index = try pending.get(index);
         if !(try closure_index_seen(&emitted, function_index)) {
-            try append_hosted_helper_closure_body(
+            let local_name = try component_function_catalog::local_function_name(&catalog, function_index);
+            let target = try package_dependency::source_function_target(package_catalog, file, local_name);
+            if try package_dependency::claim(emitted_targets, package_catalog, &target) {
+                try append_hosted_helper_closure_body(
                 out,
                 text,
                 ast,
                 &catalog,
                 function_index,
                 &var pending
-            );
+                );
+            }
             try emitted.append(function_index);
         }
         index = index + 1;
