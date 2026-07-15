@@ -35,7 +35,9 @@ func TestSelfhostCompiledUnionDispatchUsesUnionFacts(t *testing.T) {
 	}
 	unionLLVM := strings.TrimPrefix(sections[0], "union-dispatch-llvm\\n")
 	if !strings.Contains(unionLLVM, "extractvalue %test.union %value, 0") ||
-		!strings.Contains(unionLLVM, "icmp eq i64 %dispatch0_tag0, 3") {
+		!strings.Contains(unionLLVM, "icmp eq i64 %dispatch0_tag0, 3") ||
+		!strings.Contains(unionLLVM, "%dispatch.payload.test = load %test.payload") ||
+		!strings.Contains(unionLLVM, "extractvalue %test.payload %dispatch.payload.test, 0") {
 		t.Fatalf("union dispatch does not branch on aggregate tag\n%s", unionLLVM)
 	}
 	if strings.Contains(sections[1], "extractvalue") {
