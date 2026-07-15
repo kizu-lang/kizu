@@ -211,6 +211,9 @@ func TestSelfhostSourceCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 	abiRequired := []string{
 		"std::mem::equal_bytes(kizu_type, \"SourceKind\")",
 		"std::mem::equal_bytes(kizu_type, \"SourceFile\")",
+		"std::mem::equal_bytes(kizu_type, \"source::SourceFile\")",
+		"std::mem::equal_bytes(kizu_type, \"selfhost::source::SourceFile\")",
+		"std::mem::equal_bytes(kizu_type, \"std::kizu::ast::SourceFile\")",
 	}
 	for _, fragment := range abiRequired {
 		if !strings.Contains(abi, fragment) {

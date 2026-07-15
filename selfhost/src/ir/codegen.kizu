@@ -1,3 +1,5 @@
+import selfhost::types::constructor_facts;
+
 fn is_empty_node(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
     let node = ast.get(node_id);
     return match node.data {
@@ -905,6 +907,11 @@ pub fn code_op_try_string_reserve() -> i64 {
     return 155;
 }
 
+// ATOMIC_BOOL_NEW materializes one local seq_cst atomic bool: 'op dst init_bool'.
+pub fn code_op_atomic_bool_new() -> i64 {
+    return 156;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -1105,6 +1112,11 @@ pub fn code_kind_is_mut_borrow_scalar(kind: i64) -> bool {
 // by the caller. The renderer maps it to 'ptr'.
 pub fn code_kind_mut_borrow_slice() -> i64 {
     return 20;
+}
+
+// Atomic<bool> is a pointer to byte-sized atomic storage in the LLVM renderer.
+pub fn code_kind_atomic_bool() -> i64 {
+    return 21;
 }
 
 pub fn code_kind_is_mut_borrow_slice(kind: i64) -> bool {
@@ -1674,6 +1686,9 @@ pub fn lower_code_module(
     text: []u8,
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId,
+    constructor_identities: &constructor_facts::ConstructorFacts,
+    atomic_constructor_id: i64,
+    bool_type_id: i64,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
@@ -1682,18 +1697,59 @@ pub fn lower_code_module(
     args_scratch: &var std::array::Array<i64>,
     defer_records: &var std::array::Array<i64>
 ) -> !CodeEval {
-    try scratch_init(args_scratch);
+    try scratch_init(
+        args_scratch,
+        &constructor_identities.node_starts,
+        &constructor_identities.node_ends,
+        &constructor_identities.constructor_ids,
+        &constructor_identities.type_arg0_ids,
+        atomic_constructor_id,
+        bool_type_id
+    );
     return try lower_code_program(text, ast, root, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records);
 }
 
-// scratch_init seeds the call-arg scratch as an explicit stack: slot 0 holds the
-// stack pointer (the next free slot) and the argument slots start at 1. A nested
+// scratch_init seeds the lowering-only scratch with immutable constructor identity records followed
+// by the call-arg stack. Slot 0 holds the stack pointer, slot 1 the fact count, and each fact uses
+// three slots (node start/end, resolved lowering kind). A nested
 // call argument allocates its own frame above its caller's reserved slots and the
 // pointer pops back when each CALL record copies its frame, so arbitrarily nested
 // call arguments keep every frame contiguous without an array-truncate primitive
 // (dead deeper slots are overwritten through scratch_put).
-fn scratch_init(args_scratch: &var std::array::Array<i64>) -> !void {
-    try args_scratch.append(1);
+fn scratch_init(
+    args_scratch: &var std::array::Array<i64>,
+    node_starts: &std::array::Array<i64>,
+    node_ends: &std::array::Array<i64>,
+    constructor_ids: &std::array::Array<i64>,
+    type_arg0_ids: &std::array::Array<i64>,
+    atomic_constructor_id: i64,
+    bool_type_id: i64
+) -> !void {
+    let fact_count = node_starts.len();
+    if node_ends.len() != fact_count or
+        constructor_ids.len() != fact_count or
+        type_arg0_ids.len() != fact_count {
+        return error("run codegen constructor identity arrays differ in length");
+    }
+    try args_scratch.append(0);
+    try args_scratch.append(fact_count);
+    var index = 0;
+    while index < fact_count {
+        let node_start = try node_starts.get(index);
+        let node_end = try node_ends.get(index);
+        try args_scratch.append(node_start);
+        try args_scratch.append(node_end);
+        let constructor_id = try constructor_ids.get(index);
+        let type_arg0_id = try type_arg0_ids.get(index);
+        var resolved_kind = 0 - 1;
+        if constructor_id == atomic_constructor_id and type_arg0_id == bool_type_id {
+            resolved_kind = code_kind_atomic_bool();
+        }
+        try args_scratch.append(resolved_kind);
+        index = index + 1;
+    }
+    let stack_base = 2 + fact_count * 3;
+    try args_scratch.set(0, stack_base);
     return;
 }
 
@@ -10154,6 +10210,24 @@ fn lower_code_runtime_constructor(
     locals_base: i64,
     next_value: i64
 ) -> !CodeEval {
+    let resolved_kind = try scratch_constructor_kind(args_scratch, ast, callee, 0);
+    let atomic_kind = code_kind_atomic_bool();
+    if resolved_kind == atomic_kind {
+        return try lower_code_atomic_bool_new(
+            text,
+            ast,
+            decls,
+            args,
+            code,
+            kinds,
+            local_starts,
+            local_ends,
+            local_values,
+            args_scratch,
+            locals_base,
+            next_value
+        );
+    }
     let arena_new = try lower_code_arena_new(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if arena_new.ok {
         return arena_new;
@@ -10171,6 +10245,76 @@ fn lower_code_runtime_constructor(
         return try lower_code_box_new(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
+}
+
+// scratch_constructor_kind resolves a TypeApply callee solely through the immutable facts prefix
+// copied from the checker. It never inspects the callee's source text or symbol spelling.
+fn scratch_constructor_kind(
+    args_scratch: &var std::array::Array<i64>,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    index: i64
+) -> !i64 {
+    let fact_count = try args_scratch.get(1);
+    let node = ast.get(callee);
+    var fact_index = index;
+    while fact_index < fact_count {
+        let fact_pos = 2 + fact_index * 3;
+        let fact_start = try args_scratch.get(fact_pos);
+        let fact_end = try args_scratch.get(fact_pos + 1);
+        if fact_start == node.span.start and fact_end == node.span.end {
+            return try args_scratch.get(fact_pos + 2);
+        }
+        fact_index = fact_index + 1;
+    }
+    return -1;
+}
+
+fn lower_code_atomic_bool_new(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    local_starts: &var std::array::Array<i64>,
+    local_ends: &var std::array::Array<i64>,
+    local_values: &var std::array::Array<i64>,
+    args_scratch: &var std::array::Array<i64>,
+    locals_base: i64,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 1 {
+        return code_eval_unsupported(next_value);
+    }
+    let init_arg = try ast.child_at(args, 0);
+    let init_eval = try lower_code_expr(
+        text,
+        ast,
+        decls,
+        init_arg,
+        code,
+        kinds,
+        local_starts,
+        local_ends,
+        local_values,
+        args_scratch,
+        locals_base,
+        next_value
+    );
+    if !init_eval.ok {
+        return code_eval_unsupported(init_eval.next);
+    }
+    let init_kind = try kinds.get(init_eval.value_id);
+    if init_kind != code_kind_bool() {
+        return code_eval_unsupported(init_eval.next);
+    }
+    let result_value = init_eval.next;
+    try code.append(code_op_atomic_bool_new());
+    try code.append(result_value);
+    try code.append(init_eval.value_id);
+    try kinds.append(code_kind_atomic_bool());
+    return code_eval_value(result_value, result_value + 1);
 }
 
 fn lower_code_box_new(

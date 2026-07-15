@@ -9,10 +9,9 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
-// TestSelfhostNumericPackageCollectorBehavior parses the actual package and
-// drives the production resolver, dependency graph, closure, and emitter from
-// constructor_facts::collect_into. The emitted facts prove Ast parameter
-// receiver calls resolved to the numeric std::kizu::ast method definitions.
+// TestSelfhostNumericPackageCollectorBehavior resolves only the production
+// constructor-facts component against the complete numeric package catalog,
+// then emits the real collect_checked closure without source-text selection.
 func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 	restore, err := chdirRepoRoot()
 	if err != nil {
@@ -45,7 +44,12 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 		"struct-field selfhost::types::constructor_facts::ConstructorFacts 3 " +
 			"type_arg0_ids std::array::Array<i64>",
 	})
-	for _, name := range []string{"std::kizu::ast::ast_get", "std::kizu::ast::ast_child_at"} {
+	for _, name := range []string{
+		"selfhost::types::constructor_facts::collect_checked",
+		"selfhost::types::constructor_facts::append_identity",
+		"std::kizu::ast::ast_get",
+		"std::kizu::ast::ast_child_at",
+	} {
 		marker := "function-signature-return " + name + " "
 		if count := strings.Count(facts, marker); count != 1 {
 			t.Fatalf(
@@ -55,19 +59,19 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 		}
 	}
 	if count := strings.Count(facts, "package-dependency "); count == 0 {
-		t.Fatal("numeric collector closure emitted no numeric dependency records")
+		t.Fatal("numeric collector closure emitted no dependency records")
 	}
 	if count := strings.Count(facts, "package-definition "); count == 0 {
-		t.Fatal("numeric collector closure emitted no numeric target definitions")
+		t.Fatal("numeric collector closure emitted no target definitions")
 	}
 	if count := strings.Count(facts, "package-reference "); count == 0 {
-		t.Fatal("numeric collector closure emitted no numeric target references")
+		t.Fatal("numeric collector closure emitted no target references")
 	}
 }
 
 // TestSelfhostNumericPackageCollectorBackendConsumer crosses the owned-file backend boundary
 // and pins the next interpreted-consumer blocker after ConstructorFacts ABI mapping: lowering
-// the collector body reaches a mutable struct-field assignment that the interpreter does not
+// the checked producer reaches a mutable struct-field assignment that the interpreter does not
 // yet represent as a struct value. The native stage path is checked separately from this gate.
 func TestSelfhostNumericPackageCollectorBackendConsumer(t *testing.T) {
 	restore, err := chdirRepoRoot()
@@ -234,6 +238,12 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 			t.Errorf("numeric closure BFS must not inspect %q", forbidden)
 		}
 	}
+	assertSparsePackageDependencyConsumer(t, cli)
+}
+
+// assertSparsePackageDependencyConsumer verifies numeric claims use sparse identity pairs.
+func assertSparsePackageDependencyConsumer(t *testing.T, cli string) {
+	t.Helper()
 	cliBody := dependencyFunctionBody(t, cli, "consume_package_dependencies")
 	dependencyLoopStart := strings.Index(cliBody, "var dependency_index = 0")
 	emissionLoopStart := strings.Index(cliBody, "var emitted_count = 0")
@@ -249,19 +259,68 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 	if !strings.Contains(cliBody, `return error("package dependency caller definition missing")`) {
 		t.Fatal("cli dependency consumer does not reject a missing or wrong numeric caller")
 	}
-	linearClaimArrays := strings.Contains(cliBody, "claimed_components") ||
-		strings.Contains(cliBody, "claimed_functions")
-	if linearClaimArrays {
-		t.Fatal("cli dependency consumer reintroduced a linear claimed-target pair scan")
-	}
 	for _, fragment := range []string{
-		"function_stride", "identity_slot_count",
-		"definitions.get(caller_slot)", "references.get(claim_slot)",
+		"function_stride",
+		"identity_slot_count = definition_components.len() + reference_components.len()",
+		"numeric_target_index(",
+		"&definition_components, &definition_functions",
+		"&reference_components, &reference_functions",
 	} {
 		if !strings.Contains(cliBody, fragment) {
-			t.Fatalf("cli dependency consumer dense numeric claimed set missing %q", fragment)
+			t.Fatalf("cli dependency consumer sparse numeric claimed set missing %q", fragment)
 		}
 	}
+	for _, forbidden := range []string{
+		"component_count * function_stride",
+		"var definitions = std::array::Array",
+		"var references = std::array::Array",
+		"claimed_components",
+		"claimed_functions",
+	} {
+		if strings.Contains(cliBody, forbidden) {
+			t.Fatalf("cli dependency consumer reintroduced dense numeric allocation %q", forbidden)
+		}
+	}
+}
+
+// TestSelfhostCheckedConstructorHandoffPinsAtomicABI keeps the checked producer,
+// the generic four-array handoff, and run lowering joined by numeric identities.
+// Atomic selection must not regress to spelling checks in codegen.
+func TestSelfhostCheckedConstructorHandoffPinsAtomicABI(t *testing.T) {
+	constructorFacts := readSelfhostFile(t, "../../selfhost/src/types/constructor_facts.kizu")
+	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	render := readSelfhostFile(t, "../../selfhost/src/ir/code_render.kizu")
+
+	requireSourceFragments(t, "checked constructor producer", constructorFacts, []string{
+		"pub fn collect_checked(",
+		"facts: &var ConstructorFacts",
+		"pub fn append_identity(",
+		"try facts.node_starts.append(start)",
+		"try facts.node_ends.append(end)",
+		"try facts.constructor_ids.append(constructor_id)",
+		"try facts.type_arg0_ids.append(type_arg0_id)",
+	})
+	for _, name := range []string{"scratch_constructor_kind", "lower_code_runtime_constructor"} {
+		body := dependencyFunctionBody(t, codegen, name)
+		for _, forbidden := range []string{"equal_bytes", "starts_with", `"Atomic"`, `"std::atomic"`} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("%s reintroduced constructor spelling selection %q", name, forbidden)
+			}
+		}
+	}
+	constructorLookup := dependencyFunctionBody(t, codegen, "scratch_constructor_kind")
+	requireSourceFragments(t, "numeric constructor lookup", constructorLookup, []string{
+		"fact_start == node.span.start",
+		"fact_end == node.span.end",
+		"return try args_scratch.get(fact_pos + 2)",
+	})
+	atomicRender := dependencyFunctionBody(t, render, "render_atomic_bool_new")
+	requireSourceFragments(t, "Atomic<bool> LLVM semantics", atomicRender, []string{
+		"getelementptr i8, ptr %atomic",
+		"zext i1 %v",
+		"store atomic i8 %ab",
+		"seq_cst, align 1",
+	})
 }
 
 // TestSelfhostPackageDependencyIdentityUsesBothNumericIDs rejects spelling-only identity.
@@ -317,6 +376,16 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 		}
 	}
 	numericClosure := dependencyFunctionBody(t, executable, "append_numeric_package_closure")
+	for _, fragment := range []string{
+		`"collect_checked"`,
+		`"init"`,
+		"queue_append(&var pending, catalog, root_target)",
+		"queue_append(&var pending, catalog, init_target)",
+	} {
+		if !strings.Contains(numericClosure, fragment) {
+			t.Fatalf("numeric constructor closure missing lifecycle root %q", fragment)
+		}
+	}
 	for _, forbidden := range []string{"allowed", "starts_with", "equal_bytes", "callee_text"} {
 		if strings.Contains(numericClosure, forbidden) {
 			t.Fatalf("numeric package closure reintroduced name policy %q", forbidden)
@@ -332,6 +401,12 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 			t.Fatalf("numeric dependency emitter missing %q", fragment)
 		}
 	}
+	assertNumericDependencyClaimHasNoSpelling(t)
+}
+
+// assertNumericDependencyClaimHasNoSpelling rejects textual selection in dependency claims.
+func assertNumericDependencyClaimHasNoSpelling(t *testing.T) {
+	t.Helper()
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	claim := dependencyFunctionBody(t, cli, "consume_package_dependencies")
 	dependencyLoopStart := strings.Index(claim, "var dependency_index = 0")

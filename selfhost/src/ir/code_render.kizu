@@ -1,4 +1,5 @@
 import selfhost::ir::codegen;
+import selfhost::types::constructor_facts;
 
 // Run codegen IR v1 renderer: walk the flat function-block-instruction tape
 // (the Array<i64> records lower_code_module emits, with the run source text for
@@ -42,9 +43,21 @@ pub fn render_run_artifact(
     allocator: Allocator,
     source_path: []u8,
     text: []u8,
-    parsed: std::kizu::ast::ParseResult
+    parsed: std::kizu::ast::ParseResult,
+    constructor_identities: &constructor_facts::ConstructorFacts,
+    atomic_constructor_id: i64,
+    bool_type_id: i64
 ) -> !std::string::String {
-    let rendered = try render_run_ast_artifact(allocator, source_path, text, parsed.ast, parsed.root);
+    let rendered = try render_run_ast_artifact(
+        allocator,
+        source_path,
+        text,
+        parsed.ast,
+        parsed.root,
+        constructor_identities,
+        atomic_constructor_id,
+        bool_type_id
+    );
     return rendered;
 }
 
@@ -53,7 +66,10 @@ pub fn render_run_ast_artifact(
     source_path: []u8,
     text: []u8,
     ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId
+    root: std::kizu::ast::NodeId,
+    constructor_identities: &constructor_facts::ConstructorFacts,
+    atomic_constructor_id: i64,
+    bool_type_id: i64
 ) -> !std::string::String {
     var code = std::array::Array<i64>(allocator);
     var kinds = std::array::Array<i64>(allocator);
@@ -66,6 +82,9 @@ pub fn render_run_ast_artifact(
         text,
         ast,
         root,
+        constructor_identities,
+        atomic_constructor_id,
+        bool_type_id,
         &var code,
         &var kinds,
         &var local_starts,
@@ -1546,6 +1565,7 @@ fn render_value_type(
     let is_slice = kind == kind_slice;
     let is_handle = kind == kind_handle;
     let is_mut_borrow = codegen::code_kind_is_mut_borrow_ptr(kind);
+    let is_atomic_bool = kind == codegen::code_kind_atomic_bool();
     let is_error_box = kind == kind_error_box;
     let is_owned = value_kind_is_owned(kind);
     let is_union = try value_kind_is_union(code, kind);
@@ -1566,6 +1586,9 @@ fn render_value_type(
     if is_mut_borrow {
         try w(out, "ptr");
     }
+    if is_atomic_bool {
+        try w(out, "ptr");
+    }
     if is_owned {
         try w(out, "%kizu.owned");
     }
@@ -1581,7 +1604,7 @@ fn render_value_type(
     if is_struct_param {
         try render_struct_param_value_type(out, code, kind);
     }
-    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_error_box and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
+    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_atomic_bool and !is_error_box and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
     if scalar {
         try w(out, "i64");
     }
@@ -1793,6 +1816,11 @@ fn render_var_allocas(
         let sc_slot = try code.get(index + 1);
         try render_one_sc_alloca(out, sc_slot);
     }
+    let atomic_new = codegen::code_op_atomic_bool_new();
+    if op == atomic_new {
+        let atomic_slot = try code.get(index + 1);
+        try render_one_atomic_bool_alloca(out, atomic_slot);
+    }
     let next = try tape_record_end(code, index);
     try render_var_allocas(out, code, next, func_end);
     return;
@@ -1821,6 +1849,13 @@ fn render_one_bool_alloca(out: &var std::string::String, slot: i64) -> !void {
     try w(out, "  %bslot");
     try wi(out, slot);
     try wl(out, " = alloca i1");
+    return;
+}
+
+fn render_one_atomic_bool_alloca(out: &var std::string::String, slot: i64) -> !void {
+    try w(out, "  %atomic");
+    try wi(out, slot);
+    try wl(out, " = alloca i8, align 1");
     return;
 }
 
@@ -1902,6 +1937,10 @@ fn render_one_instruction_core_scalar(
     let const_bool = codegen::code_op_const_bool();
     if op == const_bool {
         try render_const_bool(out, code, index);
+    }
+    let atomic_bool_new = codegen::code_op_atomic_bool_new();
+    if op == atomic_bool_new {
+        try render_atomic_bool_new(out, code, index);
     }
     let not_op = codegen::code_op_not();
     if op == not_op {
@@ -3163,6 +3202,31 @@ fn render_const_bool(
     try w(out, " = icmp ne i64 ");
     try wi(out, literal);
     try wl(out, ", 0");
+    return;
+}
+
+fn render_atomic_bool_new(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let init = try code.get(index + 2);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = getelementptr i8, ptr %atomic");
+    try wi(out, dst);
+    try wl(out, ", i64 0");
+    try w(out, "  %ab");
+    try wi(out, index);
+    try w(out, " = zext i1 %v");
+    try wi(out, init);
+    try wl(out, " to i8");
+    try w(out, "  store atomic i8 %ab");
+    try wi(out, index);
+    try w(out, ", ptr %v");
+    try wi(out, dst);
+    try wl(out, " seq_cst, align 1");
     return;
 }
 
@@ -9051,6 +9115,10 @@ fn tape_record_end_core_scalar(code: &std::array::Array<i64>, index: i64, op: i6
     }
     let const_bool = codegen::code_op_const_bool();
     if op == const_bool {
+        return index + 3;
+    }
+    let atomic_bool_new = codegen::code_op_atomic_bool_new();
+    if op == atomic_bool_new {
         return index + 3;
     }
     let not_op = codegen::code_op_not();

@@ -7,6 +7,7 @@ import selfhost::resolver;
 import selfhost::source;
 import selfhost::source::loader;
 import selfhost::types;
+import selfhost::types::constructor_facts;
 import selfhost::types::function_calls;
 import selfhost::types::model;
 import selfhost::types::type_refs;
@@ -30,7 +31,9 @@ pub fn file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
         validation_ok
     );
     defer parsed.deinit();
-    if !(try checked_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
+    var facts = constructor_facts::init(allocator);
+    defer facts.deinit();
+    if !(try checked_ast_node(allocator, io, files, file, parsed.ast, parsed.root, &var facts)) {
         return std::process::exit_code(1);
     }
     try output::line(allocator, io, "check: ok");
@@ -342,12 +345,22 @@ pub fn checked_ast_node(
     files: &std::array::Array<source::SourceFile>,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId
+    root: std::kizu::ast::NodeId,
+    constructor_identities: &var constructor_facts::ConstructorFacts
 ) -> !bool {
     if !(try fast_diagnostics_ast_node(allocator, io, files, file, ast, root)) {
         return false;
     }
-    return try full_static_diagnostics_loaded(allocator, io, files);
+    if !(try full_static_diagnostics_loaded(allocator, io, files)) {
+        return false;
+    }
+    try constructor_facts::collect_checked(
+        file.text,
+        ast,
+        root,
+        constructor_identities
+    );
+    return true;
 }
 
 fn full_static_diagnostics_loaded(

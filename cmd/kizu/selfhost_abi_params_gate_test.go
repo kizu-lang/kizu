@@ -10,9 +10,11 @@ import (
 
 const selfhostAbiParamsGateOutput = "abi-params-spec\n" +
 	"i8 byte;i64 count;i64 offset;%kizu.slice.u8 source;" +
-	"%kizu.kizu.lexer.position pos;%kizu.kizu.lexer.token tok;i8 ref\n" +
+	"%kizu.kizu.lexer.position pos;%kizu.kizu.lexer.token tok;i8 ref;" +
+	"%kizu.selfhost.source.source_file file;" +
+	"%kizu.selfhost.types.constructor_facts.constructor_facts facts\n" +
 	"abi-params-count\n" +
-	"7\n" +
+	"9\n" +
 	"abi-params-loader-spec\n" +
 	"i64 id;i64 kind;%kizu.slice.u8 package_name;i64 module_start;" +
 	"i64 module_end;%kizu.slice.u8 path;%kizu.slice.u8 text\n"
@@ -21,8 +23,8 @@ const selfhostAbiParamsGateOutput = "abi-params-spec\n" +
 // derives a compiled params_spec from fake function-signature-param facts
 // (Agent B, tracker 1069). It covers both the lexer-shaped demo signature and a
 // loader 'source_file'-shaped signature whose SourceKind enum lowers to the i64
-// ABI, confirming the lexer and loader compiled closures derive their
-// params_spec from signature facts instead of handwritten tables.
+// ABI, plus an imported selfhost SourceFile parameter, confirming the closures
+// derive their params_spec from signature facts instead of handwritten tables.
 func TestSelfhostAbiParamsGate(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(t, "selfhost::backend::compiled_abi_params::gate")
 	if err != nil {
@@ -44,6 +46,34 @@ func TestSelfhostAbiParamsGateUnsupportedType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "abi mapper: unsupported parameter type") {
 		t.Fatalf("abi params gate error mismatch: %v", err)
+	}
+}
+
+// TestSelfhostAbiParamsConstructorFactsSpellingsAreExact pins the three exact
+// ConstructorFacts type spellings without admitting a prefix fallback.
+func TestSelfhostAbiParamsConstructorFactsSpellingsAreExact(t *testing.T) {
+	abi := readSelfhostFile(t, "../../selfhost/src/backend/compiled_abi_params.kizu")
+	start := strings.Index(abi, `std::mem::equal_bytes(kizu_type, "ConstructorFacts")`)
+	if start < 0 {
+		t.Fatal("ConstructorFacts ABI rule start missing")
+	}
+	end := strings.Index(abi[start:], "// SourceFile is the std::kizu::ast source record")
+	if end < 0 {
+		t.Fatal("ConstructorFacts ABI rule end missing")
+	}
+	rule := abi[start : start+end]
+	for _, spelling := range []string{
+		`"ConstructorFacts"`,
+		`"constructor_facts::ConstructorFacts"`,
+		`"selfhost::types::constructor_facts::ConstructorFacts"`,
+	} {
+		if !strings.Contains(rule, `std::mem::equal_bytes(kizu_type, `+spelling+`)`) &&
+			!strings.Contains(rule, `kizu_type, `+spelling) {
+			t.Fatalf("ConstructorFacts ABI rule missing exact spelling %s", spelling)
+		}
+	}
+	if strings.Contains(rule, "starts_with") {
+		t.Fatal("ConstructorFacts ABI rule widened to a prefix fallback")
 	}
 }
 

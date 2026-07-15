@@ -105,6 +105,29 @@ fn append_numeric_target_facts(index: &ir_index::IrIndex, ir_bytes: []u8, prefix
     return;
 }
 
+// numeric_target_index finds one numeric (component, function) identity in the
+// sparse package target facts. Function IDs are global-catalog IDs, so a dense
+// component_count * function_count table allocates mostly impossible pairs.
+// function_stride keeps the pair comparison collision-free after the caller's
+// product-overflow check without making that Cartesian product an allocation size.
+fn numeric_target_index(
+    components: &std::array::Array<i64>,
+    functions: &std::array::Array<i64>,
+    function_stride: i64,
+    component: i64,
+    function: i64
+) -> !i64 {
+    let target_identity = component * function_stride + function;
+    var index = 0;
+    while index < components.len() {
+        let candidate_identity = try components.get(index) * function_stride +
+            try functions.get(index);
+        if candidate_identity == target_identity { return index; }
+        index = index + 1;
+    }
+    return -1;
+}
+
 fn exact_named_fact_count(index: &ir_index::IrIndex, ir_bytes: []u8, prefix: []u8, name: []u8) -> i64 {
     var entry = ir_index::first_matching_entry(index, ir_bytes, prefix, "", name);
     var count = 0;
@@ -210,14 +233,16 @@ pub fn consume_package_dependencies(out: &var std::string::String, lookup_index:
     if component_count > 9223372036854775807 / function_stride {
         return error("package identity table size overflow");
     }
-    let identity_slot_count = component_count * function_stride;
+    if definition_components.len() > 9223372036854775807 - reference_components.len() {
+        return error("package identity table size overflow");
+    }
+    // Allocate only records represented by definition/reference facts. The full
+    // catalog IDs are intentionally sparse, so their Cartesian product is not
+    // bounded by (and need not fit within) this focused fact input.
+    let identity_slot_count = definition_components.len() + reference_components.len();
     if identity_slot_count > std::mem::len(ir_bytes) {
         return error("package identity table exceeds fact input");
     }
-    var definitions = std::array::Array<i64>(allocator);
-    defer definitions.deinit();
-    var references = std::array::Array<i64>(allocator);
-    defer references.deinit();
     var name_starts = std::array::Array<i64>(allocator);
     defer name_starts.deinit();
     var name_ends = std::array::Array<i64>(allocator);
@@ -226,31 +251,19 @@ pub fn consume_package_dependencies(out: &var std::string::String, lookup_index:
     defer name_counts.deinit();
     var mapped_name_slots = std::array::Array<i64>(allocator);
     defer mapped_name_slots.deinit();
-    var slot = 0;
-    while slot < identity_slot_count {
-        try definitions.append(0);
-        try references.append(0);
-        try name_starts.append(0);
-        try name_ends.append(0);
-        try name_counts.append(0);
-        slot = slot + 1;
-    }
     fact = 0;
     while fact < definition_components.len() {
         let component = try definition_components.get(fact);
         let function = try definition_functions.get(fact);
-        let definition_slot = component * function_stride + function;
-        if try definitions.get(definition_slot) != 0 {
+        let definition_slot = try numeric_target_index(
+            &definition_components, &definition_functions, function_stride, component, function
+        );
+        if definition_slot != fact {
             return error("duplicate package numeric definition owner");
         }
-        try definitions.set(definition_slot, 1);
-        fact = fact + 1;
-    }
-    fact = 0;
-    while fact < reference_components.len() {
-        let component = try reference_components.get(fact);
-        let function = try reference_functions.get(fact);
-        try references.set(component * function_stride + function, 1);
+        try name_starts.append(0);
+        try name_ends.append(0);
+        try name_counts.append(0);
         fact = fact + 1;
     }
     let name_prefix = "package-definition-name ";
@@ -267,8 +280,10 @@ pub fn consume_package_dependencies(out: &var std::string::String, lookup_index:
             function < 0 or function >= function_count or function_end + 1 >= end {
             return error("package definition name mapping invalid");
         }
-        let name_slot = component * function_stride + function;
-        if try definitions.get(name_slot) == 0 { return error("package definition name has no owner"); }
+        let name_slot = try numeric_target_index(
+            &definition_components, &definition_functions, function_stride, component, function
+        );
+        if name_slot < 0 { return error("package definition name has no owner"); }
         if try name_counts.get(name_slot) != 0 { return error("duplicate package definition name mapping"); }
         let mapped_name = ir_bytes[function_end + 1..end];
         var prior_index = 0;
@@ -290,15 +305,29 @@ pub fn consume_package_dependencies(out: &var std::string::String, lookup_index:
     }
     var dependency_index = 0;
     while dependency_index < caller_components.len() {
-        let caller_slot = try caller_components.get(dependency_index) * function_stride + try caller_functions.get(dependency_index);
-        let claim_slot = try target_components.get(dependency_index) * function_stride + try target_functions.get(dependency_index);
-        if try definitions.get(caller_slot) == 0 {
+        let caller_component = try caller_components.get(dependency_index);
+        let caller_function = try caller_functions.get(dependency_index);
+        let target_component = try target_components.get(dependency_index);
+        let target_function = try target_functions.get(dependency_index);
+        let caller_slot = try numeric_target_index(
+            &definition_components, &definition_functions,
+            function_stride, caller_component, caller_function
+        );
+        if caller_slot < 0 {
             return error("package dependency caller definition missing");
         }
-        if try references.get(claim_slot) == 0 {
+        let claim_slot = try numeric_target_index(
+            &reference_components, &reference_functions,
+            function_stride, target_component, target_function
+        );
+        if claim_slot < 0 {
             return error("package dependency target reference missing");
         }
-        if try definitions.get(claim_slot) == 0 {
+        let definition_claim_slot = try numeric_target_index(
+            &definition_components, &definition_functions,
+            function_stride, target_component, target_function
+        );
+        if definition_claim_slot < 0 {
             return error("package dependency target definition missing");
         }
         dependency_index = dependency_index + 1;
@@ -306,7 +335,7 @@ pub fn consume_package_dependencies(out: &var std::string::String, lookup_index:
     var emitted_count = 0;
     fact = 0;
     while fact < definition_components.len() {
-        let definition_slot = try definition_components.get(fact) * function_stride + try definition_functions.get(fact);
+        let definition_slot = fact;
         if try name_counts.get(definition_slot) != 1 {
             return error("package numeric definition name mapping missing");
         }
@@ -1292,6 +1321,18 @@ pub fn append_functions(
         io,
         "append_code_render_reachable",
         code_render_started
+    );
+    // The hosted CLI crosses one four-argument boundary into compiled Kizu. This
+    // helper owns ConstructorFacts initialization/collection and then calls the
+    // seven-argument renderer; its external definitions are emitted by the numeric
+    // constructor package and code_render closures above, so only this root is added.
+    try append_component_compiled_closure_member(
+        out,
+        lookup_index,
+        ir_bytes,
+        "selfhost::cli::execute::",
+        "render_checked_run_artifact",
+        false
     );
     let ast_stdlib_roots_started =
         try profile::begin(backend_profile, profile_out, io, "append_ast_stdlib_roots");
