@@ -293,9 +293,11 @@ func TestSelfhostAtomicBoolTapeAndLLVMContract(t *testing.T) {
 	render := readSelfhostFile(t, "../../selfhost/src/ir/code_render.kizu")
 	assertAtomicBoolTapeContract(t, codegen)
 	assertAtomicBoolLoadLowering(t, codegen)
+	assertAtomicBoolStoreLowering(t, codegen)
 	assertAtomicBoolEscapeUnsupported(t, codegen)
 	assertAtomicBoolLLVMContract(t, render)
 	assertAtomicBoolLoadLLVMContract(t, render)
+	assertAtomicBoolStoreLLVMContract(t, render)
 }
 
 // assertAtomicBoolTapeContract verifies identity routing and the fixed tape record shape.
@@ -343,16 +345,59 @@ func assertAtomicBoolLoadLowering(t *testing.T, codegen string) {
 		"kinds.append(code_kind_bool())",
 	})
 	forbidSourceFragments(t, "Atomic<bool>.load spelling dispatch", lower, []string{
-		`"Atomic"`, `"std::atomic"`, "source_path", "code_op_atomic_bool_store",
+		`"Atomic"`, `"std::atomic"`, `"store"`, "source_path", "code_op_atomic_bool_store",
 	})
 }
 
-// assertAtomicBoolEscapeUnsupported keeps store and ABI/container escape out of this slice.
+// assertAtomicBoolStoreLowering verifies the typed store arm lowers one bool
+// argument once and returns the established void-call success shape.
+func assertAtomicBoolStoreLowering(t *testing.T, codegen string) {
+	t.Helper()
+	statement := selfhostKizuFunctionBody(t, codegen, "fn lower_code_runtime_field_statement_call(")
+	requireSourceFragments(t, "Atomic<bool>.store typed statement routing", statement, []string{
+		`std::mem::equal_bytes(method, "store")`,
+		"args.len != 1",
+		"lower_code_expr(text, ast, decls, receiver",
+		"receiver_kind != code_kind_atomic_bool()",
+		"lower_code_atomic_bool_store_statement(",
+	})
+	storeGuard := strings.Index(statement, `std::mem::equal_bytes(method, "store")`)
+	shapeCheck := -1
+	if storeGuard >= 0 {
+		shapeCheck = strings.Index(statement[storeGuard:], "args.len != 1")
+	}
+	receiverProbe := strings.Index(statement, "lower_code_expr(text, ast, decls, receiver")
+	if storeGuard < 0 || shapeCheck < 0 || receiverProbe <= storeGuard+shapeCheck {
+		t.Fatal("Atomic<bool>.store receiver is evaluated before its exact shape is known")
+	}
+	if strings.Contains(statement, "code_field_method_return_kind") ||
+		strings.Contains(statement, "user_method_kind") {
+		t.Fatal("Atomic<bool>.store is incorrectly gated by a global same-name impl lookup")
+	}
+	lower := selfhostKizuFunctionBody(t, codegen, "fn lower_code_atomic_bool_store_statement(")
+	requireSourceFragments(t, "Atomic<bool>.store lowering", lower, []string{
+		"ast.child_at(args, 0)",
+		"value_kind != code_kind_bool()",
+		"code.append(code_op_atomic_bool_store())",
+		"code.append(receiver_value)",
+		"code.append(value_eval.value_id)",
+		"code_eval_value(0, value_eval.next)",
+	})
+	if strings.Count(lower, "lower_code_expr(") != 1 {
+		t.Fatal("Atomic<bool>.store argument is not lowered exactly once")
+	}
+	exprLower := selfhostKizuFunctionBody(t, codegen, "fn lower_code_atomic_bool_expr_method(")
+	forbidSourceFragments(t, "Atomic<bool>.store value-position lowering", exprLower, []string{
+		`"store"`, "code_op_atomic_bool_store", "lower_code_atomic_bool_store_statement",
+	})
+	forbidSourceFragments(t, "Atomic<bool>.store hidden dispatch", lower, []string{
+		`"Atomic"`, `"std::atomic"`, "source_path", "fixture", "fallback",
+	})
+}
+
+// assertAtomicBoolEscapeUnsupported keeps ABI/container escape out of this slice.
 func assertAtomicBoolEscapeUnsupported(t *testing.T, codegen string) {
 	t.Helper()
-	if strings.Contains(codegen, "code_op_atomic_bool_store") {
-		t.Fatal("Atomic<bool> store became supported with the load-only capability")
-	}
 	for _, name := range []string{
 		"fn code_return_kind(",
 		"fn code_param_kind(",
@@ -375,6 +420,9 @@ func assertAtomicBoolLLVMContract(t *testing.T, render string) {
 		"code_op_atomic_bool_new()",
 		"render_one_atomic_bool_alloca(out, atomic_slot)",
 	})
+	if strings.Contains(allocas, "code_op_atomic_bool_store()") {
+		t.Fatal("Atomic<bool>.store allocates new storage")
+	}
 	atomicAlloca := selfhostKizuFunctionBody(t, render, "fn render_one_atomic_bool_alloca(")
 	if !strings.Contains(atomicAlloca, `" = alloca i8, align 1"`) {
 		t.Fatal("atomic storage is not a byte-sized aligned entry alloca")
@@ -396,6 +444,33 @@ func assertAtomicBoolLLVMContract(t *testing.T, render string) {
 		!strings.Contains(valueType, `try w(out, "ptr")`) ||
 		!strings.Contains(valueType, "!is_atomic_bool") {
 		t.Fatal("Atomic<bool> tape kind does not remain a ptr value")
+	}
+}
+
+// assertAtomicBoolStoreLLVMContract verifies the fixed tape walk and seq_cst
+// byte store, including the required i1-to-i8 widening.
+func assertAtomicBoolStoreLLVMContract(t *testing.T, render string) {
+	t.Helper()
+	dispatch := selfhostKizuFunctionBody(t, render, "fn render_one_instruction_core_scalar(")
+	requireSourceFragments(t, "Atomic<bool>.store render dispatch", dispatch, []string{
+		"code_op_atomic_bool_store()",
+		"render_atomic_bool_store(out, code, index)",
+	})
+	storeWriter := selfhostKizuFunctionBody(t, render, "fn render_atomic_bool_store(")
+	requireSourceFragments(t, "Atomic<bool>.store LLVM", storeWriter, []string{
+		`" = zext i1 %v"`,
+		`" to i8"`,
+		`"  store atomic i8 %abs"`,
+		`", ptr %v"`,
+		`" seq_cst, align 1"`,
+	})
+	if strings.Contains(storeWriter, "alloca") {
+		t.Fatal("Atomic<bool>.store writer allocates new storage")
+	}
+	recordEnd := selfhostKizuFunctionBody(t, render, "fn tape_record_end_core_scalar(")
+	storeRecord := strings.Index(recordEnd, "code_op_atomic_bool_store()")
+	if storeRecord < 0 || !strings.Contains(recordEnd[storeRecord:], "return index + 3") {
+		t.Fatal("ATOMIC_BOOL_STORE is not a fixed three-slot tape record")
 	}
 }
 
