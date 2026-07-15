@@ -61,6 +61,8 @@ func assertAtomicCheckedHandoff(t *testing.T, sources atomicConstructorSources) 
 		"&constructor_identities",
 		"atomic_constructor_id",
 		"bool_type_id",
+		"channel_constructor_id",
+		"i64_type_id",
 	})
 }
 
@@ -166,6 +168,8 @@ func assertConstructorFactsEntryContract(t *testing.T, sources atomicConstructor
 		"constructor_facts::collect_checked(",
 		"constructor_facts::constructor_atomic()",
 		"constructor_facts::type_bool()",
+		"constructor_facts::constructor_channel()",
+		"constructor_facts::type_i64()",
 		"code_render::render_run_artifact(",
 		"cannot yet lower ConstructorFacts aggregate deinit",
 	})
@@ -184,12 +188,22 @@ func assertConstructorIdentityMatching(t *testing.T, sources atomicConstructorSo
 	t.Helper()
 	producer := selfhostKizuFunctionBody(t, sources.facts, "fn resolved_known_identity_id(")
 	appendResolved := selfhostKizuFunctionBody(t, sources.facts, "fn append_resolved(")
+	constructorResolver := selfhostKizuFunctionBody(
+		t, sources.facts, "fn resolved_constructor_identity_id(",
+	)
+	typeResolver := selfhostKizuFunctionBody(t, sources.facts, "fn resolved_type_identity_id(")
 	requireSourceFragments(t, "known constructor identity", appendResolved, []string{
-		`"std::atomic::Atomic"`,
-		`constructor_atomic()`,
-		`"bool"`,
-		`type_bool()`,
+		"resolved_constructor_identity_id(text, ast, root, callee)",
+		"resolved_type_identity_id(text, ast, root, arg)",
 	})
+	requireSourceFragments(
+		t, "Atomic constructor identity", constructorResolver+typeResolver, []string{
+			`"std::atomic::Atomic"`,
+			`constructor_atomic()`,
+			`"bool"`,
+			`type_bool()`,
+		},
+	)
 	forbidSourceFragments(t, "constructor identity allocation", sources.facts, []string{
 		"IdentityMaps",
 		"package_modules",

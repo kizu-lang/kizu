@@ -46,7 +46,9 @@ pub fn render_run_artifact(
     parsed: std::kizu::ast::ParseResult,
     constructor_identities: &constructor_facts::ConstructorFacts,
     atomic_constructor_id: i64,
-    bool_type_id: i64
+    bool_type_id: i64,
+    channel_constructor_id: i64,
+    i64_type_id: i64
 ) -> !std::string::String {
     let rendered = try render_run_ast_artifact(
         allocator,
@@ -56,7 +58,9 @@ pub fn render_run_artifact(
         parsed.root,
         constructor_identities,
         atomic_constructor_id,
-        bool_type_id
+        bool_type_id,
+        channel_constructor_id,
+        i64_type_id
     );
     return rendered;
 }
@@ -69,7 +73,9 @@ pub fn render_run_ast_artifact(
     root: std::kizu::ast::NodeId,
     constructor_identities: &constructor_facts::ConstructorFacts,
     atomic_constructor_id: i64,
-    bool_type_id: i64
+    bool_type_id: i64,
+    channel_constructor_id: i64,
+    i64_type_id: i64
 ) -> !std::string::String {
     var code = std::array::Array<i64>(allocator);
     var kinds = std::array::Array<i64>(allocator);
@@ -85,6 +91,8 @@ pub fn render_run_ast_artifact(
         constructor_identities,
         atomic_constructor_id,
         bool_type_id,
+        channel_constructor_id,
+        i64_type_id,
         &var code,
         &var kinds,
         &var local_starts,
@@ -230,6 +238,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
     try wl(out, "%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }");
     try wl(out, "%kizu.rt.box = type { ptr, ptr, i64 }");
+    try wl(out, "%kizu.run.channel.i64 = type { ptr, i64, i64, i64, i1 }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
     try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
@@ -1566,6 +1575,7 @@ fn render_value_type(
     let is_handle = kind == kind_handle;
     let is_mut_borrow = codegen::code_kind_is_mut_borrow_ptr(kind);
     let is_atomic_bool = kind == codegen::code_kind_atomic_bool();
+    let is_channel_i64 = kind == codegen::code_kind_channel_i64();
     let is_error_box = kind == kind_error_box;
     let is_owned = value_kind_is_owned(kind);
     let is_union = try value_kind_is_union(code, kind);
@@ -1589,6 +1599,9 @@ fn render_value_type(
     if is_atomic_bool {
         try w(out, "ptr");
     }
+    if is_channel_i64 {
+        try w(out, "ptr");
+    }
     if is_owned {
         try w(out, "%kizu.owned");
     }
@@ -1604,7 +1617,7 @@ fn render_value_type(
     if is_struct_param {
         try render_struct_param_value_type(out, code, kind);
     }
-    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_atomic_bool and !is_error_box and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
+    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_atomic_bool and !is_channel_i64 and !is_error_box and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
     if scalar {
         try w(out, "i64");
     }
@@ -1821,6 +1834,11 @@ fn render_var_allocas(
         let atomic_slot = try code.get(index + 1);
         try render_one_atomic_bool_alloca(out, atomic_slot);
     }
+    let channel_i64_new = codegen::code_op_channel_i64_new();
+    if op == channel_i64_new {
+        let channel_slot = try code.get(index + 1);
+        try render_one_channel_i64_alloca(out, channel_slot);
+    }
     let next = try tape_record_end(code, index);
     try render_var_allocas(out, code, next, func_end);
     return;
@@ -1856,6 +1874,13 @@ fn render_one_atomic_bool_alloca(out: &var std::string::String, slot: i64) -> !v
     try w(out, "  %atomic");
     try wi(out, slot);
     try wl(out, " = alloca i8, align 1");
+    return;
+}
+
+fn render_one_channel_i64_alloca(out: &var std::string::String, slot: i64) -> !void {
+    try w(out, "  %channel");
+    try wi(out, slot);
+    try wl(out, " = alloca %kizu.run.channel.i64");
     return;
 }
 
@@ -1949,6 +1974,10 @@ fn render_one_instruction_core_scalar(
     let atomic_bool_store = codegen::code_op_atomic_bool_store();
     if op == atomic_bool_store {
         try render_atomic_bool_store(out, code, index);
+    }
+    let channel_i64_new = codegen::code_op_channel_i64_new();
+    if op == channel_i64_new {
+        try render_channel_i64_new(out, code, index);
     }
     let not_op = codegen::code_op_not();
     if op == not_op {
@@ -3275,6 +3304,23 @@ fn render_atomic_bool_store(
     try w(out, ", ptr %v");
     try wi(out, receiver);
     try wl(out, " seq_cst, align 1");
+    return;
+}
+
+fn render_channel_i64_new(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    try w(out, "  store %kizu.run.channel.i64 { ptr null, i64 0, i64 0, i64 0, i1 false }, ptr %channel");
+    try wi(out, dst);
+    try nl(out);
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = getelementptr %kizu.run.channel.i64, ptr %channel");
+    try wi(out, dst);
+    try wl(out, ", i64 0");
     return;
 }
 
@@ -9176,6 +9222,10 @@ fn tape_record_end_core_scalar(code: &std::array::Array<i64>, index: i64, op: i6
     let atomic_bool_store = codegen::code_op_atomic_bool_store();
     if op == atomic_bool_store {
         return index + 3;
+    }
+    let channel_i64_new = codegen::code_op_channel_i64_new();
+    if op == channel_i64_new {
+        return index + 2;
     }
     let not_op = codegen::code_op_not();
     if op == not_op {
