@@ -82,7 +82,7 @@ pub fn union_dispatch_renderer_gate() -> !void {
         4, false, try dispatch_gate_effect_arm(9, 42)
     ));
     try first_fallthrough_arms.append(compiled_mir::enum_dispatch_arm(
-        -1, true, try dispatch_gate_void_arm()
+        -1, true, try dispatch_gate_return_call_arm(44)
     ));
     var fallthrough_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try fallthrough_stmts.append(compiled_mir::enum_dispatch_stmt(
@@ -100,7 +100,9 @@ pub fn union_dispatch_renderer_gate() -> !void {
     try fallthrough_stmts.append(compiled_mir::enum_dispatch_stmt(
         second_fallthrough_scrutinee, 0, "i64", false, second_fallthrough_arms
     ));
-    try fallthrough_stmts.append(compiled_mir::return_void_success_stmt());
+    try fallthrough_stmts.append(compiled_mir::return_call_stmt(
+        "%kizu.error.void", 45, "test", "post_match", try dispatch_gate_effect_args(45)
+    ));
     var fallthrough_function = compiled_mir_function::multi_statement_function(
         "fallthrough_dispatch_gate", "%kizu.error.void", "i64 value", fallthrough_stmts
     );
@@ -111,15 +113,50 @@ pub fn union_dispatch_renderer_gate() -> !void {
     let fallthrough_bytes = fallthrough_out.as_bytes();
     print("fallthrough-dispatch-llvm\n");
     print(fallthrough_bytes);
+
+    var boundary_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var boundary_function = compiled_mir_function::multi_statement_function(
+        "enum_dispatch_boundary_gate", "%kizu.error.i64", "", boundary_stmts
+    );
+    defer boundary_function.deinit();
+    var boundary_out = std::string::String(std::mem::page_allocator());
+    defer boundary_out.deinit();
+    let high_call = compiled_mir::return_call_stmt(
+        "i64", 46, "test", "boundary", try dispatch_gate_effect_args(46)
+    );
+    try append_enum_dispatch_arm_return(
+        &var boundary_out, &boundary_function, &high_call, 0, 1000
+    );
+    let next_call = compiled_mir::return_call_stmt(
+        "i64", 47, "test", "boundary", try dispatch_gate_effect_args(47)
+    );
+    try append_enum_dispatch_arm_return(
+        &var boundary_out, &boundary_function, &next_call, 1, 0
+    );
+    let high_expr = try dispatch_gate_return_expr(31);
+    try append_enum_dispatch_arm_return(
+        &var boundary_out, &boundary_function, &high_expr, 0, 1000
+    );
+    let next_expr = try dispatch_gate_return_expr(32);
+    try append_enum_dispatch_arm_return(
+        &var boundary_out, &boundary_function, &next_expr, 1, 0
+    );
+    let boundary_bytes = boundary_out.as_bytes();
+    print("enum-dispatch-boundary-llvm\n");
+    print(boundary_bytes);
     return;
 }
 
 fn dispatch_gate_arm(value: i64) -> !std::array::Array<compiled_mir::MirStmt> {
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(try dispatch_gate_return_expr(value));
+    return stmts;
+}
+
+fn dispatch_gate_return_expr(value: i64) -> !compiled_mir::MirStmt {
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     try insts.append(compiled_mir::int_expr_inst(1, value));
-    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-    try stmts.append(compiled_mir::return_expr_stmt(0, 1, insts));
-    return stmts;
+    return compiled_mir::return_expr_stmt(0, 1, insts);
 }
 
 fn dispatch_gate_payload_arm() -> !std::array::Array<compiled_mir::MirStmt> {
@@ -163,6 +200,20 @@ fn dispatch_gate_effect_arm(
         "effect",
         string_index,
         try_index,
+        try dispatch_gate_effect_args(string_index)
+    ));
+    return stmts;
+}
+
+fn dispatch_gate_return_call_arm(
+    string_index: i64
+) -> !std::array::Array<compiled_mir::MirStmt> {
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::return_call_stmt(
+        "%kizu.error.void",
+        string_index,
+        "test",
+        "terminal",
         try dispatch_gate_effect_args(string_index)
     ));
     return stmts;
@@ -4835,11 +4886,12 @@ fn append_multi_enum_dispatch(
                 arm_index
             );
         } else {
-            try append_dispatch_arm_return(
+            try append_enum_dispatch_arm_return(
                 out,
                 function,
                 arm_stmt,
-                local_prefix * 1000 + arm_index
+                local_prefix,
+                arm_index
             );
         }
         if arm.falls_through {
@@ -4877,22 +4929,73 @@ fn append_dispatch_arm_effect(
     return;
 }
 
-// append_dispatch_arm_return renders one enum-dispatch arm's lowered 'return <expr>'. A value
-// return wraps through the dispatch-scoped wrap (arm_scope-suffixed SSA names so the arm blocks
-// never collide); a call return renders with a dispatch-scoped call result and success wrap; an
-// error return reuses append_multi_return_error, whose %errfail<id> temps are already keyed off
-// the unique per-arm message temp id; and a bare return reuses the shared void-success renderer.
-// Other return shapes still surface an explicit blocker rather than emitting colliding SSA names
-// (issue 1157 B3).
+// append_dispatch_arm_return preserves while-match's historical numeric return namespace. Enum
+// dispatch calls append_enum_dispatch_arm_return instead so its result and argument names use an
+// explicit (match, arm) tuple and cannot alias a numeric top-level statement scope.
 fn append_dispatch_arm_return(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirStmt,
     arm_scope: i64
 ) -> !void {
+    let scope = numeric_dispatch_return_scope(arm_scope);
+    return try append_dispatch_arm_return_scoped(out, function, stmt, &scope);
+}
+
+// Enum dispatch uses a textual (match, arm) tuple instead of the numeric arm_scope retained by
+// while-match dispatch. Keeping the dispatch kinds distinct prevents a top-level enum at statement
+// 4242 from sharing return SSA names with while-match's historical dispatch_prefix 4242.
+fn append_enum_dispatch_arm_return(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirStmt,
+    match_index: i64,
+    arm_index: i64
+) -> !void {
+    let scope = try enum_dispatch_return_scope(match_index, arm_index);
+    return try append_dispatch_arm_return_scoped(out, function, stmt, &scope);
+}
+
+struct DispatchReturnScope {
+    enum_dispatch: bool,
+    numeric_scope: i64,
+    match_index: i64,
+    arm_index: i64,
+}
+
+fn numeric_dispatch_return_scope(numeric_scope: i64) -> DispatchReturnScope {
+    return DispatchReturnScope {
+        enum_dispatch: false,
+        numeric_scope: numeric_scope,
+        match_index: 0,
+        arm_index: 0
+    };
+}
+
+fn enum_dispatch_return_scope(
+    match_index: i64,
+    arm_index: i64
+) -> !DispatchReturnScope {
+    if match_index < 0 or arm_index < 0 {
+        return error("compiled mir llvm: negative enum-dispatch return scope");
+    }
+    return DispatchReturnScope {
+        enum_dispatch: true,
+        numeric_scope: 0,
+        match_index: match_index,
+        arm_index: arm_index
+    };
+}
+
+fn append_dispatch_arm_return_scoped(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirStmt,
+    scope: &DispatchReturnScope
+) -> !void {
     match stmt {
-        ReturnCall(payload) => try append_dispatch_return_call(out, function, payload, arm_scope);,
-        ReturnExpr(payload) => try append_dispatch_return_expr(out, function, payload, arm_scope);,
+        ReturnCall(payload) => try append_dispatch_return_call(out, function, payload, scope);,
+        ReturnExpr(payload) => try append_dispatch_return_expr(out, function, payload, scope);,
         ReturnError(payload) => try append_multi_return_error(out, function, payload);,
         VoidReturnSuccess(payload) => try append_multi_if_return_void_success(
             out, function.return_type.llvm_name
@@ -4906,13 +5009,19 @@ fn append_dispatch_return_call(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirReturnCallStmt,
-    arm_scope: i64
+    scope: &DispatchReturnScope
 ) -> !void {
-    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
-        out, function.name, &stmt.call_args, arm_scope
-    );
-    try out.append_bytes("  %dispatchcall");
-    try std::fmt::append_i64(out, arm_scope);
+    if scope.enum_dispatch {
+        try compiled_mir_llvm_call::append_call_arg_setup_with_dispatch_scope(
+            out, function.name, &stmt.call_args, scope.match_index, scope.arm_index
+        );
+    } else {
+        try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+            out, function.name, &stmt.call_args, scope.numeric_scope
+        );
+    }
+    try out.append_bytes("  %");
+    try append_dispatch_call_result_name(out, scope);
     try out.append_bytes(" = call ");
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
@@ -4920,55 +5029,62 @@ fn append_dispatch_return_call(
         out, stmt.call_module_prefix, stmt.call_callee_name
     );
     try out.append_bytes("(");
-    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, arm_scope);
+    if scope.enum_dispatch {
+        try compiled_mir_llvm_call::append_call_args_with_dispatch_scope(
+            out, &stmt.call_args, scope.match_index, scope.arm_index
+        );
+    } else {
+        try compiled_mir_llvm_call::append_call_args_with_prefix(
+            out, &stmt.call_args, scope.numeric_scope
+        );
+    }
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
     let own_return = function.return_type.llvm_name;
     if std::mem::starts_with(own_return, "%kizu.error.") and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
-        try out.append_bytes("  %dispatchcall");
-        try std::fmt::append_i64(out, arm_scope);
+        try out.append_bytes("  %");
+        try append_dispatch_call_result_name(out, scope);
         try out.append_bytes("_wrap0 = insertvalue ");
         try out.append_bytes(own_return);
         try out.append_bytes(" zeroinitializer, i1 true, 0");
         try out.append_byte(cast<u8>(10));
-        try out.append_bytes("  %dispatchcall");
-        try std::fmt::append_i64(out, arm_scope);
+        try out.append_bytes("  %");
+        try append_dispatch_call_result_name(out, scope);
         try out.append_bytes("_wrap1 = insertvalue ");
         try out.append_bytes(own_return);
-        try out.append_bytes(" %dispatchcall");
-        try std::fmt::append_i64(out, arm_scope);
+        try out.append_bytes(" %");
+        try append_dispatch_call_result_name(out, scope);
         try out.append_bytes("_wrap0, ");
         try out.append_bytes(stmt.llvm_type);
-        try out.append_bytes(" %dispatchcall");
-        try std::fmt::append_i64(out, arm_scope);
+        try out.append_bytes(" %");
+        try append_dispatch_call_result_name(out, scope);
         try out.append_bytes(", 1");
         try out.append_byte(cast<u8>(10));
         try out.append_bytes("  ret ");
         try out.append_bytes(own_return);
-        try out.append_bytes(" %dispatchcall");
-        try std::fmt::append_i64(out, arm_scope);
+        try out.append_bytes(" %");
+        try append_dispatch_call_result_name(out, scope);
         try out.append_bytes("_wrap1");
         try out.append_byte(cast<u8>(10));
         return;
     }
     try out.append_bytes("  ret ");
     try out.append_bytes(stmt.llvm_type);
-    try out.append_bytes(" %dispatchcall");
-    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes(" %");
+    try append_dispatch_call_result_name(out, scope);
     try out.append_byte(cast<u8>(10));
     return;
 }
 
-// append_dispatch_return_expr mirrors append_multi_if_return_expr's value-return wrap but scopes
-// the wrap SSA names by arm_scope ('dispatchret<arm_scope>_ok/_val') so several enum-dispatch arm
-// blocks in one function never collide with each other or with the trailing %retwrap return
-// (issue 1157 PR-PH / B3).
+// append_dispatch_return_expr mirrors append_multi_if_return_expr's value-return wrap. While-match
+// retains %dispatchret<numeric> names; enum dispatch uses
+// %enumdispatchret<match>_<arm> so neither kind can alias the other or a trailing %retwrap return.
 fn append_dispatch_return_expr(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirReturnExprStmt,
-    arm_scope: i64
+    scope: &DispatchReturnScope
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.expr_insts);
     let return_type = function.return_type.llvm_name;
@@ -4984,18 +5100,18 @@ fn append_dispatch_return_expr(
         try out.append_byte(cast<u8>(10));
         return;
     }
-    try out.append_bytes("  %dispatchret");
-    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes("  %");
+    try append_dispatch_return_result_name(out, scope);
     try out.append_bytes("_ok = insertvalue ");
     try out.append_bytes(return_type);
     try out.append_bytes(" zeroinitializer, i1 true, 0");
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %dispatchret");
-    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes("  %");
+    try append_dispatch_return_result_name(out, scope);
     try out.append_bytes("_val = insertvalue ");
     try out.append_bytes(return_type);
-    try out.append_bytes(" %dispatchret");
-    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes(" %");
+    try append_dispatch_return_result_name(out, scope);
     try out.append_bytes("_ok, ");
     try out.append_bytes(value_type);
     try out.append_bytes(" ");
@@ -5004,10 +5120,42 @@ fn append_dispatch_return_expr(
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ret ");
     try out.append_bytes(return_type);
-    try out.append_bytes(" %dispatchret");
-    try std::fmt::append_i64(out, arm_scope);
+    try out.append_bytes(" %");
+    try append_dispatch_return_result_name(out, scope);
     try out.append_bytes("_val");
     try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_dispatch_call_result_name(
+    out: &var std::string::String,
+    scope: &DispatchReturnScope
+) -> !void {
+    if scope.enum_dispatch {
+        try out.append_bytes("enumdispatchcall");
+        try std::fmt::append_i64(out, scope.match_index);
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, scope.arm_index);
+        return;
+    }
+    try out.append_bytes("dispatchcall");
+    try std::fmt::append_i64(out, scope.numeric_scope);
+    return;
+}
+
+fn append_dispatch_return_result_name(
+    out: &var std::string::String,
+    scope: &DispatchReturnScope
+) -> !void {
+    if scope.enum_dispatch {
+        try out.append_bytes("enumdispatchret");
+        try std::fmt::append_i64(out, scope.match_index);
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, scope.arm_index);
+        return;
+    }
+    try out.append_bytes("dispatchret");
+    try std::fmt::append_i64(out, scope.numeric_scope);
     return;
 }
 
