@@ -661,6 +661,9 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
+	if options.Opt {
+		ir.KeepReachableFunctions(module, "main")
+	}
 	llvmIR, err := llvm.Emit(module)
 	if err != nil {
 		return err
