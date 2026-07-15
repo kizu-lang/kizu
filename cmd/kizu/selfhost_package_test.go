@@ -1769,6 +1769,46 @@ func TestSelfhostTypeCheckReusesParsedFrontendAST(t *testing.T) {
 	}
 }
 
+// TestSelfhostStageSharesParsedFrontendAST keeps the native stage path on one
+// package parse shared by resolver, type checking, and ownership checking.
+func TestSelfhostStageSharesParsedFrontendAST(t *testing.T) {
+	main := readSelfhostFile(t, "../../selfhost/src/main.kizu")
+	body := selfhostKizuFunctionBody(t, main, "fn check_loaded_selfhost_sources(")
+	for _, fragment := range []string{
+		"var parsed_sources = try parser::parse_source_files(allocator, files)",
+		"try parser::deinit_parsed_source_files(parsed_sources)",
+		"resolver::resolve_parsed_sources(",
+		"types::check_parsed_sources(",
+		"ownership::check_parsed_package(",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("selfhost stage does not share parsed sources with %q", fragment)
+		}
+	}
+	if count := strings.Count(body, "parser::parse_source_files("); count != 1 {
+		t.Fatalf("selfhost stage parses package %d times, want once", count)
+	}
+	for _, wrapper := range []string{
+		"resolver::resolve_sources(",
+		"types::check_sources(",
+		"ownership::check_package(",
+	} {
+		if strings.Contains(body, wrapper) {
+			t.Fatalf("selfhost frontend helper still uses reparsing wrapper %q", wrapper)
+		}
+	}
+	stageBody := selfhostKizuFunctionBody(t, main, "fn check_and_stage_selfhost(")
+	for _, fragment := range []string{
+		`stage_profile::begin(&profile, &var profile_out, io, "frontend_check")`,
+		"check_loaded_selfhost_sources(allocator, files)",
+		`"frontend_check",`,
+	} {
+		if !strings.Contains(stageBody, fragment) {
+			t.Fatalf("selfhost stage aggregate frontend phase missing %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostPackageAritySelectionUsesModulePaths rejects hardcoded std module IDs.
 func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")

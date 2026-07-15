@@ -1,5 +1,4 @@
 import selfhost::backend;
-import selfhost::backend::data;
 import selfhost::cache;
 import selfhost::cli::check;
 import selfhost::cli::diagnostics;
@@ -8,6 +7,7 @@ import selfhost::cli::output;
 import selfhost::ir;
 import selfhost::lexer;
 import selfhost::ownership;
+import selfhost::ownership::data;
 import selfhost::parser;
 import selfhost::parser::format;
 import selfhost::resolver;
@@ -417,12 +417,41 @@ pub fn cli_contract_gate() -> !void {
     return;
 }
 
-fn stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact {
+fn stage_selfhost(allocator: Allocator, io: Io) -> !backend::data::LlvmArtifact {
     let llvm = try check_and_stage_selfhost(allocator, io);
     return llvm;
 }
 
-fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact {
+fn check_loaded_selfhost_sources(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>
+) -> !data::CheckedPackage {
+    var parsed_sources = try parser::parse_source_files(allocator, files);
+    let resolved = try resolver::resolve_parsed_sources(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes
+    );
+    let typed = try types::check_parsed_sources(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes,
+        resolved
+    );
+    let checked = try ownership::check_parsed_package(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes,
+        typed
+    );
+    try parser::deinit_parsed_source_files(parsed_sources);
+    return checked;
+}
+
+fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !backend::data::LlvmArtifact {
     var profile_out = std::string::String(allocator);
     defer profile_out.deinit();
     let profile = try stage_profile::start(&var profile_out);
@@ -440,31 +469,15 @@ fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact
         load_started
     );
 
-    let resolve_started =
-        try stage_profile::begin(&profile, &var profile_out, io, "resolve_sources");
-    let resolved = try resolver::resolve_sources(allocator, files);
+    let frontend_started =
+        try stage_profile::begin(&profile, &var profile_out, io, "frontend_check");
+    let checked = try check_loaded_selfhost_sources(allocator, files);
     try stage_profile::end(
         &profile,
         &var profile_out,
         io,
-        "resolve_sources",
-        resolve_started
-    );
-
-    let check_started =
-        try stage_profile::begin(&profile, &var profile_out, io, "check_sources");
-    let typed = try types::check_sources(allocator, files, resolved);
-    try stage_profile::end(&profile, &var profile_out, io, "check_sources", check_started);
-
-    let ownership_started =
-        try stage_profile::begin(&profile, &var profile_out, io, "ownership_check");
-    let checked = try ownership::check_package(allocator, files, typed);
-    try stage_profile::end(
-        &profile,
-        &var profile_out,
-        io,
-        "ownership_check",
-        ownership_started
+        "frontend_check",
+        frontend_started
     );
     if checked.diagnostics != 0 {
         return error("selfhost check failed");
@@ -577,7 +590,7 @@ fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact
 fn pack_stage_cache_artifact(
     allocator: Allocator,
     io: Io,
-    llvm: &data::LlvmArtifact
+    llvm: &backend::data::LlvmArtifact
 ) -> !std::string::String {
     var out = std::string::String(allocator);
     try out.append_bytes("kizu-stage-cache-v0");
@@ -605,7 +618,7 @@ fn append_cached_stage_file(
     return;
 }
 
-fn restore_cached_stage_artifact(io: Io, packed: []u8) -> !data::LlvmArtifact {
+fn restore_cached_stage_artifact(io: Io, packed: []u8) -> !backend::data::LlvmArtifact {
     var cursor = try expect_cached_stage_line(packed, 0, "kizu-stage-cache-v0");
     let llvm = try restore_cached_stage_file(io, packed, cursor, "target/selfhost/selfhost.ll");
     cursor = llvm.next;
@@ -619,7 +632,7 @@ fn restore_cached_stage_artifact(io: Io, packed: []u8) -> !data::LlvmArtifact {
     cursor = host.next;
     let host_metadata = try restore_cached_stage_file(io, packed, cursor, "target/selfhost/selfhost.host.ll.meta");
 
-    return data::LlvmArtifact {
+    return backend::data::LlvmArtifact {
         ll_path: "target/selfhost/selfhost.ll",
         metadata_path: "target/selfhost/selfhost.ll.meta",
         storage_path: "target/selfhost/selfhost.storage.ll",
