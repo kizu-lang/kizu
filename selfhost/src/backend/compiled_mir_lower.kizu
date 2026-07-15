@@ -9260,16 +9260,9 @@ fn lower_multi_expr_statement(
             string_counter, try_counter, aliases, stmts, bs
         );
     }
-    if !std::mem::equal_bytes(expr_kind, "TryExpr") {
-        return error("compiled mir: unsupported expression statement");
-    }
-    let inner = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, expr, "value", 0, sf
+    let inner = try try_call_statement_call_node(
+        ir_bytes, function_name, statement, bs, call_arg_type_cache
     );
-    let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, sf);
-    if !std::mem::equal_bytes(inner_kind, "Call") {
-        return error("compiled mir: try expression statement must wrap a call");
-    }
     if !try callee_is_field_expr(ir_bytes, function_name, inner, bs) {
         return try lower_void_free_try_call_statement(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
@@ -9428,6 +9421,39 @@ fn lower_multi_expr_statement(
         string_counter: string_counter + consumed_string,
         try_counter: try_counter + 1
     };
+}
+
+// try_call_statement_call_node validates the shared ExprStmt(TryExpr(Call)) shell and returns
+// its Call node. General expression-statement lowering decides between free and method calls
+// after this point; enum-dispatch effect arms reuse the same structural check but intentionally
+// admit only the free !void path.
+fn try_call_statement_call_node(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !i64 {
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
+    let expr = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "expr", 0, sf
+    );
+    let expr_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, expr, sf
+    );
+    if !std::mem::equal_bytes(expr_kind, "TryExpr") {
+        return error("compiled mir: unsupported expression statement");
+    }
+    let call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr, "value", 0, sf
+    );
+    let call_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, call, sf
+    );
+    if !std::mem::equal_bytes(call_kind, "Call") {
+        return error("compiled mir: try expression statement must wrap a call");
+    }
+    return call;
 }
 
 // array_receiver_lookup_kizu_type strips the borrow markers from a receiver type
@@ -11792,9 +11818,10 @@ fn lower_multi_return_statement(
 // stmt (issue 1157 PR-PH / B3 / NEW-B). The scrutinee lowers to an i64 discriminant through
 // lower_expr_into (a bare enum Var, a 'token.kind' field access, or a depth-2
 // 'expr.next.kind' field access); each arm's variant tag is resolved from the enum-variant facts
-// and its body reuses the shared return or side-effecting-expression lowerer. The trailing '_'
-// default (or final variant of an exhaustive match) carries no tag and renders as the unconditional
-// dispatch fallthrough arm. Effect-only bodies branch to a common continuation; returns terminate.
+// and its body uses the shared return lowerer or the narrow free !void try-call statement path.
+// Method effects and other expression statements remain explicit blockers. The trailing '_' default
+// (or final variant of an exhaustive match) carries no tag and renders as the unconditional dispatch
+// fallthrough arm. Effect-only bodies branch to a common continuation; returns terminate.
 // Each arm reserves a private temp/string SSA window (arm_index * ARM_SSA_STRIDE off the
 // scrutinee end) so the per-arm '%t<id>' temps and string globals never collide across the arm
 // blocks of the same function -- the same fixed-stride namespacing the if-renderer applies to
@@ -11946,15 +11973,20 @@ fn lower_multi_match_statement(
             if !std::mem::equal_bytes(arm_body_kind, "ExprStmt") {
                 return error("compiled mir: enum-dispatch arm body must return or be an expression statement");
             }
-            let expr_result = try lower_multi_expr_statement(
+            let call_node = try try_call_statement_call_node(
+                ir_bytes, function_name, arm_body, bs, call_arg_type_cache
+            );
+            if try callee_is_field_expr(ir_bytes, function_name, call_node, bs) {
+                return error("compiled mir: enum-dispatch effect arm must be a free try call");
+            }
+            let expr_result = try lower_void_free_try_call_statement(
                 ir_bytes,
                 function_name,
                 module_prefix,
                 llvm_return_type,
                 locals_spec,
-                arm_body,
+                call_node,
                 arm_string,
-                arm_temp,
                 next_try_counter,
                 &arm_aliases,
                 &var arm_stmts,
@@ -11962,6 +11994,18 @@ fn lower_multi_match_statement(
                 ir_lookup_index,
                 call_arg_type_cache
             );
+            if arm_stmts.len() != 1 {
+                return error("compiled mir: enum-dispatch effect arm must lower to one statement");
+            }
+            let effect_stmt = try arm_stmts.at(0);
+            var is_void_try_call = false;
+            match effect_stmt {
+                VoidTryCall(_) => is_void_try_call = true;,
+                _ => is_void_try_call = false;,
+            }
+            if !is_void_try_call {
+                return error("compiled mir: enum-dispatch effect arm must lower to a void try call");
+            }
             if expr_result.string_counter > arm_string + arm_ssa_stride {
                 return error("compiled mir: enum-dispatch arm exhausted its string SSA window");
             }

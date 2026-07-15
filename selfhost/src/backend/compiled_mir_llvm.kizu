@@ -72,23 +72,33 @@ pub fn union_dispatch_renderer_gate() -> !void {
     print("enum-dispatch-llvm\n");
     print(enum_bytes);
 
-    var fallthrough_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    try fallthrough_scrutinee.append(compiled_mir::var_expr_inst(0, "i64", "value"));
-    var effect_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
-    var effect_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-    try effect_stmts.append(compiled_mir::void_try_call_stmt(
-        "%kizu.error.void", "test", "effect", 0, 7, effect_args
+    var first_fallthrough_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try first_fallthrough_scrutinee.append(compiled_mir::var_expr_inst(0, "i64", "value"));
+    var first_fallthrough_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    try first_fallthrough_arms.append(compiled_mir::enum_dispatch_fallthrough_arm(
+        3, false, try dispatch_gate_effect_arm(7, 40)
     ));
-    var fallthrough_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
-    try fallthrough_arms.append(compiled_mir::enum_dispatch_fallthrough_arm(
-        3, false, effect_stmts
+    try first_fallthrough_arms.append(compiled_mir::enum_dispatch_fallthrough_arm(
+        4, false, try dispatch_gate_effect_arm(9, 42)
     ));
-    try fallthrough_arms.append(compiled_mir::enum_dispatch_arm(
+    try first_fallthrough_arms.append(compiled_mir::enum_dispatch_arm(
         -1, true, try dispatch_gate_void_arm()
     ));
     var fallthrough_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try fallthrough_stmts.append(compiled_mir::enum_dispatch_stmt(
-        fallthrough_scrutinee, 0, "i64", false, fallthrough_arms
+        first_fallthrough_scrutinee, 0, "i64", false, first_fallthrough_arms
+    ));
+    var second_fallthrough_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try second_fallthrough_scrutinee.append(compiled_mir::var_expr_inst(0, "i64", "value"));
+    var second_fallthrough_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    try second_fallthrough_arms.append(compiled_mir::enum_dispatch_fallthrough_arm(
+        5, false, try dispatch_gate_effect_arm(10, 43)
+    ));
+    try second_fallthrough_arms.append(compiled_mir::enum_dispatch_arm(
+        -1, true, try dispatch_gate_void_arm()
+    ));
+    try fallthrough_stmts.append(compiled_mir::enum_dispatch_stmt(
+        second_fallthrough_scrutinee, 0, "i64", false, second_fallthrough_arms
     ));
     try fallthrough_stmts.append(compiled_mir::return_void_success_stmt());
     var fallthrough_function = compiled_mir_function::multi_statement_function(
@@ -127,6 +137,37 @@ fn dispatch_gate_void_arm() -> !std::array::Array<compiled_mir::MirStmt> {
     try stmts.append(compiled_mir::return_void_success_stmt());
     return stmts;
 }
+
+fn dispatch_gate_effect_args(
+    string_index: i64
+) -> !std::array::Array<compiled_mir::MirCallArg> {
+    var nested_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    try nested_args.append(compiled_mir::string_call_arg(
+        "%kizu.slice.u8", "hex:2273636f706522", string_index
+    ));
+    var effect_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    try effect_args.append(compiled_mir::call_call_arg(
+        "i64", "test", "nested", nested_args
+    ));
+    return effect_args;
+}
+
+fn dispatch_gate_effect_arm(
+    try_index: i64,
+    string_index: i64
+) -> !std::array::Array<compiled_mir::MirStmt> {
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::void_try_call_stmt(
+        "%kizu.error.void",
+        "test",
+        "effect",
+        string_index,
+        try_index,
+        try dispatch_gate_effect_args(string_index)
+    ));
+    return stmts;
+}
+
 pub fn append_function(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction
@@ -1012,9 +1053,41 @@ fn append_multi_void_try_call(
     stmt: &compiled_mir::MirVoidTryCallStmt,
     local_prefix: i64
 ) -> !void {
-    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
-        out, function.name, &stmt.call_args, local_prefix
+    return try append_void_try_call_scoped(
+        out, function, stmt, false, local_prefix, 0, 0
     );
+}
+
+fn append_dispatch_void_try_call(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirVoidTryCallStmt,
+    match_index: i64,
+    arm_index: i64
+) -> !void {
+    return try append_void_try_call_scoped(
+        out, function, stmt, true, 0, match_index, arm_index
+    );
+}
+
+fn append_void_try_call_scoped(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirVoidTryCallStmt,
+    dispatch_scope: bool,
+    local_prefix: i64,
+    match_index: i64,
+    arm_index: i64
+) -> !void {
+    if dispatch_scope {
+        try compiled_mir_llvm_call::append_call_arg_setup_with_dispatch_scope(
+            out, function.name, &stmt.call_args, match_index, arm_index
+        );
+    } else {
+        try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
+            out, function.name, &stmt.call_args, local_prefix
+        );
+    }
     try out.append_bytes("  %voidtry");
     try std::fmt::append_i64(out, stmt.try_index);
     try out.append_bytes("_call = call %kizu.error.void @");
@@ -1022,7 +1095,15 @@ fn append_multi_void_try_call(
         out, stmt.call_module_prefix, stmt.call_callee_name
     );
     try out.append_bytes("(");
-    try compiled_mir_llvm_call::append_call_args_with_prefix(out, &stmt.call_args, local_prefix);
+    if dispatch_scope {
+        try compiled_mir_llvm_call::append_call_args_with_dispatch_scope(
+            out, &stmt.call_args, match_index, arm_index
+        );
+    } else {
+        try compiled_mir_llvm_call::append_call_args_with_prefix(
+            out, &stmt.call_args, local_prefix
+        );
+    }
     try append_ll_line(out, ")");
     try out.append_bytes("  %voidtry");
     try std::fmt::append_i64(out, stmt.try_index);
@@ -4658,9 +4739,6 @@ fn append_multi_enum_dispatch(
     }
     let arms = &stmt.arms;
     let arm_count = arms.len();
-    if arm_count > 1000 {
-        return error("compiled mir llvm: enum-dispatch exceeds its arm namespace");
-    }
     // Phase 1: the icmp/br dispatch chain. The last arm is the exhaustive fallthrough.
     var index = 0;
     while index < arm_count {
@@ -4697,8 +4775,9 @@ fn append_multi_enum_dispatch(
         index = index + 1;
     }
     // Phase 2: render each terminal arm through the dispatch-scoped return path. Effect-only
-    // arms continue to a shared join; each effect gets a statement-private local prefix in the
-    // 7000000+ namespace while its globally threaded try_index owns the failure/continuation labels.
+    // arms continue to a shared join; each effect gets a structurally disjoint
+    // %dispatcharg<match>_<arm> namespace while its globally threaded try_index owns the
+    // failure/continuation labels.
     var has_fallthrough = false;
     var arm_index = 0;
     while arm_index < arm_count {
@@ -4743,34 +4822,25 @@ fn append_multi_enum_dispatch(
             try out.append_byte(cast<u8>(10));
         }
         let arm_stmts = &arm.arm_stmts;
-        if arm_stmts.len() < 1 {
-            return error("compiled mir llvm: enum-dispatch arm body must not be empty");
+        if arm_stmts.len() != 1 {
+            return error("compiled mir llvm: enum-dispatch arm must contain one statement");
         }
-        if !arm.falls_through and arm_stmts.len() != 1 {
-            return error("compiled mir llvm: terminal enum-dispatch arm must contain one return");
-        }
-        if arm_stmts.len() > 1000 {
-            return error("compiled mir llvm: enum-dispatch arm exceeds its statement namespace");
-        }
-        var stmt_index = 0;
-        while stmt_index < arm_stmts.len() {
-            let arm_stmt = try arm_stmts.at(stmt_index);
-            if arm.falls_through {
-                try append_dispatch_arm_effect(
-                    out,
-                    function,
-                    arm_stmt,
-                    dispatch_effect_prefix(local_prefix, arm_index, stmt_index)
-                );
-            } else {
-                try append_dispatch_arm_return(
-                    out,
-                    function,
-                    arm_stmt,
-                    local_prefix * 1000 + arm_index
-                );
-            }
-            stmt_index = stmt_index + 1;
+        let arm_stmt = try arm_stmts.at(0);
+        if arm.falls_through {
+            try append_dispatch_arm_effect(
+                out,
+                function,
+                arm_stmt,
+                local_prefix,
+                arm_index
+            );
+        } else {
+            try append_dispatch_arm_return(
+                out,
+                function,
+                arm_stmt,
+                local_prefix * 1000 + arm_index
+            );
         }
         if arm.falls_through {
             try out.append_bytes("  br label %");
@@ -4795,26 +4865,16 @@ fn append_dispatch_arm_effect(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirStmt,
-    local_prefix: i64
+    match_index: i64,
+    arm_index: i64
 ) -> !void {
     match stmt {
-        StringTryAppend(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
-        ArrayTryAppend(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
-        ArrayTrySet(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
-        VoidTryCall(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
-        OwnedDeinit(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
-        _ => return error("compiled mir llvm: fallthrough enum-dispatch arm must contain side effects");,
+        VoidTryCall(payload) => try append_dispatch_void_try_call(
+            out, function, payload, match_index, arm_index
+        );,
+        _ => return error("compiled mir llvm: fallthrough enum-dispatch arm must contain a void try call");,
     }
     return;
-}
-
-// dispatch_effect_prefix reserves call-argument setup names for effect-only dispatch arms. The
-// existing renderer uses small prefixes for top-level statements, 1000000+ for expression calls,
-// 3000000+ for struct-field calls, and 5000000+ for nested structs. The 7000000+ namespace keeps
-// dispatch effects disjoint; one million slots per match, one thousand per arm, and one per arm
-// statement stay injective under the bounds checked by append_multi_enum_dispatch.
-fn dispatch_effect_prefix(match_index: i64, arm_index: i64, stmt_index: i64) -> i64 {
-    return 7000000 + match_index * 1000000 + arm_index * 1000 + stmt_index;
 }
 
 // append_dispatch_arm_return renders one enum-dispatch arm's lowered 'return <expr>'. A value

@@ -66,16 +66,49 @@ func assertFallthroughDispatchLLVM(t *testing.T, output string) {
 	if strings.Contains(enumAndFallthrough[0], "extractvalue") {
 		t.Fatalf("plain enum dispatch unexpectedly extracts an aggregate tag\n%s", enumAndFallthrough[0])
 	}
+	if strings.Contains(enumAndFallthrough[0], "dispatcharg") {
+		t.Fatalf(
+			"non-effect dispatch unexpectedly uses the effect call-arg namespace\n%s",
+			enumAndFallthrough[0],
+		)
+	}
 	fallthroughLLVM := enumAndFallthrough[1]
 	const canonicalSuccess = "ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }"
-	const effectCall = "%voidtry7_call = call %kizu.error.void @kizu_testeffect()"
-	terminalThenJoin := "dispatch0_arm_1:\n  " + canonicalSuccess +
-		"\ndispatch0_cont0:\n  " + canonicalSuccess
-	if !strings.Contains(fallthroughLLVM, effectCall) ||
+	const firstNestedCall = "%dispatcharg0_0_0_0_call = call i64 @kizu_testnested(" +
+		"%kizu.slice.u8 %dispatcharg0_0_1_0_slice)"
+	const firstEffectCall = "%voidtry7_call = call %kizu.error.void @kizu_testeffect(" +
+		"i64 %dispatcharg0_0_0_0_call)"
+	firstTerminalThenJoin := "dispatch0_arm_2:\n  " + canonicalSuccess +
+		"\ndispatch0_cont0:\n  %dispatch1_is_0"
+	secondTerminalThenJoin := "dispatch1_arm_1:\n  " + canonicalSuccess +
+		"\ndispatch1_cont0:\n  " + canonicalSuccess
+	if !strings.Contains(fallthroughLLVM, firstNestedCall) ||
+		!strings.Contains(fallthroughLLVM, firstEffectCall) ||
 		!strings.Contains(fallthroughLLVM, "try7_cont:\n  br label %dispatch0_cont0") ||
-		!strings.Contains(fallthroughLLVM, terminalThenJoin) {
+		!strings.Contains(fallthroughLLVM, "try9_cont:\n  br label %dispatch0_cont0") ||
+		!strings.Contains(fallthroughLLVM, "try10_cont:\n  br label %dispatch1_cont0") ||
+		!strings.Contains(fallthroughLLVM, firstTerminalThenJoin) ||
+		!strings.Contains(fallthroughLLVM, secondTerminalThenJoin) {
 		t.Fatalf(
 			"mixed terminal/fallthrough dispatch does not join after its effect arm\n%s",
+			fallthroughLLVM,
+		)
+	}
+	for _, scopedDefinition := range []string{
+		"%dispatcharg0_0_1_0_ptr =",
+		"%dispatcharg0_0_0_0_call =",
+		"%dispatcharg0_1_1_0_ptr =",
+		"%dispatcharg0_1_0_0_call =",
+		"%dispatcharg1_0_1_0_ptr =",
+		"%dispatcharg1_0_0_0_call =",
+	} {
+		if strings.Count(fallthroughLLVM, scopedDefinition) != 1 {
+			t.Fatalf("dispatch call-arg definition %q is not unique\n%s", scopedDefinition, fallthroughLLVM)
+		}
+	}
+	if strings.Contains(fallthroughLLVM, "%arg") {
+		t.Fatalf(
+			"dispatch effect still uses the colliding numeric call-arg namespace\n%s",
 			fallthroughLLVM,
 		)
 	}
