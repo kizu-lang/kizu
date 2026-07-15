@@ -92,12 +92,74 @@ pub fn append_call_arg_setup(
     return;
 }
 
+// CallArgNameScope keeps the existing numeric %arg<prefix>_<index> namespace byte-identical for
+// ordinary call sites while giving enum-dispatch effect and terminal calls a structurally disjoint
+// %dispatcharg<match>_<arm>_<nested>_<index> namespace. nested_prefix encodes only the
+// path inside one call tree; the dispatch tuple remains explicit at every depth.
+struct CallArgNameScope {
+    numeric: bool,
+    call_prefix: i64,
+    match_index: i64,
+    arm_index: i64,
+    nested_prefix: i64,
+}
+
+fn numeric_call_arg_scope(call_prefix: i64) -> CallArgNameScope {
+    return CallArgNameScope {
+        numeric: true,
+        call_prefix: call_prefix,
+        match_index: 0,
+        arm_index: 0,
+        nested_prefix: 0
+    };
+}
+
+fn dispatch_call_arg_scope(
+    match_index: i64,
+    arm_index: i64
+) -> !CallArgNameScope {
+    if match_index < 0 or arm_index < 0 {
+        return error("compiled mir llvm: negative dispatch call-arg scope");
+    }
+    return CallArgNameScope {
+        numeric: false,
+        call_prefix: 0,
+        match_index: match_index,
+        arm_index: arm_index,
+        nested_prefix: 0
+    };
+}
+
 pub fn append_call_arg_setup_with_prefix(
     out: &var std::string::String,
     llvm_symbol: []u8,
     args: &std::array::Array<compiled_mir::MirCallArg>,
     call_prefix: i64
 ) -> !void {
+    let scope = numeric_call_arg_scope(call_prefix);
+    return try append_call_arg_setup_scoped(out, llvm_symbol, args, &scope);
+}
+
+pub fn append_call_arg_setup_with_dispatch_scope(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    args: &std::array::Array<compiled_mir::MirCallArg>,
+    match_index: i64,
+    arm_index: i64
+) -> !void {
+    let scope = try dispatch_call_arg_scope(match_index, arm_index);
+    return try append_call_arg_setup_scoped(out, llvm_symbol, args, &scope);
+}
+
+fn append_call_arg_setup_scoped(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    args: &std::array::Array<compiled_mir::MirCallArg>,
+    scope: &CallArgNameScope
+) -> !void {
+    if !scope.numeric and args.len() > 1000 {
+        return error("compiled mir llvm: dispatch nested call exceeds its argument namespace");
+    }
     var index = 0;
     while index < args.len() {
         let arg = try args.at(index);
@@ -107,7 +169,7 @@ pub fn append_call_arg_setup_with_prefix(
                 "compiled mir llvm: invalid call string token"
             );
             try out.append_bytes("  ");
-            try append_arg_local_name(out, call_prefix, index);
+            try append_arg_local_name(out, scope, index);
             try out.append_bytes("_ptr = getelementptr [");
             try std::fmt::append_i64(out, payload_len);
             try out.append_bytes(" x i8], ptr @.kizu.compiled.");
@@ -117,15 +179,15 @@ pub fn append_call_arg_setup_with_prefix(
             try out.append_bytes(", i64 0, i64 0");
             try out.append_byte(cast<u8>(10));
             try out.append_bytes("  ");
-            try append_arg_local_name(out, call_prefix, index);
+            try append_arg_local_name(out, scope, index);
             try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr ");
-            try append_arg_local_name(out, call_prefix, index);
+            try append_arg_local_name(out, scope, index);
             try out.append_bytes("_ptr, 0");
             try out.append_byte(cast<u8>(10));
             try out.append_bytes("  ");
-            try append_arg_local_name(out, call_prefix, index);
+            try append_arg_local_name(out, scope, index);
             try out.append_bytes("_slice = insertvalue %kizu.slice.u8 ");
-            try append_arg_local_name(out, call_prefix, index);
+            try append_arg_local_name(out, scope, index);
             try out.append_bytes("_base, i64 ");
             try std::fmt::append_i64(out, payload_len);
             try out.append_bytes(", 1");
@@ -133,7 +195,7 @@ pub fn append_call_arg_setup_with_prefix(
         } else {
             if arg.kind == compiled_mir::MirCallArgKind::FieldAccess {
                 try out.append_bytes("  ");
-                try append_arg_local_name(out, call_prefix, index);
+                try append_arg_local_name(out, scope, index);
                 try out.append_bytes("_ex = extractvalue ");
                 try out.append_bytes(arg.source_type);
                 try out.append_bytes(" %");
@@ -146,29 +208,29 @@ pub fn append_call_arg_setup_with_prefix(
                 // (tracker 961). nested_field_index == -1 leaves it single-level.
                 if arg.nested_field_index >= 0 {
                     try out.append_bytes("  ");
-                    try append_arg_local_name(out, call_prefix, index);
+                    try append_arg_local_name(out, scope, index);
                     try out.append_bytes("_exn = extractvalue ");
                     try out.append_bytes(arg.nested_source_type);
                     try out.append_bytes(" %");
-                    try append_arg_label_base(out, call_prefix, index);
+                    try append_arg_label_base(out, scope, index);
                     try out.append_bytes("_ex, ");
                     try std::fmt::append_i64(out, arg.nested_field_index);
                     try out.append_byte(cast<u8>(10));
                 }
             } else {
                 if arg.kind == compiled_mir::MirCallArgKind::Slice {
-                    try append_slice_arg_setup(out, &arg, call_prefix, index);
+                    try append_slice_arg_setup(out, &arg, scope, index);
                 } else {
                     if arg.kind == compiled_mir::MirCallArgKind::Arith {
-                        try append_arith_arg_setup(out, &arg, call_prefix, index);
+                        try append_arith_arg_setup(out, &arg, scope, index);
                     } else {
                         if arg.kind == compiled_mir::MirCallArgKind::Call {
-                            let nested_prefix = nested_call_arg_prefix(call_prefix, index);
-                            try append_call_arg_setup_with_prefix(
-                                out, llvm_symbol, &arg.call_args, nested_prefix
+                            let nested_scope = try nested_call_arg_scope(scope, index);
+                            try append_call_arg_setup_scoped(
+                                out, llvm_symbol, &arg.call_args, &nested_scope
                             );
                             try out.append_bytes("  ");
-                            try append_arg_local_name(out, call_prefix, index);
+                            try append_arg_local_name(out, scope, index);
                             try out.append_bytes("_call = call ");
                             try out.append_bytes(arg.ty);
                             try out.append_bytes(" @");
@@ -176,7 +238,7 @@ pub fn append_call_arg_setup_with_prefix(
                                 out, arg.call_module_prefix, arg.call_callee_name
                             );
                             try out.append_bytes("(");
-                            try append_call_args_with_prefix(out, &arg.call_args, nested_prefix);
+                            try append_call_args_scoped(out, &arg.call_args, &nested_scope);
                             try out.append_bytes(")");
                             try out.append_byte(cast<u8>(10));
                         }
@@ -196,12 +258,12 @@ pub fn append_call_arg_setup_with_prefix(
 fn append_arith_arg_setup(
     out: &var std::string::String,
     arg: &compiled_mir::MirCallArg,
-    call_prefix: i64,
+    scope: &CallArgNameScope,
     index: i64
 ) -> !void {
     if arg.source_field_index >= 0 {
         try out.append_bytes("  ");
-        try append_arg_local_name(out, call_prefix, index);
+        try append_arg_local_name(out, scope, index);
         try out.append_bytes("_ex = extractvalue ");
         try out.append_bytes(arg.source_type);
         try out.append_bytes(" %");
@@ -211,7 +273,7 @@ fn append_arith_arg_setup(
         try out.append_byte(cast<u8>(10));
     }
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     if arg.bool_value {
         try out.append_bytes("_arith = sub ");
     } else {
@@ -220,7 +282,7 @@ fn append_arith_arg_setup(
     try out.append_bytes(arg.ty);
     try out.append_bytes(" ");
     if arg.source_field_index >= 0 {
-        try append_arg_local_name(out, call_prefix, index);
+        try append_arg_local_name(out, scope, index);
         try out.append_bytes("_ex");
     } else {
         try out.append_bytes("%");
@@ -239,7 +301,7 @@ fn append_arith_arg_setup(
 // field off source_type %base into %argN<suffix>_ex first, then add the offset.
 fn append_slice_arg_bound(
     out: &var std::string::String,
-    call_prefix: i64,
+    scope: &CallArgNameScope,
     index: i64,
     suffix: []u8,
     base: []u8,
@@ -249,7 +311,7 @@ fn append_slice_arg_bound(
 ) -> !void {
     if field_index >= 0 {
         try out.append_bytes("  ");
-        try append_arg_local_name(out, call_prefix, index);
+        try append_arg_local_name(out, scope, index);
         try out.append_bytes(suffix);
         try out.append_bytes("_ex = extractvalue ");
         try out.append_bytes(source_type);
@@ -259,10 +321,10 @@ fn append_slice_arg_bound(
         try std::fmt::append_i64(out, field_index);
         try out.append_byte(cast<u8>(10));
         try out.append_bytes("  ");
-        try append_arg_local_name(out, call_prefix, index);
+        try append_arg_local_name(out, scope, index);
         try out.append_bytes(suffix);
         try out.append_bytes(" = add i64 ");
-        try append_arg_local_name(out, call_prefix, index);
+        try append_arg_local_name(out, scope, index);
         try out.append_bytes(suffix);
         try out.append_bytes("_ex, ");
         try std::fmt::append_i64(out, offset);
@@ -270,7 +332,7 @@ fn append_slice_arg_bound(
         return;
     }
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes(suffix);
     if std::mem::len(base) == 0 {
         try out.append_bytes(" = add i64 0, ");
@@ -287,52 +349,52 @@ fn append_slice_arg_bound(
 fn append_slice_arg_setup(
     out: &var std::string::String,
     arg: &compiled_mir::MirCallArg,
-    call_prefix: i64,
+    scope: &CallArgNameScope,
     index: i64
 ) -> !void {
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_sbase = extractvalue %kizu.slice.u8 %");
     try out.append_bytes(arg.value);
     try out.append_bytes(", 0");
     try out.append_byte(cast<u8>(10));
     try append_slice_arg_bound(
-        out, call_prefix, index, "_sstart", arg.slice_start_base, arg.slice_start_offset,
+        out, scope, index, "_sstart", arg.slice_start_base, arg.slice_start_offset,
         arg.slice_start_source_type, arg.slice_start_field_index
     );
     try append_slice_arg_bound(
-        out, call_prefix, index, "_send", arg.slice_end_base, arg.slice_end_offset,
+        out, scope, index, "_send", arg.slice_end_base, arg.slice_end_offset,
         arg.slice_end_source_type, arg.slice_end_field_index
     );
-    try append_slice_arg_bounds_check(out, &arg, call_prefix, index);
+    try append_slice_arg_bounds_check(out, &arg, scope, index);
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_sgep = getelementptr i8, ptr ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_sbase, i64 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_sstart");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_slen = sub i64 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_send, ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_sstart");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_s0 = insertvalue %kizu.slice.u8 poison, ptr ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_sgep, 0");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_slice = insertvalue %kizu.slice.u8 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_s0, i64 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_slen, 1");
     try out.append_byte(cast<u8>(10));
     return;
@@ -348,85 +410,96 @@ fn append_slice_arg_setup(
 fn append_slice_arg_bounds_check(
     out: &var std::string::String,
     arg: &compiled_mir::MirCallArg,
-    call_prefix: i64,
+    scope: &CallArgNameScope,
     index: i64
 ) -> !void {
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_srclen = extractvalue %kizu.slice.u8 %");
     try out.append_bytes(arg.value);
     try out.append_bytes(", 1");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_startneg = icmp slt i64 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_sstart, 0");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_endbefore = icmp slt i64 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_send, ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_sstart");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_endhigh = icmp sgt i64 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_send, ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_srclen");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_badlower = or i1 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_startneg, ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_endbefore");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_bad = or i1 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_badlower, ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_endhigh");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("  br i1 ");
-    try append_arg_local_name(out, call_prefix, index);
+    try append_arg_local_name(out, scope, index);
     try out.append_bytes("_bad, label %");
-    try append_arg_label_base(out, call_prefix, index);
+    try append_arg_label_base(out, scope, index);
     try out.append_bytes("_slice_oob, label %");
-    try append_arg_label_base(out, call_prefix, index);
+    try append_arg_label_base(out, scope, index);
     try out.append_bytes("_slice_ok");
     try out.append_byte(cast<u8>(10));
-    try append_arg_label_base(out, call_prefix, index);
+    try append_arg_label_base(out, scope, index);
     try out.append_bytes("_slice_oob:");
     try out.append_byte(cast<u8>(10));
     try compiled_util::append_trap_body(out);
-    try append_arg_label_base(out, call_prefix, index);
+    try append_arg_label_base(out, scope, index);
     try out.append_bytes("_slice_ok:");
     try out.append_byte(cast<u8>(10));
     return;
 }
 
-fn nested_call_arg_prefix(call_prefix: i64, index: i64) -> i64 {
-    // This base-1000 nesting scheme assumes each call has fewer than 1000 args.
-    return 1000000 + (call_prefix * 1000) + index;
+fn nested_call_arg_scope(scope: &CallArgNameScope, index: i64) -> !CallArgNameScope {
+    if scope.numeric {
+        return numeric_call_arg_scope(1000000 + (scope.call_prefix * 1000) + index);
+    }
+    // Each call has at most 1000 arguments, so base-1000 path components are injective.
+    // Reject the final prefix before its i64 multiplication could wrap and alias another path.
+    if scope.nested_prefix > 9223372036854774 {
+        return error("compiled mir llvm: dispatch nested call path exceeds its argument namespace");
+    }
+    return CallArgNameScope {
+        numeric: false,
+        call_prefix: 0,
+        match_index: scope.match_index,
+        arm_index: scope.arm_index,
+        nested_prefix: 1 + scope.nested_prefix * 1000 + index
+    };
 }
 
 fn append_arg_local_name(
     out: &var std::string::String,
-    call_prefix: i64,
+    scope: &CallArgNameScope,
     index: i64
 ) -> !void {
-    try out.append_bytes("%arg");
-    try std::fmt::append_i64(out, call_prefix);
-    try out.append_bytes("_");
-    try std::fmt::append_i64(out, index);
+    try out.append_bytes("%");
+    try append_arg_label_base(out, scope, index);
     return;
 }
 
@@ -435,11 +508,22 @@ fn append_arg_local_name(
 // append_arg_local_name is used wherever the same name appears as an operand.
 fn append_arg_label_base(
     out: &var std::string::String,
-    call_prefix: i64,
+    scope: &CallArgNameScope,
     index: i64
 ) -> !void {
+    if !scope.numeric {
+        try out.append_bytes("dispatcharg");
+        try std::fmt::append_i64(out, scope.match_index);
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, scope.arm_index);
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, scope.nested_prefix);
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, index);
+        return;
+    }
     try out.append_bytes("arg");
-    try std::fmt::append_i64(out, call_prefix);
+    try std::fmt::append_i64(out, scope.call_prefix);
     try out.append_bytes("_");
     try std::fmt::append_i64(out, index);
     return;
@@ -458,6 +542,28 @@ pub fn append_call_args_with_prefix(
     args: &std::array::Array<compiled_mir::MirCallArg>,
     call_prefix: i64
 ) -> !void {
+    let scope = numeric_call_arg_scope(call_prefix);
+    return try append_call_args_scoped(out, args, &scope);
+}
+
+pub fn append_call_args_with_dispatch_scope(
+    out: &var std::string::String,
+    args: &std::array::Array<compiled_mir::MirCallArg>,
+    match_index: i64,
+    arm_index: i64
+) -> !void {
+    let scope = try dispatch_call_arg_scope(match_index, arm_index);
+    return try append_call_args_scoped(out, args, &scope);
+}
+
+fn append_call_args_scoped(
+    out: &var std::string::String,
+    args: &std::array::Array<compiled_mir::MirCallArg>,
+    scope: &CallArgNameScope
+) -> !void {
+    if !scope.numeric and args.len() > 1000 {
+        return error("compiled mir llvm: dispatch nested call exceeds its argument namespace");
+    }
     var index = 0;
     while index < args.len() {
         if index > 0 {
@@ -466,7 +572,7 @@ pub fn append_call_args_with_prefix(
         let arg = try args.at(index);
         try out.append_bytes(arg.ty);
         try out.append_bytes(" ");
-        try append_call_arg_value_with_prefix(out, &arg, call_prefix, index);
+        try append_call_arg_value_scoped(out, &arg, scope, index);
         index = index + 1;
     }
     return;
@@ -481,12 +587,22 @@ pub fn append_call_arg_value_with_prefix(
     call_prefix: i64,
     index: i64
 ) -> !void {
+    let scope = numeric_call_arg_scope(call_prefix);
+    return try append_call_arg_value_scoped(out, arg, &scope, index);
+}
+
+fn append_call_arg_value_scoped(
+    out: &var std::string::String,
+    arg: &compiled_mir::MirCallArg,
+    scope: &CallArgNameScope,
+    index: i64
+) -> !void {
     if arg.kind == compiled_mir::MirCallArgKind::Var {
             try out.append_bytes("%");
             try out.append_bytes(arg.value);
         } else {
             if arg.kind == compiled_mir::MirCallArgKind::String {
-                try append_arg_local_name(out, call_prefix, index);
+                try append_arg_local_name(out, scope, index);
                 try out.append_bytes("_slice");
             } else {
                 if arg.kind == compiled_mir::MirCallArgKind::Bool {
@@ -497,7 +613,7 @@ pub fn append_call_arg_value_with_prefix(
                     }
                 } else {
                     if arg.kind == compiled_mir::MirCallArgKind::FieldAccess {
-                        try append_arg_local_name(out, call_prefix, index);
+                        try append_arg_local_name(out, scope, index);
                         if arg.nested_field_index >= 0 {
                             try out.append_bytes("_exn");
                         } else {
@@ -508,14 +624,14 @@ pub fn append_call_arg_value_with_prefix(
                             try out.append_bytes("zeroinitializer");
                         } else {
                             if arg.kind == compiled_mir::MirCallArgKind::Slice {
-                                try append_arg_local_name(out, call_prefix, index);
+                                try append_arg_local_name(out, scope, index);
                                 try out.append_bytes("_slice");
                             } else {
                                 if arg.kind == compiled_mir::MirCallArgKind::IntLiteral {
                                     try std::fmt::append_i64(out, arg.int_value);
                                 } else {
                                     if arg.kind == compiled_mir::MirCallArgKind::Arith {
-                                        try append_arg_local_name(out, call_prefix, index);
+                                        try append_arg_local_name(out, scope, index);
                                         try out.append_bytes("_arith");
                                     } else {
                                         if arg.kind == compiled_mir::MirCallArgKind::Temp {
@@ -525,7 +641,7 @@ pub fn append_call_arg_value_with_prefix(
                                             try std::fmt::append_i64(out, arg.int_value);
                                         } else {
                                             if arg.kind == compiled_mir::MirCallArgKind::Call {
-                                                try append_arg_local_name(out, call_prefix, index);
+                                                try append_arg_local_name(out, scope, index);
                                                 try out.append_bytes("_call");
                                             } else {
                                                 return error("compiled mir llvm: unsupported call arg");

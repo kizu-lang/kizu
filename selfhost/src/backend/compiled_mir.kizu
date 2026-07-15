@@ -1473,17 +1473,16 @@ pub struct MirMatchTraversalStmt {
     pub arms: std::array::Array<MirTraversalArm>,
 }
 
-// MirEnumDispatchArm is one arm of a non-bool enum-dispatch match statement ('match
-// <scrutinee> { Variant => return <expr>, _ => return <expr> }', issue 1157 PR-PH / B3).
-// tag is the matched variant's discriminant; is_default marks the trailing '_' fallthrough
-// (which carries no tag). arm_stmts holds the arm body lowered through the shared
-// lower_multi_return_statement path -- a 0-or-more element Array<MirStmt> referencing MirStmt
-// through a heap-backed Array exactly like MirWhileStmt.body_stmts, so the union stays
-// fixed-size. Every arm body returns (the renderer emits a real value per arm, never
-// 'unreachable'), so the dispatch statement is terminal.
+// MirEnumDispatchArm is one arm of a non-bool enum-dispatch match statement (issue 1157
+// PR-PH / B3).
+// tag is the matched variant's discriminant; is_default marks the trailing '_' dispatch fallback
+// (which carries no tag). arm_stmts is a heap-backed Array exactly like MirWhileStmt.body_stmts,
+// so the union stays fixed-size. falls_through independently marks an effect-only body that
+// branches to the dispatch continuation rather than terminating the function.
 pub struct MirEnumDispatchArm {
     pub tag: i64,
     pub is_default: bool,
+    pub falls_through: bool,
     // A tagged-union arm may bind its variant payload. binding_name is the
     // arm-unique backend name referenced by the lowered body; payload_type is
     // derived from the matching union-variant fact. Enum/default arms keep
@@ -1496,10 +1495,10 @@ pub struct MirEnumDispatchArm {
 // MirEnumDispatchStmt backs a non-bool enum-dispatch match statement lowered to branch
 // control flow (issue 1157 PR-PH / B3): the scrutinee lowers to an i64 discriminant in
 // scrutinee_insts (the value read through scrutinee_result_id), then the renderer emits an
-// exhaustive icmp/br dispatch chain over the arms -- one block per arm, each returning a
-// real value. The last arm is the unconditional exhaustive fallthrough (a '_' default or,
-// for an exhaustive enum match, the final variant). It owns the scrutinee inst Array and the
-// arm Array.
+// exhaustive icmp/br dispatch chain over the arms. The last arm is the unconditional exhaustive
+// dispatch fallthrough (a '_' default or, for an exhaustive enum match, the final variant).
+// Effect-only arms branch to one shared continuation; terminal arms return in place. It owns the
+// scrutinee inst Array and the arm Array.
 pub struct MirEnumDispatchStmt {
     pub scrutinee_insts: std::array::Array<MirExprInst>,
     pub scrutinee_result_id: i64,
@@ -4733,6 +4732,7 @@ pub fn enum_dispatch_arm(
     return MirEnumDispatchArm {
         tag: tag,
         is_default: is_default,
+        falls_through: false,
         binding_name: "",
         payload_type: "",
         arm_stmts: arm_stmts
@@ -4748,6 +4748,38 @@ pub fn enum_dispatch_payload_arm(
     return MirEnumDispatchArm {
         tag: tag,
         is_default: false,
+        falls_through: false,
+        binding_name: binding_name,
+        payload_type: payload_type,
+        arm_stmts: arm_stmts
+    };
+}
+
+pub fn enum_dispatch_fallthrough_arm(
+    tag: i64,
+    is_default: bool,
+    arm_stmts: std::array::Array<MirStmt>
+) -> MirEnumDispatchArm {
+    return MirEnumDispatchArm {
+        tag: tag,
+        is_default: is_default,
+        falls_through: true,
+        binding_name: "",
+        payload_type: "",
+        arm_stmts: arm_stmts
+    };
+}
+
+pub fn enum_dispatch_fallthrough_payload_arm(
+    tag: i64,
+    binding_name: []u8,
+    payload_type: []u8,
+    arm_stmts: std::array::Array<MirStmt>
+) -> MirEnumDispatchArm {
+    return MirEnumDispatchArm {
+        tag: tag,
+        is_default: false,
+        falls_through: true,
         binding_name: binding_name,
         payload_type: payload_type,
         arm_stmts: arm_stmts
