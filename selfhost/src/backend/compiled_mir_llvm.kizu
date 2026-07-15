@@ -28,6 +28,30 @@ pub fn union_dispatch_renderer_gate() -> !void {
     print("union-dispatch-llvm\n");
     print(union_bytes);
 
+    var void_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try void_scrutinee.append(compiled_mir::var_expr_inst(0, "%test.union", "value"));
+    var void_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    try void_arms.append(compiled_mir::enum_dispatch_payload_arm(
+        3, "dispatch.payload.void", "%test.payload", try dispatch_gate_void_arm()
+    ));
+    try void_arms.append(compiled_mir::enum_dispatch_arm(
+        -1, true, try dispatch_gate_void_arm()
+    ));
+    var void_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try void_stmts.append(compiled_mir::enum_dispatch_stmt(
+        void_scrutinee, 0, "%test.union", true, void_arms
+    ));
+    var void_function = compiled_mir_function::multi_statement_function(
+        "void_dispatch_gate", "%kizu.error.void", "%test.union value", void_stmts
+    );
+    defer void_function.deinit();
+    var void_out = std::string::String(std::mem::page_allocator());
+    defer void_out.deinit();
+    try append_function(&var void_out, &void_function);
+    let void_bytes = void_out.as_bytes();
+    print("void-dispatch-llvm\n");
+    print(void_bytes);
+
     var enum_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     try enum_scrutinee.append(compiled_mir::var_expr_inst(0, "i64", "value"));
     var enum_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
@@ -65,6 +89,12 @@ fn dispatch_gate_payload_arm() -> !std::array::Array<compiled_mir::MirStmt> {
     ));
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::return_expr_stmt(0, 1, insts));
+    return stmts;
+}
+
+fn dispatch_gate_void_arm() -> !std::array::Array<compiled_mir::MirStmt> {
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::return_void_success_stmt());
     return stmts;
 }
 pub fn append_function(
@@ -4698,8 +4728,9 @@ fn append_multi_enum_dispatch(
 // return wraps through the dispatch-scoped wrap (arm_scope-suffixed SSA names so the arm blocks
 // never collide); a call return renders with a dispatch-scoped call result and success wrap; an
 // error return reuses append_multi_return_error, whose %errfail<id> temps are already keyed off
-// the unique per-arm message temp id. Other return shapes still surface an explicit blocker rather
-// than emitting colliding SSA names (issue 1157 B3).
+// the unique per-arm message temp id; and a bare return reuses the shared void-success renderer.
+// Other return shapes still surface an explicit blocker rather than emitting colliding SSA names
+// (issue 1157 B3).
 fn append_dispatch_arm_return(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -4710,6 +4741,9 @@ fn append_dispatch_arm_return(
         ReturnCall(payload) => try append_dispatch_return_call(out, function, payload, arm_scope);,
         ReturnExpr(payload) => try append_dispatch_return_expr(out, function, payload, arm_scope);,
         ReturnError(payload) => try append_multi_return_error(out, function, payload);,
+        VoidReturnSuccess(payload) => try append_multi_if_return_void_success(
+            out, function.return_type.llvm_name
+        );,
         _ => return error("compiled mir llvm: enum-dispatch arm return shape not yet supported");,
     }
     return;
@@ -6554,6 +6588,9 @@ fn append_multi_if_return_void_success(
     if std::mem::equal_bytes(return_type, "void") {
         try append_ll_line(out, "  ret void");
         return;
+    }
+    if !std::mem::equal_bytes(return_type, "%kizu.error.void") {
+        return error("compiled mir llvm: bare return requires void or error-void ABI");
     }
     try out.append_bytes("  ret ");
     try out.append_bytes(return_type);
