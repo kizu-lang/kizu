@@ -45,6 +45,12 @@ pub struct CallArgTypeCache {
     // cache.
     pub local_names: std::array::Array<[]u8>,
     pub local_types: std::array::Array<[]u8>,
+    // scoped_local_names and scoped_local_types form a stack of temporary lexical bindings
+    // supplied by a
+    // lowering construct whose bindings are not let statements. Match-arm
+    // payloads are the first consumer. Reverse lookup preserves shadowing.
+    pub scoped_local_names: std::array::Array<[]u8>,
+    pub scoped_local_types: std::array::Array<[]u8>,
     pub local_binding_names: std::array::Array<[]u8>,
     pub local_binding_statements: std::array::Array<i64>,
     pub local_bindings_built: bool,
@@ -82,6 +88,8 @@ pub fn call_arg_type_cache() -> CallArgTypeCache {
         edges_built: false,
         local_names: std::array::Array<[]u8>(std::mem::page_allocator()),
         local_types: std::array::Array<[]u8>(std::mem::page_allocator()),
+        scoped_local_names: std::array::Array<[]u8>(std::mem::page_allocator()),
+        scoped_local_types: std::array::Array<[]u8>(std::mem::page_allocator()),
         local_binding_names: std::array::Array<[]u8>(std::mem::page_allocator()),
         local_binding_statements: std::array::Array<i64>(std::mem::page_allocator()),
         local_bindings_built: false,
@@ -122,6 +130,8 @@ impl CallArgTypeCache {
         self.field_expr_nodes.deinit();
         self.local_types.deinit();
         self.local_names.deinit();
+        self.scoped_local_types.deinit();
+        self.scoped_local_names.deinit();
         self.local_binding_statements.deinit();
         self.local_binding_names.deinit();
         self.edge_children.deinit();
@@ -136,6 +146,36 @@ impl CallArgTypeCache {
         self.callee_names.deinit();
         self.module_prefixes.deinit();
     }
+}
+
+pub fn push_scoped_local_type(
+    cache: &var CallArgTypeCache,
+    name: []u8,
+    kizu_type: []u8
+) -> !void {
+    try cache.scoped_local_names.append(name);
+    try cache.scoped_local_types.append(kizu_type);
+    return;
+}
+
+pub fn pop_scoped_local_type(cache: &var CallArgTypeCache) -> !void {
+    let _name = try cache.scoped_local_names.pop();
+    let _kizu_type = try cache.scoped_local_types.pop();
+    return;
+}
+
+fn scoped_local_type_or_empty(
+    cache: &CallArgTypeCache,
+    name: []u8
+) -> []u8 {
+    var index = cache.scoped_local_names.len();
+    while index > 0 {
+        index = index - 1;
+        if std::mem::equal_bytes(cache.scoped_local_names.get_or_panic(index), name) {
+            return cache.scoped_local_types.get_or_panic(index);
+        }
+    }
+    return name[0..0];
 }
 
 // resolve_local_kizu_type_cached memoizes resolve_local_kizu_type by name in the per-function cache
@@ -616,6 +656,12 @@ pub fn resolve_value_llvm_type_indexed_cached(
     bs: i64,
     cache: &var CallArgTypeCache
 ) -> ![]u8 {
+    let scoped_type = scoped_local_type_or_empty(cache, name);
+    if std::mem::len(scoped_type) > 0 {
+        return try compiled_type_lower::kizu_type_to_llvm_indexed(
+            index, ir_bytes, module_prefix, scoped_type
+        );
+    }
     let param_type = find_spec_llvm_type_or_empty(params_spec, name);
     if std::mem::len(param_type) > 0 {
         return param_type;
@@ -660,6 +706,10 @@ pub fn resolve_value_kizu_type_indexed_cached(
     bs: i64,
     cache: &var CallArgTypeCache
 ) -> ![]u8 {
+    let scoped_type = scoped_local_type_or_empty(cache, name);
+    if std::mem::len(scoped_type) > 0 {
+        return scoped_type;
+    }
     let param_type = find_spec_llvm_type_or_empty(params_spec, name);
     if std::mem::len(param_type) > 0 {
         return try find_function_param_kizu_type_indexed(index, ir_bytes, function_name, name);

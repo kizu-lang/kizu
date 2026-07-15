@@ -9,7 +9,9 @@ pub fn union_dispatch_renderer_gate() -> !void {
     var union_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     try union_scrutinee.append(compiled_mir::var_expr_inst(0, "%test.union", "value"));
     var union_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
-    try union_arms.append(compiled_mir::enum_dispatch_arm(3, false, try dispatch_gate_arm(11)));
+    try union_arms.append(compiled_mir::enum_dispatch_payload_arm(
+        3, "dispatch.payload.test", "%test.payload", try dispatch_gate_payload_arm()
+    ));
     try union_arms.append(compiled_mir::enum_dispatch_arm(-1, true, try dispatch_gate_arm(22)));
     var union_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try union_stmts.append(compiled_mir::enum_dispatch_stmt(
@@ -51,6 +53,16 @@ pub fn union_dispatch_renderer_gate() -> !void {
 fn dispatch_gate_arm(value: i64) -> !std::array::Array<compiled_mir::MirStmt> {
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     try insts.append(compiled_mir::int_expr_inst(1, value));
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try stmts.append(compiled_mir::return_expr_stmt(0, 1, insts));
+    return stmts;
+}
+
+fn dispatch_gate_payload_arm() -> !std::array::Array<compiled_mir::MirStmt> {
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try insts.append(compiled_mir::field_access_expr_inst(
+        1, "i64", "dispatch.payload.test", "%test.payload", 0
+    ));
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::return_expr_stmt(0, 1, insts));
     return stmts;
@@ -4628,6 +4640,43 @@ fn append_multi_enum_dispatch(
         let arm = try arms.at(arm_index);
         try append_dispatch_label(out, local_prefix, "arm_", arm_index);
         try append_ll_line(out, ":");
+        if std::mem::len(arm.binding_name) > 0 {
+            // The tagged union stores its payload in the field-1 byte buffer. Load
+            // the fact-derived payload type under the arm-unique name referenced by
+            // the lowered body, mirroring the existing match-union read ABI.
+            try out.append_bytes("  %");
+            try out.append_bytes(arm.binding_name);
+            try out.append_bytes(".slot = alloca ");
+            try out.append_bytes(stmt.scrutinee_llvm_type);
+            try out.append_bytes(", align 8");
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  store ");
+            try out.append_bytes(stmt.scrutinee_llvm_type);
+            try out.append_byte(cast<u8>(32));
+            try append_expr_value_ref(
+                out, &stmt.scrutinee_insts, stmt.scrutinee_result_id
+            );
+            try out.append_bytes(", ptr %");
+            try out.append_bytes(arm.binding_name);
+            try out.append_bytes(".slot, align 8");
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  %");
+            try out.append_bytes(arm.binding_name);
+            try out.append_bytes(".ptr = getelementptr ");
+            try out.append_bytes(stmt.scrutinee_llvm_type);
+            try out.append_bytes(", ptr %");
+            try out.append_bytes(arm.binding_name);
+            try out.append_bytes(".slot, i32 0, i32 1");
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  %");
+            try out.append_bytes(arm.binding_name);
+            try out.append_bytes(" = load ");
+            try out.append_bytes(arm.payload_type);
+            try out.append_bytes(", ptr %");
+            try out.append_bytes(arm.binding_name);
+            try out.append_bytes(".ptr, align 8");
+            try out.append_byte(cast<u8>(10));
+        }
         let arm_stmts = &arm.arm_stmts;
         var stmt_index = 0;
         while stmt_index < arm_stmts.len() {

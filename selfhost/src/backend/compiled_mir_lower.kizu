@@ -8608,6 +8608,22 @@ fn shadow_binding_name(source_name: []u8, slot: i64) -> ![]u8 {
     return try copied.get(name);
 }
 
+// dispatch_payload_binding_name gives every match arm payload an SSA name unique
+// within the function. Match arms commonly reuse the source name value for
+// different variant payload types, so the source spelling cannot be defined in
+// every arm. The statement node and arm ordinal are stable structural identities.
+fn dispatch_payload_binding_name(statement: i64, arm_index: i64) -> ![]u8 {
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes("dispatch.payload.");
+    try std::fmt::append_i64(&var out, statement);
+    try out.append_byte(cast<u8>(46));
+    try std::fmt::append_i64(&var out, arm_index);
+    let name = out.as_bytes();
+    var copied = std::map::Map<[]u8, []u8>(std::mem::page_allocator());
+    try copied.insert(name, name);
+    return try copied.get(name);
+}
+
 // count_let_bindings_in_block counts the let/var bindings of 'name' in one statement block,
 // descending into while bodies and if then/else blocks so a binding nested in a branch counts
 // alongside one at the enclosing level. Two or more bindings of the same name in a function
@@ -11847,12 +11863,15 @@ fn lower_multi_match_statement(
         );
         let is_default = std::mem::equal_bytes(variant_name, "_");
         var tag = 0 - 1;
+        var payload_kizu = ir_bytes[0..0];
+        var payload_llvm = ir_bytes[0..0];
         if !is_default {
             if scrutinee_is_union {
                 let union_variant = try compiled_fact_lookup::lookup_union_variant_by_prefix_indexed(
                     ir_lookup_index, ir_bytes, ir_bytes[0..0], enum_kizu, variant_name
                 );
                 tag = union_variant.tag;
+                payload_kizu = union_variant.payload_kizu;
             } else {
                 tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
                     ir_lookup_index, ir_bytes, ir_bytes[0..0], enum_kizu, variant_name
@@ -11866,6 +11885,35 @@ fn lower_multi_match_statement(
         );
         let arm_temp = arm_temp_base + index * arm_ssa_stride;
         let arm_string = arm_string_base + index * arm_ssa_stride;
+        var arm_aliases = try copy_local_aliases(aliases);
+        defer arm_aliases.deinit();
+        var payload_binding_name = ir_bytes[0..0];
+        var payload_output_name = ir_bytes[0..0];
+        var has_payload_binding = false;
+        if scrutinee_is_union and !is_default {
+            let binding_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, arm_node, "binding", 0, bs
+            );
+            let binding_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, binding_node, bs
+            );
+            if !std::mem::equal_bytes(binding_kind, "Empty") {
+                payload_binding_name = try ir_contract::body_token_or_empty_from(
+                    ir_bytes, function_name, binding_node, bs
+                );
+                payload_output_name = try dispatch_payload_binding_name(statement, index);
+                payload_llvm = try compiled_type_lower::kizu_type_to_llvm_indexed(
+                    ir_lookup_index, ir_bytes, ir_bytes[0..0], payload_kizu
+                );
+                try compiled_mir_types::push_scoped_local_type(
+                    call_arg_type_cache, payload_binding_name, payload_kizu
+                );
+                has_payload_binding = true;
+                try set_local_alias(
+                    &var arm_aliases, payload_binding_name, payload_output_name
+                );
+            }
+        }
         let return_stmt = try lower_multi_return_statement(
             ir_bytes,
             function_name,
@@ -11875,13 +11923,22 @@ fn lower_multi_match_statement(
             arm_body,
             arm_string,
             arm_temp,
-            aliases,
+            &arm_aliases,
             bs,
             ir_lookup_index, call_arg_type_cache
         );
+        if has_payload_binding {
+            try compiled_mir_types::pop_scoped_local_type(call_arg_type_cache);
+        }
         var arm_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
         try arm_stmts.append(return_stmt);
-        try arms.append(compiled_mir::enum_dispatch_arm(tag, is_default, arm_stmts));
+        if std::mem::len(payload_output_name) > 0 {
+            try arms.append(compiled_mir::enum_dispatch_payload_arm(
+                tag, payload_output_name, payload_llvm, arm_stmts
+            ));
+        } else {
+            try arms.append(compiled_mir::enum_dispatch_arm(tag, is_default, arm_stmts));
+        }
         index = index + 1;
     }
     return compiled_mir::enum_dispatch_stmt(
