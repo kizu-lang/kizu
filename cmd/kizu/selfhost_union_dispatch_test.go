@@ -29,18 +29,27 @@ func TestSelfhostCompiledUnionDispatchUsesUnionFacts(t *testing.T) {
 	if err := interp.New(&out).RunEntry(program, entry); err != nil {
 		t.Fatalf("union dispatch renderer gate failed: %v\n%s", err, out.String())
 	}
-	sections := strings.Split(out.String(), "enum-dispatch-llvm")
-	if len(sections) != 2 {
-		t.Fatalf("renderer gate sections = %d, want 2\n%s", len(sections), out.String())
+	unionAndRest := strings.Split(out.String(), "void-dispatch-llvm\\n")
+	if len(unionAndRest) != 2 {
+		t.Fatalf("renderer gate void sections = %d, want 2\n%s", len(unionAndRest), out.String())
 	}
-	unionLLVM := strings.TrimPrefix(sections[0], "union-dispatch-llvm\\n")
+	unionLLVM := strings.TrimPrefix(unionAndRest[0], "union-dispatch-llvm\\n")
 	if !strings.Contains(unionLLVM, "extractvalue %test.union %value, 0") ||
 		!strings.Contains(unionLLVM, "icmp eq i64 %dispatch0_tag0, 3") ||
 		!strings.Contains(unionLLVM, "%dispatch.payload.test = load %test.payload") ||
 		!strings.Contains(unionLLVM, "extractvalue %test.payload %dispatch.payload.test, 0") {
 		t.Fatalf("union dispatch does not branch on aggregate tag\n%s", unionLLVM)
 	}
-	if strings.Contains(sections[1], "extractvalue") {
-		t.Fatalf("plain enum dispatch unexpectedly extracts an aggregate tag\n%s", sections[1])
+	voidAndEnum := strings.Split(unionAndRest[1], "enum-dispatch-llvm\\n")
+	if len(voidAndEnum) != 2 {
+		t.Fatalf("renderer gate enum sections = %d, want 2\n%s", len(voidAndEnum), out.String())
+	}
+	voidLLVM := voidAndEnum[0]
+	if !strings.Contains(voidLLVM, "%dispatch.payload.void = load %test.payload") ||
+		strings.Count(voidLLVM, "ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }") != 2 {
+		t.Fatalf("union dispatch bare-return arms do not return canonical !void success\n%s", voidLLVM)
+	}
+	if strings.Contains(voidAndEnum[1], "extractvalue") {
+		t.Fatalf("plain enum dispatch unexpectedly extracts an aggregate tag\n%s", voidAndEnum[1])
 	}
 }
