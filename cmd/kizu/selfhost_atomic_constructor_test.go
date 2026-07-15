@@ -292,7 +292,10 @@ func TestSelfhostAtomicBoolTapeAndLLVMContract(t *testing.T) {
 	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
 	render := readSelfhostFile(t, "../../selfhost/src/ir/code_render.kizu")
 	assertAtomicBoolTapeContract(t, codegen)
+	assertAtomicBoolLoadLowering(t, codegen)
+	assertAtomicBoolEscapeUnsupported(t, codegen)
 	assertAtomicBoolLLVMContract(t, render)
+	assertAtomicBoolLoadLLVMContract(t, render)
 }
 
 // assertAtomicBoolTapeContract verifies identity routing and the fixed tape record shape.
@@ -316,6 +319,51 @@ func assertAtomicBoolTapeContract(t *testing.T, codegen string) {
 	atomicReturn := strings.Index(runtimeConstructors, "return try lower_code_atomic_bool_new")
 	if atomicGuard < 0 || atomicReturn <= atomicGuard || atomicReturn >= legacyArena {
 		t.Fatal("known Atomic identity can fall through after an unsupported shape")
+	}
+}
+
+// assertAtomicBoolLoadLowering verifies load is gated by receiver kind and zero arguments.
+func assertAtomicBoolLoadLowering(t *testing.T, codegen string) {
+	t.Helper()
+	dispatch := selfhostKizuFunctionBody(t, codegen, "fn lower_code_runtime_field_expr_method(")
+	atomicGuard := strings.Index(dispatch, "if receiver_kind == code_kind_atomic_bool()")
+	atomicCall := strings.Index(dispatch, "lower_code_atomic_bool_expr_method(")
+	if atomicGuard < 0 || atomicCall <= atomicGuard {
+		t.Fatal("Atomic<bool>.load dispatch is not gated by the evaluated receiver kind")
+	}
+	if strings.Count(dispatch, "lower_code_atomic_bool_expr_method(") != 1 {
+		t.Fatal("Atomic method lowering escaped its receiver-kind dispatch arm")
+	}
+	lower := selfhostKizuFunctionBody(t, codegen, "fn lower_code_atomic_bool_expr_method(")
+	requireSourceFragments(t, "Atomic<bool>.load lowering", lower, []string{
+		`std::mem::equal_bytes(method, "load")`,
+		"args.len != 0",
+		"code.append(code_op_atomic_bool_load())",
+		"code.append(receiver_value)",
+		"kinds.append(code_kind_bool())",
+	})
+	forbidSourceFragments(t, "Atomic<bool>.load spelling dispatch", lower, []string{
+		`"Atomic"`, `"std::atomic"`, "source_path", "code_op_atomic_bool_store",
+	})
+}
+
+// assertAtomicBoolEscapeUnsupported keeps store and ABI/container escape out of this slice.
+func assertAtomicBoolEscapeUnsupported(t *testing.T, codegen string) {
+	t.Helper()
+	if strings.Contains(codegen, "code_op_atomic_bool_store") {
+		t.Fatal("Atomic<bool> store became supported with the load-only capability")
+	}
+	for _, name := range []string{
+		"fn code_return_kind(",
+		"fn code_param_kind(",
+		"fn code_array_element_kind(",
+		"fn code_struct_decl_field_kind(",
+		"fn code_struct_param_field_kind(",
+	} {
+		body := selfhostKizuFunctionBody(t, codegen, name)
+		if strings.Contains(body, "code_kind_atomic_bool") {
+			t.Fatalf("Atomic<bool> escaped through %s", name)
+		}
 	}
 }
 
@@ -348,6 +396,28 @@ func assertAtomicBoolLLVMContract(t *testing.T, render string) {
 		!strings.Contains(valueType, `try w(out, "ptr")`) ||
 		!strings.Contains(valueType, "!is_atomic_bool") {
 		t.Fatal("Atomic<bool> tape kind does not remain a ptr value")
+	}
+}
+
+// assertAtomicBoolLoadLLVMContract verifies the three-slot tape walk and seq_cst byte load.
+func assertAtomicBoolLoadLLVMContract(t *testing.T, render string) {
+	t.Helper()
+	dispatch := selfhostKizuFunctionBody(t, render, "fn render_one_instruction_core_scalar(")
+	requireSourceFragments(t, "Atomic<bool>.load render dispatch", dispatch, []string{
+		"code_op_atomic_bool_load()",
+		"render_atomic_bool_load(out, code, index)",
+	})
+	loadWriter := selfhostKizuFunctionBody(t, render, "fn render_atomic_bool_load(")
+	requireSourceFragments(t, "Atomic<bool>.load LLVM", loadWriter, []string{
+		`" = load atomic i8, ptr %v"`,
+		`" seq_cst, align 1"`,
+		`" = icmp ne i8 %abl"`,
+		`", 0"`,
+	})
+	recordEnd := selfhostKizuFunctionBody(t, render, "fn tape_record_end_core_scalar(")
+	loadRecord := strings.Index(recordEnd, "code_op_atomic_bool_load()")
+	if loadRecord < 0 || !strings.Contains(recordEnd[loadRecord:], "return index + 3") {
+		t.Fatal("ATOMIC_BOOL_LOAD is not a fixed three-slot tape record")
 	}
 }
 
