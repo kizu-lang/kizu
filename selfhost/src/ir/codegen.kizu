@@ -923,6 +923,12 @@ pub fn code_op_atomic_bool_store() -> i64 {
     return 158;
 }
 
+// CHANNEL_I64_NEW initializes one function-local owned-message queue:
+// 'op dst'.
+pub fn code_op_channel_i64_new() -> i64 {
+    return 159;
+}
+
 fn code_defer_runtime_deinit_tag() -> i64 {
     return 0 - 10;
 }
@@ -1128,6 +1134,13 @@ pub fn code_kind_mut_borrow_slice() -> i64 {
 // Atomic<bool> is a pointer to byte-sized atomic storage in the LLVM renderer.
 pub fn code_kind_atomic_bool() -> i64 {
     return 21;
+}
+
+// Channel<i64> is a pointer to function-local queue storage initialized by
+// CHANNEL_I64_NEW. Parameter/return/container escape stays unsupported because
+// none of those kind classifiers accept this value.
+pub fn code_kind_channel_i64() -> i64 {
+    return 22;
 }
 
 pub fn code_kind_is_mut_borrow_slice(kind: i64) -> bool {
@@ -1700,6 +1713,8 @@ pub fn lower_code_module(
     constructor_identities: &constructor_facts::ConstructorFacts,
     atomic_constructor_id: i64,
     bool_type_id: i64,
+    channel_constructor_id: i64,
+    i64_type_id: i64,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
@@ -1715,7 +1730,9 @@ pub fn lower_code_module(
         &constructor_identities.constructor_ids,
         &constructor_identities.type_arg0_ids,
         atomic_constructor_id,
-        bool_type_id
+        bool_type_id,
+        channel_constructor_id,
+        i64_type_id
     );
     return try lower_code_program(text, ast, root, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records);
 }
@@ -1734,7 +1751,9 @@ fn scratch_init(
     constructor_ids: &std::array::Array<i64>,
     type_arg0_ids: &std::array::Array<i64>,
     atomic_constructor_id: i64,
-    bool_type_id: i64
+    bool_type_id: i64,
+    channel_constructor_id: i64,
+    i64_type_id: i64
 ) -> !void {
     let fact_count = node_starts.len();
     if node_ends.len() != fact_count or
@@ -1755,6 +1774,9 @@ fn scratch_init(
         var resolved_kind = 0 - 1;
         if constructor_id == atomic_constructor_id and type_arg0_id == bool_type_id {
             resolved_kind = code_kind_atomic_bool();
+        }
+        if constructor_id == channel_constructor_id and type_arg0_id == i64_type_id {
+            resolved_kind = code_kind_channel_i64();
         }
         try args_scratch.append(resolved_kind);
         index = index + 1;
@@ -10253,6 +10275,10 @@ fn lower_code_runtime_constructor(
             next_value
         );
     }
+    let channel_i64_kind = code_kind_channel_i64();
+    if resolved_kind == channel_i64_kind {
+        return try lower_code_channel_i64_new(args, code, kinds, next_value);
+    }
     let arena_new = try lower_code_arena_new(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if arena_new.ok {
         return arena_new;
@@ -10270,6 +10296,21 @@ fn lower_code_runtime_constructor(
         return try lower_code_box_new(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
     return code_eval_unsupported(next_value);
+}
+
+fn lower_code_channel_i64_new(
+    args: std::kizu::ast::ChildRange,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    next_value: i64
+) -> !CodeEval {
+    if args.len != 0 {
+        return code_eval_unsupported(next_value);
+    }
+    try code.append(code_op_channel_i64_new());
+    try code.append(next_value);
+    try kinds.append(code_kind_channel_i64());
+    return code_eval_value(next_value, next_value + 1);
 }
 
 // scratch_constructor_kind resolves a TypeApply callee solely through the immutable facts prefix
