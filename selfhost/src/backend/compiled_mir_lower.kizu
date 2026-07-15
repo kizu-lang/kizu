@@ -6923,8 +6923,8 @@ fn while_match_arms_are_supported(
 // one arm and returns from every other, and a trailing error-call return. It reuses the type-apply
 // loop's plain-call-let / bool-true-header / error-return detectors; the discriminator is the
 // 3-statement body ending in a Match (the type-apply loop ends in parse/append/if/guard/latch),
-// so the two never overlap, and the latch-in-a-match arm distinguishes it from the bare
-// EnumDispatch shape (whose every arm returns).
+// so the two never overlap, and the cursor-reassigning latch arm distinguishes it from the bare
+// EnumDispatch shape (whose nonterminal arms are side-effecting expression statements).
 fn is_while_match_loop_shape(
     ir_bytes: []u8,
     function_name: []u8,
@@ -8360,13 +8360,11 @@ pub fn lower_multi_statement_function(
                         try_counter = expr_result.try_counter;
                     } else {
                     if std::mem::equal_bytes(stmt_kind, "Match") {
-                        // A non-bool enum-dispatch match statement ('match <scrutinee> { Variant
-                        // => return <expr>, _ => return <expr> }') lowers to a branch-control-flow
-                        // EnumDispatch stmt: the scrutinee becomes an i64 discriminant and each
-                        // arm body reuses the shared return lowering (issue 1157 PR-PH / B3). Every
-                        // arm returns, so the dispatch is terminal -- like a Return, it threads no
-                        // updated counters back into the loop.
-                        try stmts.append(try lower_multi_match_statement(
+                        // A non-bool enum-dispatch match lowers to branch-control-flow EnumDispatch.
+                        // Terminal return arms stay terminal; side-effecting expression arms join
+                        // and let later top-level statements continue. The result threads every
+                        // namespace counter past the scrutinee and private arm windows.
+                        let match_result = try lower_multi_match_statement(
                             ir_bytes,
                             function_name,
                             module_prefix,
@@ -8375,11 +8373,16 @@ pub fn lower_multi_statement_function(
                             statement,
                             string_counter,
                             temp_counter,
+                            try_counter,
                             &var aliases,
+                            &var stmts,
                             bs,
                             ir_lookup_index,
                             &var call_arg_type_cache
-                        ));
+                        );
+                        string_counter = match_result.string_counter;
+                        temp_counter = match_result.temp_counter;
+                        try_counter = match_result.try_counter;
                     } else {
                     if std::mem::equal_bytes(stmt_kind, "Assign") {
                         // A top-level '<local> = try <free-call>(args);' reassignment threads the
@@ -8450,7 +8453,7 @@ pub fn lower_single_match_statement_function(
     var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
     defer call_arg_type_cache.deinit();
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-    try stmts.append(try lower_multi_match_statement(
+    let _match_result = try lower_multi_match_statement(
         ir_bytes,
         function_name,
         module_prefix,
@@ -8459,11 +8462,13 @@ pub fn lower_single_match_statement_function(
         statement,
         0,
         0,
+        0,
         &var aliases,
+        &var stmts,
         bs,
         ir_lookup_index,
         &var call_arg_type_cache
-    ));
+    );
     return compiled_mir_function::multi_statement_function(
         llvm_symbol,
         llvm_return_type,
@@ -8531,6 +8536,12 @@ pub struct MultiIfLowerResult {
 }
 pub struct MultiExprLowerResult {
     pub string_counter: i64,
+    pub try_counter: i64,
+}
+
+pub struct MultiMatchLowerResult {
+    pub string_counter: i64,
+    pub temp_counter: i64,
     pub try_counter: i64,
 }
 
@@ -11777,21 +11788,18 @@ fn lower_multi_return_statement(
     );
     return compiled_mir::return_expr_stmt(string_counter, result_id, insts);
 }
-// lower_multi_match_statement lowers a non-bool enum-dispatch match statement
-// ('match <scrutinee> { Variant => return <expr>, _ => return <expr> }') into an EnumDispatch
+// lower_multi_match_statement lowers a non-bool enum-dispatch match statement into an EnumDispatch
 // stmt (issue 1157 PR-PH / B3 / NEW-B). The scrutinee lowers to an i64 discriminant through
 // lower_expr_into (a bare enum Var, a 'token.kind' field access, or a depth-2
 // 'expr.next.kind' field access); each arm's variant tag is resolved from the enum-variant facts
-// and its 'return <expr>' body reuses the shared
-// lower_multi_return_statement path. The renderer currently arm-scopes the value-return
-// ('return <int/var>') and error-return ('return error(..)') wraps; other return shapes (call /
-// struct success wraps) surface an explicit blocker at emit time until they are arm-scoped too.
-// The trailing '_' default (or the final variant of an exhaustive match) carries no tag and
-// renders as the unconditional fallthrough arm. Every arm returns, so the statement is terminal.
+// and its body reuses the shared return or side-effecting-expression lowerer. The trailing '_'
+// default (or final variant of an exhaustive match) carries no tag and renders as the unconditional
+// dispatch fallthrough arm. Effect-only bodies branch to a common continuation; returns terminate.
 // Each arm reserves a private temp/string SSA window (arm_index * ARM_SSA_STRIDE off the
 // scrutinee end) so the per-arm '%t<id>' temps and string globals never collide across the arm
 // blocks of the same function -- the same fixed-stride namespacing the if-renderer applies to
-// its then/else block labels (if_index * 1000).
+// its then/else block labels (if_index * 1000). The result advances the outer counters beyond all
+// arm windows and threads try indices sequentially because try labels are function-global.
 fn lower_multi_match_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -11801,11 +11809,13 @@ fn lower_multi_match_statement(
     statement: i64,
     string_counter: i64,
     temp_counter: i64,
+    try_counter: i64,
     aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
-) -> !compiled_mir::MirStmt {
+) -> !MultiMatchLowerResult {
     let arm_ssa_stride = 1000;
     // The scrutinee lowers to an i64 discriminant. A bare enum Var resolves its enum type from
     // the parameter/local kizu type; field access scrutinees resolve through the shared recursive
@@ -11850,6 +11860,7 @@ fn lower_multi_match_statement(
         return error("compiled mir: enum-dispatch match requires at least one arm");
     }
     var arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    var next_try_counter = try_counter;
     var index = 0;
     while index < arm_count {
         let arm_node = try ir_contract::body_child_sequence_from(
@@ -11878,10 +11889,11 @@ fn lower_multi_match_statement(
                 );
             }
         }
-        // Each arm body is a single 'return <expr>'. Reuse lower_multi_return_statement off the
-        // arm's private SSA window so its temps/strings stay disjoint from the other arms.
-        let arm_body = try dispatch_arm_return_statement(
+        let arm_body = try dispatch_arm_body_statement(
             ir_bytes, function_name, arm_node, bs
+        );
+        let arm_body_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, arm_body, bs
         );
         let arm_temp = arm_temp_base + index * arm_ssa_stride;
         let arm_string = arm_string_base + index * arm_ssa_stride;
@@ -11914,36 +11926,80 @@ fn lower_multi_match_statement(
                 );
             }
         }
-        let return_stmt = try lower_multi_return_statement(
-            ir_bytes,
-            function_name,
-            module_prefix,
-            llvm_return_type,
-            locals_spec,
-            arm_body,
-            arm_string,
-            arm_temp,
-            &arm_aliases,
-            bs,
-            ir_lookup_index, call_arg_type_cache
-        );
+        var arm_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+        var falls_through = false;
+        if std::mem::equal_bytes(arm_body_kind, "Return") {
+            try arm_stmts.append(try lower_multi_return_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                locals_spec,
+                arm_body,
+                arm_string,
+                arm_temp,
+                &arm_aliases,
+                bs,
+                ir_lookup_index, call_arg_type_cache
+            ));
+        } else {
+            if !std::mem::equal_bytes(arm_body_kind, "ExprStmt") {
+                return error("compiled mir: enum-dispatch arm body must return or be an expression statement");
+            }
+            let expr_result = try lower_multi_expr_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                locals_spec,
+                arm_body,
+                arm_string,
+                arm_temp,
+                next_try_counter,
+                &arm_aliases,
+                &var arm_stmts,
+                bs,
+                ir_lookup_index,
+                call_arg_type_cache
+            );
+            if expr_result.string_counter > arm_string + arm_ssa_stride {
+                return error("compiled mir: enum-dispatch arm exhausted its string SSA window");
+            }
+            next_try_counter = expr_result.try_counter;
+            falls_through = true;
+        }
         if has_payload_binding {
             try compiled_mir_types::pop_scoped_local_type(call_arg_type_cache);
         }
-        var arm_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-        try arm_stmts.append(return_stmt);
         if std::mem::len(payload_output_name) > 0 {
-            try arms.append(compiled_mir::enum_dispatch_payload_arm(
-                tag, payload_output_name, payload_llvm, arm_stmts
-            ));
+            if falls_through {
+                try arms.append(compiled_mir::enum_dispatch_fallthrough_payload_arm(
+                    tag, payload_output_name, payload_llvm, arm_stmts
+                ));
+            } else {
+                try arms.append(compiled_mir::enum_dispatch_payload_arm(
+                    tag, payload_output_name, payload_llvm, arm_stmts
+                ));
+            }
         } else {
-            try arms.append(compiled_mir::enum_dispatch_arm(tag, is_default, arm_stmts));
+            if falls_through {
+                try arms.append(compiled_mir::enum_dispatch_fallthrough_arm(
+                    tag, is_default, arm_stmts
+                ));
+            } else {
+                try arms.append(compiled_mir::enum_dispatch_arm(tag, is_default, arm_stmts));
+            }
         }
         index = index + 1;
     }
-    return compiled_mir::enum_dispatch_stmt(
+    try stmts.append(compiled_mir::enum_dispatch_stmt(
         scrutinee_insts, scrutinee_result_id, scrutinee_llvm_type, scrutinee_is_union, arms
-    );
+    ));
+    return MultiMatchLowerResult {
+        string_counter: arm_string_base + arm_count * arm_ssa_stride,
+        temp_counter: arm_temp_base + arm_count * arm_ssa_stride,
+        try_counter: next_try_counter
+    };
 }
 // resolve_dispatch_enum_kizu_type resolves the fully-qualified enum kizu type of an
 // enum-dispatch match scrutinee: a bare Var reads its parameter/local kizu type, and a
@@ -11980,11 +12036,11 @@ fn resolve_dispatch_enum_kizu_type(
     }
     return error("compiled mir: enum-dispatch scrutinee must be a variable or field access");
 }
-// dispatch_arm_return_statement returns the 'return <expr>' statement node backing one
-// enum-dispatch arm body. An arm body is either the Return node directly or a single-statement
-// block wrapping it; any other shape (an expression statement, multi-statement body) is not a
-// dispatch return and surfaces as an explicit blocker (issue 1157 PR-PH / B3).
-fn dispatch_arm_return_statement(
+// dispatch_arm_body_statement returns the single Return or ExprStmt backing an enum-dispatch
+// arm. Return arms terminate in place; side-effecting ExprStmt arms continue through the shared
+// dispatch join. Blocks must contain exactly one such statement so control-flow ownership stays
+// explicit in the MIR arm rather than silently dropping trailing work.
+fn dispatch_arm_body_statement(
     ir_bytes: []u8,
     function_name: []u8,
     arm_node: i64,
@@ -11994,7 +12050,8 @@ fn dispatch_arm_return_statement(
         ir_bytes, function_name, arm_node, "body", 0, bs
     );
     let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body, bs);
-    if std::mem::equal_bytes(body_kind, "Return") {
+    if std::mem::equal_bytes(body_kind, "Return") or
+        std::mem::equal_bytes(body_kind, "ExprStmt") {
         return body;
     }
     if std::mem::equal_bytes(body_kind, "Block") {
@@ -12002,18 +12059,19 @@ fn dispatch_arm_return_statement(
             ir_bytes, function_name, body, "statement", 1, bs
         );
         if extra >= 0 {
-            return error("compiled mir: enum-dispatch arm body must be a single return");
+            return error("compiled mir: enum-dispatch arm body must be a single statement");
         }
         let inner = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, body, "statement", 0, bs
         );
         let inner_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, inner, bs);
-        if !std::mem::equal_bytes(inner_kind, "Return") {
-            return error("compiled mir: enum-dispatch arm body must return");
+        if !std::mem::equal_bytes(inner_kind, "Return") and
+            !std::mem::equal_bytes(inner_kind, "ExprStmt") {
+            return error("compiled mir: enum-dispatch arm block must return or contain an expression statement");
         }
         return inner;
     }
-    return error("compiled mir: enum-dispatch arm body must be a return statement");
+    return error("compiled mir: enum-dispatch arm body must return or be an expression statement");
 }
 
 // lower_multi_return_value_array_get lowers 'return try <receiver>.get(<expr>);' where

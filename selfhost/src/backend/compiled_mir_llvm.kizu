@@ -71,6 +71,36 @@ pub fn union_dispatch_renderer_gate() -> !void {
     let enum_bytes = enum_out.as_bytes();
     print("enum-dispatch-llvm\n");
     print(enum_bytes);
+
+    var fallthrough_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try fallthrough_scrutinee.append(compiled_mir::var_expr_inst(0, "i64", "value"));
+    var effect_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    var effect_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try effect_stmts.append(compiled_mir::void_try_call_stmt(
+        "%kizu.error.void", "test", "effect", 0, 7, effect_args
+    ));
+    var fallthrough_arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    try fallthrough_arms.append(compiled_mir::enum_dispatch_fallthrough_arm(
+        3, false, effect_stmts
+    ));
+    try fallthrough_arms.append(compiled_mir::enum_dispatch_arm(
+        -1, true, try dispatch_gate_void_arm()
+    ));
+    var fallthrough_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try fallthrough_stmts.append(compiled_mir::enum_dispatch_stmt(
+        fallthrough_scrutinee, 0, "i64", false, fallthrough_arms
+    ));
+    try fallthrough_stmts.append(compiled_mir::return_void_success_stmt());
+    var fallthrough_function = compiled_mir_function::multi_statement_function(
+        "fallthrough_dispatch_gate", "%kizu.error.void", "i64 value", fallthrough_stmts
+    );
+    defer fallthrough_function.deinit();
+    var fallthrough_out = std::string::String(std::mem::page_allocator());
+    defer fallthrough_out.deinit();
+    try append_function(&var fallthrough_out, &fallthrough_function);
+    let fallthrough_bytes = fallthrough_out.as_bytes();
+    print("fallthrough-dispatch-llvm\n");
+    print(fallthrough_bytes);
     return;
 }
 
@@ -4605,10 +4635,10 @@ fn append_traversal_arm_block(
 
 // append_multi_enum_dispatch renders a non-bool enum-dispatch match statement (issue 1157
 // PR-PH / B3): it emits the scrutinee discriminant instructions, then an exhaustive icmp/br
-// dispatch chain over the arms, and one block per arm whose lowered 'return <expr>' statements
-// emit a real value (no 'unreachable'). The last arm is the unconditional fallthrough. The
-// block labels are namespaced by the render-time statement index (local_prefix) so several
-// dispatch matches in one function never collide.
+// dispatch chain over the arms, and one block per arm. Terminal arms render a real return;
+// effect-only arms render their side effects and branch to one shared continuation block. The
+// last arm is the unconditional dispatch fallthrough. Block labels are namespaced by the
+// render-time statement index (local_prefix) so several matches in one function never collide.
 fn append_multi_enum_dispatch(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -4628,6 +4658,9 @@ fn append_multi_enum_dispatch(
     }
     let arms = &stmt.arms;
     let arm_count = arms.len();
+    if arm_count > 1000 {
+        return error("compiled mir llvm: enum-dispatch exceeds its arm namespace");
+    }
     // Phase 1: the icmp/br dispatch chain. The last arm is the exhaustive fallthrough.
     var index = 0;
     while index < arm_count {
@@ -4663,8 +4696,10 @@ fn append_multi_enum_dispatch(
         }
         index = index + 1;
     }
-    // Phase 2: the arm blocks, each rendering its lowered return through the dispatch-scoped
-    // return renderer so the per-arm value-wrap SSA names never collide across arm blocks.
+    // Phase 2: render each terminal arm through the dispatch-scoped return path. Effect-only
+    // arms continue to a shared join; each effect gets a statement-private local prefix in the
+    // 7000000+ namespace while its globally threaded try_index owns the failure/continuation labels.
+    var has_fallthrough = false;
     var arm_index = 0;
     while arm_index < arm_count {
         let arm = try arms.at(arm_index);
@@ -4708,20 +4743,78 @@ fn append_multi_enum_dispatch(
             try out.append_byte(cast<u8>(10));
         }
         let arm_stmts = &arm.arm_stmts;
+        if arm_stmts.len() < 1 {
+            return error("compiled mir llvm: enum-dispatch arm body must not be empty");
+        }
+        if !arm.falls_through and arm_stmts.len() != 1 {
+            return error("compiled mir llvm: terminal enum-dispatch arm must contain one return");
+        }
+        if arm_stmts.len() > 1000 {
+            return error("compiled mir llvm: enum-dispatch arm exceeds its statement namespace");
+        }
         var stmt_index = 0;
         while stmt_index < arm_stmts.len() {
             let arm_stmt = try arm_stmts.at(stmt_index);
-            try append_dispatch_arm_return(
-                out,
-                function,
-                arm_stmt,
-                local_prefix * 1000 + arm_index
-            );
+            if arm.falls_through {
+                try append_dispatch_arm_effect(
+                    out,
+                    function,
+                    arm_stmt,
+                    dispatch_effect_prefix(local_prefix, arm_index, stmt_index)
+                );
+            } else {
+                try append_dispatch_arm_return(
+                    out,
+                    function,
+                    arm_stmt,
+                    local_prefix * 1000 + arm_index
+                );
+            }
             stmt_index = stmt_index + 1;
+        }
+        if arm.falls_through {
+            try out.append_bytes("  br label %");
+            try append_dispatch_label(out, local_prefix, "cont", 0);
+            try out.append_byte(cast<u8>(10));
+            has_fallthrough = true;
         }
         arm_index = arm_index + 1;
     }
+    if has_fallthrough {
+        try append_dispatch_label(out, local_prefix, "cont", 0);
+        try append_ll_line(out, ":");
+    }
     return;
+}
+
+// append_dispatch_arm_effect admits only MIR statements whose renderer leaves the current block
+// open. This makes the falls_through arm contract explicit: a return-shaped statement can never
+// be followed by the dispatch join branch, and unsupported value-producing shapes surface before
+// malformed LLVM is emitted.
+fn append_dispatch_arm_effect(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirStmt,
+    local_prefix: i64
+) -> !void {
+    match stmt {
+        StringTryAppend(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
+        ArrayTryAppend(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
+        ArrayTrySet(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
+        VoidTryCall(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
+        OwnedDeinit(payload) => try append_multi_stmt(out, function, stmt, local_prefix);,
+        _ => return error("compiled mir llvm: fallthrough enum-dispatch arm must contain side effects");,
+    }
+    return;
+}
+
+// dispatch_effect_prefix reserves call-argument setup names for effect-only dispatch arms. The
+// existing renderer uses small prefixes for top-level statements, 1000000+ for expression calls,
+// 3000000+ for struct-field calls, and 5000000+ for nested structs. The 7000000+ namespace keeps
+// dispatch effects disjoint; one million slots per match, one thousand per arm, and one per arm
+// statement stay injective under the bounds checked by append_multi_enum_dispatch.
+fn dispatch_effect_prefix(match_index: i64, arm_index: i64, stmt_index: i64) -> i64 {
+    return 7000000 + match_index * 1000000 + arm_index * 1000 + stmt_index;
 }
 
 // append_dispatch_arm_return renders one enum-dispatch arm's lowered 'return <expr>'. A value
@@ -4875,7 +4968,7 @@ fn append_dispatch_label(
 }
 
 // append_enum_dispatch_globals emits the string-literal globals referenced by the scrutinee
-// instructions and each arm's lowered return statements (issue 1157 PR-PH / B3).
+// instructions and every terminal or effect-only arm statement (issue 1157 PR-PH / B3).
 fn append_enum_dispatch_globals(
     out: &var std::string::String,
     llvm_symbol: []u8,

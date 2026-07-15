@@ -49,7 +49,34 @@ func TestSelfhostCompiledUnionDispatchUsesUnionFacts(t *testing.T) {
 		strings.Count(voidLLVM, "ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }") != 2 {
 		t.Fatalf("union dispatch bare-return arms do not return canonical !void success\n%s", voidLLVM)
 	}
-	if strings.Contains(voidAndEnum[1], "extractvalue") {
-		t.Fatalf("plain enum dispatch unexpectedly extracts an aggregate tag\n%s", voidAndEnum[1])
+	assertFallthroughDispatchLLVM(t, voidAndEnum[1])
+}
+
+// assertFallthroughDispatchLLVM checks the mixed terminal/effect arm CFG.
+func assertFallthroughDispatchLLVM(t *testing.T, output string) {
+	t.Helper()
+	enumAndFallthrough := strings.Split(output, "fallthrough-dispatch-llvm\\n")
+	if len(enumAndFallthrough) != 2 {
+		t.Fatalf(
+			"renderer gate fallthrough sections = %d, want 2\n%s",
+			len(enumAndFallthrough),
+			output,
+		)
+	}
+	if strings.Contains(enumAndFallthrough[0], "extractvalue") {
+		t.Fatalf("plain enum dispatch unexpectedly extracts an aggregate tag\n%s", enumAndFallthrough[0])
+	}
+	fallthroughLLVM := enumAndFallthrough[1]
+	const canonicalSuccess = "ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }"
+	const effectCall = "%voidtry7_call = call %kizu.error.void @kizu_testeffect()"
+	terminalThenJoin := "dispatch0_arm_1:\n  " + canonicalSuccess +
+		"\ndispatch0_cont0:\n  " + canonicalSuccess
+	if !strings.Contains(fallthroughLLVM, effectCall) ||
+		!strings.Contains(fallthroughLLVM, "try7_cont:\n  br label %dispatch0_cont0") ||
+		!strings.Contains(fallthroughLLVM, terminalThenJoin) {
+		t.Fatalf(
+			"mixed terminal/fallthrough dispatch does not join after its effect arm\n%s",
+			fallthroughLLVM,
+		)
 	}
 }
