@@ -357,7 +357,7 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"%run_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%run_render = call %kizu.error.owned " +
-			"@kizu_selfhost__ir_code_render_render_run_artifact",
+			"@kizu_selfhost__cli_execute_render_checked_run_artifact",
 		"%test_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
 		"%test_executable = call %kizu.selfhost.executable " +
@@ -418,6 +418,7 @@ func requiredLLVMExecutableFragments() []string {
 		"%parsed_eu = call %kizu.error.parse_result @kizu_kizu__parser_parse_program(",
 		"@kizu_kizu__ast_ast_add_node",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_lower_program",
+		"define %kizu.error.owned @kizu_selfhost__cli_execute_render_checked_run_artifact",
 		"define %kizu.error.owned @kizu_selfhost__ir_code_render_render_run_artifact",
 	}
 	fragments = append(fragments, requiredLLVMRunCodegenLoweringFragments()...)

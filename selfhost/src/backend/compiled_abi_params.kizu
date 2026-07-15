@@ -65,9 +65,11 @@ pub fn kizu_type_to_abi(kizu_type: []u8) -> ![]u8 {
         return "i64";
     }
     // SourceFile is the selfhost::source record struct. Its closures take it by
-    // borrow ('&SourceFile'), and the leading '&' is stripped above, so the bare
-    // spelling is what reaches here.
-    if std::mem::equal_bytes(kizu_type, "SourceFile") {
+    // borrow, and the leading borrow marker is stripped above. Bare, imported,
+    // and fully qualified spellings share the same source-file value ABI.
+    if std::mem::equal_bytes(kizu_type, "SourceFile") or
+        std::mem::equal_bytes(kizu_type, "source::SourceFile") or
+        std::mem::equal_bytes(kizu_type, "selfhost::source::SourceFile") {
         return "%kizu.selfhost.source.source_file";
     }
     if std::mem::equal_bytes(kizu_type, "Position") {
@@ -104,6 +106,7 @@ pub fn kizu_type_to_abi(kizu_type: []u8) -> ![]u8 {
     // Its four Array<i64> fields are emitted as struct facts from the collector
     // root and share the corresponding four-%kizu.owned LLVM value layout.
     if std::mem::equal_bytes(kizu_type, "ConstructorFacts") or
+        std::mem::equal_bytes(kizu_type, "constructor_facts::ConstructorFacts") or
         std::mem::equal_bytes(
             kizu_type, "selfhost::types::constructor_facts::ConstructorFacts"
         ) {
@@ -284,6 +287,8 @@ function-signature-param demo 3 source:runtime:[]u8
 function-signature-param demo 4 pos:runtime:std::kizu::lexer::Position
 function-signature-param demo 5 tok:runtime:std::kizu::lexer::Token
 function-signature-param demo 6 ref:runtime:&u8
+function-signature-param demo 7 file:runtime:&source::SourceFile
+function-signature-param demo 8 facts:runtime:&var_constructor_facts::ConstructorFacts
 function-body demo";
 
     var spec = std::string::String(allocator);
@@ -293,7 +298,7 @@ function-body demo";
     var indexed_spec = std::string::String(allocator);
     try append_params_spec_indexed(&indexed_facts, indexed_spec, facts, "demo");
 
-    let expected = "i8 byte;i64 count;i64 offset;%kizu.slice.u8 source;%kizu.kizu.lexer.position pos;%kizu.kizu.lexer.token tok;i8 ref";
+    let expected = "i8 byte;i64 count;i64 offset;%kizu.slice.u8 source;%kizu.kizu.lexer.position pos;%kizu.kizu.lexer.token tok;i8 ref;%kizu.selfhost.source.source_file file;%kizu.selfhost.types.constructor_facts.constructor_facts facts";
     let spec_bytes = spec.as_bytes();
     let indexed_spec_bytes = indexed_spec.as_bytes();
     std::testing::expect_equal<[]u8>(expected, spec_bytes);
@@ -309,8 +314,26 @@ function-body demo";
     std::testing::expect_equal<[]u8>("%kizu.kizu.ast.node_id", try kizu_type_to_abi("NodeId"));
     std::testing::expect_equal<[]u8>("%kizu.kizu.ast.child_range", try kizu_type_to_abi("ChildRange"));
     std::testing::expect_equal<[]u8>(
+        "%kizu.selfhost.source.source_file", try kizu_type_to_abi("SourceFile")
+    );
+    std::testing::expect_equal<[]u8>(
+        "%kizu.selfhost.source.source_file", try kizu_type_to_abi("source::SourceFile")
+    );
+    std::testing::expect_equal<[]u8>(
+        "%kizu.selfhost.source.source_file",
+        try kizu_type_to_abi("selfhost::source::SourceFile")
+    );
+    std::testing::expect_equal<[]u8>(
         "%kizu.selfhost.types.constructor_facts.constructor_facts",
         try kizu_type_to_abi("ConstructorFacts")
+    );
+    std::testing::expect_equal<[]u8>(
+        "%kizu.selfhost.types.constructor_facts.constructor_facts",
+        try kizu_type_to_abi("constructor_facts::ConstructorFacts")
+    );
+    std::testing::expect_equal<[]u8>(
+        "%kizu.selfhost.types.constructor_facts.constructor_facts",
+        try kizu_type_to_abi("selfhost::types::constructor_facts::ConstructorFacts")
     );
 
     // The loader 'source_file' closure mixes a SourceKind enum (i64 ABI) with
@@ -362,7 +385,7 @@ function-body source_file";
     print("abi-params-spec");
     print(expected);
     print("abi-params-count");
-    print(7);
+    print(9);
     print("abi-params-loader-spec");
     print(loader_expected);
     return;

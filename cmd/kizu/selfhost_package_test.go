@@ -1951,7 +1951,7 @@ func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
 	for _, fragment := range []string{
 		"@kizu_selfhost__cli_parse_validated_ast",
 		"@kizu_kizu__parser_parse_program",
-		"@kizu_selfhost__ir_code_render_render_run_artifact",
+		"@kizu_selfhost__cli_execute_render_checked_run_artifact",
 		"@kizu_selfhost__cli_lower_test_parse_result",
 	} {
 		if !strings.Contains(combined, fragment) {
@@ -2079,7 +2079,7 @@ func assertHostedRunLLVMResponsibilities(
 	t.Helper()
 	requiredRun := []string{
 		"@kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_selfhost__ir_code_render_render_run_artifact",
+		"@kizu_selfhost__cli_execute_render_checked_run_artifact",
 		"@kizu_selfhost__cli_emit_run_codegen_artifact",
 		"@kizu_rt_fs_write_file",
 		"@kizu_rt_process_spawn_wait8",
@@ -2629,7 +2629,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_cli_run_blocks(",
 		"cli_check_gate_llvm::append_static_check_gate(",
 		"@kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_selfhost__ir_code_render_render_run_artifact",
+		"@kizu_selfhost__cli_execute_render_checked_run_artifact",
 		"@kizu_selfhost__cli_emit_run_codegen_artifact",
 	},
 	"../../selfhost/src/backend/cli_ast_boundary_llvm.kizu": {

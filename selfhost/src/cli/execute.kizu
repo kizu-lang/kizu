@@ -3,8 +3,42 @@ import selfhost::cli::check;
 import selfhost::cli::diagnostics;
 import selfhost::cli::output;
 import selfhost::diagnostic;
+import selfhost::ir::code_render;
 import selfhost::parser;
 import selfhost::source::loader;
+import selfhost::types::constructor_facts;
+
+// Hosted stage2 has already completed the static check before entering this helper.
+// Keep ConstructorFacts construction and collection on the compiled Kizu side so the
+// handwritten CLI LLVM only passes the real source inputs across one stable boundary.
+pub fn render_checked_run_artifact(
+    allocator: Allocator,
+    source_path: []u8,
+    text: []u8,
+    parsed: std::kizu::ast::ParseResult
+) -> !std::string::String {
+    var constructor_identities = constructor_facts::init(allocator);
+    // The hosted CLI is a one-shot process. Its current compiled MIR can deinit an
+    // owned Array local, but cannot yet lower ConstructorFacts aggregate deinit; the
+    // process therefore owns these facts until exit, matching the renderer tape arrays.
+    try constructor_facts::collect_checked(
+        text,
+        parsed.ast,
+        parsed.root,
+        &var constructor_identities
+    );
+    let atomic_constructor_id = constructor_facts::constructor_atomic();
+    let bool_type_id = constructor_facts::type_bool();
+    return try code_render::render_run_artifact(
+        allocator,
+        source_path,
+        text,
+        parsed,
+        &constructor_identities,
+        atomic_constructor_id,
+        bool_type_id
+    );
+}
 
 pub fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let file_text = try std::fs::read_file(io, path);
@@ -24,7 +58,19 @@ pub fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
         validation_ok
     );
     defer parsed.deinit();
-    if !(try check::checked_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
+    var constructor_identities = constructor_facts::init(allocator);
+    defer constructor_identities.deinit();
+    let atomic_constructor_id = constructor_facts::constructor_atomic();
+    let bool_type_id = constructor_facts::type_bool();
+    if !(try check::checked_ast_node(
+        allocator,
+        io,
+        files,
+        file,
+        parsed.ast,
+        parsed.root,
+        &var constructor_identities
+    )) {
         return std::process::exit_code(1);
     }
     var module = try backend::render_run_codegen_artifact(
@@ -32,7 +78,10 @@ pub fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
         path,
         file_text,
         parsed.ast,
-        parsed.root
+        parsed.root,
+        &constructor_identities,
+        atomic_constructor_id,
+        bool_type_id
     );
     defer module.deinit();
     let module_bytes = module.as_bytes();
@@ -80,7 +129,17 @@ pub fn test_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
         validation_ok
     );
     defer parsed.deinit();
-    if !(try check::checked_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
+    var constructor_identities = constructor_facts::init(allocator);
+    defer constructor_identities.deinit();
+    if !(try check::checked_ast_node(
+        allocator,
+        io,
+        files,
+        file,
+        parsed.ast,
+        parsed.root,
+        &var constructor_identities
+    )) {
         return std::process::exit_code(1);
     }
     let executable = try backend::lower_test_executable(file_text, parsed.ast, parsed.root);
