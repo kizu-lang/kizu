@@ -130,6 +130,10 @@ fn expect_fail_message() -> []u8 {
     return "error: runtime error: expected condition to be true";
 }
 
+fn channel_i64_empty_message() -> []u8 {
+    return "error: runtime error: channel is empty";
+}
+
 // render_expect_fail_global emits the expectation-failure message global the
 // EXPECT fail blocks point their trap slice at (message plus a newline byte).
 fn render_expect_fail_global(out: &var std::string::String) -> !void {
@@ -137,6 +141,23 @@ fn render_expect_fail_global(out: &var std::string::String) -> !void {
     let message_len = std::mem::len(message);
     let payload_len = message_len + 1;
     try w(out, "@.kizu.run.expect_fail = private unnamed_addr constant [");
+    try wi(out, payload_len);
+    try w(out, " x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try w(out, message);
+    try w(out, "\0A");
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
+    return;
+}
+
+// render_channel_i64_empty_global emits the immutable runtime-error line used
+// by the empty recv trap, including its trailing newline byte.
+fn render_channel_i64_empty_global(out: &var std::string::String) -> !void {
+    let message = channel_i64_empty_message();
+    let message_len = std::mem::len(message);
+    let payload_len = message_len + 1;
+    try w(out, "@.kizu.run.channel_i64_empty = private unnamed_addr constant [");
     try wi(out, payload_len);
     try w(out, " x i8] c");
     try out.append_byte(cast<u8>(34));
@@ -285,6 +306,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try render_bool_print_global(out, "@.kizu.run.bool_true = private unnamed_addr constant [5 x i8] c", "true");
     try render_bool_print_global(out, "@.kizu.run.bool_false = private unnamed_addr constant [6 x i8] c", "false");
     try render_expect_fail_global(out);
+    try render_channel_i64_empty_global(out);
     try w(out, "@.kizu.run.string_truncate_oob = private unnamed_addr constant [36 x i8] c");
     try out.append_byte(cast<u8>(34));
     try w(out, "String.truncate length out of bounds");
@@ -1988,6 +2010,10 @@ fn render_one_instruction_core_scalar(
     if op == channel_i64_close {
         try render_channel_i64_close(out, code, index);
     }
+    let channel_i64_recv = codegen::code_op_channel_i64_recv();
+    if op == channel_i64_recv {
+        try render_channel_i64_recv(out, code, index);
+    }
     let not_op = codegen::code_op_not();
     if op == not_op {
         try render_not(out, code, index);
@@ -3444,6 +3470,114 @@ fn render_channel_i64_close(
     try w(out, "  store i1 true, ptr %ch");
     try wi(out, index);
     try wl(out, "_closed_field");
+    return;
+}
+
+fn render_channel_i64_recv(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let dst = try code.get(index + 1);
+    let receiver = try code.get(index + 2);
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_head_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try wi(out, receiver);
+    try wl(out, ", i32 0, i32 0");
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_head = load ptr, ptr %cr");
+    try wi(out, index);
+    try wl(out, "_head_field");
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_has_value = icmp ne ptr %cr");
+    try wi(out, index);
+    try wl(out, "_head, null");
+    try w(out, "  br i1 %cr");
+    try wi(out, index);
+    try w(out, "_has_value, label %cr");
+    try wi(out, index);
+    try w(out, "_nonempty, label %cr");
+    try wi(out, index);
+    try wl(out, "_empty");
+    try w(out, "cr");
+    try wi(out, index);
+    try wl(out, "_empty:");
+    try w(out, "  %cr");
+    try wi(out, index);
+    try wl(out, "_msg_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.channel_i64_empty, 0");
+    let message_len = std::mem::len(channel_i64_empty_message());
+    let payload_len = message_len + 1;
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_msg = insertvalue %kizu.slice.u8 %cr");
+    try wi(out, index);
+    try w(out, "_msg_base, i64 ");
+    try wi(out, payload_len);
+    try wl(out, ", 1");
+    try w(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %cr");
+    try wi(out, index);
+    try wl(out, "_msg)");
+    try wl(out, "  unreachable");
+    try w(out, "cr");
+    try wi(out, index);
+    try wl(out, "_nonempty:");
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_value_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %cr");
+    try wi(out, index);
+    try wl(out, "_head, i32 0, i32 0");
+    try w(out, "  %v");
+    try wi(out, dst);
+    try w(out, " = load i64, ptr %cr");
+    try wi(out, index);
+    try wl(out, "_value_field");
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_next_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %cr");
+    try wi(out, index);
+    try wl(out, "_head, i32 0, i32 1");
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_next = load ptr, ptr %cr");
+    try wi(out, index);
+    try wl(out, "_next_field");
+    try w(out, "  store ptr %cr");
+    try wi(out, index);
+    try w(out, "_next, ptr %cr");
+    try wi(out, index);
+    try wl(out, "_head_field");
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_now_empty = icmp eq ptr %cr");
+    try wi(out, index);
+    try wl(out, "_next, null");
+    try w(out, "  br i1 %cr");
+    try wi(out, index);
+    try w(out, "_now_empty, label %cr");
+    try wi(out, index);
+    try w(out, "_clear_tail, label %cr");
+    try wi(out, index);
+    try wl(out, "_done");
+    try w(out, "cr");
+    try wi(out, index);
+    try wl(out, "_clear_tail:");
+    try w(out, "  %cr");
+    try wi(out, index);
+    try w(out, "_tail_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try wi(out, receiver);
+    try wl(out, ", i32 0, i32 1");
+    try w(out, "  store ptr null, ptr %cr");
+    try wi(out, index);
+    try wl(out, "_tail_field");
+    try w(out, "  br label %cr");
+    try wi(out, index);
+    try wl(out, "_done");
+    try w(out, "cr");
+    try wi(out, index);
+    try wl(out, "_done:");
     return;
 }
 
@@ -9357,6 +9491,10 @@ fn tape_record_end_core_scalar(code: &std::array::Array<i64>, index: i64, op: i6
     let channel_i64_close = codegen::code_op_channel_i64_close();
     if op == channel_i64_close {
         return index + 2;
+    }
+    let channel_i64_recv = codegen::code_op_channel_i64_recv();
+    if op == channel_i64_recv {
+        return index + 3;
     }
     let not_op = codegen::code_op_not();
     if op == not_op {
