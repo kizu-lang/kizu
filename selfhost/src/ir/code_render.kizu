@@ -238,7 +238,8 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
     try wl(out, "%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }");
     try wl(out, "%kizu.rt.box = type { ptr, ptr, i64 }");
-    try wl(out, "%kizu.run.channel.i64 = type { ptr, i64, i64, i64, i1 }");
+    try wl(out, "%kizu.run.channel.i64 = type { ptr, ptr, i1 }");
+    try wl(out, "%kizu.run.channel.i64.node = type { i64, ptr }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
     try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
@@ -1979,6 +1980,10 @@ fn render_one_instruction_core_scalar(
     if op == channel_i64_new {
         try render_channel_i64_new(out, code, index);
     }
+    let channel_i64_send = codegen::code_op_channel_i64_send();
+    if op == channel_i64_send {
+        try render_channel_i64_send(out, code, index);
+    }
     let not_op = codegen::code_op_not();
     if op == not_op {
         try render_not(out, code, index);
@@ -3313,7 +3318,7 @@ fn render_channel_i64_new(
     index: i64
 ) -> !void {
     let dst = try code.get(index + 1);
-    try w(out, "  store %kizu.run.channel.i64 { ptr null, i64 0, i64 0, i64 0, i1 false }, ptr %channel");
+    try w(out, "  store %kizu.run.channel.i64 { ptr null, ptr null, i1 false }, ptr %channel");
     try wi(out, dst);
     try nl(out);
     try w(out, "  %v");
@@ -3321,6 +3326,103 @@ fn render_channel_i64_new(
     try w(out, " = getelementptr %kizu.run.channel.i64, ptr %channel");
     try wi(out, dst);
     try wl(out, ", i64 0");
+    return;
+}
+
+// render_channel_i64_send allocates one FIFO node in the caller function's
+// current execution. Keeping this alloca at the instruction (rather than the
+// function-entry scan) gives each loop execution distinct function-local
+// storage without an allocator or runtime-owned heap object.
+fn render_channel_i64_send(
+    out: &var std::string::String,
+    code: &std::array::Array<i64>,
+    index: i64
+) -> !void {
+    let receiver = try code.get(index + 1);
+    let value = try code.get(index + 2);
+    try w(out, "  %ch");
+    try wi(out, index);
+    try wl(out, "_node = alloca %kizu.run.channel.i64.node");
+    try w(out, "  %ch");
+    try wi(out, index);
+    try w(out, "_value_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %ch");
+    try wi(out, index);
+    try wl(out, "_node, i32 0, i32 0");
+    try w(out, "  store i64 %v");
+    try wi(out, value);
+    try w(out, ", ptr %ch");
+    try wi(out, index);
+    try wl(out, "_value_field");
+    try w(out, "  %ch");
+    try wi(out, index);
+    try w(out, "_next_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %ch");
+    try wi(out, index);
+    try wl(out, "_node, i32 0, i32 1");
+    try w(out, "  store ptr null, ptr %ch");
+    try wi(out, index);
+    try wl(out, "_next_field");
+    try w(out, "  %ch");
+    try wi(out, index);
+    try w(out, "_head_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try wi(out, receiver);
+    try wl(out, ", i32 0, i32 0");
+    try w(out, "  %ch");
+    try wi(out, index);
+    try w(out, "_tail_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try wi(out, receiver);
+    try wl(out, ", i32 0, i32 1");
+    try w(out, "  %ch");
+    try wi(out, index);
+    try w(out, "_tail = load ptr, ptr %ch");
+    try wi(out, index);
+    try wl(out, "_tail_field");
+    try w(out, "  %ch");
+    try wi(out, index);
+    try w(out, "_empty = icmp eq ptr %ch");
+    try wi(out, index);
+    try wl(out, "_tail, null");
+    try w(out, "  br i1 %ch");
+    try wi(out, index);
+    try w(out, "_empty, label %ch");
+    try wi(out, index);
+    try w(out, "_empty_queue, label %ch");
+    try wi(out, index);
+    try wl(out, "_nonempty_queue");
+    try w(out, "ch");
+    try wi(out, index);
+    try wl(out, "_empty_queue:");
+    try w(out, "  store ptr %ch");
+    try wi(out, index);
+    try w(out, "_node, ptr %ch");
+    try wi(out, index);
+    try wl(out, "_head_field");
+    try w(out, "  br label %ch");
+    try wi(out, index);
+    try wl(out, "_linked");
+    try w(out, "ch");
+    try wi(out, index);
+    try wl(out, "_nonempty_queue:");
+    try w(out, "  %ch");
+    try wi(out, index);
+    try w(out, "_tail_next_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %ch");
+    try wi(out, index);
+    try wl(out, "_tail, i32 0, i32 1");
+    try w(out, "  store ptr %ch");
+    try wi(out, index);
+    try w(out, "_node, ptr %ch");
+    try wi(out, index);
+    try wl(out, "_tail_next_field");
+    try w(out, "  br label %ch");
+    try wi(out, index);
+    try wl(out, "_linked");
+    try w(out, "ch");
+    try wi(out, index);
+    try wl(out, "_linked:");
+    try w(out, "  store ptr %ch");
+    try wi(out, index);
+    try w(out, "_node, ptr %ch");
+    try wi(out, index);
+    try wl(out, "_tail_field");
     return;
 }
 
@@ -9226,6 +9328,10 @@ fn tape_record_end_core_scalar(code: &std::array::Array<i64>, index: i64, op: i6
     let channel_i64_new = codegen::code_op_channel_i64_new();
     if op == channel_i64_new {
         return index + 2;
+    }
+    let channel_i64_send = codegen::code_op_channel_i64_send();
+    if op == channel_i64_send {
+        return index + 3;
     }
     let not_op = codegen::code_op_not();
     if op == not_op {
