@@ -26,6 +26,15 @@ func TestSelfhostChannelI64SendContract(t *testing.T) {
 	assertChannelI64SendFIFO(t, render)
 }
 
+// TestSelfhostChannelI64CloseContract pins statement-only typed close lowering
+// and the idempotent closed-flag store without disturbing queued nodes.
+func TestSelfhostChannelI64CloseContract(t *testing.T) {
+	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	render := readSelfhostFile(t, "../../selfhost/src/ir/code_render.kizu")
+	assertChannelI64CloseLowering(t, codegen)
+	assertChannelI64CloseLLVM(t, render)
+}
+
 // assertChannelI64CheckedIdentity verifies exact checker-side identities become
 // one numeric Channel<i64> kind without codegen spelling or arity fallback.
 func assertChannelI64CheckedIdentity(t *testing.T, facts, codegen string) {
@@ -156,11 +165,11 @@ func assertChannelI64SendDispatch(t *testing.T, codegen string) {
 	t.Helper()
 	dispatch := selfhostKizuFunctionBody(t, codegen, "fn lower_code_runtime_field_statement_call(")
 	sendStart := strings.Index(dispatch, `std::mem::equal_bytes(method, "send")`)
-	storeStart := strings.Index(dispatch, `std::mem::equal_bytes(method, "store")`)
-	if sendStart < 0 || storeStart <= sendStart {
+	closeStart := strings.Index(dispatch, `std::mem::equal_bytes(method, "close")`)
+	if sendStart < 0 || closeStart <= sendStart {
 		t.Fatal("Channel<i64>.send is not an exact runtime statement method arm")
 	}
-	sendArm := dispatch[sendStart:storeStart]
+	sendArm := dispatch[sendStart:closeStart]
 	receiverEval := "let receiver_eval = try lower_code_expr("
 	receiverProbe := "let probed_receiver = try code_local_channel_i64_receiver_value("
 	requireSourceFragments(t, "Channel<i64>.send typed statement dispatch", sendArm, []string{
@@ -240,6 +249,71 @@ func assertChannelI64SendTapeLowering(t *testing.T, codegen string) {
 	})
 }
 
+// assertChannelI64CloseLowering verifies close is a zero-argument statement op
+// over the same guarded local Channel<i64> receiver and has no expression form.
+func assertChannelI64CloseLowering(t *testing.T, codegen string) {
+	t.Helper()
+	assertChannelI64CloseDispatch(t, codegen)
+	assertChannelI64CloseTapeLowering(t, codegen)
+
+	exprDispatch := selfhostKizuFunctionBody(t, codegen, "fn lower_code_runtime_field_expr_method(")
+	forbidSourceFragments(t, "Channel<i64>.close expression lowering", exprDispatch, []string{
+		"lower_code_channel_i64_close_statement", "code_op_channel_i64_close",
+	})
+}
+
+// assertChannelI64CloseDispatch pins arity-first validation, the side-effect-free
+// local-kind probe, and exactly one ordinary receiver evaluation.
+func assertChannelI64CloseDispatch(t *testing.T, codegen string) {
+	t.Helper()
+	dispatch := selfhostKizuFunctionBody(t, codegen, "fn lower_code_runtime_field_statement_call(")
+	closeStart := strings.Index(dispatch, `std::mem::equal_bytes(method, "close")`)
+	storeStart := strings.Index(dispatch, `std::mem::equal_bytes(method, "store")`)
+	if closeStart < 0 || storeStart <= closeStart {
+		t.Fatal("Channel<i64>.close is not an exact runtime statement method arm")
+	}
+	closeArm := dispatch[closeStart:storeStart]
+	receiverEval := "let receiver_eval = try lower_code_expr("
+	receiverProbe := "let probed_receiver = try code_local_channel_i64_receiver_value("
+	requireSourceFragments(t, "Channel<i64>.close typed statement dispatch", closeArm, []string{
+		"args.len != 0",
+		receiverProbe,
+		"if probed_receiver < 0",
+		receiverEval,
+		"let receiver_kind = try kinds.get(receiver_eval.value_id)",
+		"receiver_kind != code_kind_channel_i64()",
+		"lower_code_channel_i64_close_statement(",
+	})
+	if strings.Index(closeArm, "args.len != 0") > strings.Index(closeArm, receiverProbe) {
+		t.Fatal("Channel<i64>.close probes its receiver before validating arity")
+	}
+	if strings.Index(closeArm, receiverProbe) > strings.Index(closeArm, receiverEval) {
+		t.Fatal("Channel<i64>.close lowers its receiver before the local-kind guard")
+	}
+	if strings.Count(closeArm, receiverEval) != 1 {
+		t.Fatal("Channel<i64>.close receiver is not evaluated exactly once")
+	}
+	forbidSourceFragments(t, "Channel<i64>.close dispatch fallback", closeArm, []string{
+		`"Channel"`, `"std::channel"`, "source_path", "fixture", "fallback",
+	})
+}
+
+// assertChannelI64CloseTapeLowering pins the two-slot void tape record without
+// creating a result kind or consulting other channel operations.
+func assertChannelI64CloseTapeLowering(t *testing.T, codegen string) {
+	t.Helper()
+	lower := selfhostKizuFunctionBody(t, codegen, "fn lower_code_channel_i64_close_statement(")
+	requireSourceFragments(t, "Channel<i64>.close tape lowering", lower, []string{
+		"code.append(code_op_channel_i64_close())",
+		"code.append(receiver_value)",
+		"code_eval_value(0, next_value)",
+	})
+	forbidSourceFragments(t, "Channel<i64>.close hidden lowering", lower, []string{
+		"kinds.append", "code_op_channel_i64_send", "page_allocator", "kizu_rt_",
+		"source_path", "fixture", "fallback",
+	})
+}
+
 // assertChannelI64SendFIFO verifies send allocates its node at the instruction,
 // links both empty and non-empty FIFO cases, and never acquires heap storage.
 func assertChannelI64SendFIFO(t *testing.T, render string) {
@@ -286,6 +360,45 @@ func assertChannelI64SendFIFO(t *testing.T, render string) {
 	}
 	if !strings.Contains(sendRecord, "return index + 3") {
 		t.Fatal("CHANNEL_I64_SEND is not a fixed three-slot tape record")
+	}
+}
+
+// assertChannelI64CloseLLVM verifies close only stores true to field index 2,
+// leaves FIFO storage untouched, and remains a fixed two-slot tape record.
+func assertChannelI64CloseLLVM(t *testing.T, render string) {
+	t.Helper()
+	allocas := selfhostKizuFunctionBody(t, render, "fn render_var_allocas(")
+	forbidSourceFragments(t, "Channel<i64>.close entry storage", allocas, []string{
+		"code_op_channel_i64_close",
+	})
+	dispatch := selfhostKizuFunctionBody(t, render, "fn render_one_instruction_core_scalar(")
+	requireSourceFragments(t, "Channel<i64>.close render dispatch", dispatch, []string{
+		"code_op_channel_i64_close()",
+		"render_channel_i64_close(out, code, index)",
+	})
+
+	writer := selfhostKizuFunctionBody(t, render, "fn render_channel_i64_close(")
+	requireSourceFragments(t, "Channel<i64>.close flag store", writer, []string{
+		`"_closed_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v"`,
+		`", i32 0, i32 2"`,
+		`"  store i1 true, ptr %ch"`,
+	})
+	forbidSourceFragments(t, "Channel<i64>.close forbidden mutation", writer, []string{
+		"_head", "_tail", "channel.i64.node", "alloca", "load", "icmp", "br i1",
+		"page_allocator", "kizu_rt_", "malloc", "calloc", "source_path", "fixture",
+	})
+
+	recordEnd := selfhostKizuFunctionBody(t, render, "fn tape_record_end_core_scalar(")
+	closeStart := strings.Index(recordEnd, "code_op_channel_i64_close()")
+	if closeStart < 0 {
+		t.Fatal("CHANNEL_I64_CLOSE tape record is missing")
+	}
+	closeRecord := recordEnd[closeStart:]
+	if next := strings.Index(closeRecord, "let not_op"); next >= 0 {
+		closeRecord = closeRecord[:next]
+	}
+	if !strings.Contains(closeRecord, "return index + 2") {
+		t.Fatal("CHANNEL_I64_CLOSE is not a fixed two-slot tape record")
 	}
 }
 
