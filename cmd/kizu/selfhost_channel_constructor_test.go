@@ -35,6 +35,15 @@ func TestSelfhostChannelI64CloseContract(t *testing.T) {
 	assertChannelI64CloseLLVM(t, render)
 }
 
+// TestSelfhostChannelI64RecvContract pins the dedicated typed expression probe,
+// three-slot i64 result, empty trap, and FIFO dequeue semantics.
+func TestSelfhostChannelI64RecvContract(t *testing.T) {
+	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	render := readSelfhostFile(t, "../../selfhost/src/ir/code_render.kizu")
+	assertChannelI64RecvLowering(t, codegen)
+	assertChannelI64RecvLLVM(t, render)
+}
+
 // assertChannelI64CheckedIdentity verifies exact checker-side identities become
 // one numeric Channel<i64> kind without codegen spelling or arity fallback.
 func assertChannelI64CheckedIdentity(t *testing.T, facts, codegen string) {
@@ -314,6 +323,89 @@ func assertChannelI64CloseTapeLowering(t *testing.T, codegen string) {
 	})
 }
 
+// assertChannelI64RecvLowering verifies the dedicated probe precedes name-only
+// method dispatch while preserving side-effect-free misses for user recv methods.
+func assertChannelI64RecvLowering(t *testing.T, codegen string) {
+	t.Helper()
+	assertChannelI64RecvProbeOrder(t, codegen)
+	assertChannelI64RecvFieldProbe(t, codegen)
+	assertChannelI64RecvTapeLowering(t, codegen)
+}
+
+// assertChannelI64RecvProbeOrder pins union-before-runtime-before-user-method
+// ordering so unrelated recv methods still resolve without partial tape.
+func assertChannelI64RecvProbeOrder(t *testing.T, codegen string) {
+	t.Helper()
+	call := selfhostKizuFunctionBody(t, codegen, "fn lower_code_call(")
+	unionProbe := strings.Index(call, "let union_tag = try code_callee_union_tag(")
+	recvProbe := strings.Index(call, "let channel_recv = try lower_code_channel_i64_recv_probe(")
+	methodProbe := strings.Index(call, "let method_kind = try code_method_call_return_kind(")
+	if unionProbe < 0 || recvProbe <= unionProbe || methodProbe <= recvProbe {
+		t.Fatal("Channel<i64>.recv probe is not between union and user-method resolution")
+	}
+	requireSourceFragments(t, "Channel<i64>.recv probe result", call[recvProbe:methodProbe], []string{
+		"if channel_recv.ok",
+		"return channel_recv",
+	})
+	probe := selfhostKizuFunctionBody(t, codegen, "fn lower_code_channel_i64_recv_probe(")
+	requireSourceFragments(t, "Channel<i64>.recv structural probe", probe, []string{
+		"FieldExpr(field_expr)",
+		"lower_code_channel_i64_recv_field(",
+		"_ => code_eval_unsupported(next_value)",
+	})
+	forbidSourceFragments(t, "Channel<i64>.recv structural probe effects", probe, []string{
+		"lower_code_expr", "code.append", "kinds.append",
+	})
+}
+
+// assertChannelI64RecvFieldProbe pins exact recv/arity/local-kind checks before
+// one ordinary receiver evaluation and the final typed tape commit.
+func assertChannelI64RecvFieldProbe(t *testing.T, codegen string) {
+	t.Helper()
+	field := selfhostKizuFunctionBody(t, codegen, "fn lower_code_channel_i64_recv_field(")
+	receiverEval := "let receiver_eval = try lower_code_expr("
+	receiverProbe := "let probed_receiver = try code_local_channel_i64_receiver_value("
+	requireSourceFragments(t, "Channel<i64>.recv typed field probe", field, []string{
+		"if namespace",
+		`std::mem::equal_bytes(method, "recv")`,
+		"args.len != 0",
+		receiverProbe,
+		"if probed_receiver < 0",
+		receiverEval,
+		"let receiver_kind = try kinds.get(receiver_eval.value_id)",
+		"receiver_kind != code_kind_channel_i64()",
+		"lower_code_channel_i64_recv(receiver_eval.value_id, code, kinds, receiver_eval.next)",
+	})
+	probeAt := strings.Index(field, receiverProbe)
+	lowerAt := strings.Index(field, receiverEval)
+	if probeAt < 0 || lowerAt <= probeAt {
+		t.Fatal("Channel<i64>.recv lowers its receiver before the local-kind probe")
+	}
+	if strings.Count(field, receiverEval) != 1 {
+		t.Fatal("Channel<i64>.recv receiver is not evaluated exactly once")
+	}
+	forbidSourceFragments(t, "Channel<i64>.recv field fallback", field[:lowerAt], []string{
+		"code.append", "kinds.append", "source_path", "fixture", "fallback",
+	})
+}
+
+// assertChannelI64RecvTapeLowering pins dst=next_value, the receiver payload,
+// and one i64 result kind in a fixed three-slot record.
+func assertChannelI64RecvTapeLowering(t *testing.T, codegen string) {
+	t.Helper()
+	lower := selfhostKizuFunctionBody(t, codegen, "fn lower_code_channel_i64_recv(")
+	requireSourceFragments(t, "Channel<i64>.recv tape lowering", lower, []string{
+		"code.append(code_op_channel_i64_recv())",
+		"code.append(next_value)",
+		"code.append(receiver_value)",
+		"kinds.append(code_kind_i64())",
+		"code_eval_value(next_value, next_value + 1)",
+	})
+	forbidSourceFragments(t, "Channel<i64>.recv hidden lowering", lower, []string{
+		"source_path", "fixture", "fallback", "page_allocator", "kizu_rt_",
+	})
+}
+
 // assertChannelI64SendFIFO verifies send allocates its node at the instruction,
 // links both empty and non-empty FIFO cases, and never acquires heap storage.
 func assertChannelI64SendFIFO(t *testing.T, render string) {
@@ -399,6 +491,86 @@ func assertChannelI64CloseLLVM(t *testing.T, render string) {
 	}
 	if !strings.Contains(closeRecord, "return index + 2") {
 		t.Fatal("CHANNEL_I64_CLOSE is not a fixed two-slot tape record")
+	}
+}
+
+// assertChannelI64RecvLLVM verifies the immutable empty diagnostic, FIFO pop,
+// tail reset, untouched closed flag, and fixed tape record.
+func assertChannelI64RecvLLVM(t *testing.T, render string) {
+	t.Helper()
+	assertChannelI64RecvGlobal(t, render)
+	assertChannelI64RecvDequeue(t, render)
+	assertChannelI64RecvRecord(t, render)
+}
+
+// assertChannelI64RecvGlobal pins the exact newline-terminated empty-channel
+// runtime error as an immutable LLVM global consumed by the trap path.
+func assertChannelI64RecvGlobal(t *testing.T, render string) {
+	t.Helper()
+	message := selfhostKizuFunctionBody(t, render, "fn channel_i64_empty_message(")
+	if !strings.Contains(message, `"error: runtime error: channel is empty"`) {
+		t.Fatal("Channel<i64>.recv empty diagnostic text changed")
+	}
+	global := selfhostKizuFunctionBody(t, render, "fn render_channel_i64_empty_global(")
+	requireSourceFragments(t, "Channel<i64>.recv empty diagnostic global", global, []string{
+		`"@.kizu.run.channel_i64_empty = private unnamed_addr constant ["`,
+		"channel_i64_empty_message()",
+		`"\0A"`,
+	})
+	preamble := selfhostKizuFunctionBody(t, render, "fn render_preamble(")
+	if !strings.Contains(preamble, "render_channel_i64_empty_global(out)") {
+		t.Fatal("Channel<i64>.recv empty diagnostic global is not emitted")
+	}
+}
+
+// assertChannelI64RecvDequeue pins the null trap and FIFO head/tail mutation
+// while forbidding closed-state changes and hidden storage paths.
+func assertChannelI64RecvDequeue(t *testing.T, render string) {
+	t.Helper()
+	dispatch := selfhostKizuFunctionBody(t, render, "fn render_one_instruction_core_scalar(")
+	requireSourceFragments(t, "Channel<i64>.recv render dispatch", dispatch, []string{
+		"code_op_channel_i64_recv()",
+		"render_channel_i64_recv(out, code, index)",
+	})
+	writer := selfhostKizuFunctionBody(t, render, "fn render_channel_i64_recv(")
+	requireSourceFragments(t, "Channel<i64>.recv FIFO dequeue", writer, []string{
+		`"_head_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v"`,
+		`"_head = load ptr, ptr %cr"`,
+		`"_has_value = icmp ne ptr %cr"`,
+		`"_msg_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.channel_i64_empty, 0"`,
+		`"  call void @kizu_rt_trap(%kizu.slice.u8 %cr"`,
+		`"_value_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %cr"`,
+		`" = load i64, ptr %cr"`,
+		`"_next_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %cr"`,
+		`"_next = load ptr, ptr %cr"`,
+		`try w(out, "  store ptr %cr")`,
+		`try w(out, "_next, ptr %cr")`,
+		`try wl(out, "_head_field")`,
+		`"_now_empty = icmp eq ptr %cr"`,
+		`"_tail_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v"`,
+		`"  store ptr null, ptr %cr"`,
+		`"_done:"`,
+	})
+	forbidSourceFragments(t, "Channel<i64>.recv forbidden state", writer, []string{
+		"_closed", "i32 0, i32 2", "store i1", "alloca", "kizu_rt_alloc",
+		"kizu_rt_free", "kizu_rt_channel", "page_allocator", "source_path", "fixture",
+	})
+}
+
+// assertChannelI64RecvRecord pins the renderer's fixed three-slot tape walk.
+func assertChannelI64RecvRecord(t *testing.T, render string) {
+	t.Helper()
+	recordEnd := selfhostKizuFunctionBody(t, render, "fn tape_record_end_core_scalar(")
+	recvStart := strings.Index(recordEnd, "code_op_channel_i64_recv()")
+	if recvStart < 0 {
+		t.Fatal("CHANNEL_I64_RECV tape record is missing")
+	}
+	recvRecord := recordEnd[recvStart:]
+	if next := strings.Index(recvRecord, "let not_op"); next >= 0 {
+		recvRecord = recvRecord[:next]
+	}
+	if !strings.Contains(recvRecord, "return index + 3") {
+		t.Fatal("CHANNEL_I64_RECV is not a fixed three-slot tape record")
 	}
 }
 
