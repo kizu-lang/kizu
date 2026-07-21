@@ -377,11 +377,13 @@ func assertAtomicBoolStoreLowering(t *testing.T, codegen string) {
 	})
 	storeGuard := strings.Index(statement, `std::mem::equal_bytes(method, "store")`)
 	shapeCheck := -1
+	receiverProbe := -1
 	if storeGuard >= 0 {
-		shapeCheck = strings.Index(statement[storeGuard:], "args.len != 1")
+		storeArm := statement[storeGuard:]
+		shapeCheck = strings.Index(storeArm, "args.len != 1")
+		receiverProbe = strings.Index(storeArm, "lower_code_expr(text, ast, decls, receiver")
 	}
-	receiverProbe := strings.Index(statement, "lower_code_expr(text, ast, decls, receiver")
-	if storeGuard < 0 || shapeCheck < 0 || receiverProbe <= storeGuard+shapeCheck {
+	if storeGuard < 0 || shapeCheck < 0 || receiverProbe <= shapeCheck {
 		t.Fatal("Atomic<bool>.store receiver is evaluated before its exact shape is known")
 	}
 	if strings.Contains(statement, "code_field_method_return_kind") ||
