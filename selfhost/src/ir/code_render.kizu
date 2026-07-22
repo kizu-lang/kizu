@@ -48,7 +48,8 @@ pub fn render_run_artifact(
     atomic_constructor_id: i64,
     bool_type_id: i64,
     channel_constructor_id: i64,
-    i64_type_id: i64
+    i64_type_id: i64,
+    slice_type_id: i64
 ) -> !std::string::String {
     let rendered = try render_run_ast_artifact(
         allocator,
@@ -60,7 +61,8 @@ pub fn render_run_artifact(
         atomic_constructor_id,
         bool_type_id,
         channel_constructor_id,
-        i64_type_id
+        i64_type_id,
+        slice_type_id
     );
     return rendered;
 }
@@ -75,7 +77,8 @@ pub fn render_run_ast_artifact(
     atomic_constructor_id: i64,
     bool_type_id: i64,
     channel_constructor_id: i64,
-    i64_type_id: i64
+    i64_type_id: i64,
+    slice_type_id: i64
 ) -> !std::string::String {
     var code = std::array::Array<i64>(allocator);
     var kinds = std::array::Array<i64>(allocator);
@@ -93,6 +96,7 @@ pub fn render_run_ast_artifact(
         bool_type_id,
         channel_constructor_id,
         i64_type_id,
+        slice_type_id,
         &var code,
         &var kinds,
         &var local_starts,
@@ -130,7 +134,7 @@ fn expect_fail_message() -> []u8 {
     return "error: runtime error: expected condition to be true";
 }
 
-fn channel_i64_empty_message() -> []u8 {
+fn channel_empty_message() -> []u8 {
     return "error: runtime error: channel is empty";
 }
 
@@ -151,13 +155,13 @@ fn render_expect_fail_global(out: &var std::string::String) -> !void {
     return;
 }
 
-// render_channel_i64_empty_global emits the immutable runtime-error line used
+// render_channel_empty_global emits the immutable runtime-error line used
 // by the empty recv trap, including its trailing newline byte.
-fn render_channel_i64_empty_global(out: &var std::string::String) -> !void {
-    let message = channel_i64_empty_message();
+fn render_channel_empty_global(out: &var std::string::String) -> !void {
+    let message = channel_empty_message();
     let message_len = std::mem::len(message);
     let payload_len = message_len + 1;
-    try w(out, "@.kizu.run.channel_i64_empty = private unnamed_addr constant [");
+    try w(out, "@.kizu.run.channel_empty = private unnamed_addr constant [");
     try wi(out, payload_len);
     try w(out, " x i8] c");
     try out.append_byte(cast<u8>(34));
@@ -259,8 +263,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
     try wl(out, "%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }");
     try wl(out, "%kizu.rt.box = type { ptr, ptr, i64 }");
-    try wl(out, "%kizu.run.channel.i64 = type { ptr, ptr, i1 }");
-    try wl(out, "%kizu.run.channel.i64.node = type { i64, ptr }");
+    try wl(out, "%kizu.run.channel = type { ptr, ptr, i1 }");
     try nl(out);
     try wl(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
     try wl(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
@@ -306,7 +309,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try render_bool_print_global(out, "@.kizu.run.bool_true = private unnamed_addr constant [5 x i8] c", "true");
     try render_bool_print_global(out, "@.kizu.run.bool_false = private unnamed_addr constant [6 x i8] c", "false");
     try render_expect_fail_global(out);
-    try render_channel_i64_empty_global(out);
+    try render_channel_empty_global(out);
     try w(out, "@.kizu.run.string_truncate_oob = private unnamed_addr constant [36 x i8] c");
     try out.append_byte(cast<u8>(34));
     try w(out, "String.truncate length out of bounds");
@@ -1591,14 +1594,15 @@ fn render_value_type(
 ) -> !void {
     let kind_bool = codegen::code_kind_bool();
     let kind_slice = codegen::code_kind_slice();
+    let kind_borrowed_slice = codegen::code_kind_borrowed_slice();
     let kind_handle = codegen::code_kind_handle();
     let kind_error_box = codegen::code_kind_error_box_i64();
     let is_bool = kind == kind_bool;
-    let is_slice = kind == kind_slice;
+    let is_slice = kind == kind_slice or kind == kind_borrowed_slice;
     let is_handle = kind == kind_handle;
     let is_mut_borrow = codegen::code_kind_is_mut_borrow_ptr(kind);
     let is_atomic_bool = kind == codegen::code_kind_atomic_bool();
-    let is_channel_i64 = kind == codegen::code_kind_channel_i64();
+    let is_channel = codegen::code_kind_is_channel(kind);
     let is_error_box = kind == kind_error_box;
     let is_owned = value_kind_is_owned(kind);
     let is_union = try value_kind_is_union(code, kind);
@@ -1622,7 +1626,7 @@ fn render_value_type(
     if is_atomic_bool {
         try w(out, "ptr");
     }
-    if is_channel_i64 {
+    if is_channel {
         try w(out, "ptr");
     }
     if is_owned {
@@ -1640,9 +1644,119 @@ fn render_value_type(
     if is_struct_param {
         try render_struct_param_value_type(out, code, kind);
     }
-    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_atomic_bool and !is_channel_i64 and !is_error_box and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
+    let scalar = !is_bool and !is_slice and !is_handle and !is_mut_borrow and !is_atomic_bool and !is_channel and !is_error_box and !is_owned and !is_union and !is_struct_decl and !is_struct_param;
     if scalar {
         try w(out, "i64");
+    }
+    return;
+}
+
+// render_value_abi_type is the shared storage ABI type selection for Array and
+// Channel payloads. Bool is stored as one byte while its SSA value remains i1.
+fn render_value_abi_type(out: &var std::string::String, kind: i64) -> !void {
+    if kind == codegen::code_kind_bool() {
+        try w(out, "i8");
+    }
+    if kind == codegen::code_kind_i64() {
+        try w(out, "i64");
+    }
+    if kind == codegen::code_kind_slice() {
+        try w(out, "%kizu.slice.u8");
+    }
+    return;
+}
+
+fn render_value_abi_alloca_store(
+    out: &var std::string::String,
+    prefix: []u8,
+    index: i64,
+    suffix: []u8,
+    value: i64,
+    kind: i64
+) -> !void {
+    try w(out, "  %");
+    try w(out, prefix);
+    try wi(out, index);
+    try w(out, suffix);
+    try w(out, " = alloca ");
+    try render_value_abi_type(out, kind);
+    try nl(out);
+    try render_value_abi_store(out, prefix, index, suffix, value, kind);
+    return;
+}
+
+fn render_value_abi_store(
+    out: &var std::string::String,
+    prefix: []u8,
+    index: i64,
+    ptr_suffix: []u8,
+    value: i64,
+    kind: i64
+) -> !void {
+    if kind == codegen::code_kind_bool() {
+        try w(out, "  %");
+        try w(out, prefix);
+        try wi(out, index);
+        try w(out, "_byte = zext i1 %v");
+        try wi(out, value);
+        try wl(out, " to i8");
+        try w(out, "  store i8 %");
+        try w(out, prefix);
+        try wi(out, index);
+        try w(out, "_byte, ptr %");
+        try w(out, prefix);
+        try wi(out, index);
+        try w(out, ptr_suffix);
+        try nl(out);
+    }
+    if kind == codegen::code_kind_i64() or kind == codegen::code_kind_slice() {
+        try w(out, "  store ");
+        try render_value_abi_type(out, kind);
+        try w(out, " %v");
+        try wi(out, value);
+        try w(out, ", ptr %");
+        try w(out, prefix);
+        try wi(out, index);
+        try w(out, ptr_suffix);
+        try nl(out);
+    }
+    return;
+}
+
+fn render_value_abi_load(
+    out: &var std::string::String,
+    prefix: []u8,
+    index: i64,
+    ptr_suffix: []u8,
+    value_id: i64,
+    kind: i64
+) -> !void {
+    if kind == codegen::code_kind_bool() {
+        try w(out, "  %");
+        try w(out, prefix);
+        try wi(out, index);
+        try w(out, "_byte = load i8, ptr %");
+        try w(out, prefix);
+        try wi(out, index);
+        try w(out, ptr_suffix);
+        try nl(out);
+        try w(out, "  %v");
+        try wi(out, value_id);
+        try w(out, " = icmp ne i8 %");
+        try w(out, prefix);
+        try wi(out, index);
+        try wl(out, "_byte, 0");
+    }
+    if kind == codegen::code_kind_i64() or kind == codegen::code_kind_slice() {
+        try w(out, "  %v");
+        try wi(out, value_id);
+        try w(out, " = load ");
+        try render_value_abi_type(out, kind);
+        try w(out, ", ptr %");
+        try w(out, prefix);
+        try wi(out, index);
+        try w(out, ptr_suffix);
+        try nl(out);
     }
     return;
 }
@@ -1857,10 +1971,10 @@ fn render_var_allocas(
         let atomic_slot = try code.get(index + 1);
         try render_one_atomic_bool_alloca(out, atomic_slot);
     }
-    let channel_i64_new = codegen::code_op_channel_i64_new();
-    if op == channel_i64_new {
+    let channel_new = codegen::code_op_channel_new();
+    if op == channel_new {
         let channel_slot = try code.get(index + 1);
-        try render_one_channel_i64_alloca(out, channel_slot);
+        try render_one_channel_alloca(out, channel_slot);
     }
     let next = try tape_record_end(code, index);
     try render_var_allocas(out, code, next, func_end);
@@ -1900,10 +2014,10 @@ fn render_one_atomic_bool_alloca(out: &var std::string::String, slot: i64) -> !v
     return;
 }
 
-fn render_one_channel_i64_alloca(out: &var std::string::String, slot: i64) -> !void {
+fn render_one_channel_alloca(out: &var std::string::String, slot: i64) -> !void {
     try w(out, "  %channel");
     try wi(out, slot);
-    try wl(out, " = alloca %kizu.run.channel.i64");
+    try wl(out, " = alloca %kizu.run.channel");
     return;
 }
 
@@ -1998,21 +2112,21 @@ fn render_one_instruction_core_scalar(
     if op == atomic_bool_store {
         try render_atomic_bool_store(out, code, index);
     }
-    let channel_i64_new = codegen::code_op_channel_i64_new();
-    if op == channel_i64_new {
-        try render_channel_i64_new(out, code, index);
+    let channel_new = codegen::code_op_channel_new();
+    if op == channel_new {
+        try render_channel_new(out, code, index);
     }
-    let channel_i64_send = codegen::code_op_channel_i64_send();
-    if op == channel_i64_send {
-        try render_channel_i64_send(out, code, index);
+    let channel_send = codegen::code_op_channel_send();
+    if op == channel_send {
+        try render_channel_send(out, code, index);
     }
-    let channel_i64_close = codegen::code_op_channel_i64_close();
-    if op == channel_i64_close {
-        try render_channel_i64_close(out, code, index);
+    let channel_close = codegen::code_op_channel_close();
+    if op == channel_close {
+        try render_channel_close(out, code, index);
     }
-    let channel_i64_recv = codegen::code_op_channel_i64_recv();
-    if op == channel_i64_recv {
-        try render_channel_i64_recv(out, code, index);
+    let channel_recv = codegen::code_op_channel_recv();
+    if op == channel_recv {
+        try render_channel_recv(out, code, index);
     }
     let not_op = codegen::code_op_not();
     if op == not_op {
@@ -3342,50 +3456,53 @@ fn render_atomic_bool_store(
     return;
 }
 
-fn render_channel_i64_new(
+fn render_channel_new(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64
 ) -> !void {
     let dst = try code.get(index + 1);
-    try w(out, "  store %kizu.run.channel.i64 { ptr null, ptr null, i1 false }, ptr %channel");
+    try w(out, "  store %kizu.run.channel { ptr null, ptr null, i1 false }, ptr %channel");
     try wi(out, dst);
     try nl(out);
     try w(out, "  %v");
     try wi(out, dst);
-    try w(out, " = getelementptr %kizu.run.channel.i64, ptr %channel");
+    try w(out, " = getelementptr %kizu.run.channel, ptr %channel");
     try wi(out, dst);
     try wl(out, ", i64 0");
     return;
 }
 
-// render_channel_i64_send allocates one FIFO node in the caller function's
-// current execution. Keeping this alloca at the instruction (rather than the
+// render_channel_send allocates one payload-specialized FIFO node in the caller
+// function's current execution. Keeping this alloca at the instruction (rather than the
 // function-entry scan) gives each loop execution distinct function-local
 // storage without an allocator or runtime-owned heap object.
-fn render_channel_i64_send(
+fn render_channel_send(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64
 ) -> !void {
     let receiver = try code.get(index + 1);
     let value = try code.get(index + 2);
+    let payload_kind = try code.get(index + 3);
     try w(out, "  %ch");
     try wi(out, index);
-    try wl(out, "_node = alloca %kizu.run.channel.i64.node");
+    try w(out, "_node = alloca { ");
+    try render_value_abi_type(out, payload_kind);
+    try wl(out, ", ptr }");
     try w(out, "  %ch");
     try wi(out, index);
-    try w(out, "_value_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %ch");
+    try w(out, "_value_field = getelementptr inbounds { ");
+    try render_value_abi_type(out, payload_kind);
+    try w(out, ", ptr }, ptr %ch");
     try wi(out, index);
     try wl(out, "_node, i32 0, i32 0");
-    try w(out, "  store i64 %v");
-    try wi(out, value);
-    try w(out, ", ptr %ch");
-    try wi(out, index);
-    try wl(out, "_value_field");
+    try render_value_abi_store(out, "ch", index, "_value_field", value, payload_kind);
     try w(out, "  %ch");
     try wi(out, index);
-    try w(out, "_next_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %ch");
+    try w(out, "_next_field = getelementptr inbounds { ");
+    try render_value_abi_type(out, payload_kind);
+    try w(out, ", ptr }, ptr %ch");
     try wi(out, index);
     try wl(out, "_node, i32 0, i32 1");
     try w(out, "  store ptr null, ptr %ch");
@@ -3393,12 +3510,12 @@ fn render_channel_i64_send(
     try wl(out, "_next_field");
     try w(out, "  %ch");
     try wi(out, index);
-    try w(out, "_head_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try w(out, "_head_field = getelementptr inbounds %kizu.run.channel, ptr %v");
     try wi(out, receiver);
     try wl(out, ", i32 0, i32 0");
     try w(out, "  %ch");
     try wi(out, index);
-    try w(out, "_tail_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try w(out, "_tail_field = getelementptr inbounds %kizu.run.channel, ptr %v");
     try wi(out, receiver);
     try wl(out, ", i32 0, i32 1");
     try w(out, "  %ch");
@@ -3434,7 +3551,9 @@ fn render_channel_i64_send(
     try wl(out, "_nonempty_queue:");
     try w(out, "  %ch");
     try wi(out, index);
-    try w(out, "_tail_next_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %ch");
+    try w(out, "_tail_next_field = getelementptr inbounds { ");
+    try render_value_abi_type(out, payload_kind);
+    try w(out, ", ptr }, ptr %ch");
     try wi(out, index);
     try wl(out, "_tail, i32 0, i32 1");
     try w(out, "  store ptr %ch");
@@ -3456,7 +3575,7 @@ fn render_channel_i64_send(
     return;
 }
 
-fn render_channel_i64_close(
+fn render_channel_close(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64
@@ -3464,7 +3583,7 @@ fn render_channel_i64_close(
     let receiver = try code.get(index + 1);
     try w(out, "  %ch");
     try wi(out, index);
-    try w(out, "_closed_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try w(out, "_closed_field = getelementptr inbounds %kizu.run.channel, ptr %v");
     try wi(out, receiver);
     try wl(out, ", i32 0, i32 2");
     try w(out, "  store i1 true, ptr %ch");
@@ -3473,16 +3592,17 @@ fn render_channel_i64_close(
     return;
 }
 
-fn render_channel_i64_recv(
+fn render_channel_recv(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
+    let payload_kind = try code.get(index + 3);
     try w(out, "  %cr");
     try wi(out, index);
-    try w(out, "_head_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try w(out, "_head_field = getelementptr inbounds %kizu.run.channel, ptr %v");
     try wi(out, receiver);
     try wl(out, ", i32 0, i32 0");
     try w(out, "  %cr");
@@ -3507,8 +3627,8 @@ fn render_channel_i64_recv(
     try wl(out, "_empty:");
     try w(out, "  %cr");
     try wi(out, index);
-    try wl(out, "_msg_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.channel_i64_empty, 0");
-    let message_len = std::mem::len(channel_i64_empty_message());
+    try wl(out, "_msg_base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.channel_empty, 0");
+    let message_len = std::mem::len(channel_empty_message());
     let payload_len = message_len + 1;
     try w(out, "  %cr");
     try wi(out, index);
@@ -3526,17 +3646,17 @@ fn render_channel_i64_recv(
     try wl(out, "_nonempty:");
     try w(out, "  %cr");
     try wi(out, index);
-    try w(out, "_value_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %cr");
+    try w(out, "_value_field = getelementptr inbounds { ");
+    try render_value_abi_type(out, payload_kind);
+    try w(out, ", ptr }, ptr %cr");
     try wi(out, index);
     try wl(out, "_head, i32 0, i32 0");
-    try w(out, "  %v");
-    try wi(out, dst);
-    try w(out, " = load i64, ptr %cr");
-    try wi(out, index);
-    try wl(out, "_value_field");
+    try render_value_abi_load(out, "cr", index, "_value_field", dst, payload_kind);
     try w(out, "  %cr");
     try wi(out, index);
-    try w(out, "_next_field = getelementptr inbounds %kizu.run.channel.i64.node, ptr %cr");
+    try w(out, "_next_field = getelementptr inbounds { ");
+    try render_value_abi_type(out, payload_kind);
+    try w(out, ", ptr }, ptr %cr");
     try wi(out, index);
     try wl(out, "_head, i32 0, i32 1");
     try w(out, "  %cr");
@@ -3566,7 +3686,7 @@ fn render_channel_i64_recv(
     try wl(out, "_clear_tail:");
     try w(out, "  %cr");
     try wi(out, index);
-    try w(out, "_tail_field = getelementptr inbounds %kizu.run.channel.i64, ptr %v");
+    try w(out, "_tail_field = getelementptr inbounds %kizu.run.channel, ptr %v");
     try wi(out, receiver);
     try wl(out, ", i32 0, i32 1");
     try w(out, "  store ptr null, ptr %cr");
@@ -7201,7 +7321,7 @@ fn render_try_array_append_kind(
     try w(out, "_slice = insertvalue %kizu.slice.u8 %aa");
     try wi(out, index);
     try w(out, "_base, i64 ");
-    let element_size = array_element_size(element_kind);
+    let element_size = codegen::code_kind_value_abi_size(element_kind);
     try wi(out, element_size);
     try wl(out, ", 1");
     try w(out, "  %tc");
@@ -7216,52 +7336,10 @@ fn render_try_array_append_kind(
 }
 
 fn render_array_append_slot(out: &var std::string::String, index: i64, value: i64, element_kind: i64) -> !void {
-    if element_kind == codegen::code_kind_bool() {
-        try w(out, "  %aa");
-        try wi(out, index);
-        try w(out, "_byte = zext i1 %v");
-        try wi(out, value);
-        try wl(out, " to i8");
-        try w(out, "  %aa");
-        try wi(out, index);
-        try wl(out, "_slot = alloca i8");
-        try w(out, "  store i8 %aa");
-        try wi(out, index);
-        try w(out, "_byte, ptr %aa");
-        try wi(out, index);
-        try wl(out, "_slot");
-    }
-    if element_kind == codegen::code_kind_i64() {
-        try w(out, "  %aa");
-        try wi(out, index);
-        try wl(out, "_slot = alloca i64");
-        try w(out, "  store i64 %v");
-        try wi(out, value);
-        try w(out, ", ptr %aa");
-        try wi(out, index);
-        try wl(out, "_slot");
-    }
-    if element_kind == codegen::code_kind_slice() {
-        try w(out, "  %aa");
-        try wi(out, index);
-        try wl(out, "_slot = alloca %kizu.slice.u8");
-        try w(out, "  store %kizu.slice.u8 %v");
-        try wi(out, value);
-        try w(out, ", ptr %aa");
-        try wi(out, index);
-        try wl(out, "_slot");
-    }
+    try render_value_abi_alloca_store(
+        out, "aa", index, "_slot", value, element_kind
+    );
     return;
-}
-
-fn array_element_size(element_kind: i64) -> i64 {
-    if element_kind == codegen::code_kind_bool() {
-        return 1;
-    }
-    if element_kind == codegen::code_kind_slice() {
-        return 16;
-    }
-    return 8;
 }
 
 fn render_try_void_result(
@@ -7370,32 +7448,9 @@ fn render_array_get_kind(
 }
 
 fn render_array_get_load(out: &var std::string::String, value_id: i64, temp_id: i64, element_kind: i64) -> !void {
-    if element_kind == codegen::code_kind_bool() {
-        try w(out, "  %ag");
-        try wi(out, temp_id);
-        try w(out, "_byte = load i8, ptr %ag");
-        try wi(out, temp_id);
-        try wl(out, "_ptr");
-        try w(out, "  %v");
-        try wi(out, value_id);
-        try w(out, " = icmp ne i8 %ag");
-        try wi(out, temp_id);
-        try wl(out, "_byte, 0");
-    }
-    if element_kind == codegen::code_kind_i64() {
-        try w(out, "  %v");
-        try wi(out, value_id);
-        try w(out, " = load i64, ptr %ag");
-        try wi(out, temp_id);
-        try wl(out, "_ptr");
-    }
-    if element_kind == codegen::code_kind_slice() {
-        try w(out, "  %v");
-        try wi(out, value_id);
-        try w(out, " = load %kizu.slice.u8, ptr %ag");
-        try wi(out, temp_id);
-        try wl(out, "_ptr");
-    }
+    try render_value_abi_load(
+        out, "ag", temp_id, "_ptr", value_id, element_kind
+    );
     return;
 }
 
@@ -7648,32 +7703,9 @@ fn render_try_array_set(
 // '%as<index>_ptr' for i64, bool, and []u8 element kinds, mirroring the slot
 // stores the append lowering emits.
 fn render_array_set_store(out: &var std::string::String, index: i64, value: i64, element_kind: i64) -> !void {
-    if element_kind == codegen::code_kind_bool() {
-        try w(out, "  %as");
-        try wi(out, index);
-        try w(out, "_byte = zext i1 %v");
-        try wi(out, value);
-        try wl(out, " to i8");
-        try w(out, "  store i8 %as");
-        try wi(out, index);
-        try w(out, "_byte, ptr %as");
-        try wi(out, index);
-        try wl(out, "_ptr");
-    }
-    if element_kind == codegen::code_kind_i64() {
-        try w(out, "  store i64 %v");
-        try wi(out, value);
-        try w(out, ", ptr %as");
-        try wi(out, index);
-        try wl(out, "_ptr");
-    }
-    if element_kind == codegen::code_kind_slice() {
-        try w(out, "  store %kizu.slice.u8 %v");
-        try wi(out, value);
-        try w(out, ", ptr %as");
-        try wi(out, index);
-        try wl(out, "_ptr");
-    }
+    try render_value_abi_store(
+        out, "as", index, "_ptr", value, element_kind
+    );
     return;
 }
 
@@ -7815,32 +7847,9 @@ fn render_try_array_pop(
 }
 
 fn render_array_pop_load(out: &var std::string::String, value_id: i64, index: i64, element_kind: i64) -> !void {
-    if element_kind == codegen::code_kind_bool() {
-        try w(out, "  %ap");
-        try wi(out, index);
-        try w(out, "_byte = load i8, ptr %ap");
-        try wi(out, index);
-        try wl(out, "_ptr");
-        try w(out, "  %v");
-        try wi(out, value_id);
-        try w(out, " = icmp ne i8 %ap");
-        try wi(out, index);
-        try wl(out, "_byte, 0");
-    }
-    if element_kind == codegen::code_kind_i64() {
-        try w(out, "  %v");
-        try wi(out, value_id);
-        try w(out, " = load i64, ptr %ap");
-        try wi(out, index);
-        try wl(out, "_ptr");
-    }
-    if element_kind == codegen::code_kind_slice() {
-        try w(out, "  %v");
-        try wi(out, value_id);
-        try w(out, " = load %kizu.slice.u8, ptr %ap");
-        try wi(out, index);
-        try wl(out, "_ptr");
-    }
+    try render_value_abi_load(
+        out, "ap", index, "_ptr", value_id, element_kind
+    );
     return;
 }
 
@@ -8366,6 +8375,7 @@ fn render_print(
     let value_kind = try code.get(index + 2);
     let kind_str = codegen::code_kind_str();
     let kind_slice = codegen::code_kind_slice();
+    let kind_borrowed_slice = codegen::code_kind_borrowed_slice();
     let kind_bool = codegen::code_kind_bool();
     // Dispatch on the recorded value kind through mutually exclusive void then-body
     // guards (each leaf writer also emits the trailing newline) and fall through to a
@@ -8376,7 +8386,7 @@ fn render_print(
     let record_base = codegen::code_kind_struct_base();
     let is_struct_param = try value_kind_is_struct_param(code, value_kind);
     let is_string = value_kind == kind_str;
-    let is_slice = value_kind == kind_slice;
+    let is_slice = value_kind == kind_slice or value_kind == kind_borrowed_slice;
     let is_bool = value_kind == kind_bool;
     let is_record = value_kind >= record_base and !is_struct_param;
     let not_str_slice = !is_string and !is_slice;
@@ -9480,21 +9490,21 @@ fn tape_record_end_core_scalar(code: &std::array::Array<i64>, index: i64, op: i6
     if op == atomic_bool_store {
         return index + 3;
     }
-    let channel_i64_new = codegen::code_op_channel_i64_new();
-    if op == channel_i64_new {
-        return index + 2;
-    }
-    let channel_i64_send = codegen::code_op_channel_i64_send();
-    if op == channel_i64_send {
+    let channel_new = codegen::code_op_channel_new();
+    if op == channel_new {
         return index + 3;
     }
-    let channel_i64_close = codegen::code_op_channel_i64_close();
-    if op == channel_i64_close {
+    let channel_send = codegen::code_op_channel_send();
+    if op == channel_send {
+        return index + 4;
+    }
+    let channel_close = codegen::code_op_channel_close();
+    if op == channel_close {
         return index + 2;
     }
-    let channel_i64_recv = codegen::code_op_channel_i64_recv();
-    if op == channel_i64_recv {
-        return index + 3;
+    let channel_recv = codegen::code_op_channel_recv();
+    if op == channel_recv {
+        return index + 4;
     }
     let not_op = codegen::code_op_not();
     if op == not_op {
