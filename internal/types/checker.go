@@ -7060,8 +7060,13 @@ func (c *Checker) checkThreadScopedWorker(
 
 // rejectThreadBoundaryArg rejects values unsafe to move across concurrency boundaries.
 func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe unsafeCaps) error {
-	if ident, ok := arg.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
-		return errorf("type error: borrow cannot cross concurrency boundary")
+	if ident, ok := arg.(*ast.IdentExpr); ok {
+		if env.isBorrowed(ident.Name) {
+			return errorf("type error: borrow cannot cross concurrency boundary")
+		}
+		if _, borrowedView := env.lookupBorrowSource(ident.Name); borrowedView {
+			return errorf("type error: borrow cannot cross concurrency boundary")
+		}
 	}
 	got, err := c.checkExpr(arg, env, unsafe)
 	if err != nil {

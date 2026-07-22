@@ -923,27 +923,27 @@ pub fn code_op_atomic_bool_store() -> i64 {
     return 158;
 }
 
-// CHANNEL_I64_NEW initializes one function-local owned-message queue:
-// 'op dst'.
-pub fn code_op_channel_i64_new() -> i64 {
+// CHANNEL_NEW initializes one function-local queue specialized for payload_kind:
+// 'op dst payload_kind'.
+pub fn code_op_channel_new() -> i64 {
     return 159;
 }
 
-// CHANNEL_I64_SEND appends one i64 to a function-local channel FIFO:
-// 'op receiver value'.
-pub fn code_op_channel_i64_send() -> i64 {
+// CHANNEL_SEND appends one statically typed value to a function-local FIFO:
+// 'op receiver value payload_kind'.
+pub fn code_op_channel_send() -> i64 {
     return 160;
 }
 
-// CHANNEL_I64_CLOSE marks one function-local channel closed:
+// CHANNEL_CLOSE marks one function-local channel closed:
 // 'op receiver'.
-pub fn code_op_channel_i64_close() -> i64 {
+pub fn code_op_channel_close() -> i64 {
     return 161;
 }
 
-// CHANNEL_I64_RECV removes and yields the oldest function-local i64 message:
-// 'op dst receiver'.
-pub fn code_op_channel_i64_recv() -> i64 {
+// CHANNEL_RECV removes and yields the oldest statically typed message:
+// 'op dst receiver payload_kind'.
+pub fn code_op_channel_recv() -> i64 {
     return 162;
 }
 
@@ -1068,6 +1068,20 @@ pub fn code_kind_slice() -> i64 {
     return 5;
 }
 
+// code_kind_borrowed_slice preserves String.as_bytes provenance in the run
+// lowering. It shares the []u8 SSA representation but is intentionally not a
+// storable value ABI kind, so Channel cannot erase the concurrency boundary.
+pub fn code_kind_borrowed_slice() -> i64 {
+    return 23;
+}
+
+pub fn code_kind_is_slice_value(kind: i64) -> bool {
+    if kind == code_kind_slice() {
+        return true;
+    }
+    return kind == code_kind_borrowed_slice();
+}
+
 pub fn code_kind_handle() -> i64 {
     return 6;
 }
@@ -1154,11 +1168,31 @@ pub fn code_kind_atomic_bool() -> i64 {
     return 21;
 }
 
-// Channel<i64> is a pointer to function-local queue storage initialized by
-// CHANNEL_I64_NEW. Parameter/return/container escape stays unsupported because
-// none of those kind classifiers accept this value.
-pub fn code_kind_channel_i64() -> i64 {
-    return 22;
+// Channel<T> kinds retain their payload ABI kind without a second type table.
+// The small 100..199 band is below record-backed kinds and above scalar kinds.
+// Parameter/return/container escape stays unsupported because none of those
+// classifiers accept a channel kind.
+fn code_kind_channel_base() -> i64 {
+    return 100;
+}
+
+pub fn code_kind_channel(payload_kind: i64) -> i64 {
+    if code_kind_value_abi_size(payload_kind) < 0 {
+        return 0 - 1;
+    }
+    return code_kind_channel_base() + payload_kind;
+}
+
+pub fn code_kind_is_channel(kind: i64) -> bool {
+    let payload_kind = kind - code_kind_channel_base();
+    return code_kind_value_abi_size(payload_kind) >= 0;
+}
+
+pub fn code_channel_payload_kind(kind: i64) -> i64 {
+    if !code_kind_is_channel(kind) {
+        return 0 - 1;
+    }
+    return kind - code_kind_channel_base();
 }
 
 pub fn code_kind_is_mut_borrow_slice(kind: i64) -> bool {
@@ -1335,13 +1369,19 @@ fn code_array_element_kind(code: &var std::array::Array<i64>, array_kind: i64) -
 
 fn code_array_element_size(code: &var std::array::Array<i64>, array_kind: i64) -> !i64 {
     let element_kind = try code_array_element_kind(code, array_kind);
-    if element_kind == code_kind_i64() {
-        return 8;
-    }
-    if element_kind == code_kind_bool() {
+    return code_kind_value_abi_size(element_kind);
+}
+
+// code_kind_value_abi_size is the compiler-owned storage ABI shared by containers.
+// Only no-drop scalar/slice values are admitted until move/drop plans exist.
+pub fn code_kind_value_abi_size(kind: i64) -> i64 {
+    if kind == code_kind_bool() {
         return 1;
     }
-    if element_kind == code_kind_slice() {
+    if kind == code_kind_i64() {
+        return 8;
+    }
+    if kind == code_kind_slice() {
         return 16;
     }
     return 0 - 1;
@@ -1733,6 +1773,7 @@ pub fn lower_code_module(
     bool_type_id: i64,
     channel_constructor_id: i64,
     i64_type_id: i64,
+    slice_type_id: i64,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
@@ -1750,7 +1791,8 @@ pub fn lower_code_module(
         atomic_constructor_id,
         bool_type_id,
         channel_constructor_id,
-        i64_type_id
+        i64_type_id,
+        slice_type_id
     );
     return try lower_code_program(text, ast, root, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records);
 }
@@ -1771,7 +1813,8 @@ fn scratch_init(
     atomic_constructor_id: i64,
     bool_type_id: i64,
     channel_constructor_id: i64,
-    i64_type_id: i64
+    i64_type_id: i64,
+    slice_type_id: i64
 ) -> !void {
     let fact_count = node_starts.len();
     if node_ends.len() != fact_count or
@@ -1789,12 +1832,15 @@ fn scratch_init(
         try args_scratch.append(node_end);
         let constructor_id = try constructor_ids.get(index);
         let type_arg0_id = try type_arg0_ids.get(index);
+        let payload_kind = code_type_identity_value_kind(
+            type_arg0_id, bool_type_id, i64_type_id, slice_type_id
+        );
         var resolved_kind = 0 - 1;
         if constructor_id == atomic_constructor_id and type_arg0_id == bool_type_id {
             resolved_kind = code_kind_atomic_bool();
         }
-        if constructor_id == channel_constructor_id and type_arg0_id == i64_type_id {
-            resolved_kind = code_kind_channel_i64();
+        if constructor_id == channel_constructor_id and payload_kind >= 0 {
+            resolved_kind = code_kind_channel(payload_kind);
         }
         try args_scratch.append(resolved_kind);
         index = index + 1;
@@ -1802,6 +1848,24 @@ fn scratch_init(
     let stack_base = 2 + fact_count * 3;
     try args_scratch.set(0, stack_base);
     return;
+}
+
+fn code_type_identity_value_kind(
+    type_id: i64,
+    bool_type_id: i64,
+    i64_type_id: i64,
+    slice_type_id: i64
+) -> i64 {
+    if type_id == bool_type_id {
+        return code_kind_bool();
+    }
+    if type_id == i64_type_id {
+        return code_kind_i64();
+    }
+    if type_id == slice_type_id {
+        return code_kind_slice();
+    }
+    return 0 - 1;
 }
 
 // lower_code_program dispatches the checked file's root onto the declaration walk.
@@ -6469,7 +6533,7 @@ fn lower_code_runtime_field_statement_call(
         if args.len != 1 {
             return code_eval_unsupported(next_value);
         }
-        let probed_receiver = try code_local_channel_i64_receiver_value(
+        let probed_receiver = try code_local_channel_receiver_value(
             text, ast, receiver, kinds, local_starts, local_ends, local_values, locals_base
         );
         if probed_receiver < 0 {
@@ -6480,16 +6544,16 @@ fn lower_code_runtime_field_statement_call(
             return code_eval_unsupported(receiver_eval.next);
         }
         let receiver_kind = try kinds.get(receiver_eval.value_id);
-        if receiver_kind != code_kind_channel_i64() {
+        if !code_kind_is_channel(receiver_kind) {
             return code_eval_unsupported(receiver_eval.next);
         }
-        return try lower_code_channel_i64_send_statement(text, ast, decls, receiver_eval.value_id, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
+        return try lower_code_channel_send_statement(text, ast, decls, receiver_eval.value_id, receiver_kind, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, receiver_eval.next);
     }
     if std::mem::equal_bytes(method, "close") {
         if args.len != 0 {
             return code_eval_unsupported(next_value);
         }
-        let probed_receiver = try code_local_channel_i64_receiver_value(
+        let probed_receiver = try code_local_channel_receiver_value(
             text, ast, receiver, kinds, local_starts, local_ends, local_values, locals_base
         );
         if probed_receiver < 0 {
@@ -6500,10 +6564,10 @@ fn lower_code_runtime_field_statement_call(
             return code_eval_unsupported(receiver_eval.next);
         }
         let receiver_kind = try kinds.get(receiver_eval.value_id);
-        if receiver_kind != code_kind_channel_i64() {
+        if !code_kind_is_channel(receiver_kind) {
             return code_eval_unsupported(receiver_eval.next);
         }
-        return try lower_code_channel_i64_close_statement(
+        return try lower_code_channel_close_statement(
             receiver_eval.value_id, code, receiver_eval.next
         );
     }
@@ -6566,11 +6630,11 @@ fn lower_code_runtime_field_statement_call(
     return code_eval_value(0, receiver_eval.next);
 }
 
-// code_local_channel_i64_receiver_value is a side-effect-free guard for the
+// code_local_channel_receiver_value is a side-effect-free guard for the
 // current local-only Channel slice. It rejects computed receivers and encoded
 // mutable slots before ordinary expression lowering can append tape that a
 // later user-method fallback would observe.
-fn code_local_channel_i64_receiver_value(
+fn code_local_channel_receiver_value(
     text: []u8,
     ast: std::kizu::ast::Ast,
     receiver: std::kizu::ast::NodeId,
@@ -6582,18 +6646,18 @@ fn code_local_channel_i64_receiver_value(
 ) -> !i64 {
     let node = ast.get(receiver);
     return match node.data {
-        Var(var_node) => try code_local_channel_i64_var_value(
+        Var(var_node) => try code_local_channel_var_value(
             text, ast, receiver, kinds, local_starts, local_ends, local_values, locals_base
         ),
-        _ => code_no_local_channel_i64_receiver(),
+        _ => code_no_local_channel_receiver(),
     };
 }
 
-fn code_no_local_channel_i64_receiver() -> i64 {
+fn code_no_local_channel_receiver() -> i64 {
     return 0 - 1;
 }
 
-fn code_local_channel_i64_var_value(
+fn code_local_channel_var_value(
     text: []u8,
     ast: std::kizu::ast::Ast,
     receiver: std::kizu::ast::NodeId,
@@ -6611,7 +6675,7 @@ fn code_local_channel_i64_var_value(
         return 0 - 1;
     }
     let kind = try kinds.get(bound);
-    if kind != code_kind_channel_i64() {
+    if !code_kind_is_channel(kind) {
         return 0 - 1;
     }
     return bound;
@@ -7432,11 +7496,10 @@ fn lower_code_try_map_method(
     if !value_eval.ok {
         return code_eval_unsupported(value_eval.next);
     }
-    let kind_slice = code_kind_slice();
     let map_value_kind = code_map_value_kind(receiver_kind);
     let key_kind = try kinds.get(key_slice.value_id);
     let value_kind = try kinds.get(value_eval.value_id);
-    if key_kind != kind_slice {
+    if !code_kind_is_slice_value(key_kind) {
         return code_eval_unsupported(value_eval.next);
     }
     if value_kind != map_value_kind {
@@ -10309,7 +10372,7 @@ fn lower_code_call(
     if union_tag >= 0 {
         return try lower_code_union_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     }
-    let channel_recv = try lower_code_channel_i64_recv_probe(
+    let channel_recv = try lower_code_channel_recv_probe(
         text, ast, decls, callee, args, code, kinds, local_starts, local_ends,
         local_values, args_scratch, locals_base, next_value
     );
@@ -10342,10 +10405,10 @@ fn lower_code_call(
     return try emit_code_user_call(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, result_kind, next_value);
 }
 
-// lower_code_channel_i64_recv_probe recognizes only a field call whose local
-// receiver is already known to be Channel<i64>. Every miss is side-effect-free,
+// lower_code_channel_recv_probe recognizes only a field call whose local
+// receiver is already known to be Channel<T>. Every miss is side-effect-free,
 // so unrelated user-defined recv methods still reach normal method resolution.
-fn lower_code_channel_i64_recv_probe(
+fn lower_code_channel_recv_probe(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
@@ -10362,7 +10425,7 @@ fn lower_code_channel_i64_recv_probe(
 ) -> !CodeEval {
     let node = ast.get(callee);
     return match node.data {
-        FieldExpr(field_expr) => try lower_code_channel_i64_recv_field(
+        FieldExpr(field_expr) => try lower_code_channel_recv_field(
             text, ast, decls, field_expr.receiver, field_expr.name,
             field_expr.namespace, args, code, kinds, local_starts, local_ends,
             local_values, args_scratch, locals_base, next_value
@@ -10371,7 +10434,7 @@ fn lower_code_channel_i64_recv_probe(
     };
 }
 
-fn lower_code_channel_i64_recv_field(
+fn lower_code_channel_recv_field(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
@@ -10398,7 +10461,7 @@ fn lower_code_channel_i64_recv_field(
     if args.len != 0 {
         return code_eval_unsupported(next_value);
     }
-    let probed_receiver = try code_local_channel_i64_receiver_value(
+    let probed_receiver = try code_local_channel_receiver_value(
         text, ast, receiver, kinds, local_starts, local_ends, local_values, locals_base
     );
     if probed_receiver < 0 {
@@ -10412,22 +10475,30 @@ fn lower_code_channel_i64_recv_field(
         return code_eval_unsupported(receiver_eval.next);
     }
     let receiver_kind = try kinds.get(receiver_eval.value_id);
-    if receiver_kind != code_kind_channel_i64() {
+    if !code_kind_is_channel(receiver_kind) {
         return code_eval_unsupported(receiver_eval.next);
     }
-    return try lower_code_channel_i64_recv(receiver_eval.value_id, code, kinds, receiver_eval.next);
+    return try lower_code_channel_recv(
+        receiver_eval.value_id, receiver_kind, code, kinds, receiver_eval.next
+    );
 }
 
-fn lower_code_channel_i64_recv(
+fn lower_code_channel_recv(
     receiver_value: i64,
+    receiver_kind: i64,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
-    try code.append(code_op_channel_i64_recv());
+    let payload_kind = code_channel_payload_kind(receiver_kind);
+    if payload_kind < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    try code.append(code_op_channel_recv());
     try code.append(next_value);
     try code.append(receiver_value);
-    try kinds.append(code_kind_i64());
+    try code.append(payload_kind);
+    try kinds.append(payload_kind);
     return code_eval_value(next_value, next_value + 1);
 }
 
@@ -10482,9 +10553,8 @@ fn lower_code_runtime_constructor(
             next_value
         );
     }
-    let channel_i64_kind = code_kind_channel_i64();
-    if resolved_kind == channel_i64_kind {
-        return try lower_code_channel_i64_new(args, code, kinds, next_value);
+    if code_kind_is_channel(resolved_kind) {
+        return try lower_code_channel_new(args, resolved_kind, code, kinds, next_value);
     }
     let arena_new = try lower_code_arena_new(text, ast, decls, callee, args, code, kinds, local_starts, local_ends, local_values, args_scratch, locals_base, next_value);
     if arena_new.ok {
@@ -10505,8 +10575,9 @@ fn lower_code_runtime_constructor(
     return code_eval_unsupported(next_value);
 }
 
-fn lower_code_channel_i64_new(
+fn lower_code_channel_new(
     args: std::kizu::ast::ChildRange,
+    channel_kind: i64,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     next_value: i64
@@ -10514,9 +10585,14 @@ fn lower_code_channel_i64_new(
     if args.len != 0 {
         return code_eval_unsupported(next_value);
     }
-    try code.append(code_op_channel_i64_new());
+    let payload_kind = code_channel_payload_kind(channel_kind);
+    if payload_kind < 0 {
+        return code_eval_unsupported(next_value);
+    }
+    try code.append(code_op_channel_new());
     try code.append(next_value);
-    try kinds.append(code_kind_channel_i64());
+    try code.append(payload_kind);
+    try kinds.append(channel_kind);
     return code_eval_value(next_value, next_value + 1);
 }
 
@@ -11609,11 +11685,12 @@ fn lower_code_atomic_bool_store_statement(
     return code_eval_value(0, value_eval.next);
 }
 
-fn lower_code_channel_i64_send_statement(
+fn lower_code_channel_send_statement(
     text: []u8,
     ast: std::kizu::ast::Ast,
     decls: std::kizu::ast::ChildRange,
     receiver_value: i64,
+    receiver_kind: i64,
     args: std::kizu::ast::ChildRange,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
@@ -11629,22 +11706,31 @@ fn lower_code_channel_i64_send_statement(
     if !value_eval.ok {
         return code_eval_unsupported(value_eval.next);
     }
-    let value_kind = try kinds.get(value_eval.value_id);
-    if value_kind != code_kind_i64() {
+    let direct_kind = try kinds.get(value_eval.value_id);
+    if direct_kind == code_kind_borrowed_slice() {
         return code_eval_unsupported(value_eval.next);
     }
-    try code.append(code_op_channel_i64_send());
+    let payload_eval = try lower_code_arg_slice(
+        text, code, kinds, value_eval.value_id, value_eval.next
+    );
+    let value_kind = try kinds.get(payload_eval.value_id);
+    let payload_kind = code_channel_payload_kind(receiver_kind);
+    if payload_kind < 0 or value_kind != payload_kind {
+        return code_eval_unsupported(payload_eval.next);
+    }
+    try code.append(code_op_channel_send());
     try code.append(receiver_value);
-    try code.append(value_eval.value_id);
-    return code_eval_value(0, value_eval.next);
+    try code.append(payload_eval.value_id);
+    try code.append(payload_kind);
+    return code_eval_value(0, payload_eval.next);
 }
 
-fn lower_code_channel_i64_close_statement(
+fn lower_code_channel_close_statement(
     receiver_value: i64,
     code: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
-    try code.append(code_op_channel_i64_close());
+    try code.append(code_op_channel_close());
     try code.append(receiver_value);
     return code_eval_value(0, next_value);
 }
@@ -11717,7 +11803,7 @@ fn lower_code_string_as_bytes_expr(
     try code.append(op);
     try code.append(next_value);
     try code.append(receiver_value);
-    let kind_slice = code_kind_slice();
+    let kind_slice = code_kind_borrowed_slice();
     try kinds.append(kind_slice);
     let after_value = next_value + 1;
     return code_eval_value(next_value, after_value);
