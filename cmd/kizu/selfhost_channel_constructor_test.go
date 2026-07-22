@@ -109,6 +109,29 @@ func TestSelfhostStorageValueABISharedWithArray(t *testing.T) {
 	})
 }
 
+// TestSelfhostBorrowedSliceConsumerContract keeps borrowed slice provenance at
+// storage boundaries while allowing Map.insert to copy key bytes.
+func TestSelfhostBorrowedSliceConsumerContract(t *testing.T) {
+	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	mapInsert := selfhostKizuFunctionBody(t, codegen, "fn lower_code_try_map_method(")
+	requireSourceFragments(t, "Map copied borrowed slice key", mapInsert, []string{
+		"let key_kind = try kinds.get(key_slice.value_id)",
+		"if !code_kind_is_slice_value(key_kind)",
+		"let op = code_op_try_map_insert_i64()",
+		"code.append(op)",
+	})
+	channelSend := selfhostKizuFunctionBody(t, codegen, "fn lower_code_channel_send_statement(")
+	requireSourceFragments(t, "Channel borrowed slice boundary", channelSend, []string{
+		"let direct_kind = try kinds.get(value_eval.value_id)",
+		"direct_kind == code_kind_borrowed_slice()",
+		"let payload_eval = try lower_code_arg_slice(",
+	})
+	if strings.Index(channelSend, "direct_kind == code_kind_borrowed_slice()") >
+		strings.Index(channelSend, "let payload_eval = try lower_code_arg_slice(") {
+		t.Fatal("Channel.send normalizes borrowed provenance before rejecting it")
+	}
+}
+
 // TestSelfhostChannelGenericOperationsContract preserves local-only FIFO,
 // close, empty-recv, typed payload matching, and fixed generic tape records.
 func TestSelfhostChannelGenericOperationsContract(t *testing.T) {
