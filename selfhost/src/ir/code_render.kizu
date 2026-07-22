@@ -1,5 +1,6 @@
 import selfhost::ir::codegen;
 import selfhost::types::constructor_facts;
+import selfhost::types::primitive_type;
 
 // Run codegen IR v1 renderer: walk the flat function-block-instruction tape
 // (the Array<i64> records lower_code_module emits, with the run source text for
@@ -46,10 +47,7 @@ pub fn render_run_artifact(
     parsed: std::kizu::ast::ParseResult,
     constructor_identities: &constructor_facts::ConstructorFacts,
     atomic_constructor_id: i64,
-    bool_type_id: i64,
-    channel_constructor_id: i64,
-    i64_type_id: i64,
-    slice_type_id: i64
+    channel_constructor_id: i64
 ) -> !std::string::String {
     let rendered = try render_run_ast_artifact(
         allocator,
@@ -59,10 +57,7 @@ pub fn render_run_artifact(
         parsed.root,
         constructor_identities,
         atomic_constructor_id,
-        bool_type_id,
-        channel_constructor_id,
-        i64_type_id,
-        slice_type_id
+        channel_constructor_id
     );
     return rendered;
 }
@@ -75,10 +70,7 @@ pub fn render_run_ast_artifact(
     root: std::kizu::ast::NodeId,
     constructor_identities: &constructor_facts::ConstructorFacts,
     atomic_constructor_id: i64,
-    bool_type_id: i64,
-    channel_constructor_id: i64,
-    i64_type_id: i64,
-    slice_type_id: i64
+    channel_constructor_id: i64
 ) -> !std::string::String {
     var code = std::array::Array<i64>(allocator);
     var kinds = std::array::Array<i64>(allocator);
@@ -93,10 +85,7 @@ pub fn render_run_ast_artifact(
         root,
         constructor_identities,
         atomic_constructor_id,
-        bool_type_id,
         channel_constructor_id,
-        i64_type_id,
-        slice_type_id,
         &var code,
         &var kinds,
         &var local_starts,
@@ -1651,16 +1640,18 @@ fn render_value_type(
     return;
 }
 
-// render_value_abi_type is the shared storage ABI type selection for Array and
-// Channel payloads. Bool is stored as one byte while its SSA value remains i1.
-fn render_value_abi_type(out: &var std::string::String, kind: i64) -> !void {
-    if kind == codegen::code_kind_bool() {
+// render_value_abi_type is the shared compile-time storage ABI selection for
+// Array and Channel. Integer SSA stays i64; only storage uses the checked width.
+fn render_value_abi_type(out: &var std::string::String, storage_abi: i64) -> !void {
+    if storage_abi == primitive_type::storage_abi_bool() {
         try w(out, "i8");
     }
-    if kind == codegen::code_kind_i64() {
-        try w(out, "i64");
+    if primitive_type::storage_abi_is_integer(storage_abi) {
+        try w(out, "i");
+        let width = primitive_type::storage_abi_integer_width(storage_abi);
+        try wi(out, width);
     }
-    if kind == codegen::code_kind_slice() {
+    if storage_abi == primitive_type::storage_abi_slice() {
         try w(out, "%kizu.slice.u8");
     }
     return;
@@ -1672,16 +1663,19 @@ fn render_value_abi_alloca_store(
     index: i64,
     suffix: []u8,
     value: i64,
-    kind: i64
+    storage_abi: i64
 ) -> !void {
     try w(out, "  %");
     try w(out, prefix);
     try wi(out, index);
     try w(out, suffix);
     try w(out, " = alloca ");
-    try render_value_abi_type(out, kind);
+    try render_value_abi_type(out, storage_abi);
+    try w(out, ", align ");
+    let alignment = primitive_type::storage_abi_align(storage_abi);
+    try wi(out, alignment);
     try nl(out);
-    try render_value_abi_store(out, prefix, index, suffix, value, kind);
+    try render_value_abi_store(out, prefix, index, suffix, value, storage_abi);
     return;
 }
 
@@ -1691,9 +1685,9 @@ fn render_value_abi_store(
     index: i64,
     ptr_suffix: []u8,
     value: i64,
-    kind: i64
+    storage_abi: i64
 ) -> !void {
-    if kind == codegen::code_kind_bool() {
+    if storage_abi == primitive_type::storage_abi_bool() {
         try w(out, "  %");
         try w(out, prefix);
         try wi(out, index);
@@ -1709,11 +1703,42 @@ fn render_value_abi_store(
         try w(out, ptr_suffix);
         try nl(out);
     }
-    if kind == codegen::code_kind_i64() or kind == codegen::code_kind_slice() {
+    if storage_abi == primitive_type::storage_abi_slice() {
         try w(out, "  store ");
-        try render_value_abi_type(out, kind);
+        try render_value_abi_type(out, storage_abi);
         try w(out, " %v");
         try wi(out, value);
+        try w(out, ", ptr %");
+        try w(out, prefix);
+        try wi(out, index);
+        try w(out, ptr_suffix);
+        try nl(out);
+    }
+    if primitive_type::storage_abi_is_integer(storage_abi) {
+        let width = primitive_type::storage_abi_integer_width(storage_abi);
+        if width < 64 {
+            try w(out, "  %");
+            try w(out, prefix);
+            try wi(out, index);
+            try w(out, "_narrow = trunc i64 %v");
+            try wi(out, value);
+            try w(out, " to i");
+            try wi(out, width);
+            try nl(out);
+        }
+        try w(out, "  store i");
+        try wi(out, width);
+        try w(out, " ");
+        if width < 64 {
+            try w(out, "%");
+            try w(out, prefix);
+            try wi(out, index);
+            try w(out, "_narrow");
+        }
+        if width == 64 {
+            try w(out, "%v");
+            try wi(out, value);
+        }
         try w(out, ", ptr %");
         try w(out, prefix);
         try wi(out, index);
@@ -1729,9 +1754,9 @@ fn render_value_abi_load(
     index: i64,
     ptr_suffix: []u8,
     value_id: i64,
-    kind: i64
+    storage_abi: i64
 ) -> !void {
-    if kind == codegen::code_kind_bool() {
+    if storage_abi == primitive_type::storage_abi_bool() {
         try w(out, "  %");
         try w(out, prefix);
         try wi(out, index);
@@ -1747,16 +1772,55 @@ fn render_value_abi_load(
         try wi(out, index);
         try wl(out, "_byte, 0");
     }
-    if kind == codegen::code_kind_i64() or kind == codegen::code_kind_slice() {
+    if storage_abi == primitive_type::storage_abi_slice() {
         try w(out, "  %v");
         try wi(out, value_id);
         try w(out, " = load ");
-        try render_value_abi_type(out, kind);
+        try render_value_abi_type(out, storage_abi);
         try w(out, ", ptr %");
         try w(out, prefix);
         try wi(out, index);
         try w(out, ptr_suffix);
         try nl(out);
+    }
+    if primitive_type::storage_abi_is_integer(storage_abi) {
+        let width = primitive_type::storage_abi_integer_width(storage_abi);
+        if width == 64 {
+            try w(out, "  %v");
+            try wi(out, value_id);
+            try w(out, " = load i64, ptr %");
+            try w(out, prefix);
+            try wi(out, index);
+            try w(out, ptr_suffix);
+            try nl(out);
+        }
+        if width < 64 {
+            try w(out, "  %");
+            try w(out, prefix);
+            try wi(out, index);
+            try w(out, "_narrow = load i");
+            try wi(out, width);
+            try w(out, ", ptr %");
+            try w(out, prefix);
+            try wi(out, index);
+            try w(out, ptr_suffix);
+            try nl(out);
+            try w(out, "  %v");
+            try wi(out, value_id);
+            try w(out, " = ");
+            if primitive_type::storage_abi_integer_signed(storage_abi) {
+                try w(out, "sext i");
+            }
+            if !primitive_type::storage_abi_integer_signed(storage_abi) {
+                try w(out, "zext i");
+            }
+            try wi(out, width);
+            try w(out, " %");
+            try w(out, prefix);
+            try wi(out, index);
+            try w(out, "_narrow to i64");
+            try nl(out);
+        }
     }
     return;
 }
@@ -2554,25 +2618,13 @@ fn render_one_instruction_runtime_array_items(
     abi: i64,
     op: i64
 ) -> !void {
-    let try_array_append = codegen::code_op_try_array_append_i64();
-    if op == try_array_append {
-        try render_try_array_append_i64(out, code, index, abi);
-    }
     let try_array_append_value = codegen::code_op_try_array_append();
     if op == try_array_append_value {
         try render_try_array_append(out, code, index, abi);
     }
-    let try_array_get = codegen::code_op_try_array_get_i64();
-    if op == try_array_get {
-        try render_try_array_get_i64(out, code, index, abi);
-    }
     let try_array_get_value = codegen::code_op_try_array_get();
     if op == try_array_get_value {
         try render_try_array_get(out, code, index, abi);
-    }
-    let array_get = codegen::code_op_array_get_i64();
-    if op == array_get {
-        try render_array_get_i64(out, code, index);
     }
     let array_get_value = codegen::code_op_array_get();
     if op == array_get_value {
@@ -3484,24 +3536,24 @@ fn render_channel_send(
 ) -> !void {
     let receiver = try code.get(index + 1);
     let value = try code.get(index + 2);
-    let payload_kind = try code.get(index + 3);
+    let storage_abi = try code.get(index + 3);
     try w(out, "  %ch");
     try wi(out, index);
     try w(out, "_node = alloca { ");
-    try render_value_abi_type(out, payload_kind);
+    try render_value_abi_type(out, storage_abi);
     try wl(out, ", ptr }");
     try w(out, "  %ch");
     try wi(out, index);
     try w(out, "_value_field = getelementptr inbounds { ");
-    try render_value_abi_type(out, payload_kind);
+    try render_value_abi_type(out, storage_abi);
     try w(out, ", ptr }, ptr %ch");
     try wi(out, index);
     try wl(out, "_node, i32 0, i32 0");
-    try render_value_abi_store(out, "ch", index, "_value_field", value, payload_kind);
+    try render_value_abi_store(out, "ch", index, "_value_field", value, storage_abi);
     try w(out, "  %ch");
     try wi(out, index);
     try w(out, "_next_field = getelementptr inbounds { ");
-    try render_value_abi_type(out, payload_kind);
+    try render_value_abi_type(out, storage_abi);
     try w(out, ", ptr }, ptr %ch");
     try wi(out, index);
     try wl(out, "_node, i32 0, i32 1");
@@ -3552,7 +3604,7 @@ fn render_channel_send(
     try w(out, "  %ch");
     try wi(out, index);
     try w(out, "_tail_next_field = getelementptr inbounds { ");
-    try render_value_abi_type(out, payload_kind);
+    try render_value_abi_type(out, storage_abi);
     try w(out, ", ptr }, ptr %ch");
     try wi(out, index);
     try wl(out, "_tail, i32 0, i32 1");
@@ -3599,7 +3651,7 @@ fn render_channel_recv(
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
-    let payload_kind = try code.get(index + 3);
+    let storage_abi = try code.get(index + 3);
     try w(out, "  %cr");
     try wi(out, index);
     try w(out, "_head_field = getelementptr inbounds %kizu.run.channel, ptr %v");
@@ -3647,15 +3699,15 @@ fn render_channel_recv(
     try w(out, "  %cr");
     try wi(out, index);
     try w(out, "_value_field = getelementptr inbounds { ");
-    try render_value_abi_type(out, payload_kind);
+    try render_value_abi_type(out, storage_abi);
     try w(out, ", ptr }, ptr %cr");
     try wi(out, index);
     try wl(out, "_head, i32 0, i32 0");
-    try render_value_abi_load(out, "cr", index, "_value_field", dst, payload_kind);
+    try render_value_abi_load(out, "cr", index, "_value_field", dst, storage_abi);
     try w(out, "  %cr");
     try wi(out, index);
     try w(out, "_next_field = getelementptr inbounds { ");
-    try render_value_abi_type(out, payload_kind);
+    try render_value_abi_type(out, storage_abi);
     try w(out, ", ptr }, ptr %cr");
     try wi(out, index);
     try wl(out, "_head, i32 0, i32 1");
@@ -7279,25 +7331,14 @@ fn render_try_string_truncate(
     return;
 }
 
-fn render_try_array_append_i64(
-    out: &var std::string::String,
-    code: &std::array::Array<i64>,
-    index: i64,
-    abi: i64
-) -> !void {
-    let element_kind = codegen::code_kind_i64();
-    try render_try_array_append_kind(out, code, index, abi, element_kind);
-    return;
-}
-
 fn render_try_array_append(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64,
     abi: i64
 ) -> !void {
-    let element_kind = try code.get(index + 3);
-    try render_try_array_append_kind(out, code, index, abi, element_kind);
+    let storage_abi = try code.get(index + 3);
+    try render_try_array_append_kind(out, code, index, abi, storage_abi);
     return;
 }
 
@@ -7306,11 +7347,11 @@ fn render_try_array_append_kind(
     code: &std::array::Array<i64>,
     index: i64,
     abi: i64,
-    element_kind: i64
+    storage_abi: i64
 ) -> !void {
     let receiver = try code.get(index + 1);
     let value = try code.get(index + 2);
-    try render_array_append_slot(out, index, value, element_kind);
+    try render_array_append_slot(out, index, value, storage_abi);
     try w(out, "  %aa");
     try wi(out, index);
     try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %aa");
@@ -7321,7 +7362,7 @@ fn render_try_array_append_kind(
     try w(out, "_slice = insertvalue %kizu.slice.u8 %aa");
     try wi(out, index);
     try w(out, "_base, i64 ");
-    let element_size = codegen::code_kind_value_abi_size(element_kind);
+    let element_size = primitive_type::storage_abi_size(storage_abi);
     try wi(out, element_size);
     try wl(out, ", 1");
     try w(out, "  %tc");
@@ -7335,9 +7376,9 @@ fn render_try_array_append_kind(
     return;
 }
 
-fn render_array_append_slot(out: &var std::string::String, index: i64, value: i64, element_kind: i64) -> !void {
+fn render_array_append_slot(out: &var std::string::String, index: i64, value: i64, storage_abi: i64) -> !void {
     try render_value_abi_alloca_store(
-        out, "aa", index, "_slot", value, element_kind
+        out, "aa", index, "_slot", value, storage_abi
     );
     return;
 }
@@ -7370,23 +7411,13 @@ fn render_try_void_result(
     return;
 }
 
-fn render_array_get_i64(
-    out: &var std::string::String,
-    code: &std::array::Array<i64>,
-    index: i64
-) -> !void {
-    let element_kind = codegen::code_kind_i64();
-    try render_array_get_kind(out, code, index, element_kind);
-    return;
-}
-
 fn render_array_get(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64
 ) -> !void {
-    let element_kind = try code.get(index + 4);
-    try render_array_get_kind(out, code, index, element_kind);
+    let storage_abi = try code.get(index + 4);
+    try render_array_get_kind(out, code, index, storage_abi);
     return;
 }
 
@@ -7394,74 +7425,63 @@ fn render_array_get_kind(
     out: &var std::string::String,
     code: &std::array::Array<i64>,
     index: i64,
-    element_kind: i64
+    storage_abi: i64
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
     let item_index = try code.get(index + 3);
     try w(out, "  %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try w(out, " = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %v");
     try wi(out, receiver);
     try w(out, ", i64 %v");
     try wi(out, item_index);
     try wl(out, ")");
     try w(out, "  %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try w(out, "_ok = extractvalue %kizu.error.slice.u8 %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try wl(out, ", 0");
     try w(out, "  br i1 %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try w(out, "_ok, label %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try w(out, "_cont, label %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try wl(out, "_fail");
     try w(out, "ag");
-    try wi(out, dst);
+    try wi(out, index);
     try wl(out, "_fail:");
     try w(out, "  %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try w(out, "_msg = extractvalue %kizu.error.slice.u8 %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try wl(out, ", 2");
     try w(out, "  call void @kizu_rt_trap(%kizu.slice.u8 %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try wl(out, "_msg)");
     try wl(out, "  unreachable");
     try w(out, "ag");
-    try wi(out, dst);
+    try wi(out, index);
     try wl(out, "_cont:");
     try w(out, "  %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try w(out, "_slice = extractvalue %kizu.error.slice.u8 %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try wl(out, ", 1");
     try w(out, "  %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try w(out, "_ptr = extractvalue %kizu.slice.u8 %ag");
-    try wi(out, dst);
+    try wi(out, index);
     try wl(out, "_slice, 0");
-    try render_array_get_load(out, dst, dst, element_kind);
+    try render_array_get_load(out, dst, index, storage_abi);
     return;
 }
 
-fn render_array_get_load(out: &var std::string::String, value_id: i64, temp_id: i64, element_kind: i64) -> !void {
+fn render_array_get_load(out: &var std::string::String, value_id: i64, temp_id: i64, storage_abi: i64) -> !void {
     try render_value_abi_load(
-        out, "ag", temp_id, "_ptr", value_id, element_kind
+        out, "ag", temp_id, "_ptr", value_id, storage_abi
     );
-    return;
-}
-
-fn render_try_array_get_i64(
-    out: &var std::string::String,
-    code: &std::array::Array<i64>,
-    index: i64,
-    abi: i64
-) -> !void {
-    let element_kind = codegen::code_kind_i64();
-    try render_try_array_get_i64_kind(out, code, index, abi, element_kind);
     return;
 }
 
@@ -7471,68 +7491,8 @@ fn render_try_array_get(
     index: i64,
     abi: i64
 ) -> !void {
-    let element_kind = try code.get(index + 4);
-    try render_try_array_get_kind(out, code, index, abi, element_kind);
-    return;
-}
-
-fn render_try_array_get_i64_kind(
-    out: &var std::string::String,
-    code: &std::array::Array<i64>,
-    index: i64,
-    abi: i64,
-    element_kind: i64
-) -> !void {
-    let dst = try code.get(index + 1);
-    let receiver = try code.get(index + 2);
-    let item_index = try code.get(index + 3);
-    try w(out, "  %ag");
-    try wi(out, index);
-    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %v");
-    try wi(out, receiver);
-    try w(out, ", i64 %v");
-    try wi(out, item_index);
-    try wl(out, ")");
-    try w(out, "  %ag");
-    try wi(out, index);
-    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %ag");
-    try wi(out, index);
-    try wl(out, ", 0");
-    try w(out, "  br i1 %ag");
-    try wi(out, index);
-    try w(out, "_ok, label %tc");
-    try wi(out, index);
-    try w(out, "_cont, label %tc");
-    try wi(out, index);
-    try wl(out, "_fail");
-    try w(out, "tc");
-    try wi(out, index);
-    try wl(out, "_fail:");
-    try w(out, "  %tc");
-    try wi(out, index);
-    try w(out, "_pm = extractvalue %kizu.error.slice.u8 %ag");
-    try wi(out, index);
-    try wl(out, ", 2");
-    try w(out, "  %tc");
-    try wi(out, index);
-    try w(out, " = insertvalue %kizu.error.i64 { i1 false, i64 0, %kizu.slice.u8 zeroinitializer }, %kizu.slice.u8 %tc");
-    try wi(out, index);
-    try wl(out, "_pm, 2");
-    try render_try_i64_propagate(out, code, index, abi);
-    try w(out, "tc");
-    try wi(out, index);
-    try wl(out, "_cont:");
-    try w(out, "  %ag");
-    try wi(out, index);
-    try w(out, "_slice = extractvalue %kizu.error.slice.u8 %ag");
-    try wi(out, index);
-    try wl(out, ", 1");
-    try w(out, "  %ag");
-    try wi(out, index);
-    try w(out, "_ptr = extractvalue %kizu.slice.u8 %ag");
-    try wi(out, index);
-    try wl(out, "_slice, 0");
-    try render_array_get_load(out, dst, index, element_kind);
+    let storage_abi = try code.get(index + 4);
+    try render_try_array_get_kind(out, code, index, abi, storage_abi);
     return;
 }
 
@@ -7541,7 +7501,7 @@ fn render_try_array_get_kind(
     code: &std::array::Array<i64>,
     index: i64,
     abi: i64,
-    element_kind: i64
+    storage_abi: i64
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
@@ -7587,7 +7547,7 @@ fn render_try_array_get_kind(
     try w(out, "_ptr = extractvalue %kizu.slice.u8 %ag");
     try wi(out, index);
     try wl(out, "_slice, 0");
-    try render_array_get_load(out, dst, index, element_kind);
+    try render_array_get_load(out, dst, index, storage_abi);
     return;
 }
 
@@ -7653,7 +7613,7 @@ fn render_try_array_set(
     let receiver = try code.get(index + 1);
     let item_index = try code.get(index + 2);
     let value = try code.get(index + 3);
-    let element_kind = try code.get(index + 4);
+    let storage_abi = try code.get(index + 4);
     try w(out, "  %as");
     try wi(out, index);
     try w(out, " = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %v");
@@ -7695,16 +7655,16 @@ fn render_try_array_set(
     try w(out, "_ptr = extractvalue %kizu.slice.u8 %as");
     try wi(out, index);
     try wl(out, "_slice, 0");
-    try render_array_set_store(out, index, value, element_kind);
+    try render_array_set_store(out, index, value, storage_abi);
     return;
 }
 
 // render_array_set_store stores '%v<value>' into the element pointer
 // '%as<index>_ptr' for i64, bool, and []u8 element kinds, mirroring the slot
 // stores the append lowering emits.
-fn render_array_set_store(out: &var std::string::String, index: i64, value: i64, element_kind: i64) -> !void {
+fn render_array_set_store(out: &var std::string::String, index: i64, value: i64, storage_abi: i64) -> !void {
     try render_value_abi_store(
-        out, "as", index, "_ptr", value, element_kind
+        out, "as", index, "_ptr", value, storage_abi
     );
     return;
 }
@@ -7775,7 +7735,7 @@ fn render_try_array_pop(
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
-    let element_kind = try code.get(index + 3);
+    let storage_abi = try code.get(index + 3);
     try w(out, "  %ap");
     try wi(out, index);
     try w(out, "_len = call i64 @kizu_rt_array_len(%kizu.owned %v");
@@ -7827,7 +7787,7 @@ fn render_try_array_pop(
     try w(out, "_ptr = extractvalue %kizu.slice.u8 %ap");
     try wi(out, index);
     try wl(out, "_slice, 0");
-    try render_array_pop_load(out, dst, index, element_kind);
+    try render_array_pop_load(out, dst, index, storage_abi);
     try w(out, "  %ap");
     try wi(out, index);
     try w(out, "_raw = extractvalue %kizu.owned %v");
@@ -7846,9 +7806,9 @@ fn render_try_array_pop(
     return;
 }
 
-fn render_array_pop_load(out: &var std::string::String, value_id: i64, index: i64, element_kind: i64) -> !void {
+fn render_array_pop_load(out: &var std::string::String, value_id: i64, index: i64, storage_abi: i64) -> !void {
     try render_value_abi_load(
-        out, "ap", index, "_ptr", value_id, element_kind
+        out, "ap", index, "_ptr", value_id, storage_abi
     );
     return;
 }
@@ -9690,25 +9650,13 @@ fn tape_record_end_array_storage(code: &std::array::Array<i64>, index: i64, op: 
 }
 
 fn tape_record_end_array_items(code: &std::array::Array<i64>, index: i64, op: i64) -> !i64 {
-    let try_array_append = codegen::code_op_try_array_append_i64();
-    if op == try_array_append {
-        return index + 3;
-    }
     let try_array_append_value = codegen::code_op_try_array_append();
     if op == try_array_append_value {
-        return index + 4;
-    }
-    let try_array_get = codegen::code_op_try_array_get_i64();
-    if op == try_array_get {
         return index + 4;
     }
     let try_array_get_value = codegen::code_op_try_array_get();
     if op == try_array_get_value {
         return index + 5;
-    }
-    let array_get = codegen::code_op_array_get_i64();
-    if op == array_get {
-        return index + 4;
     }
     let array_get_value = codegen::code_op_array_get();
     if op == array_get_value {

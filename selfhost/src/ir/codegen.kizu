@@ -1,4 +1,5 @@
 import selfhost::types::constructor_facts;
+import selfhost::types::primitive_type;
 
 fn is_empty_node(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
     let node = ast.get(node_id);
@@ -617,14 +618,6 @@ pub fn code_op_array_len() -> i64 {
     return 103;
 }
 
-pub fn code_op_try_array_append_i64() -> i64 {
-    return 104;
-}
-
-pub fn code_op_array_get_i64() -> i64 {
-    return 105;
-}
-
 pub fn code_op_try_map_insert_i64() -> i64 {
     return 106;
 }
@@ -661,12 +654,7 @@ pub fn code_op_arena_get_struct_field() -> i64 {
     return 115;
 }
 
-pub fn code_op_try_array_get_i64() -> i64 {
-    return 116;
-}
-
-// Non-i64 Array<T> records carry the element kind explicitly so the renderer can
-// marshal/load bool and []u8 elements without changing the existing i64 tape.
+// Generic Array<T> records carry the compile-time storage ABI explicitly.
 pub fn code_op_try_array_append() -> i64 {
     return 122;
 }
@@ -1090,16 +1078,42 @@ pub fn code_kind_owned_string() -> i64 {
     return 7;
 }
 
+// Every primitive Array is one ABI-encoded kind. Adding an integer width does
+// not add an Array kind or opcode; its checked TypeRecord supplies the ABI.
+fn code_kind_owned_array_primitive_base() -> i64 {
+    return 0 - 400000000;
+}
+
+fn code_kind_owned_array_primitive(storage_abi: i64) -> i64 {
+    if !primitive_type::storage_abi_supported(storage_abi) {
+        return 0 - 1;
+    }
+    return code_kind_owned_array_primitive_base() - storage_abi;
+}
+
+fn code_kind_is_owned_array_primitive(kind: i64) -> bool {
+    let storage_abi = code_kind_owned_array_primitive_base() - kind;
+    return primitive_type::storage_abi_supported(storage_abi);
+}
+
+fn code_kind_owned_array_primitive_abi(kind: i64) -> i64 {
+    if !code_kind_is_owned_array_primitive(kind) {
+        return primitive_type::storage_abi_unknown();
+    }
+    return code_kind_owned_array_primitive_base() - kind;
+}
+
 pub fn code_kind_owned_array_i64() -> i64 {
-    return 8;
+    let abi = primitive_type::storage_abi_integer(64, true);
+    return code_kind_owned_array_primitive(abi);
 }
 
 pub fn code_kind_owned_array_bool() -> i64 {
-    return 11;
+    return code_kind_owned_array_primitive(primitive_type::storage_abi_bool());
 }
 
 pub fn code_kind_owned_array_slice() -> i64 {
-    return 12;
+    return code_kind_owned_array_primitive(primitive_type::storage_abi_slice());
 }
 
 pub fn code_kind_owned_map_i64() -> i64 {
@@ -1168,27 +1182,30 @@ pub fn code_kind_atomic_bool() -> i64 {
     return 21;
 }
 
-// Channel<T> kinds retain their payload ABI kind without a second type table.
-// The small 100..199 band is below record-backed kinds and above scalar kinds.
+// Channel<T> kinds retain their compile-time payload storage ABI without a
+// second type table or a runtime tag.
+// The kind is a base offset plus the descriptor; current bool/slice/integer
+// descriptors produce sparse values from 101 through 329, below the
+// record-backed kind base.
 // Parameter/return/container escape stays unsupported because none of those
 // classifiers accept a channel kind.
 fn code_kind_channel_base() -> i64 {
     return 100;
 }
 
-pub fn code_kind_channel(payload_kind: i64) -> i64 {
-    if code_kind_value_abi_size(payload_kind) < 0 {
+pub fn code_kind_channel(storage_abi: i64) -> i64 {
+    if !primitive_type::storage_abi_supported(storage_abi) {
         return 0 - 1;
     }
-    return code_kind_channel_base() + payload_kind;
+    return code_kind_channel_base() + storage_abi;
 }
 
 pub fn code_kind_is_channel(kind: i64) -> bool {
-    let payload_kind = kind - code_kind_channel_base();
-    return code_kind_value_abi_size(payload_kind) >= 0;
+    let storage_abi = kind - code_kind_channel_base();
+    return primitive_type::storage_abi_supported(storage_abi);
 }
 
-pub fn code_channel_payload_kind(kind: i64) -> i64 {
+pub fn code_channel_payload_abi(kind: i64) -> i64 {
     if !code_kind_is_channel(kind) {
         return 0 - 1;
     }
@@ -1332,13 +1349,7 @@ fn code_kind_is_owned_resource(kind: i64) -> bool {
 }
 
 pub fn code_kind_is_owned_array(kind: i64) -> bool {
-    if kind == code_kind_owned_array_i64() {
-        return true;
-    }
-    if kind == code_kind_owned_array_bool() {
-        return true;
-    }
-    if kind == code_kind_owned_array_slice() {
+    if code_kind_is_owned_array_primitive(kind) {
         return true;
     }
     if code_kind_is_owned_array_enum(kind) {
@@ -1348,14 +1359,9 @@ pub fn code_kind_is_owned_array(kind: i64) -> bool {
 }
 
 fn code_array_element_kind(code: &var std::array::Array<i64>, array_kind: i64) -> !i64 {
-    if array_kind == code_kind_owned_array_i64() {
-        return code_kind_i64();
-    }
-    if array_kind == code_kind_owned_array_bool() {
-        return code_kind_bool();
-    }
-    if array_kind == code_kind_owned_array_slice() {
-        return code_kind_slice();
+    if code_kind_is_owned_array_primitive(array_kind) {
+        let storage_abi = code_kind_owned_array_primitive_abi(array_kind);
+        return code_storage_abi_value_kind(storage_abi);
     }
     if code_kind_is_owned_array_enum(array_kind) {
         return code_kind_i64();
@@ -1368,23 +1374,56 @@ fn code_array_element_kind(code: &var std::array::Array<i64>, array_kind: i64) -
 }
 
 fn code_array_element_size(code: &var std::array::Array<i64>, array_kind: i64) -> !i64 {
-    let element_kind = try code_array_element_kind(code, array_kind);
-    return code_kind_value_abi_size(element_kind);
+    let storage_abi = try code_array_element_abi(code, array_kind);
+    return primitive_type::storage_abi_size(storage_abi);
 }
 
-// code_kind_value_abi_size is the compiler-owned storage ABI shared by containers.
-// Only no-drop scalar/slice values are admitted until move/drop plans exist.
-pub fn code_kind_value_abi_size(kind: i64) -> i64 {
-    if kind == code_kind_bool() {
-        return 1;
+fn code_array_element_abi(code: &var std::array::Array<i64>, array_kind: i64) -> !i64 {
+    if code_kind_is_owned_array_primitive(array_kind) {
+        return code_kind_owned_array_primitive_abi(array_kind);
     }
-    if kind == code_kind_i64() {
-        return 8;
+    if code_kind_is_owned_array_enum(array_kind) {
+        return primitive_type::storage_abi_integer(64, true);
     }
-    if kind == code_kind_slice() {
-        return 16;
+    if code_kind_is_owned_array_struct(array_kind) {
+        let record_pos = code_kind_owned_array_struct_record_pos(array_kind);
+        let field_kind = try struct_param_first_field_kind(code, record_pos);
+        return code_kind_storage_abi(field_kind);
+    }
+    return primitive_type::storage_abi_unknown();
+}
+
+fn code_storage_abi_value_kind(storage_abi: i64) -> i64 {
+    if primitive_type::storage_abi_is_integer(storage_abi) {
+        return code_kind_i64();
+    }
+    if storage_abi == primitive_type::storage_abi_bool() {
+        return code_kind_bool();
+    }
+    if storage_abi == primitive_type::storage_abi_slice() {
+        return code_kind_slice();
     }
     return 0 - 1;
+}
+
+fn code_kind_storage_abi(kind: i64) -> i64 {
+    if kind == code_kind_bool() {
+        return primitive_type::storage_abi_bool();
+    }
+    if kind == code_kind_i64() {
+        return primitive_type::storage_abi_integer(64, true);
+    }
+    if kind == code_kind_slice() {
+        return primitive_type::storage_abi_slice();
+    }
+    return primitive_type::storage_abi_unknown();
+}
+
+// code_kind_value_abi_size remains the record-field bridge. Container
+// instances carry a storage ABI directly and never infer one from an SSA kind.
+pub fn code_kind_value_abi_size(kind: i64) -> i64 {
+    let storage_abi = code_kind_storage_abi(kind);
+    return primitive_type::storage_abi_size(storage_abi);
 }
 
 // An Array<EnumType> carries the i64-tag ABI like Array<i64>, but it must also
@@ -1770,10 +1809,7 @@ pub fn lower_code_module(
     root: std::kizu::ast::NodeId,
     constructor_identities: &constructor_facts::ConstructorFacts,
     atomic_constructor_id: i64,
-    bool_type_id: i64,
     channel_constructor_id: i64,
-    i64_type_id: i64,
-    slice_type_id: i64,
     code: &var std::array::Array<i64>,
     kinds: &var std::array::Array<i64>,
     local_starts: &var std::array::Array<i64>,
@@ -1788,11 +1824,9 @@ pub fn lower_code_module(
         &constructor_identities.node_ends,
         &constructor_identities.constructor_ids,
         &constructor_identities.type_arg0_ids,
+        &constructor_identities.type_arg0_storage_abis,
         atomic_constructor_id,
-        bool_type_id,
-        channel_constructor_id,
-        i64_type_id,
-        slice_type_id
+        channel_constructor_id
     );
     return try lower_code_program(text, ast, root, code, kinds, local_starts, local_ends, local_values, args_scratch, defer_records);
 }
@@ -1810,16 +1844,15 @@ fn scratch_init(
     node_ends: &std::array::Array<i64>,
     constructor_ids: &std::array::Array<i64>,
     type_arg0_ids: &std::array::Array<i64>,
+    type_arg0_storage_abis: &std::array::Array<i64>,
     atomic_constructor_id: i64,
-    bool_type_id: i64,
-    channel_constructor_id: i64,
-    i64_type_id: i64,
-    slice_type_id: i64
+    channel_constructor_id: i64
 ) -> !void {
     let fact_count = node_starts.len();
     if node_ends.len() != fact_count or
         constructor_ids.len() != fact_count or
-        type_arg0_ids.len() != fact_count {
+        type_arg0_ids.len() != fact_count or
+        type_arg0_storage_abis.len() != fact_count {
         return error("run codegen constructor identity arrays differ in length");
     }
     try args_scratch.append(0);
@@ -1832,15 +1865,16 @@ fn scratch_init(
         try args_scratch.append(node_end);
         let constructor_id = try constructor_ids.get(index);
         let type_arg0_id = try type_arg0_ids.get(index);
-        let payload_kind = code_type_identity_value_kind(
-            type_arg0_id, bool_type_id, i64_type_id, slice_type_id
-        );
+        let type_arg0_storage_abi = try type_arg0_storage_abis.get(index);
+        let type_arg0_record = primitive_type::record_from_identity(type_arg0_id);
         var resolved_kind = 0 - 1;
-        if constructor_id == atomic_constructor_id and type_arg0_id == bool_type_id {
+        if constructor_id == atomic_constructor_id and
+            type_arg0_record.kind == primitive_type::type_kind_bool() {
             resolved_kind = code_kind_atomic_bool();
         }
-        if constructor_id == channel_constructor_id and payload_kind >= 0 {
-            resolved_kind = code_kind_channel(payload_kind);
+        if constructor_id == channel_constructor_id and
+            primitive_type::storage_abi_supported(type_arg0_storage_abi) {
+            resolved_kind = code_kind_channel(type_arg0_storage_abi);
         }
         try args_scratch.append(resolved_kind);
         index = index + 1;
@@ -1848,24 +1882,6 @@ fn scratch_init(
     let stack_base = 2 + fact_count * 3;
     try args_scratch.set(0, stack_base);
     return;
-}
-
-fn code_type_identity_value_kind(
-    type_id: i64,
-    bool_type_id: i64,
-    i64_type_id: i64,
-    slice_type_id: i64
-) -> i64 {
-    if type_id == bool_type_id {
-        return code_kind_bool();
-    }
-    if type_id == i64_type_id {
-        return code_kind_i64();
-    }
-    if type_id == slice_type_id {
-        return code_kind_slice();
-    }
-    return 0 - 1;
 }
 
 // lower_code_program dispatches the checked file's root onto the declaration walk.
@@ -7326,20 +7342,12 @@ fn lower_code_try_array_method(
         return code_eval_unsupported(arg_eval.next);
     }
     let element_eval = try lower_code_array_element_value(text, code, kinds, receiver_kind, arg_eval.value_id, arg_eval.next);
-    let element_kind = try code_array_element_kind(code, receiver_kind);
-    if element_kind == code_kind_i64() {
-        let op_array_append_i64 = code_op_try_array_append_i64();
-        try code.append(op_array_append_i64);
-        try code.append(receiver_value);
-        try code.append(element_eval.value_id);
-    }
-    if element_kind != code_kind_i64() {
-        let op_array_append = code_op_try_array_append();
-        try code.append(op_array_append);
-        try code.append(receiver_value);
-        try code.append(element_eval.value_id);
-        try code.append(element_kind);
-    }
+    let storage_abi = try code_array_element_abi(code, receiver_kind);
+    let op_array_append = code_op_try_array_append();
+    try code.append(op_array_append);
+    try code.append(receiver_value);
+    try code.append(element_eval.value_id);
+    try code.append(storage_abi);
     return code_eval_value(0, element_eval.next);
 }
 
@@ -7355,23 +7363,58 @@ fn lower_code_array_element_value(
     if code_kind_is_owned_array_struct(receiver_kind) {
         return try lower_code_array_struct_element_value(text, code, kinds, receiver_kind, value_id, element_kind, next_value);
     }
-    let element_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
-    let element_value = element_eval.value_id;
-    let element_next = element_eval.next;
-    let value_kind = try kinds.get(element_value);
-    if value_kind == element_kind {
-        return code_eval_value(element_value, element_next);
+    // Enum values keep their declaration-backed semantic kind while their
+    // Array storage uses the shared signed-i64 ABI. The checked AST already
+    // guarantees the enum identity matches this Array instantiation.
+    if code_kind_is_owned_array_enum(receiver_kind) {
+        let value_kind = try kinds.get(value_id);
+        let value_is_enum = try code_kind_is_enum_value(code, value_kind);
+        if !value_is_enum {
+            return code_eval_unsupported(next_value);
+        }
+        return code_eval_value(value_id, next_value);
     }
-    // Array<EnumType> instantiates as an i64-tag array: an enum element value is
-    // its i64 discriminant at runtime, so it lowers through the i64 element path.
-    let value_is_enum = try code_kind_is_enum_value(code, value_kind);
-    if element_kind != code_kind_i64() {
-        return code_eval_unsupported(element_next);
+    let storage_abi = try code_array_element_abi(code, receiver_kind);
+    return try lower_code_storage_value(
+        text, code, kinds, storage_abi, value_id, next_value
+    );
+}
+
+// lower_code_storage_value is the single expected-ABI coercion for container
+// stores. Checked integer values all use the i64 SSA kind; the descriptor, not
+// the SSA kind, determines truncation and extension at the storage boundary.
+fn lower_code_storage_value(
+    text: []u8,
+    code: &var std::array::Array<i64>,
+    kinds: &var std::array::Array<i64>,
+    storage_abi: i64,
+    value_id: i64,
+    next_value: i64
+) -> !CodeEval {
+    let expected_kind = code_storage_abi_value_kind(storage_abi);
+    if expected_kind < 0 {
+        return code_eval_unsupported(next_value);
     }
-    if !value_is_enum {
-        return code_eval_unsupported(element_next);
+    if primitive_type::storage_abi_is_integer(storage_abi) {
+        let value_kind = try kinds.get(value_id);
+        if value_kind != code_kind_i64() {
+            return code_eval_unsupported(next_value);
+        }
+        return code_eval_value(value_id, next_value);
     }
-    return code_eval_value(element_value, element_next);
+    if storage_abi == primitive_type::storage_abi_bool() {
+        let value_kind = try kinds.get(value_id);
+        if value_kind != code_kind_bool() {
+            return code_eval_unsupported(next_value);
+        }
+        return code_eval_value(value_id, next_value);
+    }
+    let slice_eval = try lower_code_arg_slice(text, code, kinds, value_id, next_value);
+    let slice_kind = try kinds.get(slice_eval.value_id);
+    if slice_kind != code_kind_slice() {
+        return code_eval_unsupported(slice_eval.next);
+    }
+    return slice_eval;
 }
 
 fn lower_code_array_struct_element_value(
@@ -7452,13 +7495,13 @@ fn lower_code_try_array_set(
         return code_eval_unsupported(value_eval.next);
     }
     let element_eval = try lower_code_array_element_value(text, code, kinds, receiver_kind, value_eval.value_id, value_eval.next);
-    let element_kind = try code_array_element_kind(code, receiver_kind);
+    let storage_abi = try code_array_element_abi(code, receiver_kind);
     let op_try_array_set = code_op_try_array_set();
     try code.append(op_try_array_set);
     try code.append(receiver_value);
     try code.append(index_eval.value_id);
     try code.append(element_eval.value_id);
-    try code.append(element_kind);
+    try code.append(storage_abi);
     return code_eval_value(0, element_eval.next);
 }
 
@@ -10490,15 +10533,16 @@ fn lower_code_channel_recv(
     kinds: &var std::array::Array<i64>,
     next_value: i64
 ) -> !CodeEval {
-    let payload_kind = code_channel_payload_kind(receiver_kind);
-    if payload_kind < 0 {
+    let storage_abi = code_channel_payload_abi(receiver_kind);
+    if !primitive_type::storage_abi_supported(storage_abi) {
         return code_eval_unsupported(next_value);
     }
     try code.append(code_op_channel_recv());
     try code.append(next_value);
     try code.append(receiver_value);
-    try code.append(payload_kind);
-    try kinds.append(payload_kind);
+    try code.append(storage_abi);
+    let value_kind = code_storage_abi_value_kind(storage_abi);
+    try kinds.append(value_kind);
     return code_eval_value(next_value, next_value + 1);
 }
 
@@ -10585,13 +10629,13 @@ fn lower_code_channel_new(
     if args.len != 0 {
         return code_eval_unsupported(next_value);
     }
-    let payload_kind = code_channel_payload_kind(channel_kind);
-    if payload_kind < 0 {
+    let storage_abi = code_channel_payload_abi(channel_kind);
+    if !primitive_type::storage_abi_supported(storage_abi) {
         return code_eval_unsupported(next_value);
     }
     try code.append(code_op_channel_new());
     try code.append(next_value);
-    try code.append(payload_kind);
+    try code.append(storage_abi);
     try kinds.append(channel_kind);
     return code_eval_value(next_value, next_value + 1);
 }
@@ -10902,15 +10946,10 @@ fn code_array_type_arg_kind(
     type_arg: std::kizu::ast::NodeId,
     code: &var std::array::Array<i64>
 ) -> !i64 {
-    if type_node_is_i64(text, ast, type_arg) {
-        return code_kind_owned_array_i64();
-    }
-    let type_text = ast_node_text(text, ast, type_arg);
-    if std::mem::equal_bytes(type_text, "bool") {
-        return code_kind_owned_array_bool();
-    }
-    if std::mem::equal_bytes(type_text, "[]u8") {
-        return code_kind_owned_array_slice();
+    let type_record = primitive_type::record_from_node(text, ast, type_arg);
+    let storage_abi = primitive_type::storage_abi(type_record);
+    if primitive_type::storage_abi_supported(storage_abi) {
+        return code_kind_owned_array_primitive(storage_abi);
     }
     // A declared enum element has the i64-tag ABI (an 8-byte discriminant), so
     // Array<EnumType> lowers onto the same storage path as Array<i64>. The kind
@@ -11710,18 +11749,17 @@ fn lower_code_channel_send_statement(
     if direct_kind == code_kind_borrowed_slice() {
         return code_eval_unsupported(value_eval.next);
     }
-    let payload_eval = try lower_code_arg_slice(
-        text, code, kinds, value_eval.value_id, value_eval.next
+    let storage_abi = code_channel_payload_abi(receiver_kind);
+    let payload_eval = try lower_code_storage_value(
+        text, code, kinds, storage_abi, value_eval.value_id, value_eval.next
     );
-    let value_kind = try kinds.get(payload_eval.value_id);
-    let payload_kind = code_channel_payload_kind(receiver_kind);
-    if payload_kind < 0 or value_kind != payload_kind {
+    if !payload_eval.ok {
         return code_eval_unsupported(payload_eval.next);
     }
     try code.append(code_op_channel_send());
     try code.append(receiver_value);
     try code.append(payload_eval.value_id);
-    try code.append(payload_kind);
+    try code.append(storage_abi);
     return code_eval_value(0, payload_eval.next);
 }
 
@@ -12363,22 +12401,13 @@ fn lower_code_array_get(
     if index_kind != kind_i64 {
         return code_eval_unsupported(index_eval.next);
     }
-    let element_kind = try code_array_element_kind(code, receiver_kind);
-    if element_kind == kind_i64 {
-        let op_array_get_i64 = code_op_array_get_i64();
-        try code.append(op_array_get_i64);
-        try code.append(index_eval.next);
-        try code.append(receiver_value);
-        try code.append(index_eval.value_id);
-    }
-    if element_kind != kind_i64 {
-        let op_array_get = code_op_array_get();
-        try code.append(op_array_get);
-        try code.append(index_eval.next);
-        try code.append(receiver_value);
-        try code.append(index_eval.value_id);
-        try code.append(element_kind);
-    }
+    let storage_abi = try code_array_element_abi(code, receiver_kind);
+    let op_array_get = code_op_array_get();
+    try code.append(op_array_get);
+    try code.append(index_eval.next);
+    try code.append(receiver_value);
+    try code.append(index_eval.value_id);
+    try code.append(storage_abi);
     let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let result_value = index_eval.next;
@@ -13567,8 +13596,8 @@ fn lower_code_try_array_at_mut(
     if index_kind != kind_i64 {
         return code_eval_unsupported(index_eval.next);
     }
-    let element_kind = try code_array_element_kind(code, receiver_kind);
-    let borrow_kind = code_array_mut_borrow_kind(element_kind);
+    let storage_abi = try code_array_element_abi(code, receiver_kind);
+    let borrow_kind = code_array_mut_borrow_kind(storage_abi);
     if borrow_kind < 0 {
         return code_eval_unsupported(index_eval.next);
     }
@@ -13578,17 +13607,18 @@ fn lower_code_try_array_at_mut(
     try code.append(result_value);
     try code.append(receiver_value);
     try code.append(index_eval.value_id);
-    try code.append(element_kind);
+    try code.append(storage_abi);
     try kinds.append(borrow_kind);
     let after_value = result_value + 1;
     return code_eval_value(result_value, after_value);
 }
 
-fn code_array_mut_borrow_kind(element_kind: i64) -> i64 {
-    if element_kind == code_kind_i64() {
+fn code_array_mut_borrow_kind(storage_abi: i64) -> i64 {
+    let i64_abi = primitive_type::storage_abi_integer(64, true);
+    if storage_abi == i64_abi {
         return code_kind_mut_borrow_i64();
     }
-    if element_kind == code_kind_slice() {
+    if storage_abi == primitive_type::storage_abi_slice() {
         return code_kind_mut_borrow_slice();
     }
     return 0 - 1;
@@ -13606,12 +13636,12 @@ fn lower_code_try_array_pop(
         return code_eval_unsupported(next_value);
     }
     let result_value = next_value;
-    let element_kind = try code_array_element_kind(code, receiver_kind);
+    let storage_abi = try code_array_element_abi(code, receiver_kind);
     let op_try_array_pop = code_op_try_array_pop();
     try code.append(op_try_array_pop);
     try code.append(result_value);
     try code.append(receiver_value);
-    try code.append(element_kind);
+    try code.append(storage_abi);
     let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let after_value = result_value + 1;
@@ -13648,22 +13678,13 @@ fn lower_code_try_array_get(
         return code_eval_unsupported(index_eval.next);
     }
     let result_value = index_eval.next;
-    let element_kind = try code_array_element_kind(code, receiver_kind);
-    if element_kind == kind_i64 {
-        let op_try_array_get_i64 = code_op_try_array_get_i64();
-        try code.append(op_try_array_get_i64);
-        try code.append(result_value);
-        try code.append(receiver_value);
-        try code.append(index_eval.value_id);
-    }
-    if element_kind != kind_i64 {
-        let op_try_array_get = code_op_try_array_get();
-        try code.append(op_try_array_get);
-        try code.append(result_value);
-        try code.append(receiver_value);
-        try code.append(index_eval.value_id);
-        try code.append(element_kind);
-    }
+    let storage_abi = try code_array_element_abi(code, receiver_kind);
+    let op_try_array_get = code_op_try_array_get();
+    try code.append(op_try_array_get);
+    try code.append(result_value);
+    try code.append(receiver_value);
+    try code.append(index_eval.value_id);
+    try code.append(storage_abi);
     let result_kind = try code_array_get_result_kind(code, receiver_kind);
     try kinds.append(result_kind);
     let after_value = result_value + 1;

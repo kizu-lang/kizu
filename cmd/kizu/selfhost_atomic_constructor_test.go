@@ -60,13 +60,11 @@ func assertAtomicCheckedHandoff(t *testing.T, sources atomicConstructorSources) 
 		"&var constructor_identities",
 		"&constructor_identities",
 		"atomic_constructor_id",
-		"bool_type_id",
 		"channel_constructor_id",
-		"i64_type_id",
 	})
 }
 
-// assertAtomicScratchABI verifies the four borrowed fact arrays reach codegen scratch state.
+// assertAtomicScratchABI verifies semantic identity and storage ABI facts reach codegen scratch.
 func assertAtomicScratchABI(t *testing.T, sources atomicConstructorSources) {
 	t.Helper()
 	lowerModule := selfhostKizuFunctionBody(t, sources.codegen, "pub fn lower_code_module(")
@@ -76,15 +74,17 @@ func assertAtomicScratchABI(t *testing.T, sources atomicConstructorSources) {
 		"    node_starts: &std::array::Array<i64>,\n" +
 		"    node_ends: &std::array::Array<i64>,\n" +
 		"    constructor_ids: &std::array::Array<i64>,\n" +
-		"    type_arg0_ids: &std::array::Array<i64>,"
+		"    type_arg0_ids: &std::array::Array<i64>,\n" +
+		"    type_arg0_storage_abis: &std::array::Array<i64>,"
 	if !strings.Contains(sources.codegen, scratchSignature) {
-		t.Fatal("constructor scratch does not take four borrowed array parameters")
+		t.Fatal("constructor scratch does not take five borrowed fact arrays")
 	}
 	requireSourceFragments(t, "constructor scratch normalization", scratchInit, []string{
 		"node_starts.len()",
 		"node_ends.len()",
 		"constructor_ids.len()",
 		"type_arg0_ids.len()",
+		"type_arg0_storage_abis.len()",
 		"node_starts.get(index)",
 		"node_ends.get(index)",
 		"let node_start = try node_starts.get(index)",
@@ -93,6 +93,7 @@ func assertAtomicScratchABI(t *testing.T, sources atomicConstructorSources) {
 		"args_scratch.append(node_end)",
 		"constructor_ids.get(index)",
 		"type_arg0_ids.get(index)",
+		"type_arg0_storage_abis.get(index)",
 		"var resolved_kind = 0 - 1",
 	})
 	requireSourceFragments(t, "constructor scratch borrowed fields", lowerModule, []string{
@@ -100,6 +101,7 @@ func assertAtomicScratchABI(t *testing.T, sources atomicConstructorSources) {
 		"&constructor_identities.node_ends",
 		"&constructor_identities.constructor_ids",
 		"&constructor_identities.type_arg0_ids",
+		"&constructor_identities.type_arg0_storage_abis",
 	})
 }
 
@@ -112,14 +114,17 @@ func assertAtomicScratchHasNoNestedReceivers(t *testing.T, sources atomicConstru
 		"let node_ends = &constructor_identities.node_ends",
 		"let constructor_ids = &constructor_identities.constructor_ids",
 		"let type_arg0_ids = &constructor_identities.type_arg0_ids",
+		"let type_arg0_storage_abis = &constructor_identities.type_arg0_storage_abis",
 		"constructor_identities.node_starts.len()",
 		"constructor_identities.node_ends.len()",
 		"constructor_identities.constructor_ids.len()",
 		"constructor_identities.type_arg0_ids.len()",
+		"constructor_identities.type_arg0_storage_abis.len()",
 		"constructor_identities.node_starts.get(index)",
 		"constructor_identities.node_ends.get(index)",
 		"constructor_identities.constructor_ids.get(index)",
 		"constructor_identities.type_arg0_ids.get(index)",
+		"constructor_identities.type_arg0_storage_abis.get(index)",
 		"args_scratch.append(try node_starts.get(index))",
 		"args_scratch.append(try node_ends.get(index))",
 		"var resolved_kind = -1",
@@ -167,9 +172,7 @@ func assertConstructorFactsEntryContract(t *testing.T, sources atomicConstructor
 		"constructor_facts::init(allocator)",
 		"constructor_facts::collect_checked(",
 		"constructor_facts::constructor_atomic()",
-		"constructor_facts::type_bool()",
 		"constructor_facts::constructor_channel()",
-		"constructor_facts::type_i64()",
 		"code_render::render_run_artifact(",
 		"cannot yet lower ConstructorFacts aggregate deinit",
 	})
@@ -191,17 +194,17 @@ func assertConstructorIdentityMatching(t *testing.T, sources atomicConstructorSo
 	constructorResolver := selfhostKizuFunctionBody(
 		t, sources.facts, "fn resolved_constructor_identity_id(",
 	)
-	typeResolver := selfhostKizuFunctionBody(t, sources.facts, "fn resolved_type_identity_id(")
 	requireSourceFragments(t, "known constructor identity", appendResolved, []string{
 		"resolved_constructor_identity_id(text, ast, root, callee)",
-		"resolved_type_identity_id(text, ast, root, arg)",
+		"primitive_type::record_from_node(text, ast, arg)",
+		"primitive_type::storage_abi(type_record)",
 	})
 	requireSourceFragments(
-		t, "Atomic constructor identity", constructorResolver+typeResolver, []string{
+		t, "Atomic constructor identity", constructorResolver+appendResolved, []string{
 			`"std::atomic::Atomic"`,
 			`constructor_atomic()`,
-			`"bool"`,
-			`type_bool()`,
+			`type_record.identity`,
+			`type_arg0_storage_abi`,
 		},
 	)
 	forbidSourceFragments(t, "constructor identity allocation", sources.facts, []string{

@@ -471,8 +471,24 @@ fn append_numeric_package_closure(
         "ConstructorFacts",
         "selfhost::types::constructor_facts::ConstructorFacts"
     );
+    let primitive_target = try package_dependency::resolve_call(
+        catalog, "selfhost", "types/primitive_type", "record_from_node"
+    );
+    let primitive_parsed_index = primitive_target.component.value;
+    let primitive_source_index = try parsed_files.source_indexes.get(primitive_parsed_index);
+    let primitive_file = try files.at(primitive_source_index);
+    let primitive_parsed = try parsed_results.at(primitive_parsed_index);
+    try append_qualified_struct_type_facts(
+        out,
+        primitive_file.text,
+        primitive_parsed.ast,
+        primitive_parsed.root,
+        "TypeRecord",
+        "selfhost::types::primitive_type::TypeRecord"
+    );
     try package_dependency::queue_append(&var pending, catalog, root_target);
     try package_dependency::queue_append(&var pending, catalog, init_target);
+    try append_primitive_type_roots(&var pending, catalog);
     var index = 0;
     while index < package_dependency::queue_len(&pending) {
         let target = try package_dependency::queue_target(&pending, index);
@@ -484,6 +500,43 @@ fn append_numeric_package_closure(
         index = index + 1;
     }
     try append_numeric_dependency_records(out, catalog, graph, emitted_targets);
+    return;
+}
+
+fn append_primitive_type_root(
+    pending: &var package_dependency::FunctionTargetQueue,
+    catalog: &package_dependency::PackageFunctionCatalog,
+    function_name: []u8
+) -> !void {
+    let target = try package_dependency::resolve_call(
+        catalog, "selfhost", "types/primitive_type", function_name
+    );
+    try package_dependency::queue_append(pending, catalog, target);
+    return;
+}
+
+// These are the explicit cross-closure primitive ABI surface used by codegen
+// and code_render. Their local dependencies are discovered by the numeric graph;
+// no primitive spelling or container-specific branch is added here.
+fn append_primitive_type_roots(
+    pending: &var package_dependency::FunctionTargetQueue,
+    catalog: &package_dependency::PackageFunctionCatalog
+) -> !void {
+    try append_primitive_type_root(pending, catalog, "record_from_node");
+    try append_primitive_type_root(pending, catalog, "record_from_identity");
+    try append_primitive_type_root(pending, catalog, "type_kind_unknown");
+    try append_primitive_type_root(pending, catalog, "type_kind_bool");
+    try append_primitive_type_root(pending, catalog, "storage_abi");
+    try append_primitive_type_root(pending, catalog, "storage_abi_unknown");
+    try append_primitive_type_root(pending, catalog, "storage_abi_bool");
+    try append_primitive_type_root(pending, catalog, "storage_abi_slice");
+    try append_primitive_type_root(pending, catalog, "storage_abi_integer");
+    try append_primitive_type_root(pending, catalog, "storage_abi_is_integer");
+    try append_primitive_type_root(pending, catalog, "storage_abi_integer_width");
+    try append_primitive_type_root(pending, catalog, "storage_abi_integer_signed");
+    try append_primitive_type_root(pending, catalog, "storage_abi_supported");
+    try append_primitive_type_root(pending, catalog, "storage_abi_size");
+    try append_primitive_type_root(pending, catalog, "storage_abi_align");
     return;
 }
 
@@ -3927,6 +3980,9 @@ fn code_render_closure_external_callee_allowed(callee_text: []u8) -> bool {
     if std::mem::equal_bytes(callee_text, "codegen::lower_code_module") {
         return true;
     }
+    if primitive_type_external_callee_allowed(callee_text) {
+        return true;
+    }
     return std::mem::starts_with(callee_text, "codegen::code_op_") or
         std::mem::starts_with(callee_text, "codegen::code_kind_") or
         std::mem::starts_with(callee_text, "codegen::code_loop_kind_") or
@@ -3934,6 +3990,9 @@ fn code_render_closure_external_callee_allowed(callee_text: []u8) -> bool {
 }
 
 fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
+    if primitive_type_external_callee_allowed(callee_text) {
+        return true;
+    }
     if std::mem::equal_bytes(callee_text, "ast.get") {
         return true;
     }
@@ -3966,6 +4025,24 @@ fn codegen_closure_external_callee_allowed(callee_text: []u8) -> bool {
         return true;
     }
     return false;
+}
+
+fn primitive_type_external_callee_allowed(callee_text: []u8) -> bool {
+    return std::mem::equal_bytes(callee_text, "primitive_type::record_from_node") or
+        std::mem::equal_bytes(callee_text, "primitive_type::record_from_identity") or
+        std::mem::equal_bytes(callee_text, "primitive_type::type_kind_unknown") or
+        std::mem::equal_bytes(callee_text, "primitive_type::type_kind_bool") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_unknown") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_bool") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_slice") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_integer") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_is_integer") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_integer_width") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_integer_signed") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_supported") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_size") or
+        std::mem::equal_bytes(callee_text, "primitive_type::storage_abi_align");
 }
 
 fn codegen_closure_binary_op_accessor_allowed(callee_text: []u8) -> bool {

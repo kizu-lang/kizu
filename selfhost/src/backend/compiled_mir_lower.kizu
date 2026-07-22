@@ -1656,8 +1656,15 @@ pub fn is_count_range_function(
     ir_bytes: []u8,
     function_name: []u8,
     statement_count: i64,
+    params_spec: []u8,
     bs: i64
 ) -> !bool {
+    // The specialized lowerer unconditionally reads params 0 and 1 as the AST
+    // receiver and child range. Reject lookalike loop bodies before inspecting
+    // their statements unless the derived ABI has exactly those two entries.
+    if !count_range_params_spec_supported(params_spec) {
+        return false;
+    }
     if statement_count != 4 {
         return false;
     }
@@ -1700,6 +1707,27 @@ pub fn is_count_range_function(
     let s3_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s3, "value", 0, bs);
     let s3_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, s3_value, bs);
     return std::mem::equal_bytes(s3_value_kind, "Var");
+}
+
+fn count_range_params_spec_supported(params_spec: []u8) -> bool {
+    let spec_len = std::mem::len(params_spec);
+    let semicolon = cast<u8>(59);
+    let first = compiled_util::find_byte(params_spec, semicolon, 0);
+    if first >= spec_len {
+        return false;
+    }
+    let second = compiled_util::find_byte(params_spec, semicolon, first + 1);
+    return second >= spec_len;
+}
+
+// count_range_param_shape_gate keeps a one-parameter accumulator-shaped loop
+// from reaching lower_count_range_function's unconditional param-1 access.
+pub fn count_range_param_shape_gate() -> void {
+    std::testing::expect(!count_range_params_spec_supported("i64 text"));
+    std::testing::expect(count_range_params_spec_supported("%kizu.ast tree;%kizu.range range"));
+    std::testing::expect(!count_range_params_spec_supported("i64 a;i64 b;i64 c"));
+    print("count-range-param-shape");
+    return;
 }
 
 // nth_param_field returns the name (want_name true) or LLVM type (false) of the index-th

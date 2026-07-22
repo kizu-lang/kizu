@@ -5,6 +5,44 @@ import (
 	"testing"
 )
 
+// TestSelfhostPrimitiveStorageABIContract pins one generic checked primitive
+// record and one compile-time storage descriptor. Integer spellings must not
+// grow per-scalar identities or lowering kinds as more widths are admitted.
+func TestSelfhostPrimitiveStorageABIContract(t *testing.T) {
+	primitive := readSelfhostFile(t, "../../selfhost/src/types/primitive_type.kizu")
+	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	render := readSelfhostFile(t, "../../selfhost/src/ir/code_render.kizu")
+
+	record := selfhostKizuFunctionBody(t, primitive, "pub fn record_from_node(")
+	requireSourceFragments(t, "generic primitive type record", primitive+record, []string{
+		"pub struct TypeRecord", "pub bit_width: i64", "pub signed: bool",
+		"pub fn record_from_text(", "integer_width_from_text(", "decimal_digit_value(",
+	})
+	forbidSourceFragments(t, "per-scalar primitive identities", primitive+codegen, []string{
+		"type_u8", "type_i32", "code_kind_u8", "code_kind_i32",
+		"CHANNEL_U8", "CHANNEL_I32",
+	})
+
+	size := selfhostKizuFunctionBody(t, primitive, "pub fn storage_abi_size(")
+	align := selfhostKizuFunctionBody(t, primitive, "pub fn storage_abi_align(")
+	requireSourceFragments(t, "storage ABI size and alignment", size+align, []string{
+		"storage_abi_integer_width(abi)", "width / 8",
+		"storage_abi_bool()", "storage_abi_slice()",
+	})
+	coerce := selfhostKizuFunctionBody(t, codegen, "fn lower_code_storage_value(")
+	requireSourceFragments(t, "shared container value coercion", coerce, []string{
+		"storage_abi", "primitive_type::storage_abi_is_integer",
+		"code_kind_i64()", "code_kind_bool()", "lower_code_arg_slice(",
+	})
+
+	typeWriter := selfhostKizuFunctionBody(t, render, "fn render_value_abi_type(")
+	store := selfhostKizuFunctionBody(t, render, "fn render_value_abi_store(")
+	load := selfhostKizuFunctionBody(t, render, "fn render_value_abi_load(")
+	requireSourceFragments(t, "generic integer LLVM storage ABI", typeWriter+store+load, []string{
+		"storage_abi_integer_width", `trunc i64 %v`, `"zext i"`, `"sext i"`,
+	})
+}
+
 // TestSelfhostChannelValueABIContract pins one generic Channel tape/lowering
 // family for both i64 and []u8 payloads.
 func TestSelfhostChannelValueABIContract(t *testing.T) {
@@ -12,15 +50,17 @@ func TestSelfhostChannelValueABIContract(t *testing.T) {
 	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
 	render := readSelfhostFile(t, "../../selfhost/src/ir/code_render.kizu")
 
-	typeResolver := selfhostKizuFunctionBody(t, facts, "fn resolved_type_identity_id(")
-	requireSourceFragments(t, "Channel payload identities", typeResolver, []string{
-		`"i64"`, "type_i64()", `"[]u8"`, "type_slice()",
+	appendResolved := selfhostKizuFunctionBody(t, facts, "fn append_resolved(")
+	requireSourceFragments(t, "Channel payload type record", appendResolved, []string{
+		"primitive_type::record_from_node(text, ast, arg)",
+		"type_record.identity", "primitive_type::storage_abi(type_record)",
+		"type_arg0_storage_abi",
 	})
 	scratch := selfhostKizuFunctionBody(t, codegen, "fn scratch_init(")
 	requireSourceFragments(t, "generic Channel kind selection", scratch, []string{
-		"let payload_kind = code_type_identity_value_kind(",
-		"constructor_id == channel_constructor_id and payload_kind >= 0",
-		"resolved_kind = code_kind_channel(payload_kind)",
+		"let type_arg0_record = primitive_type::record_from_identity(type_arg0_id)",
+		"primitive_type::storage_abi_supported(type_arg0_storage_abi)",
+		"resolved_kind = code_kind_channel(type_arg0_storage_abi)",
 	})
 	forbidSourceFragments(t, "Channel codegen identity spelling", scratch, []string{
 		`"Channel"`, `"std::channel"`, "source_path", "fixture", "fallback",
@@ -28,8 +68,8 @@ func TestSelfhostChannelValueABIContract(t *testing.T) {
 
 	kind := selfhostKizuFunctionBody(t, codegen, "pub fn code_kind_channel(")
 	requireSourceFragments(t, "encoded Channel payload kind", kind, []string{
-		"code_kind_value_abi_size(payload_kind)",
-		"code_kind_channel_base() + payload_kind",
+		"primitive_type::storage_abi_supported(storage_abi)",
+		"code_kind_channel_base() + storage_abi",
 	})
 	dispatch := selfhostKizuFunctionBody(t, codegen, "fn lower_code_runtime_constructor(")
 	channelAt := strings.Index(dispatch, "if code_kind_is_channel(resolved_kind)")
@@ -39,10 +79,10 @@ func TestSelfhostChannelValueABIContract(t *testing.T) {
 	}
 	lower := selfhostKizuFunctionBody(t, codegen, "fn lower_code_channel_new(")
 	requireSourceFragments(t, "generic Channel constructor tape", lower, []string{
-		"let payload_kind = code_channel_payload_kind(channel_kind)",
+		"let storage_abi = code_channel_payload_abi(channel_kind)",
 		"code.append(code_op_channel_new())",
 		"code.append(next_value)",
-		"code.append(payload_kind)",
+		"code.append(storage_abi)",
 		"kinds.append(channel_kind)",
 	})
 
@@ -56,14 +96,15 @@ func TestSelfhostChannelValueABIContract(t *testing.T) {
 // TestSelfhostStorageValueABISharedWithArray pins one compiler-owned storage
 // ABI source for Array elements and Channel payloads.
 func TestSelfhostStorageValueABISharedWithArray(t *testing.T) {
+	primitive := readSelfhostFile(t, "../../selfhost/src/types/primitive_type.kizu")
 	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
 	render := readSelfhostFile(t, "../../selfhost/src/ir/code_render.kizu")
 
-	size := selfhostKizuFunctionBody(t, codegen, "pub fn code_kind_value_abi_size(")
+	size := selfhostKizuFunctionBody(t, primitive, "pub fn storage_abi_size(")
 	requireSourceFragments(t, "shared value ABI sizes", size, []string{
-		"kind == code_kind_bool()", "return 1",
-		"kind == code_kind_i64()", "return 8",
-		"kind == code_kind_slice()", "return 16",
+		"abi == storage_abi_bool()", "return 1",
+		"storage_abi_integer_width(abi)", "width / 8",
+		"abi == storage_abi_slice()", "return 16",
 		"return 0 - 1",
 	})
 	forbidSourceFragments(t, "borrowed view storage ABI", size, []string{
@@ -71,36 +112,44 @@ func TestSelfhostStorageValueABISharedWithArray(t *testing.T) {
 	})
 	arraySize := selfhostKizuFunctionBody(t, codegen, "fn code_array_element_size(")
 	requireSourceFragments(t, "Array shared value ABI size", arraySize, []string{
-		"code_array_element_kind", "code_kind_value_abi_size(element_kind)",
+		"code_array_element_abi", "primitive_type::storage_abi_size(storage_abi)",
 	})
 
 	typeWriter := selfhostKizuFunctionBody(t, render, "fn render_value_abi_type(")
 	requireSourceFragments(t, "shared value ABI LLVM types", typeWriter, []string{
-		"code_kind_bool()", `"i8"`, "code_kind_i64()", `"i64"`,
-		"code_kind_slice()", `"%kizu.slice.u8"`,
+		"primitive_type::storage_abi_bool()", `"i8"`,
+		"primitive_type::storage_abi_integer_width(storage_abi)",
+		"primitive_type::storage_abi_slice()", `"%kizu.slice.u8"`,
 	})
 	store := selfhostKizuFunctionBody(t, render, "fn render_value_abi_store(")
 	requireSourceFragments(t, "shared value ABI store", store, []string{
-		`"_byte = zext i1 %v"`, "render_value_abi_type(out, kind)",
+		`"_byte = zext i1 %v"`, "storage_abi_is_integer(storage_abi)",
 	})
 	load := selfhostKizuFunctionBody(t, render, "fn render_value_abi_load(")
 	requireSourceFragments(t, "shared value ABI load", load, []string{
 		`"_byte = load i8, ptr %"`, `" = icmp ne i8 %"`,
-		"render_value_abi_type(out, kind)",
+		"storage_abi_integer_signed(storage_abi)",
 	})
 
 	arrayAppend := selfhostKizuFunctionBody(t, render, "fn render_array_append_slot(")
 	arrayGet := selfhostKizuFunctionBody(t, render, "fn render_array_get_load(")
+	arrayGetOrPanic := selfhostKizuFunctionBody(t, render, "fn render_array_get_kind(")
 	arraySet := selfhostKizuFunctionBody(t, render, "fn render_array_set_store(")
 	arrayPop := selfhostKizuFunctionBody(t, render, "fn render_array_pop_load(")
-	arrayOperations := arrayAppend + arrayGet + arraySet + arrayPop
+	arrayOperations := arrayAppend + arrayGet + arrayGetOrPanic + arraySet + arrayPop
 	requireSourceFragments(t, "Array shared value ABI", arrayOperations, []string{
 		"render_value_abi_alloca_store(", "render_value_abi_load(", "render_value_abi_store(",
+	})
+	requireSourceFragments(t, "Array get_or_panic unique tape temporary", arrayGetOrPanic, []string{
+		"try wi(out, index)", "render_array_get_load(out, dst, index, storage_abi)",
+	})
+	forbidSourceFragments(t, "Array get_or_panic value-id temporary", arrayGetOrPanic, []string{
+		"render_array_get_load(out, dst, dst, storage_abi)",
 	})
 	channelSend := selfhostKizuFunctionBody(t, render, "fn render_channel_send(")
 	channelRecv := selfhostKizuFunctionBody(t, render, "fn render_channel_recv(")
 	requireSourceFragments(t, "Channel shared value ABI", channelSend+channelRecv, []string{
-		"render_value_abi_type(out, payload_kind)",
+		"render_value_abi_type(out, storage_abi)",
 		"render_value_abi_store(out, \"ch\"",
 		"render_value_abi_load(out, \"cr\"",
 	})
@@ -124,10 +173,10 @@ func TestSelfhostBorrowedSliceConsumerContract(t *testing.T) {
 	requireSourceFragments(t, "Channel borrowed slice boundary", channelSend, []string{
 		"let direct_kind = try kinds.get(value_eval.value_id)",
 		"direct_kind == code_kind_borrowed_slice()",
-		"let payload_eval = try lower_code_arg_slice(",
+		"let payload_eval = try lower_code_storage_value(",
 	})
 	if strings.Index(channelSend, "direct_kind == code_kind_borrowed_slice()") >
-		strings.Index(channelSend, "let payload_eval = try lower_code_arg_slice(") {
+		strings.Index(channelSend, "let payload_eval = try lower_code_storage_value(") {
 		t.Fatal("Channel.send normalizes borrowed provenance before rejecting it")
 	}
 }
@@ -187,19 +236,20 @@ func assertSelfhostChannelSendRecvLowering(t *testing.T, codegen string) {
 	send := selfhostKizuFunctionBody(t, codegen, "fn lower_code_channel_send_statement(")
 	requireSourceFragments(t, "generic Channel send tape", send, []string{
 		"direct_kind == code_kind_borrowed_slice()",
-		"let payload_eval = try lower_code_arg_slice(",
-		"let payload_kind = code_channel_payload_kind(receiver_kind)",
-		"value_kind != payload_kind",
+		"let storage_abi = code_channel_payload_abi(receiver_kind)",
+		"let payload_eval = try lower_code_storage_value(",
+		"if !payload_eval.ok",
 		"code.append(code_op_channel_send())",
 		"code.append(payload_eval.value_id)",
-		"code.append(payload_kind)",
+		"code.append(storage_abi)",
 	})
 	recv := selfhostKizuFunctionBody(t, codegen, "fn lower_code_channel_recv(")
 	requireSourceFragments(t, "generic Channel recv tape", recv, []string{
-		"let payload_kind = code_channel_payload_kind(receiver_kind)",
+		"let storage_abi = code_channel_payload_abi(receiver_kind)",
 		"code.append(code_op_channel_recv())",
-		"code.append(payload_kind)",
-		"kinds.append(payload_kind)",
+		"code.append(storage_abi)",
+		"let value_kind = code_storage_abi_value_kind(storage_abi)",
+		"kinds.append(value_kind)",
 	})
 	stringView := selfhostKizuFunctionBody(t, codegen, "fn lower_code_string_as_bytes_expr(")
 	requireSourceFragments(t, "String view provenance kind", stringView, []string{
