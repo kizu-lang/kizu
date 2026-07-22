@@ -1656,8 +1656,15 @@ pub fn is_count_range_function(
     ir_bytes: []u8,
     function_name: []u8,
     statement_count: i64,
+    params_spec: []u8,
     bs: i64
 ) -> !bool {
+    // The specialized lowerer emits count_range's exact Ast/ChildRange
+    // operations. Require that function identity and ABI before body inspection;
+    // an accumulator-shaped helper must continue through generic lowering.
+    if !count_range_target_supported(function_name, params_spec) {
+        return false;
+    }
     if statement_count != 4 {
         return false;
     }
@@ -1700,6 +1707,71 @@ pub fn is_count_range_function(
     let s3_value = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s3, "value", 0, bs);
     let s3_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, s3_value, bs);
     return std::mem::equal_bytes(s3_value_kind, "Var");
+}
+
+fn count_range_target_supported(function_name: []u8, params_spec: []u8) -> bool {
+    if !std::mem::equal_bytes(function_name, "selfhost::ast::count_range") {
+        return false;
+    }
+    let spec_len = std::mem::len(params_spec);
+    let semicolon = cast<u8>(59);
+    let first = compiled_util::find_byte(params_spec, semicolon, 0);
+    if first >= spec_len {
+        return false;
+    }
+    let second = compiled_util::find_byte(params_spec, semicolon, first + 1);
+    if second < spec_len {
+        return false;
+    }
+    if !count_range_param_type_matches(
+        params_spec, 0, first, "%kizu.kizu.ast.ast"
+    ) {
+        return false;
+    }
+    return count_range_param_type_matches(
+        params_spec, first + 1, spec_len, "%kizu.kizu.ast.child_range"
+    );
+}
+
+fn count_range_param_type_matches(
+    params_spec: []u8,
+    start: i64,
+    end: i64,
+    expected_type: []u8
+) -> bool {
+    if start >= end {
+        return false;
+    }
+    let space = cast<u8>(32);
+    let type_end = compiled_util::find_byte(params_spec, space, start);
+    if type_end <= start or type_end >= end or type_end + 1 >= end {
+        return false;
+    }
+    return std::mem::equal_bytes(params_spec[start..type_end], expected_type);
+}
+
+// count_range_param_shape_gate keeps every non-target identity or ABI away
+// from lower_count_range_function's hard-coded Ast/ChildRange operations.
+pub fn count_range_param_shape_gate() -> void {
+    let target = "selfhost::ast::count_range";
+    let exact_abi = "%kizu.kizu.ast.ast receiver;%kizu.kizu.ast.child_range children";
+    std::testing::expect(!count_range_target_supported(
+        target, "%kizu.kizu.ast.ast receiver"
+    ));
+    std::testing::expect(!count_range_target_supported(target, "i64 a;i64 b"));
+    std::testing::expect(!count_range_target_supported(
+        "selfhost::ast::other", exact_abi
+    ));
+    std::testing::expect(count_range_target_supported(target, exact_abi));
+    std::testing::expect(!count_range_target_supported(
+        target, "%kizu.kizu.ast.ast receiver;"
+    ));
+    std::testing::expect(!count_range_target_supported(
+        target,
+        "%kizu.kizu.ast.ast receiver;%kizu.kizu.ast.child_range children;i64 extra"
+    ));
+    print("count-range-param-shape");
+    return;
 }
 
 // nth_param_field returns the name (want_name true) or LLVM type (false) of the index-th

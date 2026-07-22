@@ -1,8 +1,11 @@
+import selfhost::types::primitive_type;
+
 pub struct ConstructorFacts {
     pub node_starts: std::array::Array<i64>,
     pub node_ends: std::array::Array<i64>,
     pub constructor_ids: std::array::Array<i64>,
     pub type_arg0_ids: std::array::Array<i64>,
+    pub type_arg0_storage_abis: std::array::Array<i64>,
 }
 
 pub fn init(allocator: Allocator) -> ConstructorFacts {
@@ -10,7 +13,8 @@ pub fn init(allocator: Allocator) -> ConstructorFacts {
         node_starts: std::array::Array<i64>(allocator),
         node_ends: std::array::Array<i64>(allocator),
         constructor_ids: std::array::Array<i64>(allocator),
-        type_arg0_ids: std::array::Array<i64>(allocator)
+        type_arg0_ids: std::array::Array<i64>(allocator),
+        type_arg0_storage_abis: std::array::Array<i64>(allocator)
     };
 }
 
@@ -20,11 +24,13 @@ impl ConstructorFacts {
         self.node_ends.deinit();
         self.constructor_ids.deinit();
         self.type_arg0_ids.deinit();
+        self.type_arg0_storage_abis.deinit();
     }
 }
 
-// This producer runs only after the full checker succeeds. Known constructor and type
-// identities are selected by exact source spelling or an exact root-import expansion.
+// This producer runs only after the full checker succeeds. Known constructors
+// use exact root/import resolution; primitive type arguments become canonical
+// semantic records plus separate compile-time storage ABI descriptors.
 pub fn collect_checked(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -40,12 +46,14 @@ pub fn append_identity(
     start: i64,
     end: i64,
     constructor_id: i64,
-    type_arg0_id: i64
+    type_arg0_id: i64,
+    type_arg0_storage_abi: i64
 ) -> !void {
     try facts.node_starts.append(start);
     try facts.node_ends.append(end);
     try facts.constructor_ids.append(constructor_id);
     try facts.type_arg0_ids.append(type_arg0_id);
+    try facts.type_arg0_storage_abis.append(type_arg0_storage_abi);
     return;
 }
 
@@ -139,10 +147,20 @@ fn append_resolved(
     let constructor_id = try resolved_constructor_identity_id(text, ast, root, callee);
     if constructor_id == no_identity() { return; }
     let arg = try ast.child_at(args, 0);
-    let type_arg0_id = try resolved_type_identity_id(text, ast, root, arg);
-    if type_arg0_id == no_identity() { return; }
+    let type_record = primitive_type::record_from_node(text, ast, arg);
+    if type_record.kind == primitive_type::type_kind_unknown() { return; }
+    let type_arg0_id = type_record.identity;
+    let type_arg0_storage_abi = primitive_type::storage_abi(type_record);
+    if !primitive_type::storage_abi_supported(type_arg0_storage_abi) { return; }
     let node = ast.get(node_id);
-    try append_identity(facts, node.span.start, node.span.end, constructor_id, type_arg0_id);
+    try append_identity(
+        facts,
+        node.span.start,
+        node.span.end,
+        constructor_id,
+        type_arg0_id,
+        type_arg0_storage_abi
+    );
     return;
 }
 
@@ -158,25 +176,6 @@ fn resolved_constructor_identity_id(
     if atomic_id != no_identity() { return atomic_id; }
     return try resolved_known_identity_id(
         text, ast, root, node_id, "std::channel::Channel", constructor_channel()
-    );
-}
-
-fn resolved_type_identity_id(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId,
-    node_id: std::kizu::ast::NodeId
-) -> !i64 {
-    let bool_id = try resolved_known_identity_id(
-        text, ast, root, node_id, "bool", type_bool()
-    );
-    if bool_id != no_identity() { return bool_id; }
-    let i64_id = try resolved_known_identity_id(
-        text, ast, root, node_id, "i64", type_i64()
-    );
-    if i64_id != no_identity() { return i64_id; }
-    return try resolved_known_identity_id(
-        text, ast, root, node_id, "[]u8", type_slice()
     );
 }
 
@@ -296,9 +295,6 @@ fn resolved_import_path_identity_id(
 
 pub fn constructor_atomic() -> i64 { return 1; }
 pub fn constructor_channel() -> i64 { return 2; }
-pub fn type_bool() -> i64 { return 1; }
-pub fn type_i64() -> i64 { return 2; }
-pub fn type_slice() -> i64 { return 3; }
 pub fn no_identity() -> i64 { return 0; }
 fn no_alias_match() -> i64 { return -1; }
 

@@ -77,6 +77,39 @@ func TestSelfhostAbiParamsConstructorFactsSpellingsAreExact(t *testing.T) {
 	}
 }
 
+// TestSelfhostAbiParamsTypeRecordSpellingsAreExact pins the primitive type
+// record ABI without admitting scalar-specific spellings or a prefix fallback.
+func TestSelfhostAbiParamsTypeRecordSpellingsAreExact(t *testing.T) {
+	abi := readSelfhostFile(t, "../../selfhost/src/backend/compiled_abi_params.kizu")
+	start := strings.Index(abi, `std::mem::equal_bytes(kizu_type, "TypeRecord")`)
+	if start < 0 {
+		t.Fatal("TypeRecord ABI rule start missing")
+	}
+	end := strings.Index(abi[start:], "// SourceFile is the std::kizu::ast source record")
+	if end < 0 {
+		t.Fatal("TypeRecord ABI rule end missing")
+	}
+	rule := abi[start : start+end]
+	for _, spelling := range []string{
+		`"TypeRecord"`,
+		`"primitive_type::TypeRecord"`,
+		`"selfhost::types::primitive_type::TypeRecord"`,
+	} {
+		if !strings.Contains(rule, `std::mem::equal_bytes(kizu_type, `+spelling+`)`) &&
+			!strings.Contains(rule, `kizu_type, `+spelling) {
+			t.Fatalf("TypeRecord ABI rule missing exact spelling %s", spelling)
+		}
+	}
+	if strings.Contains(rule, "starts_with") {
+		t.Fatal("TypeRecord ABI rule widened to a prefix fallback")
+	}
+	for _, scalar := range []string{`"u8"`, `"i32"`} {
+		if strings.Contains(rule, scalar) {
+			t.Fatalf("TypeRecord ABI rule gained scalar-specific spelling %s", scalar)
+		}
+	}
+}
+
 // runSelfhostAbiParamsGate loads the selfhost package and runs the given entry.
 func runSelfhostAbiParamsGate(t *testing.T, entry string) (string, error) {
 	t.Helper()

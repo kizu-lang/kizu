@@ -43,6 +43,16 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 			"constructor_ids std::array::Array<i64>",
 		"struct-field selfhost::types::constructor_facts::ConstructorFacts 3 " +
 			"type_arg0_ids std::array::Array<i64>",
+		"struct-field selfhost::types::constructor_facts::ConstructorFacts 4 " +
+			"type_arg0_storage_abis std::array::Array<i64>",
+	})
+	requireSourceFragments(t, "TypeRecord source ABI facts", facts, []string{
+		"type-llvm selfhost::types::primitive_type::TypeRecord " +
+			"%kizu.selfhost.types.primitive_type.type_record",
+		"struct-field selfhost::types::primitive_type::TypeRecord 0 identity i64",
+		"struct-field selfhost::types::primitive_type::TypeRecord 1 kind i64",
+		"struct-field selfhost::types::primitive_type::TypeRecord 2 bit_width i64",
+		"struct-field selfhost::types::primitive_type::TypeRecord 3 signed bool",
 	})
 	for _, name := range []string{
 		"selfhost::types::constructor_facts::collect_checked",
@@ -217,7 +227,10 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 	})
 	requireSourceFragments(t, "ConstructorFacts LLVM ABI", llvm, []string{
 		"%kizu.selfhost.types.constructor_facts.constructor_facts = type { " +
-			"%kizu.owned, %kizu.owned, %kizu.owned, %kizu.owned }",
+			"%kizu.owned, %kizu.owned, %kizu.owned, %kizu.owned, %kizu.owned }",
+	})
+	requireSourceFragments(t, "TypeRecord LLVM ABI", llvm, []string{
+		"%kizu.selfhost.types.primitive_type.type_record = type { i64, i64, i64, i1 }",
 	})
 	for _, fragment := range []string{
 		"import selfhost::ir::package_dependency;",
@@ -284,7 +297,7 @@ func assertSparsePackageDependencyConsumer(t *testing.T, cli string) {
 }
 
 // TestSelfhostCheckedConstructorHandoffPinsAtomicABI keeps the checked producer,
-// the generic four-array handoff, and run lowering joined by numeric identities.
+// the checked identity/storage-ABI handoff, and run lowering joined by numeric identities.
 // Atomic selection must not regress to spelling checks in codegen.
 func TestSelfhostCheckedConstructorHandoffPinsAtomicABI(t *testing.T) {
 	constructorFacts := readSelfhostFile(t, "../../selfhost/src/types/constructor_facts.kizu")
@@ -299,6 +312,7 @@ func TestSelfhostCheckedConstructorHandoffPinsAtomicABI(t *testing.T) {
 		"try facts.node_ends.append(end)",
 		"try facts.constructor_ids.append(constructor_id)",
 		"try facts.type_arg0_ids.append(type_arg0_id)",
+		"try facts.type_arg0_storage_abis.append(type_arg0_storage_abi)",
 	})
 	for _, name := range []string{"scratch_constructor_kind", "lower_code_runtime_constructor"} {
 		body := dependencyFunctionBody(t, codegen, name)
