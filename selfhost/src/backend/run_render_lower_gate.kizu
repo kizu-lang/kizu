@@ -1,12 +1,11 @@
 import selfhost::ir::executable_functions;
-import selfhost::backend::cli_llvm;
+import selfhost::backend::compiled_program_llvm;
+import selfhost::backend::compiled_canonical_facts;
 import selfhost::backend::ir_index;
-import selfhost::source;
+import selfhost::source::loader;
 
-// run_render_lower_gate drives the compiled MIR lowering over ONLY the
-// selfhost::ir::code_render renderer closure, with the codegen / std::kizu::ast
-// facts present for cross-module signature resolution but their closures left
-// unlowered, surfacing the next renderer lowering blocker in seconds.
+// run_render_lower_gate selects the renderer from facts produced by the same
+// package-wide numeric graph and closure path used by production.
 pub fn run_render_lower_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
@@ -14,20 +13,9 @@ pub fn run_render_lower_gate() -> !void {
     var facts = std::string::String(allocator);
     defer facts.deinit();
 
-    let ast_path = "std/src/kizu/ast.kizu";
-    let ast_text = try std::fs::read_file(io, ast_path);
-    let ast_file = gate_render_source_file(0, source::SourceKind::Std, ast_path, ast_text);
-    try executable_functions::append_ast_function_facts(allocator, &var facts, &ast_file);
-
-    let codegen_path = "selfhost/src/ir/codegen.kizu";
-    let codegen_text = try std::fs::read_file(io, codegen_path);
-    let codegen_file = gate_render_source_file(1, source::SourceKind::Selfhost, codegen_path, codegen_text);
-    try executable_functions::append_codegen_function_facts(allocator, &var facts, &codegen_file);
-
-    let render_path = "selfhost/src/ir/code_render.kizu";
-    let render_text = try std::fs::read_file(io, render_path);
-    let render_file = gate_render_source_file(2, source::SourceKind::Selfhost, render_path, render_text);
-    try executable_functions::append_code_render_function_facts(allocator, &var facts, &render_file);
+    var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
+    defer files.deinit();
+    try executable_functions::append_facts(allocator, &var facts, &files);
 
     let facts_path = "target/selfhost/run_render_lower_gate.ir";
     if !(try std::fs::exists(io, "target")) {
@@ -41,30 +29,18 @@ pub fn run_render_lower_gate() -> !void {
     let ir_bytes = try std::fs::read_file(io, &facts_path);
     var lookup_index = try ir_index::build(ir_bytes);
     defer lookup_index.deinit();
+    var canonical_facts = try compiled_canonical_facts::parse_and_validate(
+        &lookup_index, ir_bytes
+    );
+    defer canonical_facts.deinit();
 
     var registry = std::string::String(allocator);
     defer registry.deinit();
-    try cli_llvm::append_code_render_reachable_compiled_functions(
-        &var registry, &lookup_index, ir_bytes
+    let emitted = try compiled_program_llvm::append_reachable_functions(
+        &var registry, &lookup_index, &canonical_facts, ir_bytes
     );
+    if emitted < 1 { return error("run render lower gate: package definitions missing"); }
 
     print("run-render-lower-ok");
     return;
-}
-
-fn gate_render_source_file(
-    id: i64,
-    kind: source::SourceKind,
-    path: []u8,
-    text: []u8
-) -> source::SourceFile {
-    return source::SourceFile {
-        id: id,
-        kind: kind,
-        package_name: "selfhost",
-        module_start: 13,
-        module_end: std::mem::len(path) - 5,
-        path: path,
-        text: text
-    };
 }

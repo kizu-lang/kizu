@@ -1,11 +1,15 @@
 import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::compiled_canonical_facts;
 import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_mir_lower_call;
 import selfhost::backend::compiled_mir_types;
 import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_type_lower;
+import selfhost::backend::compiled_type_resolver;
 import selfhost::backend::compiled_util;
 import selfhost::backend::ir_contract;
+import selfhost::backend::ir_index;
+import selfhost::ir::builtin_contract;
 
 pub fn lower_struct_fields(
     ir_bytes: []u8,
@@ -13,7 +17,10 @@ pub fn lower_struct_fields(
     module_prefix: []u8,
     params_spec: []u8,
     value_node: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !std::array::Array<compiled_mir::MirStructField> {
     let field_count = try count_struct_fields(ir_bytes, function_name, value_node, bs);
     var fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
@@ -36,7 +43,10 @@ pub fn lower_struct_fields(
             field_index,
             field_value,
             field_value_kind,
-            bs
+            bs,
+            ir_lookup_index,
+            canonical_facts,
+            call_arg_type_cache
         ));
         field_index = field_index + 1;
     }
@@ -75,7 +85,10 @@ fn lower_struct_field(
     field_index: i64,
     field_value: i64,
     field_value_kind: []u8,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
     if std::mem::equal_bytes(field_value_kind, "Var") {
         let var_name = try ir_contract::body_token_or_empty_from(
@@ -84,8 +97,9 @@ fn lower_struct_field(
             field_value,
             bs
         );
-        let var_type = try compiled_mir_types::resolve_value_llvm_type(
-            ir_bytes, function_name, module_prefix, params_spec, var_name, bs
+        let var_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
+            ir_lookup_index, ir_bytes, function_name, module_prefix,
+            params_spec, var_name, bs, call_arg_type_cache
         );
         return compiled_mir::var_struct_field(field_index, var_type, var_name);
     }
@@ -171,7 +185,9 @@ fn lower_struct_field(
             params_spec,
             field_index,
             field_value,
-            bs
+            bs,
+            ir_lookup_index,
+            call_arg_type_cache
         );
     }
     if std::mem::equal_bytes(field_value_kind, "Call") {
@@ -182,7 +198,10 @@ fn lower_struct_field(
             params_spec,
             field_index,
             field_value,
-            bs
+            bs,
+            ir_lookup_index,
+            canonical_facts,
+            call_arg_type_cache
         );
     }
     if std::mem::equal_bytes(field_value_kind, "Binary") {
@@ -193,7 +212,9 @@ fn lower_struct_field(
             params_spec,
             field_index,
             field_value,
-            bs
+            bs,
+            ir_lookup_index,
+            call_arg_type_cache
         );
     }
     if std::mem::equal_bytes(field_value_kind, "StructLiteralExpr") {
@@ -204,7 +225,10 @@ fn lower_struct_field(
             params_spec,
             field_index,
             field_value,
-            bs
+            bs,
+            ir_lookup_index,
+            canonical_facts,
+            call_arg_type_cache
         );
     }
     return error("compiled mir: unsupported struct field value kind");
@@ -225,21 +249,21 @@ fn lower_struct_field_call(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
-    let field_callee = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, field_value, bs
+    let owned_constructor = try compiled_type_resolver::owned_constructor_indexed(
+        ir_lookup_index, ir_bytes, function_name, field_value
     );
-    // 'Struct { field: std::array::Array<T>(alloc), ... }' /
-    // 'Struct { field: std::arena::Arena<T>(alloc), ... }' construct a fresh runtime-owned
-    // container directly into a struct field (the std::kizu::ast::Ast constructor seeds its
-    // nodes Arena<AstNode> and children Array<NodeId> this way). Both lower to the
-    // element-size-generic @kizu_rt_array_new builtin, so the field carries an ArrayNew
-    // descriptor instead of a resolved component call.
-    if std::mem::starts_with(field_callee, "std::array::Array<") or
-        std::mem::starts_with(field_callee, "std::arena::Arena<") {
+    // Exact TypeId-derived owned constructor facts cover source nominal constructors and
+    // direct builtins without inspecting the callee spelling.
+    if owned_constructor.found {
         return try lower_struct_field_owned_container(
-            ir_bytes, function_name, module_prefix, field_index, field_value, field_callee, bs
+            ir_bytes, function_name, module_prefix, params_spec,
+            field_index, field_value, &owned_constructor, bs,
+            ir_lookup_index, call_arg_type_cache
         );
     }
     // 'Struct { field: <receiver>.<method>(<args>), ... }' is a value-receiver method call in
@@ -249,63 +273,53 @@ fn lower_struct_field_call(
     // emit the literal 'ast.<method>' against the caller's module and drop the receiver.
     if try compiled_mir_types::callee_is_field_mode_method(ir_bytes, function_name, field_value, bs) {
         return try lower_struct_field_method_call(
-            ir_bytes, function_name, module_prefix, params_spec, field_index, field_value, bs
+            ir_bytes, function_name, module_prefix, params_spec, field_index, field_value, bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
         );
     }
     if try compiled_mir_lower_call::is_error_call(ir_bytes, function_name, field_value, bs) {
         return error("compiled mir: error call not supported in struct field");
     }
-    let call_type = try compiled_mir_types::lower_call_return_type(
-        ir_bytes, function_name, module_prefix, field_value, bs
+    let call_info = try compiled_mir_types::lower_call_info_for_instance_indexed(
+        ir_lookup_index, canonical_facts, ir_bytes,
+        function_name, module_prefix, field_value, bs, call_arg_type_cache
     );
-    let callee_name = try compiled_mir_types::lower_call_callee_name(
-        ir_bytes, function_name, module_prefix, field_value, bs
-    );
-    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
-        ir_bytes, function_name, module_prefix, field_value, bs
-    );
-    let args = try compiled_mir_lower_call::lower_call_args(
-        ir_bytes, function_name, module_prefix, params_spec, field_value, 0, bs
+    let args = try compiled_mir_lower_call::lower_call_args_canonical(
+        ir_bytes, function_name, module_prefix, params_spec, field_value, 0, bs,
+        ir_lookup_index, canonical_facts, &call_info.types,
+        call_arg_type_cache
     );
     if try compiled_mir_lower_call::count_string_args(&args) > 0 {
         return error("compiled mir: string-literal args unsupported in call-valued struct field");
     }
     return compiled_mir::call_struct_field(
         field_index,
-        call_type,
-        callee_module_prefix,
-        callee_name,
+        call_info.return_llvm_type,
+        call_info.module_prefix,
+        call_info.callee_name,
         args
     );
 }
 
-// lower_struct_field_owned_container lowers an owned-container constructor used as a struct
-// field value (std::array::Array<T>(alloc) / std::arena::Arena<T>(alloc)). The element type is
-// stripped off the constructor callee and mapped to its LLVM type so the renderer can derive the
-// element-size constant; the sole argument is the allocator value. It mirrors the standalone
-// 'var <name> = std::array::Array<T>(alloc)' ArrayNew statement lowering, reusing the same
-// element-size-generic @kizu_rt_array_new builtin (no per-type size or symbol is hardcoded).
+// lower_struct_field_owned_container consumes the same resolved descriptor as standalone lets.
 fn lower_struct_field_owned_container(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
+    params_spec: []u8,
     field_index: i64,
     field_value: i64,
-    callee: []u8,
-    bs: i64
+    constructor: &compiled_type_resolver::ResolvedOwnedConstructor,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
-    let callee_len = std::mem::len(callee);
-    if callee[callee_len - 1] != cast<u8>(62) {
-        return error("compiled mir: malformed owned-container struct field constructor type");
-    }
-    var prefix_len = std::mem::len("std::array::Array<");
-    if std::mem::starts_with(callee, "std::arena::Arena<") {
-        prefix_len = std::mem::len("std::arena::Arena<");
-    }
-    let element_kizu = callee[prefix_len..callee_len - 1];
-    let element_llvm = try compiled_type_lower::kizu_type_to_llvm(
-        ir_bytes, module_prefix, element_kizu
+    let constructor_runtime = builtin_contract::owned_container_constructor_runtime(
+        constructor.family
     );
+    if !constructor_runtime.found {
+        return error("compiled mir: unsupported owned struct-field constructor runtime ABI");
+    }
     let arg_count = try compiled_mir_types::count_call_args(ir_bytes, function_name, field_value, bs);
     if arg_count != 1 {
         return error("compiled mir: owned-container struct field constructor takes exactly the allocator argument");
@@ -313,11 +327,46 @@ fn lower_struct_field_owned_container(
     let alloc_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, field_value, "arg", 0, bs
     );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, alloc_node, bs
+        ),
+        "Var"
+    ) {
+        return error("compiled mir: owned-container struct field allocator must be a value name");
+    }
     let alloc_name = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, alloc_node, bs);
     if std::mem::len(alloc_name) == 0 {
         return error("compiled mir: owned-container struct field allocator must be a value name");
     }
-    return compiled_mir::array_new_struct_field(field_index, "%kizu.owned", alloc_name, element_llvm);
+    let allocator_spelling = try compiled_mir_types::resolve_value_kizu_type_indexed_cached(
+        ir_lookup_index, ir_bytes, function_name, module_prefix,
+        params_spec, alloc_name, bs, call_arg_type_cache
+    );
+    let allocator_type = try compiled_type_resolver::resolve_type_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, allocator_spelling
+    );
+    if !std::mem::equal_bytes(allocator_type.canonical_identity, "Allocator") {
+        return error("compiled mir: owned struct-field constructor argument is not an Allocator");
+    }
+    let allocator_abi = allocator_type.abi;
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    try args.append(compiled_mir::var_call_arg(
+        allocator_abi, alloc_name
+    ));
+    if constructor_runtime.type_size_argument_slot >= 0 {
+        if !constructor.type_arguments_concrete or
+            std::mem::len(constructor.storage_type.abi) == 0 {
+            return error("compiled mir: owned struct-field constructor storage type is not concrete");
+        }
+        try args.append(try compiled_mir::type_size_call_arg(
+            constructor.storage_type.abi
+        ));
+    }
+    return compiled_mir::call_struct_field(
+        field_index, constructor.result_type.abi,
+        "", constructor_runtime.symbol, args
+    );
 }
 
 // lower_struct_field_method_call lowers a value-receiver method call used as a struct field value
@@ -335,29 +384,46 @@ fn lower_struct_field_method_call(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
-    let info = try compiled_mir_types::resolve_method_call(
-        ir_bytes, function_name, module_prefix, params_spec, field_value, bs
+    let info = try compiled_mir_types::resolve_method_call_indexed(
+        ir_lookup_index, ir_bytes, function_name, module_prefix,
+        params_spec, field_value, bs
     );
-    let explicit_arg_count = try compiled_mir_types::count_call_args(
-        ir_bytes, function_name, field_value, bs
+    let call_info = try compiled_mir_types::lower_call_info_for_instance_indexed(
+        ir_lookup_index, canonical_facts, ir_bytes,
+        function_name, module_prefix, field_value, bs, call_arg_type_cache
     );
-    var arg_types = try compiled_mir_types::lower_call_arg_types(
-        ir_bytes, info.module_prefix, info.callee_name, explicit_arg_count + 1
-    );
-    defer arg_types.deinit();
+    var runtime_arg_nodes =
+        try compiled_mir_lower_call::canonical_runtime_arg_nodes(
+            ir_bytes, function_name, field_value, bs, ir_lookup_index,
+            &call_info.types
+        );
+    defer runtime_arg_nodes.deinit();
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
-    try args.append(compiled_mir::var_call_arg(try arg_types.get(0), info.receiver_name));
+    let receiver_type =
+        try compiled_canonical_facts::parsed_canonical_runtime_abi(
+            ir_lookup_index, canonical_facts, ir_bytes, call_info.types.receiver_id
+        );
+    try args.append(compiled_mir::var_call_arg(receiver_type, info.receiver_name));
     var arg_index = 0;
-    while arg_index < explicit_arg_count {
-        let arg_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, field_value, "arg", arg_index, bs
+    while arg_index < runtime_arg_nodes.len() {
+        let type_id = try compiled_canonical_facts::parsed_call_runtime_type_id(
+            canonical_facts, &call_info.types, arg_index
         );
-        let arg_type = try arg_types.get(arg_index + 1);
-        let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg(
-            ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, 0, bs
-        );
+        let arg_type =
+            try compiled_canonical_facts::parsed_canonical_runtime_abi(
+                ir_lookup_index, canonical_facts, ir_bytes, type_id
+            );
+        let scalar_arg =
+            try compiled_mir_lower_call::lower_single_call_arg_canonical(
+                ir_bytes, function_name, module_prefix, params_spec, arg_type,
+                try runtime_arg_nodes.get(arg_index), 0, bs, ir_lookup_index,
+                canonical_facts, call_arg_type_cache
+            );
         if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
             return error("compiled mir: string-literal args unsupported in method-call struct field");
         }
@@ -366,9 +432,9 @@ fn lower_struct_field_method_call(
     }
     return compiled_mir::call_struct_field(
         field_index,
-        info.return_llvm_type,
-        info.module_prefix,
-        info.callee_name,
+        call_info.return_llvm_type,
+        call_info.module_prefix,
+        call_info.callee_name,
         args
     );
 }
@@ -380,14 +446,13 @@ fn lower_struct_field_computed_binary(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
     let op = try ir_contract::sequence_fact_value_from(
         ir_bytes, "body-binary ", function_name, field_value, bs
     );
-    if !std::mem::equal_bytes(op, "sub") {
-        return error("compiled mir: unsupported computed struct field op");
-    }
     let left = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, field_value, "left", 0, bs
     );
@@ -395,19 +460,81 @@ fn lower_struct_field_computed_binary(
         ir_bytes, function_name, field_value, "right", 0, bs
     );
     let right_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, right, bs);
+    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left, bs);
+    let left_is_scalar =
+        std::mem::equal_bytes(left_kind, "Var") or
+        std::mem::equal_bytes(left_kind, "Int");
+    let right_is_scalar =
+        std::mem::equal_bytes(right_kind, "Var") or
+        std::mem::equal_bytes(right_kind, "Int");
+    if left_is_scalar and right_is_scalar {
+        if !std::mem::equal_bytes(op, "add") and
+            !std::mem::equal_bytes(op, "sub") and
+            !std::mem::equal_bytes(op, "mul") and
+            !std::mem::equal_bytes(op, "div") and
+            !std::mem::equal_bytes(op, "mod") {
+            return error("compiled mir: unsupported scalar struct field binary op");
+        }
+        var left_name = "";
+        var left_literal = 0;
+        let left_is_literal = std::mem::equal_bytes(left_kind, "Int");
+        if left_is_literal {
+            left_literal = try ir_contract::body_int_value_from(
+                ir_bytes, function_name, left, bs
+            );
+        } else {
+            left_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, left, bs
+            );
+            let left_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
+                ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+                left_name, bs, call_arg_type_cache
+            );
+            if !std::mem::equal_bytes(left_type, "i64") {
+                return error("compiled mir: computed struct field lhs must be i64");
+            }
+        }
+        var right_name = "";
+        var right_literal = 0;
+        let right_is_literal = std::mem::equal_bytes(right_kind, "Int");
+        if right_is_literal {
+            right_literal = try ir_contract::body_int_value_from(
+                ir_bytes, function_name, right, bs
+            );
+        } else {
+            right_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, right, bs
+            );
+            let right_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
+                ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+                right_name, bs, call_arg_type_cache
+            );
+            if !std::mem::equal_bytes(right_type, "i64") {
+                return error("compiled mir: computed struct field rhs must be i64");
+            }
+        }
+        return compiled_mir::computed_scalar_binary_struct_field(
+            field_index, op,
+            left_name, left_literal, left_is_literal,
+            right_name, right_literal, right_is_literal
+        );
+    }
+    if !std::mem::equal_bytes(op, "sub") {
+        return error("compiled mir: unsupported computed struct field op");
+    }
     if !std::mem::equal_bytes(right_kind, "Var") {
         return error("compiled mir: computed struct field rhs must be Var");
     }
     let right_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, right, bs
     );
-    let right_type = try compiled_mir_types::resolve_value_llvm_type(
-        ir_bytes, function_name, module_prefix, params_spec, right_name, bs
+    let right_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        right_name, bs, call_arg_type_cache
     );
     if !std::mem::equal_bytes(right_type, "i64") {
         return error("compiled mir: computed struct field rhs must be i64");
     }
-    let left_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, left, bs);
     if !std::mem::equal_bytes(left_kind, "Call") {
         return error("compiled mir: computed struct field lhs must be a call");
     }
@@ -443,8 +570,9 @@ fn lower_struct_field_computed_binary(
     let root_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, root, bs
     );
-    let field = try compiled_mir_types::resolve_field_expr(
-        ir_bytes, function_name, module_prefix, params_spec, receiver, bs
+    let field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        receiver, bs, call_arg_type_cache
     );
     let element_type = compiled_mir_types::array_value_element_kizu_type_or_empty(
         compiled_mir_types::struct_lookup_kizu_type(field.field_kizu_type)
@@ -475,13 +603,17 @@ fn lower_struct_field_struct(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
-    let nested_type = try compiled_signature::resolve_struct_literal_type(
-        ir_bytes, function_name, module_prefix, field_value, bs
+    let nested_type = try compiled_signature::resolve_struct_literal_type_indexed(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, field_value, bs
     );
     let nested_fields = try lower_struct_fields(
-        ir_bytes, function_name, module_prefix, params_spec, field_value, bs
+        ir_bytes, function_name, module_prefix, params_spec, field_value, bs,
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     return compiled_mir::struct_literal_struct_field(
         field_index,
@@ -497,7 +629,9 @@ fn lower_struct_field_expr(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
     let mode = try ir_contract::sequence_fact_second_value_from(
         ir_bytes,
@@ -528,7 +662,8 @@ fn lower_struct_field_expr(
             receiver,
             bs
         );
-        let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+            ir_lookup_index,
             ir_bytes,
             module_prefix,
             receiver_token,
@@ -559,7 +694,9 @@ fn lower_struct_field_expr(
             field_index,
             field_value,
             receiver,
-            bs
+            bs,
+            ir_lookup_index,
+            call_arg_type_cache
         );
     }
     if !std::mem::equal_bytes(receiver_kind, "Var") {
@@ -571,8 +708,9 @@ fn lower_struct_field_expr(
         receiver,
         bs
     );
-    let field = try compiled_mir_types::resolve_field_expr(
-        ir_bytes, function_name, module_prefix, params_spec, field_value, bs
+    let field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        field_value, bs, call_arg_type_cache
     );
     return compiled_mir::field_access_struct_field(
         field_index,
@@ -591,7 +729,9 @@ fn lower_nested_struct_field_expr(
     field_index: i64,
     field_value: i64,
     receiver: i64,
-    bs: i64
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
     let root_receiver = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, receiver, "receiver", 0, bs
@@ -603,11 +743,13 @@ fn lower_nested_struct_field_expr(
     let root_name = try ir_contract::body_token_or_empty_from(
         ir_bytes, function_name, root_receiver, bs
     );
-    let first_field = try compiled_mir_types::resolve_field_expr(
-        ir_bytes, function_name, module_prefix, params_spec, receiver, bs
+    let first_field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        receiver, bs, call_arg_type_cache
     );
-    let second_field = try compiled_mir_types::resolve_field_expr(
-        ir_bytes, function_name, module_prefix, params_spec, field_value, bs
+    let second_field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+        field_value, bs, call_arg_type_cache
     );
     return compiled_mir::nested_field_access_struct_field(
         field_index,

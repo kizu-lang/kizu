@@ -1,0 +1,1173 @@
+import selfhost::parser;
+import selfhost::source;
+import selfhost::ir::package_type_resolution;
+import selfhost::ir::package_type_environment;
+import selfhost::ir::package_prepared_types;
+import selfhost::ir::package_expression_type_resolution;
+import selfhost::ir::package_call_facts;
+import selfhost::ir::package_catalog;
+import selfhost::ir::package_dependency_graph;
+import selfhost::ir::package_exact_lookup;
+import selfhost::ir::package_function_identity;
+import selfhost::ir::builtin_contract;
+
+// Exact call resolution is isolated from package catalog/graph storage. This
+// module owns lexical type state, expression typing, and the closed builtin
+// operation table used to classify every Call node.
+
+// CalleeResolution is the resolver boundary between source-shaped calls and
+// numeric package dependency identities. A non-package result is deliberate;
+// an unresolved result is never allowed to disappear from the graph.
+// resolve_package_calls is pass two of package identity construction. It walks
+// every function body while its parsed AST is alive and records either the
+// exact numeric package target or a closed non-source call kind. Package-shaped
+// misses still fail instead of disappearing behind a runtime fallback.
+pub struct ResolvedPackageCalls {
+    pub calls: package_call_facts::ResolvedCallTargets,
+    pub canonical_types: package_type_resolution::CanonicalTypeFacts,
+}
+
+pub fn resolve_package_calls(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles,
+    catalog: &package_catalog::PackageFunctionCatalog
+) -> !package_call_facts::ResolvedCallTargets {
+    var calls = package_call_facts::resolved_call_targets(allocator);
+    errdefer calls.deinit();
+    var type_store = try package_type_resolution::type_store(allocator, catalog);
+    defer type_store.deinit();
+    var prepared_types = try package_prepared_types::prepare(
+        allocator, catalog, &var type_store
+    );
+    defer prepared_types.deinit();
+    try resolve_package_calls_into(
+        allocator, files, parsed_files, catalog,
+        &var type_store, &var prepared_types, &var calls
+    );
+    return calls;
+}
+
+pub fn resolve_package_calls_with_types(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles,
+    catalog: &package_catalog::PackageFunctionCatalog
+) -> !ResolvedPackageCalls {
+    var calls = package_call_facts::resolved_call_targets(allocator);
+    errdefer calls.deinit();
+    var type_store = try package_type_resolution::type_store(allocator, catalog);
+    defer type_store.deinit();
+    var prepared_types = try package_prepared_types::prepare(
+        allocator, catalog, &var type_store
+    );
+    defer prepared_types.deinit();
+    try resolve_package_calls_into(
+        allocator, files, parsed_files, catalog,
+        &var type_store, &var prepared_types, &var calls
+    );
+    let canonical_types = try package_type_resolution::snapshot_canonical_types(
+        &type_store, allocator
+    );
+    return ResolvedPackageCalls { calls: calls, canonical_types: canonical_types };
+}
+
+fn resolve_package_calls_into(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    type_store: &var package_type_resolution::TypeStore,
+    prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    let parsed_results = &parsed_files.parsed;
+    var parsed_index = 0;
+    while parsed_index < parsed_results.len() {
+        let source_index = try parsed_files.source_indexes.get(parsed_index);
+        let file = try files.at(source_index);
+        let parsed = try parsed_results.at(parsed_index);
+        let component_id = package_exact_lookup::component_for_source(catalog, file);
+        if component_id < 0 {
+            return error("resolver component not found");
+        }
+        var root_locals = package_type_environment::environment(allocator);
+        let result = resolve_calls_node(
+            file.text, &parsed.ast, parsed.root, catalog, component_id,
+            package_function_identity::FunctionTarget { component: package_function_identity::ComponentId { value: component_id }, function: package_function_identity::FunctionId { value: -1 } },
+            type_store, prepared_types, root_locals, calls
+        );
+        root_locals.deinit();
+        try result;
+        parsed_index = parsed_index + 1;
+    }
+    return;
+}
+
+impl ResolvedPackageCalls {
+    fn deinit(self: ResolvedPackageCalls) -> void {
+        self.calls.deinit();
+        self.canonical_types.deinit();
+        return;
+    }
+}
+
+fn resolve_calls_node(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return resolve_calls_range(text, ast, program.declarations, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        ImplDecl(impl_decl) => return resolve_calls_range(text, ast, impl_decl.methods, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        FnDecl(fn_decl) => return resolve_function_calls(text, ast, node_id, fn_decl.name, fn_decl.type_params, fn_decl.params, fn_decl.body, catalog, component_id, type_store, prepared_types, calls);,
+        Call(call) => return resolve_call_node(text, ast, node_id, call.callee, call.args, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        Prefix(prefix) => return resolve_calls_node(text, ast, prefix.right, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        Binary(binary) => return resolve_calls_two(text, ast, binary.left, binary.right, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        FieldExpr(field) => return resolve_calls_node(text, ast, field.receiver, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        DerefExpr(deref) => return resolve_calls_node(text, ast, deref.receiver, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        TypeApplyExpr(type_apply) => return resolve_calls_node_range(text, ast, type_apply.callee, type_apply.type_args, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        CastExpr(cast_expr) => return resolve_calls_two(text, ast, cast_expr.type_node, cast_expr.value, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        IndexExpr(index_expr) => return resolve_calls_three(text, ast, index_expr.target, index_expr.start, index_expr.end, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        StructLiteralExpr(struct_literal) => return resolve_calls_node_range(text, ast, struct_literal.type_name, struct_literal.fields, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        StructFieldInit(field_init) => return resolve_calls_two(text, ast, field_init.name, field_init.value, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        ArenaNewExpr(arena_new) => return resolve_calls_two(text, ast, arena_new.type_node, arena_new.allocator, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        TryExpr(try_expr) => return resolve_calls_node(text, ast, try_expr.value, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        ComptimeExpr(comptime_expr) => return resolve_calls_node(text, ast, comptime_expr.value, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        Block(block) => return resolve_scoped_calls_range(text, ast, block.statements, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        If(if_node) => return resolve_calls_three(text, ast, if_node.condition, if_node.then_block, if_node.else_block, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        Let(let_node) => return resolve_let_calls(text, ast, let_node.name, let_node.value, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        Assign(assign) => return resolve_calls_two(text, ast, assign.target, assign.value, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        Return(return_node) => return resolve_calls_node(text, ast, return_node.value, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        Defer(defer_node) => return resolve_calls_node(text, ast, defer_node.expr, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        ErrDefer(err_defer_node) => return resolve_calls_node(text, ast, err_defer_node.expr, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        ExprStmt(expr_stmt) => return resolve_calls_node(text, ast, expr_stmt.expr, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        While(while_node) => return resolve_calls_three(text, ast, while_node.label, while_node.condition, while_node.body, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        For(for_node) => return resolve_for_calls(text, ast, for_node.name, for_node.start, for_node.end, for_node.body, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        Match(match_node) => return resolve_match_calls(text, ast, match_node.value, match_node.arms, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        MatchArm(match_arm) => return error("resolver match arm requires scrutinee type context");,
+        Unsafe(unsafe_node) => return resolve_calls_node(text, ast, unsafe_node.body, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        ComptimeIf(comptime_if) => return resolve_calls_three(text, ast, comptime_if.condition, comptime_if.then_block, comptime_if.else_block, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);,
+        _ => return;,
+    }
+}
+
+fn resolve_function_calls(text: []u8, ast: &std::kizu::ast::Ast, declaration: std::kizu::ast::NodeId, name: std::kizu::ast::NodeId, type_params: std::kizu::ast::ChildRange, params: std::kizu::ast::ChildRange, body: std::kizu::ast::NodeId, catalog: &package_catalog::PackageFunctionCatalog, component_id: i64, type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog, calls: &var package_call_facts::ResolvedCallTargets) -> !void {
+    let name_span = ast.get(name).span;
+    let entry = package_exact_lookup::function_entry_by_name_span(catalog, component_id, name_span.start, name_span.end);
+    if entry < 0 { return error("resolver caller not found"); }
+    var local_types = package_type_environment::environment(std::mem::page_allocator());
+    let result = resolve_function_calls_with_environment(
+        text, ast, type_params, params, body, catalog, component_id, entry,
+        type_store, prepared_types, &var local_types, calls
+    );
+    local_types.deinit();
+    return result;
+}
+
+fn resolve_function_calls_with_environment(text: []u8, ast: &std::kizu::ast::Ast, type_params: std::kizu::ast::ChildRange, params: std::kizu::ast::ChildRange, body: std::kizu::ast::NodeId, catalog: &package_catalog::PackageFunctionCatalog, component_id: i64, entry: i64, type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog, local_types: &var package_type_environment::Environment, calls: &var package_call_facts::ResolvedCallTargets) -> !void {
+    let owner_type = try package_prepared_types::function_owner(
+        prepared_types, type_store, entry
+    );
+    if owner_type.type_id >= 0 {
+        try package_type_environment::bind_self_type(local_types, &owner_type);
+    }
+    try append_type_parameters(text, ast, type_params, entry, local_types);
+    try append_param_types(text, ast, params, catalog, component_id, type_store, prepared_types, local_types);
+    return resolve_current_scope_block(
+        text, ast, body, catalog, component_id, try package_catalog::target_at_entry(catalog, entry),
+        type_store, prepared_types, local_types, calls
+    );
+}
+
+fn resolve_call_node(text: []u8, ast: &std::kizu::ast::Ast, call_node: std::kizu::ast::NodeId, callee: std::kizu::ast::NodeId, args: std::kizu::ast::ChildRange, catalog: &package_catalog::PackageFunctionCatalog, component_id: i64, caller: package_function_identity::FunctionTarget, type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog, local_types: &var package_type_environment::Environment, calls: &var package_call_facts::ResolvedCallTargets) -> !void {
+    let resolution = try package_expression_type_resolution::resolve_callee(text, ast, callee, type_store, prepared_types, local_types, catalog, component_id);
+    if resolution.kind == package_expression_type_resolution::callee_unresolved_kind() { return error("unresolved qualified package call target"); }
+    if resolution.kind == package_expression_type_resolution::callee_unresolved_method_kind() { return error("unresolved receiver package method target"); }
+    if resolution.kind == package_expression_type_resolution::callee_resolved_kind() {
+        try package_call_facts::append_resolved_call(calls, ast, call_node, copy_target(&caller), try package_catalog::target_at_entry(catalog, resolution.target_index));
+    } else {
+        if resolution.kind != package_expression_type_resolution::callee_non_package_kind() or
+            resolution.builtin_kind == package_call_facts::builtin_none_kind() {
+            return error("resolved call has no exact classification");
+        }
+        try package_call_facts::append_builtin_call(
+            calls, ast, call_node, copy_target(&caller),
+            resolution.builtin_kind, resolution.builtin_operation,
+            resolution.builtin_identity
+        );
+    }
+    try append_owned_constructor_if_exact(
+        text, ast, call_node, callee, catalog, component_id, copy_target(&caller),
+        type_store, prepared_types, local_types, &resolution, calls
+    );
+    try append_call_type_ids(
+        text, ast, call_node, callee, args, catalog, component_id,
+        copy_target(&caller), &resolution,
+        type_store, prepared_types, local_types, calls
+    );
+    try resolve_calls_node(text, ast, callee, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);
+    return resolve_calls_range(text, ast, args, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls);
+}
+
+struct ReceiverNode { found: bool, node: std::kizu::ast::NodeId }
+
+fn append_call_type_ids(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    call_node: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    resolution: &package_expression_type_resolution::CalleeResolution,
+    type_store: &var package_type_resolution::TypeStore,
+    prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    var runtime_types = std::array::Array<i64>(std::mem::page_allocator());
+    defer runtime_types.deinit();
+    var explicit_types = std::array::Array<i64>(std::mem::page_allocator());
+    defer explicit_types.deinit();
+    var index = 0;
+    while index < args.len {
+        let arg_node = try ast.child_at(args, index);
+        let value = try package_expression_type_resolution::infer_exact_expression_type(
+            text, ast, arg_node, type_store, prepared_types,
+            local_types, catalog, component_id
+        );
+        if value.type_id < 0 { return error("call runtime argument type unresolved"); }
+        try append_function_item_dependency_if_exact(
+            catalog, copy_target(&caller), type_store, value.type_id, calls
+        );
+        try explicit_types.append(value.type_id);
+        index = index + 1;
+    }
+    var type_actuals = std::array::Array<i64>(std::mem::page_allocator());
+    defer type_actuals.deinit();
+    try append_callee_type_actuals(
+        text, ast, callee, catalog, component_id,
+        type_store, prepared_types, local_types, &var type_actuals
+    );
+    let receiver_node = call_receiver_node(ast, callee);
+    var receiver_type_id = -1;
+    if receiver_node.found {
+        let receiver = try package_expression_type_resolution::infer_exact_expression_type(
+            text, ast, receiver_node.node, type_store, prepared_types,
+            local_types, catalog, component_id
+        );
+        receiver_type_id = receiver.type_id;
+        if resolution.kind ==
+            package_expression_type_resolution::callee_resolved_kind() and
+            package_catalog::function_type_parameter_len(
+                catalog, resolution.target_index
+            ) > 0 {
+            var inferred = std::array::Array<i64>(std::mem::page_allocator());
+            defer inferred.deinit();
+            try package_prepared_types::infer_function_owner_actuals(
+                prepared_types,
+                catalog,
+                type_store,
+                resolution.target_index,
+                &receiver,
+                &var inferred
+            );
+            if type_actuals.len() == 0 {
+                var inferred_index = 0;
+                while inferred_index < inferred.len() {
+                    try type_actuals.append(try inferred.get(inferred_index));
+                    inferred_index = inferred_index + 1;
+                }
+            } else {
+                if type_actuals.len() != inferred.len() {
+                    return error(
+                        "generic method explicit and receiver type arity mismatch"
+                    );
+                }
+                var inferred_index = 0;
+                while inferred_index < inferred.len() {
+                    let explicit_type = try package_type_resolution::type_at(
+                        type_store, try type_actuals.get(inferred_index)
+                    );
+                    let inferred_type = try package_type_resolution::type_at(
+                        type_store, try inferred.get(inferred_index)
+                    );
+                    if !(try package_type_resolution::same_type(
+                        type_store, &explicit_type, &inferred_type
+                    )) {
+                        return error(
+                            "generic method explicit type does not match receiver"
+                        );
+                    }
+                    inferred_index = inferred_index + 1;
+                }
+            }
+        }
+        if resolution.kind ==
+            package_expression_type_resolution::callee_non_package_kind() and
+            type_actuals.len() == 0 {
+            let receiver_value = try package_type_resolution::without_borrow(
+                type_store, &receiver
+            );
+            let receiver_actual_len = try package_type_resolution::type_argument_len(
+                type_store, &receiver_value
+            );
+            var receiver_actual = 0;
+            while receiver_actual < receiver_actual_len {
+                let actual = try package_type_resolution::type_argument(
+                    type_store, &receiver_value, receiver_actual
+                );
+                try type_actuals.append(actual.type_id);
+                receiver_actual = receiver_actual + 1;
+            }
+        }
+    }
+    var static_bindings = std::array::Array<
+        package_call_facts::StaticBindingInput
+    >(std::mem::page_allocator());
+    defer static_bindings.deinit();
+    index = 0;
+    while index < type_actuals.len() {
+        try static_bindings.append(package_call_facts::StaticBindingInput {
+            kind: package_call_facts::static_binding_type_kind(),
+            type_id: try type_actuals.get(index),
+            value_bits: 0,
+            function_component_id: -1,
+            function_id: -1
+        });
+        index = index + 1;
+    }
+    if resolution.kind == package_expression_type_resolution::callee_resolved_kind() {
+        var receiver_param_len = 0;
+        if receiver_node.found { receiver_param_len = 1; }
+        let declared_param_len = package_catalog::function_param_len(
+            catalog, resolution.target_index
+        );
+        if declared_param_len != args.len + receiver_param_len {
+            return error("resolved call argument count does not match parameter layout");
+        }
+        if receiver_node.found {
+            if !(try package_catalog::function_param_is_receiver(
+                catalog, resolution.target_index, 0
+            )) or try package_catalog::function_param_mode(
+                catalog, resolution.target_index, 0
+            ) != package_catalog::function_param_runtime_mode() or
+                try package_catalog::function_param_runtime_ordinal(
+                    catalog, resolution.target_index, 0
+                ) != 0 {
+                return error("resolved receiver parameter layout mismatch");
+            }
+        }
+        var runtime_ordinal = receiver_param_len;
+        index = 0;
+        while index < explicit_types.len() {
+            let source_ordinal = receiver_param_len + index;
+            if try package_catalog::function_param_is_receiver(
+                catalog, resolution.target_index, source_ordinal
+            ) {
+                return error("resolved explicit argument is marked receiver");
+            }
+            let mode = try package_catalog::function_param_mode(
+                catalog, resolution.target_index, source_ordinal
+            );
+            if mode == package_catalog::function_param_runtime_mode() {
+                if try package_catalog::function_param_runtime_ordinal(
+                    catalog, resolution.target_index, source_ordinal
+                ) != runtime_ordinal {
+                    return error("resolved runtime parameter ordinal mismatch");
+                }
+                try runtime_types.append(try explicit_types.get(index));
+                runtime_ordinal = runtime_ordinal + 1;
+            } else {
+                if mode != package_catalog::function_param_comptime_mode() {
+                    return error("resolved call parameter has invalid mode");
+                }
+                if try package_catalog::function_param_runtime_ordinal(
+                    catalog, resolution.target_index, source_ordinal
+                ) != -1 {
+                    return error("comptime parameter has runtime ordinal");
+                }
+                try append_comptime_static_binding(
+                    text,
+                    ast,
+                    try ast.child_at(args, index),
+                    type_store,
+                    try explicit_types.get(index),
+                    &var static_bindings
+                );
+            }
+            index = index + 1;
+        }
+    } else {
+        index = 0;
+        while index < explicit_types.len() {
+            try runtime_types.append(try explicit_types.get(index));
+            index = index + 1;
+        }
+    }
+    let result = try package_expression_type_resolution::infer_exact_expression_type(
+        text, ast, call_node, type_store, prepared_types, local_types,
+        catalog, component_id
+    );
+    return package_call_facts::append_call_types(
+        calls, type_store, ast, call_node, caller, receiver_type_id,
+        &runtime_types, &type_actuals, &static_bindings, result.type_id
+    );
+}
+
+fn append_comptime_static_binding(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    type_store: &package_type_resolution::TypeStore,
+    type_id: i64,
+    out: &var std::array::Array<package_call_facts::StaticBindingInput>
+) -> !void {
+    let value = try package_type_resolution::type_at(type_store, type_id);
+    if value.kind == package_type_resolution::type_kind_function_item() {
+        try out.append(package_call_facts::StaticBindingInput {
+            kind: package_call_facts::static_binding_function_kind(),
+            type_id: type_id,
+            value_bits: 0,
+            function_component_id: value.declaration_component_id,
+            function_id: value.declaration_index
+        });
+        return;
+    }
+    let node = ast.get(node_id);
+    match node.data {
+        Int(int_node) => try out.append(package_call_facts::StaticBindingInput {
+            kind: package_call_facts::static_binding_scalar_kind(),
+            type_id: type_id,
+            value_bits: try parse_comptime_integer(node_text(text, ast, node_id)),
+            function_component_id: -1,
+            function_id: -1
+        });,
+        Bool(bool_node) => try out.append(package_call_facts::StaticBindingInput {
+            kind: package_call_facts::static_binding_scalar_kind(),
+            type_id: type_id,
+            value_bits: comptime_bool_bits(bool_node.value),
+            function_component_id: -1,
+            function_id: -1
+        });,
+        ComptimeExpr(comptime_expr) => return append_comptime_static_binding(
+            text, ast, comptime_expr.value, type_store, type_id, out
+        );,
+        Prefix(prefix) => return append_negative_comptime_static_binding(
+            text, ast, &prefix, type_id, out
+        );,
+        _ => return error("unsupported comptime parameter value kind");,
+    }
+    return;
+}
+
+fn comptime_bool_bits(value: bool) -> i64 {
+    if value { return 1; }
+    return 0;
+}
+
+fn append_negative_comptime_static_binding(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    prefix: &std::kizu::ast::PrefixNode,
+    type_id: i64,
+    out: &var std::array::Array<package_call_facts::StaticBindingInput>
+) -> !void {
+    match prefix.op {
+        Neg => return append_negative_comptime_integer(
+            text, ast, prefix.right, type_id, out
+        );,
+        _ => return error("unsupported comptime parameter value kind");,
+    }
+    return;
+}
+
+fn append_negative_comptime_integer(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    type_id: i64,
+    out: &var std::array::Array<package_call_facts::StaticBindingInput>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Int(int_node) => return append_negative_comptime_integer_bits(
+            node_text(text, ast, node_id), type_id, out
+        );,
+        _ => return error("unsupported comptime parameter value kind");,
+    }
+    return;
+}
+
+fn append_negative_comptime_integer_bits(
+    literal: []u8,
+    type_id: i64,
+    out: &var std::array::Array<package_call_facts::StaticBindingInput>
+) -> !void {
+    var bits = 0;
+    if std::mem::equal_bytes(literal, "9223372036854775808") {
+        bits = -9223372036854775807 - 1;
+    } else {
+        bits = 0 - try parse_comptime_integer(literal);
+    }
+    return out.append(package_call_facts::StaticBindingInput {
+        kind: package_call_facts::static_binding_scalar_kind(),
+        type_id: type_id,
+        value_bits: bits,
+        function_component_id: -1,
+        function_id: -1
+    });
+}
+
+fn parse_comptime_integer(literal: []u8) -> !i64 {
+    if std::mem::len(literal) == 0 {
+        return error("empty comptime integer literal");
+    }
+    var value = 0;
+    var index = 0;
+    while index < std::mem::len(literal) {
+        let byte = literal[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("unsupported comptime integer literal");
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if value > (9223372036854775807 - digit) / 10 {
+            return error("comptime integer literal out of range");
+        }
+        value = value * 10 + digit;
+        index = index + 1;
+    }
+    return value;
+}
+
+fn append_function_item_dependency_if_exact(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &package_type_resolution::TypeStore,
+    type_id: i64,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    let value = try package_type_resolution::type_at(type_store, type_id);
+    if value.kind != package_type_resolution::type_kind_function_item() { return; }
+    let target = package_function_identity::FunctionTarget {
+        component: package_function_identity::ComponentId {
+            value: value.declaration_component_id
+        },
+        function: package_function_identity::FunctionId {
+            value: value.declaration_index
+        }
+    };
+    let ignored = try package_catalog::target_slot(
+        catalog, package_function_identity::copy_function_target(&target)
+    );
+    try package_call_facts::append_indirect_dependency(calls, caller, target);
+    return;
+}
+
+
+fn call_receiver_node(
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId
+) -> ReceiverNode {
+    let node = ast.get(callee);
+    match node.data {
+        FieldExpr(field) => if !field.namespace {
+            return ReceiverNode { found: true, node: field.receiver };
+        } else { return ReceiverNode { found: false, node: callee }; },
+        TypeApplyExpr(value) => return call_receiver_node(ast, value.callee);,
+        _ => return ReceiverNode { found: false, node: callee };,
+    }
+    return ReceiverNode { found: false, node: callee };
+}
+
+fn append_callee_type_actuals(
+    text: []u8, ast: &std::kizu::ast::Ast, callee: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog, component_id: i64,
+    type_store: &var package_type_resolution::TypeStore,
+    prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &package_type_environment::Environment,
+    out: &var std::array::Array<i64>
+) -> !void {
+    let node = ast.get(callee);
+    match node.data {
+        TypeApplyExpr(value) => return append_type_actual_range(
+            text, ast, value.type_args, catalog, component_id,
+            type_store, prepared_types, local_types, out
+        );,
+        _ => return;,
+    }
+    return;
+}
+
+fn append_type_actual_range(
+    text: []u8, ast: &std::kizu::ast::Ast,
+    type_args: std::kizu::ast::ChildRange,
+    catalog: &package_catalog::PackageFunctionCatalog, component_id: i64,
+    type_store: &var package_type_resolution::TypeStore,
+    prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &package_type_environment::Environment,
+    out: &var std::array::Array<i64>
+) -> !void {
+    var index = 0;
+    while index < type_args.len {
+        let type_node = try ast.child_at(type_args, index);
+        let actual = try package_expression_type_resolution::resolve_type_spelling(
+            catalog, component_id, node_text(text, ast, type_node),
+            type_store, prepared_types, local_types
+        );
+        if actual.type_id < 0 { return error("call type actual unresolved"); }
+        try out.append(actual.type_id);
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_owned_constructor_if_exact(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    call_node: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore,
+    prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &package_type_environment::Environment,
+    resolution: &package_expression_type_resolution::CalleeResolution,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    let callee_node = ast.get(callee);
+    match callee_node.data {
+        TypeApplyExpr(type_apply) => return append_type_apply_owned_constructor_if_exact(
+            text, ast, call_node, callee, type_apply.type_args, catalog,
+            component_id, caller, type_store, prepared_types, local_types,
+            resolution, calls
+        );,
+        _ => return;,
+    }
+    return;
+}
+
+fn append_type_apply_owned_constructor_if_exact(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    call_node: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    type_args: std::kizu::ast::ChildRange,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore,
+    prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &package_type_environment::Environment,
+    resolution: &package_expression_type_resolution::CalleeResolution,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    if resolution.kind != package_expression_type_resolution::callee_non_package_kind() and
+        resolution.kind != package_expression_type_resolution::callee_resolved_kind() { return; }
+    // Most type-applied builtins are operations on an existing container and
+    // have no owned result TypeId. Reject them by the semantic operation
+    // contract before asking expression inference for a constructor result.
+    if resolution.kind == package_expression_type_resolution::callee_non_package_kind() {
+        let operation = builtin_contract::owned_container_operation(
+            resolution.builtin_operation
+        );
+        if !operation.found or
+            operation.action != builtin_contract::owned_container_action_construct() {
+            return;
+        }
+    }
+    let result = try package_expression_type_resolution::infer_exact_expression_type(
+        text, ast, call_node, type_store, prepared_types, local_types,
+        catalog, component_id
+    );
+    let result_argument_len = try package_type_resolution::type_argument_len(
+        type_store, &result
+    );
+    if result_argument_len == 0 or result_argument_len != type_args.len {
+        return;
+    }
+    let classification = try owned_constructor_classification(
+        catalog, component_id, &result, resolution
+    );
+    if classification.family == builtin_contract::owned_container_family_none() { return; }
+    var type_argument_index = 0;
+    while type_argument_index < result_argument_len {
+        let result_argument = try package_type_resolution::type_argument(
+            type_store, &result, type_argument_index
+        );
+        let argument_node = try ast.child_at(type_args, type_argument_index);
+        let argument_spelling = node_text(text, ast, argument_node);
+        let spelled_argument = try package_expression_type_resolution::resolve_type_spelling(
+            catalog, component_id, argument_spelling,
+            type_store, prepared_types, local_types
+        );
+        if !(try package_type_resolution::same_type(
+            type_store, &result_argument, &spelled_argument
+        )) {
+            return error(
+                "owned constructor TypeId arguments do not match type application"
+            );
+        }
+        type_argument_index = type_argument_index + 1;
+    }
+    return package_call_facts::append_owned_constructor(
+        calls, text, ast, call_node, type_args,
+        caller, classification.family, classification.action,
+        result.constructor_name,
+        node_text(text, ast, callee)
+    );
+}
+
+struct OwnedConstructorClassification {
+    family: i64,
+    action: i64,
+}
+
+fn no_owned_constructor_classification() -> OwnedConstructorClassification {
+    return OwnedConstructorClassification {
+        family: builtin_contract::owned_container_family_none(),
+        action: builtin_contract::owned_container_action_none()
+    };
+}
+
+fn owned_constructor_classification(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    result: &package_type_resolution::ResolvedType,
+    resolution: &package_expression_type_resolution::CalleeResolution
+) -> !OwnedConstructorClassification {
+    if resolution.kind == package_expression_type_resolution::callee_non_package_kind() {
+        let descriptor = builtin_contract::owned_container_operation(
+            resolution.builtin_operation
+        );
+        if !descriptor.found { return no_owned_constructor_classification(); }
+        if descriptor.action != builtin_contract::owned_container_action_construct() {
+            return no_owned_constructor_classification();
+        }
+        return OwnedConstructorClassification {
+            family: descriptor.family,
+            action: descriptor.action
+        };
+    }
+    if resolution.kind != package_expression_type_resolution::callee_resolved_kind() {
+        return no_owned_constructor_classification();
+    }
+    let nominal_constructor = try package_exact_lookup::qualified_function_entry(
+        catalog, component_id, result.constructor_name
+    );
+    if nominal_constructor != resolution.target_index {
+        return no_owned_constructor_classification();
+    }
+    let owned_family = package_type_resolution::intrinsic_owned_container_family(
+        result.intrinsic_kind
+    );
+    let descriptor = builtin_contract::owned_container_constructor(owned_family);
+    if !descriptor.found { return no_owned_constructor_classification(); }
+    if descriptor.action != builtin_contract::owned_container_action_construct() {
+        return no_owned_constructor_classification();
+    }
+    return OwnedConstructorClassification {
+        family: descriptor.family,
+        action: descriptor.action
+    };
+}
+
+fn append_param_types(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment
+) -> !void {
+    var index = 0;
+    while index < params.len {
+        try append_param_type(
+            text, ast, try ast.child_at(params, index), catalog,
+            component_id, type_store, prepared_types, local_types
+        );
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_type_parameters(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    function_index: i64,
+    local_types: &var package_type_environment::Environment
+) -> !void {
+    var index = 0;
+    while index < type_params.len {
+        let name = node_text(text, ast, try ast.child_at(type_params, index));
+        try package_type_environment::append_type_parameter(
+            local_types, name, package_type_resolution::formal_owner_function(),
+            function_index, index
+        );
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_param_type(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    param_node_id: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment
+) -> !void {
+    let param_node = ast.get(param_node_id);
+    match param_node.data {
+        Param(param) => return append_named_param_type(
+            text, ast, param.name, param.type_node,
+            catalog, component_id, type_store, prepared_types, local_types
+        );,
+        _ => return error("resolver function parameter is not Param");,
+    }
+}
+
+fn append_named_param_type(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment
+) -> !void {
+    let type_value = try package_expression_type_resolution::resolve_type_spelling(
+        catalog, component_id, node_text(text, ast, type_node),
+        type_store, prepared_types, local_types
+    );
+    return insert_local_type(
+        local_types, node_text(text, ast, name), type_value
+    );
+}
+
+fn resolve_let_calls(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    try resolve_calls_node(
+        text, ast, value, catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    let value_type = try package_expression_type_resolution::infer_exact_expression_type(
+        text, ast, value, type_store, prepared_types, local_types, catalog, component_id
+    );
+    return insert_local_type(local_types, node_text(text, ast, name), value_type);
+}
+
+fn resolve_for_calls(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    try resolve_calls_two(
+        text, ast, start, end, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    try package_type_environment::enter_scope(local_types);
+    let index_type = try package_expression_type_resolution::resolve_type_spelling(
+        catalog, component_id, "i64", type_store, prepared_types, local_types
+    );
+    try package_type_environment::insert(
+        local_types, node_text(text, ast, name), index_type
+    );
+    try resolve_current_scope_block(
+        text, ast, body, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    return package_type_environment::leave_scope(local_types);
+}
+
+fn resolve_match_calls(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    try resolve_calls_node(
+        text, ast, value, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    let value_type = try package_expression_type_resolution::infer_exact_expression_type(
+        text, ast, value, type_store, prepared_types, local_types, catalog, component_id
+    );
+    var index = 0;
+    while index < arms.len {
+        try resolve_match_arm_calls(
+            text, ast, try ast.child_at(arms, index), value_type,
+            catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls
+        );
+        index = index + 1;
+    }
+    return;
+}
+
+fn resolve_match_arm_calls(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    arm_node_id: std::kizu::ast::NodeId,
+    union_type: package_type_resolution::ResolvedType,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    let arm_node = ast.get(arm_node_id);
+    match arm_node.data {
+        MatchArm(arm) => return resolve_typed_match_arm_calls(
+            text, ast, arm.pattern, arm.binding, arm.body, union_type,
+            catalog, component_id, copy_target(&caller), type_store, prepared_types, local_types, calls
+        );,
+        _ => return error("resolver match member is not MatchArm");,
+    }
+}
+
+fn resolve_typed_match_arm_calls(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    pattern: std::kizu::ast::NodeId,
+    binding: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    union_type: package_type_resolution::ResolvedType,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    try package_type_environment::enter_scope(local_types);
+    let binding_name = node_text(text, ast, binding);
+    if std::mem::len(binding_name) > 0 {
+        let owner = try package_type_resolution::without_borrow(
+            type_store, &union_type
+        );
+        let binding_type = try package_prepared_types::instantiate_union_payload(
+            prepared_types, catalog, type_store, &owner,
+            node_text(text, ast, pattern)
+        );
+        try package_type_environment::insert(local_types, binding_name, binding_type);
+    }
+    try resolve_current_scope_block(
+        text, ast, body, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    return package_type_environment::leave_scope(local_types);
+}
+
+fn insert_local_type(
+    local_types: &var package_type_environment::Environment,
+    name: []u8,
+    type_value: package_type_resolution::ResolvedType
+) -> !void {
+    return package_type_environment::insert(local_types, name, type_value);
+}
+
+fn node_text(text: []u8, ast: &std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> []u8 {
+    let span = ast.get(node_id).span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
+}
+
+fn copy_target(target: &package_function_identity::FunctionTarget) -> package_function_identity::FunctionTarget {
+    return package_function_identity::copy_function_target(target);
+}
+
+fn resolve_calls_range(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    var index = 0;
+    while index < range.len {
+        try resolve_calls_node(
+            text, ast, try ast.child_at(range, index), catalog, component_id,
+            copy_target(&caller), type_store, prepared_types, local_types, calls
+        );
+        index = index + 1;
+    }
+    return;
+}
+
+fn resolve_scoped_calls_range(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    try package_type_environment::enter_scope(local_types);
+    try resolve_calls_range(
+        text, ast, range, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    return package_type_environment::leave_scope(local_types);
+}
+
+// Function parameters, for-loop induction variables, and match payloads own
+// the scope in which their body statements execute. Their syntactic Block must
+// not introduce a second child scope, which would incorrectly permit a body
+// local to shadow the binding that establishes the body context.
+fn resolve_current_scope_block(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    block_node: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore,
+    prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    let node = ast.get(block_node);
+    match node.data {
+        Block(block) => return resolve_calls_range(
+            text, ast, block.statements, catalog, component_id,
+            copy_target(&caller), type_store, prepared_types, local_types, calls
+        );,
+        _ => return resolve_calls_node(
+            text, ast, block_node, catalog, component_id,
+            copy_target(&caller), type_store, prepared_types, local_types, calls
+        );,
+    }
+}
+
+fn resolve_calls_two(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    a: std::kizu::ast::NodeId,
+    b: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    try resolve_calls_node(
+        text, ast, a, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    return resolve_calls_node(
+        text, ast, b, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+}
+
+fn resolve_calls_three(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    a: std::kizu::ast::NodeId,
+    b: std::kizu::ast::NodeId,
+    c: std::kizu::ast::NodeId,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    try resolve_calls_two(
+        text, ast, a, b, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    return resolve_calls_node(
+        text, ast, c, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+}
+
+fn resolve_calls_node_range(
+    text: []u8,
+    ast: &std::kizu::ast::Ast,
+    node: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    caller: package_function_identity::FunctionTarget,
+    type_store: &var package_type_resolution::TypeStore, prepared_types: &var package_prepared_types::PreparedTypeCatalog,
+    local_types: &var package_type_environment::Environment,
+    calls: &var package_call_facts::ResolvedCallTargets
+) -> !void {
+    try resolve_calls_node(
+        text, ast, node, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+    return resolve_calls_range(
+        text, ast, range, catalog, component_id,
+        copy_target(&caller), type_store, prepared_types, local_types, calls
+    );
+}
+pub fn append_resolved_dependencies(
+    graph: &var package_dependency_graph::DependencyGraph,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    calls: &package_call_facts::ResolvedCallTargets
+) -> !void {
+    var index = 0;
+    while index < package_call_facts::resolved_call_len(calls) {
+        try package_dependency_graph::append_dependency(
+            graph, catalog, try package_call_facts::resolved_call_record(calls, index)
+        );
+        index = index + 1;
+    }
+    index = 0;
+    while index < package_call_facts::indirect_dependency_len(calls) {
+        try package_dependency_graph::append_dependency(
+            graph, catalog, try package_call_facts::indirect_dependency_record(calls, index)
+        );
+        index = index + 1;
+    }
+    return;
+}

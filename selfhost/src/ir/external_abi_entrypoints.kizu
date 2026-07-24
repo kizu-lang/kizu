@@ -1,0 +1,135 @@
+import selfhost::abi::semantic_signature;
+
+// ExternalAbiEntrypoint is a compiled Kizu function called directly from the
+// handwritten backend boundary. Dependencies below these roots belong to the
+// package dependency graph and must never be repeated here.
+pub struct ExternalAbiEntrypoint {
+    pub package_name: []u8,
+    pub module_path: []u8,
+    pub function_name: []u8,
+    pub return_type: []u8,
+    pub param_types: []u8,
+}
+
+pub struct ExternalAbiManifest {
+    pub entrypoints: std::array::Array<ExternalAbiEntrypoint>,
+}
+
+pub fn collect(allocator: Allocator) -> !ExternalAbiManifest {
+    var manifest = ExternalAbiManifest {
+        entrypoints: std::array::Array<ExternalAbiEntrypoint>(allocator)
+    };
+    errdefer manifest.deinit();
+    try append(
+        &var manifest,
+        "selfhost", "cli/check", "fast_diagnostics_parsed_file", "!bool",
+        "Allocator;Io;[]u8;[]u8;std::kizu::ast::ParseResult"
+    );
+    try append(
+        &var manifest,
+        "selfhost", "cli/execute", "render_checked_run_artifact", "!std::string::String",
+        "Allocator;[]u8;[]u8;std::kizu::ast::ParseResult"
+    );
+    try append(
+        &var manifest,
+        "selfhost", "backend/executable", "lower_test_executable", "!data::Executable",
+        "[]u8;std::kizu::ast::Ast;std::kizu::ast::NodeId"
+    );
+    try append(
+        &var manifest,
+        "std", "kizu/parser", "parse_program", "!std::kizu::ast::ParseResult",
+        "Allocator;std::kizu::ast::SourceFile"
+    );
+    try append(
+        &var manifest,
+        "selfhost", "parser/format", "format_source", "!std::string::String",
+        "Allocator;[]u8"
+    );
+    try append(
+        &var manifest,
+        "selfhost", "backend/hosted", "artifact_path", "!std::string::String",
+        "Allocator;[]u8;[]u8;[]u8"
+    );
+    try append(
+        &var manifest,
+        "selfhost", "ir/codegen", "metadata_line", "[]u8", ""
+    );
+    return manifest;
+}
+
+fn append(
+    manifest: &var ExternalAbiManifest,
+    package_name: []u8,
+    module_path: []u8,
+    function_name: []u8,
+    return_type: []u8,
+    param_types: []u8
+) -> !void {
+    try manifest.entrypoints.append(ExternalAbiEntrypoint {
+        package_name: package_name,
+        module_path: module_path,
+        function_name: function_name,
+        return_type: return_type,
+        param_types: param_types
+    });
+    return;
+}
+
+impl ExternalAbiManifest {
+    fn deinit(self: ExternalAbiManifest) -> void {
+        self.entrypoints.deinit();
+    }
+}
+
+pub fn len(manifest: &ExternalAbiManifest) -> i64 {
+    return manifest.entrypoints.len();
+}
+
+// param_count and param_type_at expose the ordered semantic signature without
+// introducing an owned nested array. Semicolons are record separators, not part
+// of Kizu type-token syntax.
+pub fn param_count(entrypoint: &ExternalAbiEntrypoint) -> !i64 {
+    return semantic_signature::count(entrypoint.param_types);
+}
+
+pub fn param_type_at(entrypoint: &ExternalAbiEntrypoint, wanted: i64) -> ![]u8 {
+    return semantic_signature::type_at(entrypoint.param_types, wanted);
+}
+
+// append_qualified_name is the sole manifest-entry -> IR function identity mapping.
+// Package collection and backend validation both consume this spelling; neither owns
+// a parallel list of external roots or their qualified names.
+pub fn append_qualified_name(
+    out: &var std::string::String,
+    entrypoint: &ExternalAbiEntrypoint
+) -> !void {
+    try out.append_bytes(entrypoint.package_name);
+    try out.append_bytes("::");
+    var index = 0;
+    while index < std::mem::len(entrypoint.module_path) {
+        let byte = entrypoint.module_path[index];
+        if byte == cast<u8>(47) {
+            try out.append_bytes("::");
+        } else {
+            try out.append_byte(byte);
+        }
+        index = index + 1;
+    }
+    try out.append_bytes("::");
+    try out.append_bytes(entrypoint.function_name);
+    return;
+}
+
+pub fn qualified_name_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var manifest = try collect(allocator);
+    defer manifest.deinit();
+    let manifest_entries = &manifest.entrypoints;
+    let entrypoint = try manifest_entries.at(0);
+    var qualified = std::string::String(allocator);
+    defer qualified.deinit();
+    try append_qualified_name(&var qualified, &entrypoint);
+    let bytes = qualified.as_bytes();
+    print(bytes);
+    return;
+}

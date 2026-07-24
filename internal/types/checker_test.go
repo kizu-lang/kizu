@@ -549,6 +549,70 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsBorrowProvenanceThroughFieldAliases keeps the root owner
+// through explicit field borrows and borrowed-view locals.
+func TestCheckAcceptsBorrowProvenanceThroughFieldAliases(t *testing.T) {
+	source := `import std::string;
+struct Owner {
+    text: std::string::String,
+}
+impl Owner {
+    fn bytes(self: &Owner) -> []u8 borrows self {
+        let storage = &self.text;
+        let view = storage.as_bytes();
+        return view;
+    }
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckAcceptsMethodBorrowProvenance maps method return sources across
+// the implicit receiver offset as well as explicit method parameters.
+func TestCheckAcceptsMethodBorrowProvenance(t *testing.T) {
+	source := `struct Picker {
+    bytes: []u8,
+}
+impl Picker {
+    fn from_self(self: &Picker) -> []u8 borrows self {
+        return self.bytes;
+    }
+    fn from_arg(self: &Picker, value: []u8) -> []u8 borrows value {
+        return value;
+    }
+}
+fn forward_self(picker: &Picker) -> []u8 borrows picker {
+    let view = picker.from_self();
+    return view;
+}
+fn forward_arg(picker: &Picker, value: []u8) -> []u8 borrows value {
+    let view = picker.from_arg(value);
+    return view;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckPreservesArrayElementNominalTypeThroughAt pins the exact receiver
+// identity used by field lookup after a generic method and try unwrap.
+func TestCheckPreservesArrayElementNominalTypeThroughAt(t *testing.T) {
+	source := `struct MirCallArg {
+    string_index: i64,
+}
+fn read(args: std::array::Array<MirCallArg>) -> !i64 {
+    let arg = try args.at(0);
+    return arg.string_index;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsBorrowProvenanceDeclarationErrors keeps borrowed returns explicit.
 func TestCheckRejectsBorrowProvenanceDeclarationErrors(t *testing.T) {
 	cases := []struct {
@@ -581,6 +645,48 @@ func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
 			name: "return source mismatch",
 			source: `fn bad(left: []u8, right: []u8) -> []u8 borrows left {
     return right;
+}`,
+			want: "return borrows `left` but returned value is not tied to that source",
+		},
+		{
+			name: "field alias source mismatch",
+			source: `import std::string;
+struct Owner {
+    text: std::string::String,
+}
+fn bad(left: &Owner, right: &Owner) -> []u8 borrows left {
+    let storage = &right.text;
+    let view = storage.as_bytes();
+    return view;
+}`,
+			want: "return borrows `left` but returned value is not tied to that source",
+		},
+		{
+			name: "temporary field owner",
+			source: `import std::string;
+struct Owner {
+    text: std::string::String,
+}
+fn make(text: std::string::String) -> Owner {
+    return Owner { text: text };
+}
+fn bad(owner: &Owner, text: std::string::String) -> []u8 borrows owner {
+    let view = make(text).text.as_bytes();
+    return view;
+}`,
+			want: "return borrows `owner` but returned value is not tied to that source",
+		},
+		{
+			name: "method explicit source mismatch",
+			source: `struct Picker {}
+impl Picker {
+    fn from_arg(self: &Picker, value: []u8) -> []u8 borrows value {
+        return value;
+    }
+}
+fn bad(picker: &Picker, left: []u8, right: []u8) -> []u8 borrows left {
+    let view = picker.from_arg(right);
+    return view;
 }`,
 			want: "return borrows `left` but returned value is not tied to that source",
 		},
@@ -1216,6 +1322,40 @@ fn check(values: std::array::Array<Parsed>) -> !void {
 fn main() {}`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckAcceptsArrayPopOrPanicResourceElements keeps the trap variant move-capable.
+func TestCheckAcceptsArrayPopOrPanicResourceElements(t *testing.T) {
+	source := `struct Parsed { values: std::array::Array<i64> }
+impl Parsed {
+    fn deinit(self: Parsed) -> void {
+        self.values.deinit();
+    }
+}
+fn check(values: std::array::Array<Parsed>) -> void {
+    let value = values.pop_or_panic();
+    value.deinit();
+    print(values.len());
+    values.deinit();
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsArrayPopOrPanicArguments fixes the zero-argument signature.
+func TestCheckRejectsArrayPopOrPanicArguments(t *testing.T) {
+	err := checkSource(`fn check(values: std::array::Array<i64>) -> i64 {
+    return values.pop_or_panic(0);
+}
+fn main() {}`)
+	if err == nil {
+		t.Fatal("expected pop_or_panic arity error")
+	}
+	if !strings.Contains(err.Error(), "`Array.pop_or_panic` expects 0 args") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 

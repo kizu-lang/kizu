@@ -1,0 +1,495 @@
+import selfhost::abi::fixed_abi_contract;
+import selfhost::abi::program_entry_contract;
+import selfhost::backend::compiled_error_abi;
+import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_type_lower;
+import selfhost::backend::compiled_type_resolver;
+import selfhost::backend::fact_tokens;
+import selfhost::backend::ir_index;
+
+struct ProgramEntry {
+    component_id: i64,
+    function_id: i64,
+    canonical_name: []u8,
+}
+
+fn parse_program_entry_line(facts: []u8, start: i64, end: i64) -> !ProgramEntry {
+    let prefix = "program-entry ";
+    var cursor = start + std::mem::len(prefix);
+    let component_end = fact_tokens::token_end(facts, cursor, end);
+    let component_id = try fact_tokens::parse_nonnegative_i64(
+        facts, cursor, component_end
+    );
+    cursor = fact_tokens::skip_spaces(facts, component_end, end);
+    let function_end = fact_tokens::token_end(facts, cursor, end);
+    let function_id = try fact_tokens::parse_nonnegative_i64(
+        facts, cursor, function_end
+    );
+    cursor = fact_tokens::skip_spaces(facts, function_end, end);
+    let name_end = fact_tokens::token_end(facts, cursor, end);
+    if cursor >= name_end or name_end != end {
+        return error("compiled run entry: malformed program-entry fact");
+    }
+    return ProgramEntry {
+        component_id: component_id,
+        function_id: function_id,
+        canonical_name: facts[cursor..name_end]
+    };
+}
+
+fn exact_program_entry(
+    index: &ir_index::IrIndex,
+    facts: []u8
+) -> !ProgramEntry {
+    let prefix = "program-entry ";
+    if ir_index::fact_prefix_entry_count(index, facts, prefix) != 1 {
+        return error("compiled run entry: exactly one program-entry fact required");
+    }
+    let entry = ir_index::first_entry_with_fact_prefix(index, facts, prefix);
+    return try parse_program_entry_line(
+        facts,
+        ir_index::entry_line_start(index, entry),
+        ir_index::entry_line_end(index, entry)
+    );
+}
+
+fn parse_definition_name_line(
+    facts: []u8,
+    start: i64,
+    end: i64
+) -> !ProgramEntry {
+    let prefix = "package-definition-name ";
+    var cursor = start + std::mem::len(prefix);
+    let component_end = fact_tokens::token_end(facts, cursor, end);
+    let component_id = try fact_tokens::parse_nonnegative_i64(
+        facts, cursor, component_end
+    );
+    cursor = fact_tokens::skip_spaces(facts, component_end, end);
+    let function_end = fact_tokens::token_end(facts, cursor, end);
+    let function_id = try fact_tokens::parse_nonnegative_i64(
+        facts, cursor, function_end
+    );
+    cursor = fact_tokens::skip_spaces(facts, function_end, end);
+    let name_end = fact_tokens::token_end(facts, cursor, end);
+    if cursor >= name_end or name_end != end {
+        return error("compiled run entry: malformed package-definition-name fact");
+    }
+    return ProgramEntry {
+        component_id: component_id,
+        function_id: function_id,
+        canonical_name: facts[cursor..name_end]
+    };
+}
+
+fn require_definition_owner(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    program: &ProgramEntry
+) -> !void {
+    let prefix = "package-definition-name ";
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, prefix);
+    var numeric_owner_count = 0;
+    var canonical_owner_count = 0;
+    while entry >= 0 and ir_index::entry_key_starts_with(index, facts, entry, prefix) {
+        let definition = try parse_definition_name_line(
+            facts,
+            ir_index::entry_line_start(index, entry),
+            ir_index::entry_line_end(index, entry)
+        );
+        let numeric_owner = definition.component_id == program.component_id and
+            definition.function_id == program.function_id;
+        let canonical_owner = std::mem::equal_bytes(
+            definition.canonical_name, program.canonical_name
+        );
+        if numeric_owner {
+            numeric_owner_count = numeric_owner_count + 1;
+            if !canonical_owner {
+                return error("compiled run entry: numeric owner name mismatch");
+            }
+        }
+        if canonical_owner {
+            canonical_owner_count = canonical_owner_count + 1;
+            if !numeric_owner {
+                return error("compiled run entry: canonical name owner mismatch");
+            }
+        }
+        entry = entry + 1;
+    }
+    if numeric_owner_count != 1 or canonical_owner_count != 1 {
+        return error("compiled run entry: exact package definition owner required");
+    }
+    return;
+}
+
+fn require_zero_runtime_params(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    canonical_name: []u8
+) -> !void {
+    let entry = ir_index::first_matching_entry(
+        index, facts, "function-signature-param ", facts[0..0], canonical_name
+    );
+    if entry >= 0 {
+        return error("compiled run entry: program entry parameters unsupported");
+    }
+    return;
+}
+
+fn append_symbol(out: &var std::string::String, symbol: []u8) -> !void {
+    try out.append_byte(cast<u8>(64));
+    try out.append_bytes(symbol);
+    return;
+}
+
+fn append_owned_symbol(
+    out: &var std::string::String,
+    symbol: &std::string::String
+) -> !void {
+    try out.append_byte(cast<u8>(64));
+    var index = 0;
+    while index < symbol.len() {
+        try out.append_byte(owned_byte_at(symbol, index));
+        index = index + 1;
+    }
+    return;
+}
+
+fn owned_byte_at(value: &std::string::String, index: i64) -> u8 {
+    let bytes = value.as_bytes();
+    return bytes[index];
+}
+
+fn append_line(out: &var std::string::String, line: []u8) -> !void {
+    try out.append_bytes(line);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_exit_return(
+    out: &var std::string::String,
+    result_name: []u8,
+    exit_code: i64
+) -> !void {
+    let run_abi = program_entry_contract::run_entry_return_abi();
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(run_abi.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::process_exit_code_symbol());
+    try out.append_byte(cast<u8>(40));
+    try out.append_bytes(run_abi.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, exit_code);
+    try append_line(out, ")");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(run_abi.llvm_name);
+    try out.append_bytes(" %");
+    try append_line(out, result_name);
+    return;
+}
+
+pub fn append_host_declarations(out: &var std::string::String) -> !void {
+    let void_abi = fixed_abi_contract::describe(fixed_abi_contract::FixedAbiKind::Void);
+    let argc_abi = program_entry_contract::c_argc_abi();
+    let argv_abi = program_entry_contract::c_argv_abi();
+    let run_abi = program_entry_contract::run_entry_return_abi();
+    try out.append_bytes("declare ");
+    try out.append_bytes(void_abi.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::host_init_symbol());
+    try out.append_byte(cast<u8>(40));
+    try out.append_bytes(argc_abi.llvm_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(argv_abi.llvm_name);
+    try append_line(out, ")");
+    try out.append_bytes("declare ");
+    try out.append_bytes(void_abi.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::main_error_message_symbol());
+    try out.append_byte(cast<u8>(40));
+    try out.append_bytes(argv_abi.llvm_name);
+    try out.append_bytes(", ");
+    try out.append_bytes(run_abi.llvm_name);
+    try append_line(out, ")");
+    try out.append_bytes("declare ");
+    try out.append_bytes(run_abi.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::process_exit_code_symbol());
+    try out.append_byte(cast<u8>(40));
+    try out.append_bytes(run_abi.llvm_name);
+    try append_line(out, ")");
+    try append_line(out, "");
+    return;
+}
+
+fn append_program_call(
+    out: &var std::string::String,
+    symbol: &std::string::String,
+    llvm_return: []u8,
+    returns_error: bool,
+    success_kind: fixed_abi_contract::FixedAbiKind
+) -> !void {
+    if !returns_error and success_kind == fixed_abi_contract::FixedAbiKind::Void {
+        try out.append_bytes("  call ");
+        try out.append_bytes(llvm_return);
+        try out.append_byte(cast<u8>(32));
+        try append_owned_symbol(out, symbol);
+        try append_line(out, "()");
+        return append_exit_return(
+            out, "program_success_exit", program_entry_contract::success_exit_code()
+        );
+    }
+    try out.append_bytes("  %program_result = call ");
+    try out.append_bytes(llvm_return);
+    try out.append_byte(cast<u8>(32));
+    try append_owned_symbol(out, symbol);
+    try append_line(out, "()");
+    if !returns_error {
+        return append_exit_return(
+            out, "program_success_exit", program_entry_contract::success_exit_code()
+        );
+    }
+    return;
+}
+
+fn append_error_result_branch(
+    out: &var std::string::String,
+    llvm_return: []u8,
+    success_abi: []u8
+) -> !void {
+    let slice_abi = fixed_abi_contract::describe(
+        fixed_abi_contract::FixedAbiKind::SliceU8
+    );
+    let pointer_abi = fixed_abi_contract::describe(
+        fixed_abi_contract::FixedAbiKind::Pointer
+    );
+    let bool_abi = fixed_abi_contract::describe(
+        fixed_abi_contract::FixedAbiKind::Bool
+    );
+    let length_abi = program_entry_contract::run_entry_return_abi();
+    try out.append_bytes("  %program_ok = extractvalue ");
+    try out.append_bytes(llvm_return);
+    try out.append_bytes(" %program_result, ");
+    try std::fmt::append_i64(out, compiled_error_abi::success_flag_field_index());
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br ");
+    try out.append_bytes(bool_abi.llvm_name);
+    try append_line(
+        out, " %program_ok, label %program_success, label %program_failure"
+    );
+    try append_line(out, "program_failure:");
+    try out.append_bytes("  %program_message = extractvalue ");
+    try out.append_bytes(llvm_return);
+    try out.append_bytes(" %program_result, ");
+    try std::fmt::append_i64(
+        out, try compiled_error_abi::message_field_index(success_abi)
+    );
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %program_message_ptr = extractvalue ");
+    try out.append_bytes(slice_abi.llvm_name);
+    try out.append_bytes(" %program_message, ");
+    try std::fmt::append_i64(out, fixed_abi_contract::slice_pointer_field_index());
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %program_message_len = extractvalue ");
+    try out.append_bytes(slice_abi.llvm_name);
+    try out.append_bytes(" %program_message, ");
+    try std::fmt::append_i64(out, fixed_abi_contract::slice_length_field_index());
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  call ");
+    let void_abi = fixed_abi_contract::describe(fixed_abi_contract::FixedAbiKind::Void);
+    try out.append_bytes(void_abi.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::main_error_message_symbol());
+    try out.append_byte(cast<u8>(40));
+    try out.append_bytes(pointer_abi.llvm_name);
+    try out.append_bytes(" %program_message_ptr, ");
+    try out.append_bytes(length_abi.llvm_name);
+    try append_line(out, " %program_message_len)");
+    try append_exit_return(
+        out, "program_failure_exit", program_entry_contract::failure_exit_code()
+    );
+    try append_line(out, "program_success:");
+    try append_exit_return(
+        out, "program_success_exit", program_entry_contract::success_exit_code()
+    );
+    return;
+}
+
+fn append_c_main(out: &var std::string::String) -> !void {
+    let void_abi = fixed_abi_contract::describe(fixed_abi_contract::FixedAbiKind::Void);
+    let c_return = program_entry_contract::c_main_return_abi();
+    let argc = program_entry_contract::c_argc_abi();
+    let argv = program_entry_contract::c_argv_abi();
+    let run_return = program_entry_contract::run_entry_return_abi();
+    try out.append_bytes("define ");
+    try out.append_bytes(c_return.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::c_main_symbol());
+    try out.append_byte(cast<u8>(40));
+    try out.append_bytes(argc.llvm_name);
+    try out.append_bytes(" %argc, ");
+    try out.append_bytes(argv.llvm_name);
+    try append_line(out, " %argv) {");
+    try append_line(out, "entry:");
+    try out.append_bytes("  call ");
+    try out.append_bytes(void_abi.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::host_init_symbol());
+    try out.append_byte(cast<u8>(40));
+    try out.append_bytes(argc.llvm_name);
+    try out.append_bytes(" %argc, ");
+    try out.append_bytes(argv.llvm_name);
+    try append_line(out, " %argv)");
+    try out.append_bytes("  %run_code = call ");
+    try out.append_bytes(run_return.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::run_entry_symbol());
+    try append_line(out, "()");
+    try out.append_bytes("  %exit_code = trunc ");
+    try out.append_bytes(run_return.llvm_name);
+    try out.append_bytes(" %run_code to ");
+    try out.append_bytes(c_return.llvm_name);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(c_return.llvm_name);
+    try append_line(out, " %exit_code");
+    try append_line(out, "}");
+    return;
+}
+
+// append_run_entry consumes only indexed package facts. It never searches for
+// a source-level main spelling: program-entry supplies the exact numeric and
+// canonical identity, and compiled_signature owns LLVM symbol derivation.
+pub fn append_run_entry(
+    out: &var std::string::String,
+    index: &ir_index::IrIndex,
+    facts: []u8
+) -> !void {
+    let program = try exact_program_entry(index, facts);
+    try require_definition_owner(index, facts, &program);
+    try require_zero_runtime_params(index, facts, program.canonical_name);
+    let function = try compiled_type_resolver::resolve_function_indexed(
+        index, facts, facts[0..0], program.canonical_name
+    );
+    if !std::mem::equal_bytes(function.canonical_identity, program.canonical_name) {
+        return error("compiled run entry: signature identity mismatch");
+    }
+    let success_abi = function.return_type.abi;
+    let success_kind = fixed_abi_contract::from_llvm(success_abi).kind;
+    if success_kind != fixed_abi_contract::FixedAbiKind::Void and
+        success_kind != fixed_abi_contract::FixedAbiKind::Integer64 {
+        return error("compiled run entry: unsupported return ABI");
+    }
+    let llvm_return = try compiled_type_lower::kizu_type_to_llvm_indexed(
+        index, facts, function.owner_module, function.return_spelling
+    );
+    var symbol = std::string::String(std::mem::page_allocator());
+    defer symbol.deinit();
+    try compiled_signature::append_function_llvm_symbol(
+        &var symbol, program.canonical_name
+    );
+
+    try append_host_declarations(out);
+    let run_return = program_entry_contract::run_entry_return_abi();
+    try out.append_bytes("define ");
+    try out.append_bytes(run_return.llvm_name);
+    try out.append_byte(cast<u8>(32));
+    try append_symbol(out, program_entry_contract::run_entry_symbol());
+    try append_line(out, "() {");
+    try append_line(out, "entry:");
+    try append_program_call(
+        out, &symbol, llvm_return, function.returns_error, success_kind
+    );
+    if function.returns_error {
+        try append_error_result_branch(out, llvm_return, success_abi);
+    }
+    try append_line(out, "}");
+    try append_line(out, "");
+    try append_c_main(out);
+    return;
+}
+
+fn append_gate(facts: []u8) -> !void {
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var out = std::string::String(std::mem::page_allocator());
+    defer out.deinit();
+    try append_run_entry(&var out, &index, facts);
+    let bytes = out.as_bytes();
+    print(bytes);
+    return;
+}
+
+pub fn void_gate() -> !void {
+    return append_gate("program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start void");
+}
+
+pub fn i64_gate() -> !void {
+    return append_gate("program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start i64");
+}
+
+pub fn error_void_gate() -> !void {
+    return append_gate("error-llvm void %kizu.error.void
+program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start !void");
+}
+
+pub fn error_i64_gate() -> !void {
+    return append_gate("error-llvm i64 %kizu.error.i64
+program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start !i64");
+}
+
+pub fn duplicate_program_entry_gate() -> !void {
+    return append_gate("program-entry 4 7 app::entry::start
+program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start void");
+}
+
+pub fn numeric_owner_mismatch_gate() -> !void {
+    return append_gate("program-entry 4 7 app::entry::start
+package-definition-name 4 8 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start void");
+}
+
+pub fn unsupported_return_gate() -> !void {
+    return append_gate("program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start bool");
+}
+
+pub fn missing_signature_gate() -> !void {
+    return append_gate("program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start");
+}
+
+pub fn duplicate_signature_gate() -> !void {
+    return append_gate("program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start void
+function-signature-return app::entry::start void");
+}
+
+pub fn runtime_param_gate() -> !void {
+    return append_gate("program-entry 4 7 app::entry::start
+package-definition-name 4 7 app::entry::start
+function-owner-module app::entry::start app::entry::
+function-signature-return app::entry::start void
+function-signature-param app::entry::start 0 value:runtime:i64");
+}

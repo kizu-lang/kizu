@@ -1,0 +1,1754 @@
+import selfhost::backend::ir_index;
+import selfhost::backend::compiled_error_abi;
+import selfhost::backend::compiled_instance_context;
+import selfhost::backend::compiled_type_resolver;
+import selfhost::ir::builtin_contract;
+import selfhost::ir::intrinsic_type_contract;
+import selfhost::type_spelling;
+
+pub struct CanonicalFactRecord {
+    kind: i64,
+    identity: []u8,
+    metadata_a: i64,
+    metadata_b: i64,
+    child_start: i64,
+    child_len: i64,
+}
+
+struct CallFactRecord {
+    occupied: bool,
+    caller: []u8,
+    span_start: i64,
+    span_end: i64,
+    node_sequence: i64,
+    body_seen: bool,
+    classification_seen: bool,
+    type_seen: bool,
+    receiver_id: i64,
+    result_id: i64,
+    runtime_start: i64,
+    runtime_len: i64,
+    actual_start: i64,
+    actual_len: i64,
+}
+
+struct InstanceCallFactRecord {
+    instance_id: i64,
+    span_start: i64,
+    span_end: i64,
+    receiver_id: i64,
+    result_id: i64,
+    runtime_start: i64,
+    runtime_len: i64,
+    actual_start: i64,
+    actual_len: i64,
+}
+
+pub struct CanonicalFactTable {
+    records: std::array::Array<CanonicalFactRecord>,
+    child_ids: std::array::Array<i64>,
+    enum_flags: std::array::Array<bool>,
+    call_slots: std::array::Array<CallFactRecord>,
+    call_type_ids: std::array::Array<i64>,
+    instance_calls: std::array::Array<InstanceCallFactRecord>,
+    call_count: i64,
+}
+
+pub struct ParsedCallTypeFact {
+    pub receiver_id: i64,
+    pub result_id: i64,
+    pub runtime_start: i64,
+    pub runtime_len: i64,
+    pub actual_start: i64,
+    pub actual_len: i64,
+}
+
+pub fn parsed_call_type_for_span(
+    table: &CanonicalFactTable,
+    caller: &[]u8,
+    span_start: i64,
+    span_end: i64
+) -> !ParsedCallTypeFact {
+    let slot = try find_call_slot(table, caller, span_start, span_end);
+    let slots = &table.call_slots;
+    let record = try slots.at(slot);
+    if !record.body_seen or !record.classification_seen or !record.type_seen {
+        return error("body call canonical record is incomplete");
+    }
+    return ParsedCallTypeFact {
+        receiver_id: record.receiver_id, result_id: record.result_id,
+        runtime_start: record.runtime_start, runtime_len: record.runtime_len,
+        actual_start: record.actual_start, actual_len: record.actual_len
+    };
+}
+
+pub fn parsed_call_type_for_span_instance(
+    table: &CanonicalFactTable,
+    context: &compiled_instance_context::InstanceContext,
+    caller: &[]u8,
+    span_start: i64,
+    span_end: i64
+) -> !ParsedCallTypeFact {
+    if !context.found {
+        return parsed_call_type_for_span(table, caller, span_start, span_end);
+    }
+    return parsed_call_type_for_span_instance_id(
+        table, context.instance_id, span_start, span_end
+    );
+}
+
+pub fn parsed_call_type_for_span_instance_id(
+    table: &CanonicalFactTable,
+    instance_id: i64,
+    span_start: i64,
+    span_end: i64
+) -> !ParsedCallTypeFact {
+    var found = -1;
+    var index = 0;
+    let instance_calls = &table.instance_calls;
+    while index < instance_calls.len() {
+        let record = try instance_calls.at(index);
+        if record.instance_id == instance_id and
+            record.span_start == span_start and record.span_end == span_end {
+            if found >= 0 {
+                return error("duplicate concrete instance call type");
+            }
+            found = index;
+        }
+        index = index + 1;
+    }
+    if found < 0 { return error("concrete instance call type missing"); }
+    let selected_record = try instance_calls.at(found);
+    return ParsedCallTypeFact {
+        receiver_id: selected_record.receiver_id,
+        result_id: selected_record.result_id,
+        runtime_start: selected_record.runtime_start,
+        runtime_len: selected_record.runtime_len,
+        actual_start: selected_record.actual_start,
+        actual_len: selected_record.actual_len
+    };
+}
+
+pub fn parsed_call_runtime_type_id(
+    table: &CanonicalFactTable,
+    call: &ParsedCallTypeFact,
+    index: i64
+) -> !i64 {
+    if index < 0 or index >= call.runtime_len {
+        return error("body call runtime type index out of range");
+    }
+    return table.call_type_ids.get(call.runtime_start + index);
+}
+
+pub fn parsed_call_runtime_type_id_instance(
+    table: &CanonicalFactTable,
+    context: &compiled_instance_context::InstanceContext,
+    call: &ParsedCallTypeFact,
+    index: i64
+) -> !i64 {
+    return parsed_call_runtime_type_id(table, call, index);
+}
+
+pub fn parsed_call_actual_type_id(
+    table: &CanonicalFactTable,
+    call: &ParsedCallTypeFact,
+    index: i64
+) -> !i64 {
+    if index < 0 or index >= call.actual_len {
+        return error("body call actual type index out of range");
+    }
+    return table.call_type_ids.get(call.actual_start + index);
+}
+
+pub fn parsed_call_actual_type_id_instance(
+    table: &CanonicalFactTable,
+    context: &compiled_instance_context::InstanceContext,
+    call: &ParsedCallTypeFact,
+    index: i64
+) -> !i64 {
+    return parsed_call_actual_type_id(table, call, index);
+}
+
+pub fn parsed_print_runtime_abi(
+    table: &CanonicalFactTable, wanted_id: i64
+) -> !builtin_contract::PrintRuntimeAbi {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    var transport = builtin_contract::PrintRuntimeTransport::Unsupported;
+    if record.kind == kind_slice() and record.child_len == 1 {
+        let child_id = try table.child_ids.get(record.child_start);
+        let child = try records.at(child_id);
+        if child.kind == kind_intrinsic() and
+            child.metadata_a == intrinsic_type_contract::kind_u8() {
+            transport = builtin_contract::PrintRuntimeTransport::SliceU8;
+        }
+    } else {
+        if record.kind == kind_intrinsic() {
+            if record.metadata_a == intrinsic_type_contract::kind_bool() {
+                transport = builtin_contract::PrintRuntimeTransport::Bool;
+            } else {
+                if intrinsic_type_contract::is_signed_integer_kind(record.metadata_a) {
+                    transport = builtin_contract::PrintRuntimeTransport::SignedInteger;
+                } else {
+                    if intrinsic_type_contract::is_unsigned_integer_kind(record.metadata_a) {
+                        transport = builtin_contract::PrintRuntimeTransport::UnsignedInteger;
+                    }
+                }
+            }
+        }
+    }
+    let abi = builtin_contract::print_runtime_abi(transport);
+    if !abi.found {
+        return error("compiled canonical facts: print type unsupported");
+    }
+    return abi;
+}
+
+pub fn parsed_canonical_kind(
+    table: &CanonicalFactTable, wanted_id: i64
+) -> !i64 {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    return record.kind;
+}
+
+pub fn parsed_canonical_is_concrete(
+    table: &CanonicalFactTable,
+    wanted_id: i64
+) -> !bool {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    if record.kind == kind_formal() { return false; }
+    var child = 0;
+    while child < record.child_len {
+        if !(try parsed_canonical_is_concrete(
+            table, try table.child_ids.get(record.child_start + child)
+        )) {
+            return false;
+        }
+        child = child + 1;
+    }
+    return true;
+}
+
+pub fn validate_instance_context(
+    table: &CanonicalFactTable,
+    context: &compiled_instance_context::InstanceContext
+) -> !void {
+    var index = 0;
+    while index < compiled_instance_context::actual_len(context) {
+        if !(try parsed_canonical_is_concrete(
+            table, try compiled_instance_context::actual_type_id(context, index)
+        )) {
+            return error("compiled instance static type actual is not concrete");
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while index < compiled_instance_context::param_len(context) {
+        if !(try parsed_canonical_is_concrete(
+            table, try compiled_instance_context::param_type_id(context, index)
+        )) {
+            return error("compiled instance parameter type is not concrete");
+        }
+        index = index + 1;
+    }
+    if !(try parsed_canonical_is_concrete(
+        table, try compiled_instance_context::result_type_id(context)
+    )) {
+        return error("compiled instance result type is not concrete");
+    }
+    return;
+}
+
+pub fn parsed_canonical_identity(
+    table: &CanonicalFactTable, wanted_id: i64
+) -> ![]u8 {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    return record.identity;
+}
+
+pub fn parsed_canonical_metadata_a(
+    table: &CanonicalFactTable, wanted_id: i64
+) -> !i64 {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    return record.metadata_a;
+}
+
+pub fn parsed_canonical_child(
+    table: &CanonicalFactTable, wanted_id: i64, child_index: i64
+) -> !i64 {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    if child_index < 0 or child_index >= record.child_len {
+        return error("canonical child selector out of range");
+    }
+    return table.child_ids.get(record.child_start + child_index);
+}
+
+pub fn parsed_method_receiver_value_type_id(
+    table: &CanonicalFactTable, receiver_id: i64
+) -> !i64 {
+    let records = &table.records;
+    let record = try records.at(receiver_id);
+    if record.kind != kind_borrow() and record.kind != kind_borrow_var() {
+        return receiver_id;
+    }
+    if record.child_len != 1 {
+        return error("canonical method receiver borrow must have one child");
+    }
+    return table.child_ids.get(record.child_start);
+}
+
+pub fn parsed_canonical_error_success_child(
+    table: &CanonicalFactTable, wanted_id: i64
+) -> !i64 {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    if record.kind != kind_error_union() or record.child_len != 2 {
+        return error("runtime result must be a canonical error union");
+    }
+    let error_id = try table.child_ids.get(record.child_start);
+    let error_record = try records.at(error_id);
+    if error_record.kind != kind_intrinsic() or
+        !std::mem::equal_bytes(error_record.identity, "error") {
+        return error("runtime result error union must use the default error type");
+    }
+    return table.child_ids.get(record.child_start + 1);
+}
+
+pub fn parsed_call_error_success_receiver_child(
+    table: &CanonicalFactTable,
+    call: &ParsedCallTypeFact,
+    receiver_child_slot: i64
+) -> !i64 {
+    if call.receiver_id < 0 {
+        return error("runtime result receiver canonical type missing");
+    }
+    let success_id = try parsed_canonical_error_success_child(table, call.result_id);
+    let success_value_id = try parsed_method_receiver_value_type_id(
+        table, success_id
+    );
+    let receiver_value_id = try parsed_method_receiver_value_type_id(
+        table, call.receiver_id
+    );
+    let expected_id = try parsed_canonical_child(
+        table, receiver_value_id, receiver_child_slot
+    );
+    if success_value_id != expected_id {
+        return error("runtime result receiver child selector mismatch");
+    }
+    return expected_id;
+}
+
+pub fn parsed_canonical_spelling(
+    table: &CanonicalFactTable, wanted_id: i64
+) -> !std::string::String {
+    var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
+    try append_parsed_canonical_spelling(&var out, table, wanted_id);
+    return out;
+}
+
+pub struct CanonicalRuntimeAbi {
+    pub llvm: []u8,
+}
+
+pub fn parsed_canonical_runtime_abi(
+    index: &ir_index::IrIndex,
+    table: &CanonicalFactTable,
+    facts: []u8,
+    wanted_id: i64
+) -> ![]u8 {
+    let abi = try parsed_canonical_runtime_abi_value(
+        index, table, facts, wanted_id
+    );
+    return abi.llvm;
+}
+
+fn parsed_canonical_runtime_abi_value(
+    index: &ir_index::IrIndex,
+    table: &CanonicalFactTable,
+    facts: []u8,
+    wanted_id: i64
+) -> !CanonicalRuntimeAbi {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    if record.kind == kind_intrinsic() or record.kind == kind_declared() {
+        let llvm = try compiled_type_resolver::resolve_indexed(
+            index, facts, facts[0..0], record.identity
+        );
+        return CanonicalRuntimeAbi { llvm: llvm };
+    }
+    if record.kind == kind_borrow() or record.kind == kind_borrow_var() {
+        if record.child_len != 1 {
+            return error("runtime ABI canonical borrow arity invalid");
+        }
+        let child_id = try table.child_ids.get(record.child_start);
+        return parsed_canonical_runtime_abi_value(index, table, facts, child_id);
+    }
+    if record.kind == kind_nullable() {
+        if record.child_len != 1 {
+            return error("runtime ABI canonical nullable arity invalid");
+        }
+        let child_id = try table.child_ids.get(record.child_start);
+        return parsed_canonical_runtime_abi_value(
+            index, table, facts, child_id
+        );
+    }
+    if record.kind == kind_slice() {
+        if record.child_len != 1 {
+            return error("runtime ABI canonical slice arity invalid");
+        }
+        let child_id = try table.child_ids.get(record.child_start);
+        let child_record = try records.at(child_id);
+        if child_record.kind != kind_intrinsic() or
+            !std::mem::equal_bytes(child_record.identity, "u8") {
+            return error("runtime ABI canonical slice element unsupported");
+        }
+        let llvm = try compiled_type_resolver::resolve_indexed(
+            index, facts, facts[0..0], "[]u8"
+        );
+        return CanonicalRuntimeAbi { llvm: llvm };
+    }
+    if record.kind == kind_error_union() {
+        if record.child_len != 2 {
+            return error("runtime ABI canonical error union arity invalid");
+        }
+        let error_id = try table.child_ids.get(record.child_start);
+        let error_record = try records.at(error_id);
+        if error_record.kind != kind_intrinsic() or
+            !std::mem::equal_bytes(error_record.identity, "error") {
+            return error("runtime ABI canonical typed error unsupported");
+        }
+        let success_id = try table.child_ids.get(record.child_start + 1);
+        let success = try parsed_canonical_runtime_abi_value(
+            index, table, facts, success_id
+        );
+        let llvm = try compiled_error_abi::lookup_indexed(
+            index, facts, success.llvm
+        );
+        return CanonicalRuntimeAbi { llvm: llvm };
+    }
+    return error("runtime ABI canonical type unsupported");
+}
+
+pub fn parsed_canonical_spelling_matches(
+    table: &CanonicalFactTable, wanted_id: i64, expected: []u8
+) -> !bool {
+    var spelling = try parsed_canonical_spelling(table, wanted_id);
+    defer spelling.deinit();
+    return owned_string_equal(&spelling, expected);
+}
+
+pub fn parsed_canonical_type_matches_spelling_indexed(
+    index: &ir_index::IrIndex,
+    table: &CanonicalFactTable,
+    facts: []u8,
+    wanted_id: i64,
+    spelling_module: []u8,
+    spelling: []u8
+) -> !bool {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    if record.kind == kind_borrow_var() and
+        std::mem::starts_with(spelling, "&var_") {
+        if record.child_len != 1 { return false; }
+        return parsed_canonical_type_matches_spelling_indexed(
+            index, table, facts,
+            try table.child_ids.get(record.child_start),
+            spelling_module, spelling[5..std::mem::len(spelling)]
+        );
+    }
+    let layer = try type_spelling::parse(spelling);
+    if record.kind == kind_intrinsic() or record.kind == kind_declared() {
+        if layer.kind != type_spelling::layer_named() { return false; }
+        let resolved = try compiled_type_resolver::resolve_type_indexed(
+            index, facts, spelling_module, spelling
+        );
+        if !std::mem::equal_bytes(resolved.canonical_identity, record.identity) {
+            return false;
+        }
+        if !layer.has_arguments { return record.child_len == 0; }
+        let arguments = try type_spelling::arguments(&layer, spelling);
+        var argument_start = 0;
+        var child = 0;
+        while argument_start < std::mem::len(arguments) {
+            if child >= record.child_len { return false; }
+            let argument = try type_spelling::next_argument(
+                arguments, argument_start
+            );
+            if !try parsed_canonical_type_matches_spelling_indexed(
+                index, table, facts,
+                try table.child_ids.get(record.child_start + child),
+                spelling_module, argument
+            ) {
+                return false;
+            }
+            child = child + 1;
+            argument_start = try type_spelling::next_argument_start(
+                arguments, argument_start
+            );
+        }
+        return child == record.child_len;
+    }
+    if record.kind == kind_error_union() {
+        if layer.kind != type_spelling::layer_error_union() or
+            record.child_len != 2 {
+            return false;
+        }
+        let error_record = try records.at(
+            try table.child_ids.get(record.child_start)
+        );
+        if error_record.kind != kind_intrinsic() or
+            !std::mem::equal_bytes(error_record.identity, "error") {
+            return false;
+        }
+        return parsed_canonical_type_matches_spelling_indexed(
+            index, table, facts,
+            try table.child_ids.get(record.child_start + 1),
+            spelling_module, try type_spelling::second_child(&layer, spelling)
+        );
+    }
+    if record.child_len != 1 { return false; }
+    var expected_layer = 0;
+    if record.kind == kind_borrow() {
+        expected_layer = type_spelling::layer_borrow();
+    }
+    if record.kind == kind_borrow_var() {
+        expected_layer = type_spelling::layer_borrow_var();
+    }
+    if record.kind == kind_slice() {
+        expected_layer = type_spelling::layer_slice();
+    }
+    if record.kind == kind_nullable() {
+        expected_layer = type_spelling::layer_nullable();
+    }
+    if record.kind == kind_dynamic() {
+        expected_layer = type_spelling::layer_dynamic();
+    }
+    if record.kind == kind_const() {
+        expected_layer = type_spelling::layer_const();
+    }
+    if expected_layer == 0 or layer.kind != expected_layer { return false; }
+    return parsed_canonical_type_matches_spelling_indexed(
+        index, table, facts,
+        try table.child_ids.get(record.child_start),
+        spelling_module, try type_spelling::first_child(&layer, spelling)
+    );
+}
+
+pub enum ScalarI64Codec {
+    Unsupported,
+    Identity,
+    Bool,
+    UnsignedNarrow,
+    SignedNarrow,
+}
+
+pub fn parsed_scalar_i64_codec(
+    table: &CanonicalFactTable, wanted_id: i64
+) -> !ScalarI64Codec {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    if record.kind == kind_intrinsic() {
+        let intrinsic = record.metadata_a;
+        if intrinsic == intrinsic_type_contract::kind_bool() {
+            return ScalarI64Codec::Bool;
+        }
+        if intrinsic == intrinsic_type_contract::kind_u8() or
+            intrinsic == intrinsic_type_contract::kind_u16() or
+            intrinsic == intrinsic_type_contract::kind_u32() {
+            return ScalarI64Codec::UnsignedNarrow;
+        }
+        if intrinsic == intrinsic_type_contract::kind_i8() or
+            intrinsic == intrinsic_type_contract::kind_i16() or
+            intrinsic == intrinsic_type_contract::kind_i32() {
+            return ScalarI64Codec::SignedNarrow;
+        }
+        if intrinsic == intrinsic_type_contract::kind_i64() or
+            intrinsic == intrinsic_type_contract::kind_u64() or
+            intrinsic == intrinsic_type_contract::kind_usize() or
+            intrinsic == intrinsic_type_contract::kind_isize() {
+            return ScalarI64Codec::Identity;
+        }
+        return ScalarI64Codec::Unsupported;
+    }
+    if record.kind == kind_declared() and try table.enum_flags.get(wanted_id) {
+        return ScalarI64Codec::Identity;
+    }
+    return ScalarI64Codec::Unsupported;
+}
+
+fn append_parsed_canonical_spelling(
+    out: &var std::string::String,
+    table: &CanonicalFactTable,
+    wanted_id: i64
+) -> !void {
+    let records = &table.records;
+    let record = try records.at(wanted_id);
+    if record.kind == kind_function_item() {
+        try out.append_bytes("Function");
+        return;
+    }
+    if record.kind == kind_formal() {
+        return error("runtime ABI cannot contain unresolved formal");
+    }
+    if record.kind == kind_intrinsic() or record.kind == kind_declared() {
+        try out.append_bytes(record.identity);
+        if record.child_len > 0 {
+            try out.append_byte(cast<u8>(60));
+            var child = 0;
+            while child < record.child_len {
+                if child > 0 { try out.append_byte(cast<u8>(44)); }
+                try append_parsed_canonical_spelling(
+                    out, table, try table.child_ids.get(record.child_start + child)
+                );
+                child = child + 1;
+            }
+            try out.append_byte(cast<u8>(62));
+        }
+        return;
+    }
+    if record.kind == kind_error_union() {
+        if record.child_len != 2 { return error("canonical error union arity invalid"); }
+        let error_child = try table.child_ids.get(record.child_start);
+        let error_records = &table.records;
+        let error_record = try error_records.at(error_child);
+        if error_record.kind != kind_intrinsic() or
+            !std::mem::equal_bytes(error_record.identity, "error") {
+            return error("runtime ABI cannot erase typed error union child");
+        }
+        try out.append_byte(cast<u8>(33));
+        return append_parsed_canonical_spelling(
+            out, table, try table.child_ids.get(record.child_start + 1)
+        );
+    }
+    if record.child_len != 1 { return error("canonical wrapper arity invalid"); }
+    var recognized = false;
+    if record.kind == kind_borrow() {
+        try out.append_byte(cast<u8>(38)); recognized = true;
+    }
+    if record.kind == kind_borrow_var() {
+        try out.append_bytes("&var_"); recognized = true;
+    }
+    if record.kind == kind_slice() {
+        try out.append_bytes("[]"); recognized = true;
+    }
+    if record.kind == kind_nullable() {
+        try out.append_byte(cast<u8>(63)); recognized = true;
+    }
+    if record.kind == kind_dynamic() or record.kind == kind_const() {
+        return error("runtime ABI wrapper has no backend contract");
+    }
+    if !recognized { return error("canonical wrapper kind invalid"); }
+    return append_parsed_canonical_spelling(
+        out, table, try table.child_ids.get(record.child_start)
+    );
+}
+
+fn owned_string_equal(
+    spelling: &std::string::String, expected: []u8
+) -> bool {
+    let actual_len = spelling.len();
+    var equal = actual_len == std::mem::len(expected);
+    var index_value = 0;
+    while equal and index_value < actual_len {
+        if owned_string_byte_at(spelling, index_value) != expected[index_value] {
+            equal = false;
+        }
+        index_value = index_value + 1;
+    }
+    return equal;
+}
+
+fn owned_string_byte_at(
+    spelling: &std::string::String, index_value: i64
+) -> u8 {
+    let bytes = spelling.as_bytes();
+    return bytes[index_value];
+}
+
+fn kind_intrinsic() -> i64 { return 1; }
+fn kind_declared() -> i64 { return 2; }
+fn kind_formal() -> i64 { return 3; }
+fn kind_borrow() -> i64 { return 4; }
+fn kind_borrow_var() -> i64 { return 5; }
+fn kind_slice() -> i64 { return 6; }
+fn kind_nullable() -> i64 { return 7; }
+fn kind_dynamic() -> i64 { return 8; }
+fn kind_error_union() -> i64 { return 9; }
+fn kind_const() -> i64 { return 10; }
+fn kind_function_item() -> i64 { return 11; }
+
+fn new_table(allocator: Allocator) -> CanonicalFactTable {
+    return CanonicalFactTable {
+        records: std::array::Array<CanonicalFactRecord>(allocator),
+        child_ids: std::array::Array<i64>(allocator),
+        enum_flags: std::array::Array<bool>(allocator),
+        call_slots: std::array::Array<CallFactRecord>(allocator),
+        call_type_ids: std::array::Array<i64>(allocator),
+        instance_calls: std::array::Array<InstanceCallFactRecord>(allocator),
+        call_count: 0
+    };
+}
+
+pub fn parse_and_validate(
+    index: &ir_index::IrIndex,
+    facts: []u8
+) -> !CanonicalFactTable {
+    var table = new_table(std::mem::page_allocator());
+    errdefer table.deinit();
+    let count = fact_count(index, facts, "canonical-type ");
+    try reserve_rows(&var table, count);
+    var id = 0;
+    while id < count {
+        try table.records.append(CanonicalFactRecord {
+            kind: 0, identity: "", metadata_a: -1, metadata_b: -1,
+            child_start: -1, child_len: -1
+        });
+        id = id + 1;
+    }
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, "canonical-type ");
+    while entry >= 0 and ir_index::entry_key_starts_with(
+        index, facts, entry, "canonical-type "
+    ) {
+        try parse_canonical_line(
+            &var table,
+            facts[ir_index::entry_line_start(index, entry)..ir_index::entry_line_end(index, entry)],
+            count
+        );
+        entry = entry + 1;
+    }
+    id = 0;
+    while id < count {
+        let records = &table.records;
+        let record = try records.at(id);
+        if record.kind == 0 { return error("canonical type ID is not dense"); }
+        try table.enum_flags.append(try validate_identity(index, facts, &table, id));
+        id = id + 1;
+    }
+    try parse_and_validate_call_facts(index, facts, count, &var table);
+    return table;
+}
+
+fn reserve_rows(table: &var CanonicalFactTable, count: i64) -> !void {
+    try table.records.reserve(count);
+    return;
+}
+
+fn parse_canonical_line(
+    table: &var CanonicalFactTable,
+    line: []u8,
+    count: i64
+) -> !void {
+    let id = try parse_i64(try token(line, 1));
+    if id < 0 or id >= count { return error("canonical type ID out of range"); }
+    let existing_records = &table.records;
+    let existing = try existing_records.at(id);
+    if existing.kind != 0 { return error("duplicate canonical type ID"); }
+    let kind_name = try token(line, 2);
+    let kind = try kind_from_name(kind_name);
+    let identity = try token(line, 3);
+    let metadata_a = try parse_i64(try token(line, 4));
+    let metadata_b = try parse_i64(try token(line, 5));
+    let child_len = try parse_i64(try token(line, 6));
+    if child_len < 0 { return error("canonical type child count invalid"); }
+    if token_count(line) != 7 + child_len {
+        return error("canonical type token count mismatch");
+    }
+    try validate_kind_header(kind, identity, metadata_a, metadata_b, child_len);
+    let child_start = table.child_ids.len();
+    try table.child_ids.reserve(child_len);
+    var child = 0;
+    while child < child_len {
+        let child_id = try parse_i64(try token(line, 7 + child));
+        if child_id < 0 or child_id >= id {
+            return error("canonical type child must precede parent");
+        }
+        try table.child_ids.append(child_id);
+        child = child + 1;
+    }
+    try table.records.set(id, CanonicalFactRecord {
+        kind: kind, identity: identity,
+        metadata_a: metadata_a, metadata_b: metadata_b,
+        child_start: child_start, child_len: child_len
+    });
+    return;
+}
+
+fn validate_kind_header(
+    kind: i64, identity: []u8, metadata_a: i64, metadata_b: i64, child_len: i64
+) -> !void {
+    if kind == kind_intrinsic() {
+        if metadata_a < 0 or metadata_b != -1 or
+            !std::mem::equal_bytes(identity, try intrinsic_type_contract::canonical_name(metadata_a)) or
+            child_len != intrinsic_type_contract::arity(metadata_a) {
+            return error("canonical intrinsic contract mismatch");
+        }
+        return;
+    }
+    if kind == kind_declared() {
+        if metadata_a < 0 or metadata_b < 0 {
+            return error("canonical declared contract mismatch");
+        }
+        return;
+    }
+    if kind == kind_formal() {
+        if (metadata_a != 1 and metadata_a != 2) or
+            metadata_b < 0 or child_len != 0 {
+            return error("canonical formal contract mismatch");
+        }
+        return;
+    }
+    if kind == kind_function_item() {
+        if metadata_a < 0 or metadata_b < 0 {
+            return error("canonical function item contract mismatch");
+        }
+        return;
+    }
+    var expected_children = 1;
+    if kind == kind_error_union() { expected_children = 2; }
+    if !std::mem::equal_bytes(identity, "-") or metadata_a != -1 or metadata_b != -1 or
+        child_len != expected_children {
+        return error("canonical wrapper contract mismatch");
+    }
+    return;
+}
+
+fn validate_identity(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    table: &CanonicalFactTable,
+    id: i64
+) -> !bool {
+    let records = &table.records;
+    let record = try records.at(id);
+    let kind = record.kind;
+    let identity = record.identity;
+    if kind == kind_declared() {
+        let enum_count = exact_first_token_fact_count(
+            index, facts, "enum-type ", identity
+        );
+        let owners = exact_first_token_fact_count(
+            index, facts, "type-llvm ", identity
+        ) + enum_count +
+            exact_first_token_fact_count(index, facts, "union-type ", identity) +
+            exact_first_token_fact_count(index, facts, "abi-repr ", identity);
+        if owners != 1 { return error("canonical declared identity is not exact"); }
+        if exact_first_token_fact_count(
+            index, facts, "declared-type-parameter ", identity
+        ) != record.child_len {
+            return error("canonical declared type argument arity mismatch");
+        }
+        return enum_count == 1;
+    }
+    if kind == kind_formal() {
+        var prefix = "function-type-parameter ";
+        if record.metadata_a == 2 {
+            prefix = "declared-type-parameter ";
+        }
+        if exact_two_token_fact_count(
+            index, facts, prefix, identity, record.metadata_b
+        ) != 1 {
+            return error("canonical formal owner is not exact");
+        }
+    }
+    if kind == kind_function_item() and exact_first_token_fact_count(
+        index, facts, "function-owner-module ", identity
+    ) != 1 { return error("canonical function item owner is not exact"); }
+    return false;
+}
+
+fn parse_and_validate_call_facts(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    canonical_count: i64,
+    table: &var CanonicalFactTable
+) -> !void {
+    let maximum_records = fact_count(index, facts, "body-node ") +
+        fact_count(index, facts, "body-call-target ") +
+        fact_count(index, facts, "body-call-builtin ") +
+        fact_count(index, facts, "body-call-type-ids ");
+    let capacity = maximum_records * 2 + 1;
+    try table.call_slots.reserve(capacity);
+    var slot = 0;
+    while slot < capacity {
+        try table.call_slots.append(empty_call_record());
+        slot = slot + 1;
+    }
+    try parse_call_body_nodes(index, facts, table);
+    try parse_call_classifications(index, facts, "body-call-target ", table);
+    try parse_call_classifications(index, facts, "body-call-builtin ", table);
+    try parse_call_type_records(index, facts, canonical_count, table);
+    try parse_instance_call_type_records(index, facts, canonical_count, table);
+    slot = 0;
+    while slot < table.call_slots.len() {
+        let slots = &table.call_slots;
+        let record = try slots.at(slot);
+        if record.occupied and (!record.body_seen or
+            !record.classification_seen or !record.type_seen) {
+            return error("body call facts are not in exact one-to-one coverage");
+        }
+        slot = slot + 1;
+    }
+    return;
+}
+
+fn parse_instance_call_type_records(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    canonical_count: i64,
+    table: &var CanonicalFactTable
+) -> !void {
+    let prefix = "instance-call-type-ids ";
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, prefix);
+    while entry >= 0 and ir_index::entry_key_starts_with(
+        index, facts, entry, prefix
+    ) {
+        let line = facts[
+            ir_index::entry_line_start(index, entry)..
+            ir_index::entry_line_end(index, entry)
+        ];
+        let instance_id = try parse_i64(try token(line, 1));
+        let span_start = try parse_i64(try token(line, 2));
+        let span_end = try parse_i64(try token(line, 3));
+        if instance_id < 0 or span_start < 0 or span_end <= span_start {
+            return error("instance call type identity invalid");
+        }
+        if try instance_call_type_exists(
+            table, instance_id, span_start, span_end
+        ) {
+            return error("duplicate instance call type fact");
+        }
+        let receiver = try parse_i64(try token(line, 4));
+        let result = try parse_i64(try token(line, 5));
+        if receiver < -1 or receiver >= canonical_count or
+            result < 0 or result >= canonical_count {
+            return error("instance call canonical type ID out of range");
+        }
+        let runtime_len = try parse_i64(try token(line, 6));
+        if runtime_len < 0 {
+            return error("instance call runtime type count invalid");
+        }
+        var cursor = 7;
+        try validate_id_vector(line, cursor, runtime_len, canonical_count);
+        let runtime_start = table.call_type_ids.len();
+        try append_id_vector(
+            &var table.call_type_ids, line, cursor, runtime_len
+        );
+        cursor = cursor + runtime_len;
+        let actual_len = try parse_i64(try token(line, cursor));
+        if actual_len < 0 {
+            return error("instance call actual type count invalid");
+        }
+        cursor = cursor + 1;
+        try validate_id_vector(line, cursor, actual_len, canonical_count);
+        let actual_start = table.call_type_ids.len();
+        try append_id_vector(
+            &var table.call_type_ids, line, cursor, actual_len
+        );
+        if token_count(line) != cursor + actual_len {
+            return error("instance call type token count mismatch");
+        }
+        try table.instance_calls.append(InstanceCallFactRecord {
+            instance_id: instance_id,
+            span_start: span_start,
+            span_end: span_end,
+            receiver_id: receiver,
+            result_id: result,
+            runtime_start: runtime_start,
+            runtime_len: runtime_len,
+            actual_start: actual_start,
+            actual_len: actual_len
+        });
+        entry = entry + 1;
+    }
+    return;
+}
+
+fn instance_call_type_exists(
+    table: &CanonicalFactTable,
+    instance_id: i64,
+    span_start: i64,
+    span_end: i64
+) -> !bool {
+    let instance_calls = &table.instance_calls;
+    var index = 0;
+    while index < instance_calls.len() {
+        let existing = try instance_calls.at(index);
+        if existing.instance_id == instance_id and
+            existing.span_start == span_start and
+            existing.span_end == span_end {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn empty_call_record() -> CallFactRecord {
+    return CallFactRecord {
+        occupied: false, caller: "", span_start: -1, span_end: -1,
+        node_sequence: -1, body_seen: false, classification_seen: false,
+        type_seen: false, receiver_id: -1, result_id: -1,
+        runtime_start: -1, runtime_len: 0, actual_start: -1, actual_len: 0
+    };
+}
+
+fn parse_call_body_nodes(
+    index: &ir_index::IrIndex, facts: []u8,
+    table: &var CanonicalFactTable
+) -> !void {
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, "body-node ");
+    while entry >= 0 and ir_index::entry_key_starts_with(
+        index, facts, entry, "body-node "
+    ) {
+        let line = facts[
+            ir_index::entry_line_start(index, entry)..ir_index::entry_line_end(index, entry)
+        ];
+        if std::mem::equal_bytes(token_or_empty(line, 6), "Call") {
+            if token_count(line) != 10 or
+                !std::mem::equal_bytes(token_or_empty(line, 3), "depth") or
+                !std::mem::equal_bytes(token_or_empty(line, 5), "kind") or
+                !std::mem::equal_bytes(token_or_empty(line, 7), "span") {
+                return error("body call node contract invalid");
+            }
+            let caller = try token(line, 1);
+            let node_sequence = try parse_i64(try token(line, 2));
+            let span_start = try parse_i64(try token(line, 8));
+            let span_end = try parse_i64(try token(line, 9));
+            try validate_call_key(node_sequence, span_start, span_end);
+            let record_slot = try find_or_insert_call_slot(
+                table, &caller, span_start, span_end
+            );
+            let slots = &table.call_slots;
+            let record = try slots.at(record_slot);
+            if record.body_seen { return error("duplicate body call node span"); }
+            try table.call_slots.set(
+                record_slot, call_record_with_body(record, node_sequence)
+            );
+        }
+        entry = entry + 1;
+    }
+    return;
+}
+
+fn parse_call_classifications(
+    index: &ir_index::IrIndex, facts: []u8, prefix: []u8,
+    table: &var CanonicalFactTable
+) -> !void {
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, prefix);
+    while entry >= 0 and ir_index::entry_key_starts_with(index, facts, entry, prefix) {
+        let line = facts[
+            ir_index::entry_line_start(index, entry)..ir_index::entry_line_end(index, entry)
+        ];
+        var expected_tokens = 5;
+        if std::mem::equal_bytes(prefix, "body-call-builtin ") {
+            expected_tokens = 7;
+        }
+        if token_count(line) != expected_tokens {
+            return error("body call classification token count mismatch");
+        }
+        let caller = try token(line, 1);
+        let span_start = try parse_i64(try token(line, 2));
+        let span_end = try parse_i64(try token(line, 3));
+        try validate_call_key(0, span_start, span_end);
+        let record_slot = try find_or_insert_call_slot(
+            table, &caller, span_start, span_end
+        );
+        let slots = &table.call_slots;
+        let record = try slots.at(record_slot);
+        if record.classification_seen {
+            return error("duplicate or conflicting body call classification");
+        }
+        try table.call_slots.set(
+            record_slot, call_record_with_classification(record)
+        );
+        entry = entry + 1;
+    }
+    return;
+}
+
+fn parse_call_type_records(
+    index: &ir_index::IrIndex, facts: []u8, canonical_count: i64,
+    table: &var CanonicalFactTable
+) -> !void {
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, "body-call-type-ids ");
+    while entry >= 0 and ir_index::entry_key_starts_with(
+        index, facts, entry, "body-call-type-ids "
+    ) {
+        let line = facts[
+            ir_index::entry_line_start(index, entry)..ir_index::entry_line_end(index, entry)
+        ];
+        let caller = try token(line, 1);
+        let span_start = try parse_i64(try token(line, 2));
+        let span_end = try parse_i64(try token(line, 3));
+        if span_start < 0 or span_end <= span_start {
+            return error("body call type span invalid");
+        }
+        let record_slot = try find_or_insert_call_slot(
+            table, &caller, span_start, span_end
+        );
+        let read_slots = &table.call_slots;
+        let read_record = try read_slots.at(record_slot);
+        if read_record.type_seen { return error("duplicate body call type fact"); }
+        let receiver = try parse_i64(try token(line, 4));
+        let result = try parse_i64(try token(line, 5));
+        if receiver < -1 or receiver >= canonical_count or result < 0 or result >= canonical_count {
+            return error("body call canonical type ID out of range");
+        }
+        let runtime_len = try parse_i64(try token(line, 6));
+        if runtime_len < 0 { return error("body call runtime type count invalid"); }
+        var cursor = 7;
+        try validate_id_vector(line, cursor, runtime_len, canonical_count);
+        let runtime_start = table.call_type_ids.len();
+        try append_id_vector(
+            &var table.call_type_ids, line, cursor, runtime_len
+        );
+        cursor = cursor + runtime_len;
+        let actual_len = try parse_i64(try token(line, cursor));
+        if actual_len < 0 { return error("body call type actual count invalid"); }
+        cursor = cursor + 1;
+        try validate_id_vector(line, cursor, actual_len, canonical_count);
+        let actual_start = table.call_type_ids.len();
+        try append_id_vector(
+            &var table.call_type_ids, line, cursor, actual_len
+        );
+        if token_count(line) != cursor + actual_len {
+            return error("body call type token count mismatch");
+        }
+        let write_slots = &table.call_slots;
+        let write_record = try write_slots.at(record_slot);
+        try table.call_slots.set(record_slot, call_record_with_types(
+            write_record, receiver, result, runtime_start, runtime_len,
+            actual_start, actual_len
+        ));
+        entry = entry + 1;
+    }
+    return;
+}
+
+fn append_id_vector(
+    destination: &var std::array::Array<i64>, line: []u8,
+    start: i64, len: i64
+) -> !void {
+    try destination.reserve(len);
+    var index = 0;
+    while index < len {
+        try destination.append(try parse_i64(try token(line, start + index)));
+        index = index + 1;
+    }
+    return;
+}
+
+fn validate_call_key(
+    node_sequence: i64, span_start: i64, span_end: i64
+) -> !void {
+    if node_sequence < 0 or span_start < 0 or span_end <= span_start {
+        return error("body call key invalid");
+    }
+    return;
+}
+
+fn find_or_insert_call_slot(
+    table: &var CanonicalFactTable,
+    caller: &[]u8,
+    span_start: i64,
+    span_end: i64
+) -> !i64 {
+    let capacity = table.call_slots.len();
+    if capacity <= 0 { return error("body call table has no capacity"); }
+    var slot = call_hash(caller, span_start, span_end, capacity);
+    var probes = 0;
+    while probes < capacity {
+        let slots = &table.call_slots;
+        let record = try slots.at(slot);
+        if !record.occupied {
+            try table.call_slots.set(slot, CallFactRecord {
+                occupied: true, caller: caller.*, span_start: span_start,
+                span_end: span_end, node_sequence: -1,
+                body_seen: false, classification_seen: false, type_seen: false,
+                receiver_id: -1, result_id: -1,
+                runtime_start: -1, runtime_len: 0,
+                actual_start: -1, actual_len: 0
+            });
+            table.call_count = table.call_count + 1;
+            return slot;
+        }
+        if record.span_start == span_start and record.span_end == span_end and
+            std::mem::equal_bytes(record.caller, caller.*) {
+            return slot;
+        }
+        slot = (slot + 1) % capacity;
+        probes = probes + 1;
+    }
+    return error("body call table is full");
+}
+
+fn find_call_slot(
+    table: &CanonicalFactTable,
+    caller: &[]u8,
+    span_start: i64,
+    span_end: i64
+) -> !i64 {
+    let capacity = table.call_slots.len();
+    if capacity <= 0 { return error("body call table has no capacity"); }
+    var slot = call_hash(caller, span_start, span_end, capacity);
+    var probes = 0;
+    while probes < capacity {
+        let slots = &table.call_slots;
+        let record = try slots.at(slot);
+        if !record.occupied { return error("body call canonical record not found"); }
+        if record.span_start == span_start and record.span_end == span_end and
+            std::mem::equal_bytes(record.caller, caller.*) {
+            return slot;
+        }
+        slot = (slot + 1) % capacity;
+        probes = probes + 1;
+    }
+    return error("body call canonical record not found");
+}
+
+fn call_record_with_body(
+    record: &CallFactRecord, node_sequence: i64
+) -> CallFactRecord {
+    return CallFactRecord {
+        occupied: record.occupied, caller: record.caller,
+        span_start: record.span_start, span_end: record.span_end,
+        node_sequence: node_sequence, body_seen: true,
+        classification_seen: record.classification_seen,
+        type_seen: record.type_seen, receiver_id: record.receiver_id,
+        result_id: record.result_id, runtime_start: record.runtime_start,
+        runtime_len: record.runtime_len, actual_start: record.actual_start,
+        actual_len: record.actual_len
+    };
+}
+
+fn call_record_with_classification(
+    record: &CallFactRecord
+) -> CallFactRecord {
+    return CallFactRecord {
+        occupied: record.occupied, caller: record.caller,
+        span_start: record.span_start, span_end: record.span_end,
+        node_sequence: record.node_sequence, body_seen: record.body_seen,
+        classification_seen: true, type_seen: record.type_seen,
+        receiver_id: record.receiver_id, result_id: record.result_id,
+        runtime_start: record.runtime_start, runtime_len: record.runtime_len,
+        actual_start: record.actual_start, actual_len: record.actual_len
+    };
+}
+
+fn call_record_with_types(
+    record: &CallFactRecord,
+    receiver_id: i64, result_id: i64,
+    runtime_start: i64, runtime_len: i64,
+    actual_start: i64, actual_len: i64
+) -> CallFactRecord {
+    return CallFactRecord {
+        occupied: record.occupied, caller: record.caller,
+        span_start: record.span_start, span_end: record.span_end,
+        node_sequence: record.node_sequence, body_seen: record.body_seen,
+        classification_seen: record.classification_seen, type_seen: true,
+        receiver_id: receiver_id, result_id: result_id,
+        runtime_start: runtime_start, runtime_len: runtime_len,
+        actual_start: actual_start, actual_len: actual_len
+    };
+}
+
+fn call_hash(
+    caller: &[]u8, span_start: i64, span_end: i64, capacity: i64
+) -> i64 {
+    var hash = (span_start % capacity + span_end % capacity) % capacity;
+    var index = 0;
+    while index < std::mem::len(caller.*) {
+        hash = (hash * 131 + cast<i64>(caller.*[index])) % capacity;
+        index = index + 1;
+    }
+    return hash;
+}
+
+fn validate_id_vector(line: []u8, start: i64, len: i64, limit: i64) -> !void {
+    var index = 0;
+    while index < len {
+        let id = try parse_i64(try token(line, start + index));
+        if id < 0 or id >= limit { return error("body call vector type ID out of range"); }
+        index = index + 1;
+    }
+    return;
+}
+
+fn exact_first_token_fact_count(
+    index: &ir_index::IrIndex, facts: []u8, prefix: []u8, wanted: []u8
+) -> i64 {
+    var count = 0;
+    var entry = ir_index::first_matching_entry(index, facts, prefix, "", wanted);
+    while entry >= 0 and ir_index::entry_matches_query(
+        index, facts, entry, prefix, "", wanted
+    ) {
+        count = count + 1;
+        entry = entry + 1;
+    }
+    return count;
+}
+
+fn exact_two_token_fact_count(
+    index: &ir_index::IrIndex, facts: []u8, prefix: []u8,
+    first: []u8, second_number: i64
+) -> i64 {
+    var count = 0;
+    var entry = ir_index::first_matching_entry(index, facts, prefix, "", first);
+    while entry >= 0 and ir_index::entry_matches_query(
+        index, facts, entry, prefix, "", first
+    ) {
+        let line = facts[
+            ir_index::entry_line_start(index, entry)..ir_index::entry_line_end(index, entry)
+        ];
+        if parse_i64_or_invalid(token_or_empty(line, 2)) == second_number {
+            count = count + 1;
+        }
+        entry = entry + 1;
+    }
+    return count;
+}
+
+fn fact_count(index: &ir_index::IrIndex, facts: []u8, prefix: []u8) -> i64 {
+    var count = 0;
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, prefix);
+    while entry >= 0 and ir_index::entry_key_starts_with(index, facts, entry, prefix) {
+        count = count + 1;
+        entry = entry + 1;
+    }
+    return count;
+}
+
+fn kind_from_name(name: []u8) -> !i64 {
+    if std::mem::equal_bytes(name, "intrinsic") { return kind_intrinsic(); }
+    if std::mem::equal_bytes(name, "declared") { return kind_declared(); }
+    if std::mem::equal_bytes(name, "formal") { return kind_formal(); }
+    if std::mem::equal_bytes(name, "borrow") { return kind_borrow(); }
+    if std::mem::equal_bytes(name, "borrow-var") { return kind_borrow_var(); }
+    if std::mem::equal_bytes(name, "slice") { return kind_slice(); }
+    if std::mem::equal_bytes(name, "nullable") { return kind_nullable(); }
+    if std::mem::equal_bytes(name, "dynamic") { return kind_dynamic(); }
+    if std::mem::equal_bytes(name, "error-union") { return kind_error_union(); }
+    if std::mem::equal_bytes(name, "const") { return kind_const(); }
+    if std::mem::equal_bytes(name, "function-item") { return kind_function_item(); }
+    return error("canonical type kind invalid");
+}
+
+fn token_count(line: []u8) -> i64 {
+    var count = 0;
+    var cursor = 0;
+    while cursor < std::mem::len(line) {
+        while cursor < std::mem::len(line) and line[cursor] == cast<u8>(32) {
+            cursor = cursor + 1;
+        }
+        if cursor >= std::mem::len(line) { return count; }
+        count = count + 1;
+        while cursor < std::mem::len(line) and line[cursor] != cast<u8>(32) {
+            cursor = cursor + 1;
+        }
+    }
+    return count;
+}
+
+fn token(line: []u8, wanted: i64) -> ![]u8 borrows line {
+    let value = token_or_empty(line, wanted);
+    if std::mem::len(value) == 0 { return error("canonical fact token missing"); }
+    return value;
+}
+
+fn token_or_empty(line: []u8, wanted: i64) -> []u8 borrows line {
+    var cursor = 0;
+    var current = 0;
+    while cursor < std::mem::len(line) {
+        while cursor < std::mem::len(line) and line[cursor] == cast<u8>(32) {
+            cursor = cursor + 1;
+        }
+        let start = cursor;
+        while cursor < std::mem::len(line) and line[cursor] != cast<u8>(32) {
+            cursor = cursor + 1;
+        }
+        if current == wanted { return line[start..cursor]; }
+        current = current + 1;
+    }
+    return line[0..0];
+}
+
+fn parse_i64_or_invalid(value: []u8) -> i64 {
+    if std::mem::len(value) == 0 { return -9223372036854775807; }
+    var negative = false;
+    var index = 0;
+    if value[0] == cast<u8>(45) { negative = true; index = 1; }
+    if index >= std::mem::len(value) { return -9223372036854775807; }
+    var result = 0;
+    while index < std::mem::len(value) {
+        let byte = value[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return -9223372036854775807;
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if result > (9223372036854775807 - digit) / 10 {
+            return -9223372036854775807;
+        }
+        result = result * 10 + digit;
+        index = index + 1;
+    }
+    if negative { return 0 - result; }
+    return result;
+}
+
+fn parse_i64(value: []u8) -> !i64 {
+    if std::mem::len(value) == 0 { return error("canonical numeric token missing"); }
+    var negative = false;
+    var index = 0;
+    if value[0] == cast<u8>(45) { negative = true; index = 1; }
+    if index >= std::mem::len(value) { return error("canonical numeric token invalid"); }
+    var result = 0;
+    while index < std::mem::len(value) {
+        let byte = value[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("canonical numeric token invalid");
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if result > (9223372036854775807 - digit) / 10 {
+            return error("canonical numeric token overflow");
+        }
+        result = result * 10 + digit;
+        index = index + 1;
+    }
+    if negative { return 0 - result; }
+    return result;
+}
+
+fn validate_gate_facts(facts: []u8) -> !void {
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    return;
+}
+
+pub fn valid_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic error 50 -1 0
+canonical-type 1 intrinsic bool 2 -1 0
+canonical-type 2 error-union - -1 -1 2 0 1
+body-node app::f 0 depth 0 kind Call span 10 20
+body-call-builtin app::f 10 20 runtime map-contains -
+body-call-type-ids app::f 10 20 -1 2 0 0
+";
+    return validate_gate_facts(facts);
+}
+
+pub fn error_result_receiver_child_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic error 50 -1 0
+canonical-type 1 intrinsic u8 7 -1 0
+canonical-type 2 slice - -1 -1 1 1
+canonical-type 3 intrinsic bool 2 -1 0
+canonical-type 4 intrinsic std::map::Map 33 -1 2 2 3
+canonical-type 5 error-union - -1 -1 2 0 3
+body-node app::f 0 depth 0 kind Call span 10 20
+body-call-builtin app::f 10 20 runtime map-get -
+body-call-type-ids app::f 10 20 4 5 1 2 1 2
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    let caller = "app::f";
+    let call = try parsed_call_type_for_span(&table, &caller, 10, 20);
+    std::testing::expect(
+        (try parsed_call_error_success_receiver_child(&table, &call, 1)) == 3
+    );
+    return;
+}
+
+pub fn print_runtime_abi_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic u8 7 -1 0
+canonical-type 1 slice - -1 -1 1 0
+canonical-type 2 intrinsic i16 4 -1 0
+canonical-type 3 intrinsic u32 9 -1 0
+canonical-type 4 intrinsic bool 2 -1 0
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    let slice_abi = try parsed_print_runtime_abi(&table, 1);
+    std::testing::expect(match slice_abi.transport {
+        SliceU8 => true,
+        _ => false,
+    });
+    std::testing::expect_equal<[]u8>("kizu_print_string", slice_abi.symbol);
+    let signed_abi = try parsed_print_runtime_abi(&table, 2);
+    std::testing::expect(match signed_abi.transport {
+        SignedInteger => true,
+        _ => false,
+    });
+    std::testing::expect_equal<[]u8>("kizu_print_int", signed_abi.symbol);
+    let unsigned_abi = try parsed_print_runtime_abi(&table, 3);
+    std::testing::expect(match unsigned_abi.transport {
+        UnsignedInteger => true,
+        _ => false,
+    });
+    std::testing::expect_equal<[]u8>("kizu_print_int", unsigned_abi.symbol);
+    let bool_abi = try parsed_print_runtime_abi(&table, 4);
+    std::testing::expect(match bool_abi.transport {
+        Bool => true,
+        _ => false,
+    });
+    std::testing::expect_equal<[]u8>("kizu_print_bool", bool_abi.symbol);
+    return;
+}
+
+pub fn unsupported_print_runtime_abi_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic f64 14 -1 0
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    let unused = try parsed_print_runtime_abi(&table, 0);
+    print(unused.symbol);
+    return;
+}
+
+pub fn mismatched_error_result_receiver_child_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic error 50 -1 0
+canonical-type 1 intrinsic u8 7 -1 0
+canonical-type 2 slice - -1 -1 1 1
+canonical-type 3 intrinsic bool 2 -1 0
+canonical-type 4 intrinsic i64 6 -1 0
+canonical-type 5 intrinsic std::map::Map 33 -1 2 2 3
+canonical-type 6 error-union - -1 -1 2 0 4
+body-node app::f 0 depth 0 kind Call span 10 20
+body-call-builtin app::f 10 20 runtime map-get -
+body-call-type-ids app::f 10 20 5 6 1 2 1 2
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    let caller = "app::f";
+    let call = try parsed_call_type_for_span(&table, &caller, 10, 20);
+    let unused = try parsed_call_error_success_receiver_child(&table, &call, 1);
+    print(unused);
+    return;
+}
+
+pub fn missing_type_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic bool 2 -1 0
+body-node app::f 0 depth 0 kind Call span 10 20
+body-call-target app::f 10 20 app::g
+";
+    return validate_gate_facts(facts);
+}
+
+pub fn phantom_type_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic bool 2 -1 0
+body-call-target app::f 10 20 app::g
+body-call-type-ids app::f 10 20 -1 0 0 0
+";
+    return validate_gate_facts(facts);
+}
+
+pub fn duplicate_classification_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic bool 2 -1 0
+body-node app::f 0 depth 0 kind Call span 10 20
+body-call-target app::f 10 20 app::g
+body-call-builtin app::f 10 20 runtime map-contains -
+body-call-type-ids app::f 10 20 -1 0 0 0
+";
+    return validate_gate_facts(facts);
+}
+
+pub fn numeric_overflow_gate() -> !void {
+    let facts = "canonical-type 9223372036854775808 intrinsic bool 2 -1 0
+";
+    return validate_gate_facts(facts);
+}
+
+pub fn typed_error_spelling_gate() -> !void {
+    let facts = "type-llvm app::TypedError %app.typed_error
+canonical-type 0 declared app::TypedError 0 0 0
+canonical-type 1 intrinsic bool 2 -1 0
+canonical-type 2 error-union - -1 -1 2 0 1
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    var spelling = try parsed_canonical_spelling(&table, 2);
+    defer spelling.deinit();
+    return;
+}
+
+pub fn declared_fixed_abi_gate() -> !void {
+    let facts = "abi-repr std::string::String %kizu.owned
+canonical-type 0 declared std::string::String 0 0 0
+";
+    return validate_gate_facts(facts);
+}
+
+pub fn borrow_var_spelling_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic bool 2 -1 0
+canonical-type 1 borrow-var - -1 -1 1 0
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    if !try parsed_canonical_spelling_matches(&table, 1, "&var_bool") {
+        return error("borrow-var canonical spelling mismatch");
+    }
+    return;
+}
+
+pub fn nested_generic_spelling_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic u8 7 -1 0
+canonical-type 1 slice - -1 -1 1 0
+canonical-type 2 intrinsic std::channel::Channel 35 -1 1 1
+canonical-type 3 intrinsic i64 6 -1 0
+canonical-type 4 intrinsic std::array::Array 30 -1 1 3
+canonical-type 5 intrinsic std::map::Map 33 -1 2 4 2
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    if !try parsed_canonical_spelling_matches(
+        &table, 5,
+        "std::map::Map<std::array::Array<i64>,std::channel::Channel<[]u8>>"
+    ) { return error("nested canonical spelling mismatch"); }
+    return;
+}
+
+pub fn declared_generic_runtime_abi_gate() -> !void {
+    let facts = "type-llvm app::Box %app.box
+declared-type-parameter app::Box 0 T
+canonical-type 0 intrinsic i64 6 -1 0
+canonical-type 1 declared app::Box 0 0 1 0
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    std::testing::expect_equal<[]u8>(
+        "%app.box",
+        try parsed_canonical_runtime_abi(&index, &table, facts, 1)
+    );
+    if !try parsed_canonical_spelling_matches(
+        &table, 1, "app::Box<i64>"
+    ) {
+        return error("declared generic canonical spelling mismatch");
+    }
+    return;
+}
+
+pub fn declared_generic_arity_mismatch_gate() -> !void {
+    let facts = "type-llvm app::Pair %app.pair
+declared-type-parameter app::Pair 0 Left
+declared-type-parameter app::Pair 1 Right
+canonical-type 0 intrinsic i64 6 -1 0
+canonical-type 1 declared app::Pair 0 0 1 0
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    return;
+}
+
+pub fn runtime_abi_direct_resolution_gate() -> !void {
+    let facts = "abi-repr []u8 %kizu.slice.u8
+abi-repr std::array::Array %kizu.owned
+error-llvm i1 %kizu.error.i1
+canonical-type 0 intrinsic bool 2 -1 0
+canonical-type 1 intrinsic u8 7 -1 0
+canonical-type 2 slice - -1 -1 1 1
+canonical-type 3 intrinsic std::array::Array 30 -1 1 0
+canonical-type 4 intrinsic error 50 -1 0
+canonical-type 5 error-union - -1 -1 2 4 0
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    std::testing::expect_equal<[]u8>(
+        "i1", try parsed_canonical_runtime_abi(&index, &table, facts, 0)
+    );
+    std::testing::expect_equal<[]u8>(
+        "%kizu.slice.u8",
+        try parsed_canonical_runtime_abi(&index, &table, facts, 2)
+    );
+    std::testing::expect_equal<[]u8>(
+        "%kizu.owned",
+        try parsed_canonical_runtime_abi(&index, &table, facts, 3)
+    );
+    std::testing::expect_equal<[]u8>(
+        "%kizu.error.i1",
+        try parsed_canonical_runtime_abi(&index, &table, facts, 5)
+    );
+    return;
+}
+
+pub fn direction_neutral_scalar_codec_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic bool 2 -1 0
+canonical-type 1 intrinsic u8 7 -1 0
+canonical-type 2 intrinsic i32 5 -1 0
+canonical-type 3 intrinsic i64 6 -1 0
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    let bool_codec = try parsed_scalar_i64_codec(&table, 0);
+    std::testing::expect(match bool_codec {
+        Bool => true,
+        _ => false,
+    });
+    let unsigned_codec = try parsed_scalar_i64_codec(&table, 1);
+    std::testing::expect(match unsigned_codec {
+        UnsignedNarrow => true,
+        _ => false,
+    });
+    let signed_codec = try parsed_scalar_i64_codec(&table, 2);
+    std::testing::expect(match signed_codec {
+        SignedNarrow => true,
+        _ => false,
+    });
+    let identity_codec = try parsed_scalar_i64_codec(&table, 3);
+    std::testing::expect(match identity_codec {
+        Identity => true,
+        _ => false,
+    });
+    return;
+}
+
+pub fn aggregate_scalar_storage_rejected_gate() -> !void {
+    let facts = "canonical-type 0 intrinsic bool 2 -1 0
+canonical-type 1 slice - -1 -1 1 0
+";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    var table = try parse_and_validate(&index, facts);
+    defer table.deinit();
+    let codec = try parsed_scalar_i64_codec(&table, 1);
+    std::testing::expect(match codec { Unsupported => true, _ => false, });
+    return;
+}
+
+impl CanonicalFactTable {
+    fn deinit(self: CanonicalFactTable) -> void {
+        self.instance_calls.deinit();
+        self.call_type_ids.deinit();
+        self.call_slots.deinit();
+        self.child_ids.deinit();
+        self.enum_flags.deinit();
+        self.records.deinit();
+        return;
+    }
+}

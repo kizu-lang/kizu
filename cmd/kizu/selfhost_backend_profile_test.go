@@ -88,11 +88,14 @@ func TestSelfhostBackendProfileRecordsIRFactMetricsOnlyWhenEnabled(t *testing.T)
 		`"ir.fact.body_edge.line_bytes"`,
 		`"ir.fact.function_signature_param.entries"`,
 		`"ir.fact.struct_field.entries"`,
-		`"ir.fact.stdlib_return.entries"`,
 	} {
 		if !strings.Contains(recordFacts, fragment) {
 			t.Fatalf("record_ir_fact_profile_metrics missing %q", fragment)
 		}
+	}
+	if strings.Contains(recordFacts, "stdlib_return") ||
+		strings.Contains(recordFacts, `"stdlib-return "`) {
+		t.Fatal("record_ir_fact_profile_metrics keeps producer-free stdlib-return metrics")
 	}
 
 	recordPrefix := selfhostKizuFunctionBody(t, llvm, "fn record_fact_prefix_metrics(")
@@ -142,23 +145,25 @@ func TestSelfhostLLVMRenderReservesModuleOutput(t *testing.T) {
 	}
 }
 
-// TestSelfhostBackendProfileSplitsCompiledLowerRender keeps the profiled
-// component path from hiding return-type lookup inside the lower/render bucket.
-func TestSelfhostBackendProfileSplitsCompiledLowerRender(t *testing.T) {
-	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
-	emit := selfhostKizuFunctionBody(t, cli, "fn emit_compiled_closure_member_profiled(")
+// TestSelfhostBackendGenericPackageEmissionUsesCompiledLowering keeps package
+// definitions on the shared compiled lowering path after component profilers
+// and seed lists are removed.
+func TestSelfhostBackendGenericPackageEmissionUsesCompiledLowering(t *testing.T) {
+	program := readSelfhostFile(t, "../../selfhost/src/backend/compiled_program_llvm.kizu")
+	emit := selfhostKizuFunctionBody(t, program, "fn emit_numeric_package_definition(")
 	for _, fragment := range []string{
-		`"derive_return"`,
-		`compiled_signature::derive_return_type_indexed(`,
-		`"lower_render_body"`,
-		`compiled_llvm::append_compiled_function_auto_return_indexed(`,
+		`exact_named_fact_count(lookup_index, ir_bytes, "function-signature-return ", name)`,
+		`exact_named_fact_count(lookup_index, ir_bytes, "body-node ", name)`,
+		`compiled_abi_params::append_params_spec_indexed(`,
+		`compiled_signature::append_function_llvm_symbol(`,
+		`compiled_llvm::append_compiled_function_auto_indexed(`,
 	} {
 		if !strings.Contains(emit, fragment) {
-			t.Fatalf("profiled compiled closure emission missing %q", fragment)
+			t.Fatalf("generic package definition emission missing %q", fragment)
 		}
 	}
-	if strings.Contains(emit, `"lower_render"`) {
-		t.Fatal("profiled compiled closure emission should split lower_render into narrower buckets")
+	if strings.Contains(program, "emit_compiled_closure_member_profiled") {
+		t.Fatal("backend retains superseded component closure profiler")
 	}
 
 	compiledLLVM := readSelfhostFile(t, "../../selfhost/src/backend/compiled_llvm.kizu")
@@ -182,11 +187,11 @@ func TestSelfhostBackendProfileSplitsCompiledLowerRender(t *testing.T) {
 // per-function let-type cache from falling back to whole-IR fact scans.
 func TestSelfhostMIRCachedLetTypeResolutionUsesIndexedHelpers(t *testing.T) {
 	mirTypes := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_types.kizu")
-	cached := selfhostKizuFunctionBody(t, mirTypes, "fn resolve_let_value_kizu_type_for_value_cached(")
+	cached := selfhostKizuFunctionBody(t, mirTypes, "fn resolve_let_value_type_for_value_cached(")
 	for _, fragment := range []string{
-		"resolve_value_kizu_type_indexed_cached(",
-		"resolve_value_array_get_element_or_empty_indexed_cached(",
-		"resolve_try_call_success_kizu_type_indexed(",
+		"resolve_value_type_indexed_cached(",
+		"resolve_value_array_get_element_type_indexed_cached(",
+		"compiled_type_resolver::resolve_call_indexed(",
 	} {
 		if !strings.Contains(cached, fragment) {
 			t.Fatalf("cached let type resolution missing %q", fragment)
@@ -196,11 +201,12 @@ func TestSelfhostMIRCachedLetTypeResolutionUsesIndexedHelpers(t *testing.T) {
 	callCached := selfhostKizuFunctionBody(
 		t,
 		mirTypes,
-		"fn resolve_let_call_value_kizu_type_indexed_cached(",
+		"fn resolve_let_call_value_type_indexed_cached(",
 	)
 	for _, fragment := range []string{
-		"resolve_receiver_value_kizu_type_indexed_cached(",
-		"value_receiver_method_return_kizu_or_empty_indexed_cached(",
+		"compiled_type_resolver::call_target_indexed(",
+		"compiled_type_resolver::call_builtin_indexed(",
+		"compiled_type_resolver::resolve_call_indexed(",
 	} {
 		if !strings.Contains(callCached, fragment) {
 			t.Fatalf("cached call type resolution missing %q", fragment)
@@ -209,24 +215,19 @@ func TestSelfhostMIRCachedLetTypeResolutionUsesIndexedHelpers(t *testing.T) {
 	for _, forbidden := range []string{
 		"try resolve_receiver_value_kizu_type(",
 		"try value_receiver_method_return_kizu_or_empty(",
+		"value_receiver_method_return_kizu_or_empty_indexed_cached(",
 	} {
 		if strings.Contains(callCached, forbidden) {
 			t.Fatalf("cached call type resolution still uses non-indexed helper %q", forbidden)
 		}
 	}
 
-	tryIndexed := selfhostKizuFunctionBody(
-		t,
-		mirTypes,
-		"fn resolve_try_call_success_kizu_type_indexed(",
-	)
-	for _, fragment := range []string{
-		"cross_module_callee_qualified_name_or_empty_indexed(",
-		"lookup_fact_value_by_prefix_or_empty_indexed(",
-		"lookup_stdlib_return_indexed(",
+	for _, forbidden := range []string{
+		"cross_module_callee_qualified_name_or_empty",
+		"lookup_qualified_function_name_by_callee_suffix",
 	} {
-		if !strings.Contains(tryIndexed, fragment) {
-			t.Fatalf("indexed try-call type resolution missing %q", fragment)
+		if strings.Contains(mirTypes, forbidden) {
+			t.Fatalf("legacy call target resolver remains: %q", forbidden)
 		}
 	}
 }
@@ -241,8 +242,7 @@ func TestSelfhostMIRLetCallLoweringKeepsCalleeResolutionIndexed(t *testing.T) {
 	} {
 		body := selfhostKizuFunctionBody(t, mirLower, signature)
 		for _, fragment := range []string{
-			"lower_call_callee_name_indexed(",
-			"lower_call_module_prefix_indexed(",
+			"lower_call_info_for_instance_indexed(",
 		} {
 			if !strings.Contains(body, fragment) {
 				t.Fatalf("%s missing %q", signature, fragment)
@@ -251,6 +251,8 @@ func TestSelfhostMIRLetCallLoweringKeepsCalleeResolutionIndexed(t *testing.T) {
 		for _, forbidden := range []string{
 			"try compiled_mir_types::lower_call_callee_name(",
 			"try compiled_mir_types::lower_call_module_prefix(",
+			"lower_call_callee_name_indexed(",
+			"lower_call_module_prefix_indexed(",
 		} {
 			if strings.Contains(body, forbidden) {
 				t.Fatalf("%s still uses non-indexed helper %q", signature, forbidden)
@@ -265,29 +267,31 @@ func TestSelfhostIndexedTypeLoweringAvoidsKnownFallbackScans(t *testing.T) {
 	typeLower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_type_lower.kizu")
 	indexed := selfhostKizuFunctionBody(t, typeLower, "pub fn kizu_type_to_llvm_indexed(")
 	for _, fragment := range []string{
-		"error_union_type_llvm_direct_or_empty(inner)",
-		"error_union_enum_abi_or_empty_indexed(",
-		"non_error_type_llvm_direct_or_empty(kizu_type)",
+		"compiled_type_resolver::resolve_indexed(",
+		"error_union_inner_to_llvm_indexed(",
 	} {
 		if !strings.Contains(indexed, fragment) {
 			t.Fatalf("indexed type lowering missing %q", fragment)
 		}
 	}
 
-	enumIndexed := selfhostKizuFunctionBody(t, typeLower, "fn error_union_enum_abi_or_empty_indexed(")
-	if !strings.Contains(enumIndexed, "compiled_fact_lookup::is_enum_type_indexed(") {
-		t.Fatal("indexed error-union enum lowering should use indexed enum lookup")
-	}
-
-	errorDirect := selfhostKizuFunctionBody(t, typeLower, "fn error_union_type_llvm_direct_or_empty(")
+	errorIndexed := selfhostKizuFunctionBody(t, typeLower, "pub fn error_union_inner_to_llvm_indexed(")
 	for _, fragment := range []string{
-		`"ParseNode"`,
-		`"%kizu.error.parse_node"`,
-		`"Token"`,
-		`"%kizu.error.token"`,
+		"compiled_type_resolver::resolve_indexed(",
+		"compiled_error_abi::lookup_indexed(",
 	} {
-		if !strings.Contains(errorDirect, fragment) {
-			t.Fatalf("direct error-union lowering missing %q", fragment)
+		if !strings.Contains(errorIndexed, fragment) {
+			t.Fatalf("canonical error-union lowering missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"error_union_type_llvm_direct_or_empty",
+		"error_union_enum_abi_or_empty_indexed",
+		"non_error_type_llvm_direct_or_empty",
+		`"ParseNode"`, `"%kizu.error.parse_node"`,
+	} {
+		if strings.Contains(typeLower, forbidden) {
+			t.Fatalf("indexed type lowering retained allowlist %q", forbidden)
 		}
 	}
 }

@@ -4697,7 +4697,82 @@ fn is_type_apply_start(
         return false;
     }
     let node = ast.get(left.node);
-    return std::kizu::parser::is_namespace_path_span(text, &node.span);
+    if node.span.end != left.next.start { return false; }
+    let callee = std::mem::trim_ascii(text[node.span.start..node.span.end]);
+    if std::mem::equal_bytes(callee, "type") or
+        std::kizu::parser::is_namespace_path_span(text, &node.span) {
+        return std::kizu::parser::type_apply_has_valid_static_arguments(
+            text, left.next, false
+        );
+    }
+    if !std::kizu::parser::is_bare_name_span(text, &node.span) { return false; }
+    return std::kizu::parser::type_apply_has_valid_static_arguments(
+        text, left.next, true
+    );
+}
+
+fn is_bare_name_span(
+    text: []u8,
+    span: &std::kizu::ast::Span
+) -> bool {
+    if span.start >= span.end { return false; }
+    var index = span.start;
+    while index < span.end {
+        if !std::kizu::parser::is_name_byte(text[index]) { return false; }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn type_apply_has_valid_static_arguments(
+    text: []u8,
+    open: std::kizu::lexer::Token,
+    require_call: bool
+) -> bool {
+    var depth = 1;
+    var current = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_eof_token(current) {
+        if !std::kizu::parser::is_static_type_argument_token(current.kind) {
+            return false;
+        }
+        if std::kizu::parser::is_single_token_byte(text, current, cast<u8>(60)) {
+            depth = depth + 1;
+        } else {
+            if std::kizu::parser::is_single_token_byte(text, current, cast<u8>(62)) {
+                depth = depth - 1;
+                if depth == 0 {
+                    if !require_call { return true; }
+                    let next = std::kizu::lexer::next_token(text, current);
+                    return std::kizu::parser::is_single_token_byte(
+                        text, next, cast<u8>(40)
+                    );
+                }
+            }
+        }
+        current = std::kizu::lexer::next_token(text, current);
+    }
+    return false;
+}
+
+fn is_static_type_argument_token(
+    kind: std::kizu::lexer::TokenKind
+) -> bool {
+    return match kind {
+        Ident => true,
+        Dyn => true,
+        Var => true,
+        Mut => true,
+        DoubleColon => true,
+        Comma => true,
+        Bang => true,
+        Amp => true,
+        LBracket => true,
+        RBracket => true,
+        LT => true,
+        GT => true,
+        Question => true,
+        _ => false,
+    };
 }
 
 fn is_struct_literal_start(

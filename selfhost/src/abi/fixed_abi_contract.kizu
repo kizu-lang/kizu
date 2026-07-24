@@ -1,0 +1,250 @@
+// FixedAbi is the dependency-free physical ABI contract shared by compiled
+// type resolution, layout, and LLVM declaration rendering. Nullable remains a
+// semantic capability fact: several identities use ptr, but only Ptr is
+// nullable, so it intentionally does not appear here.
+pub enum FixedAbiKind {
+    Missing,
+    Void,
+    Bool,
+    Integer8,
+    Integer16,
+    Integer32,
+    Integer64,
+    Float32,
+    Float64,
+    Pointer,
+    Owned,
+    SliceU8,
+    Handle,
+}
+
+pub struct FixedAbi {
+    pub kind: FixedAbiKind,
+    pub llvm_name: []u8,
+    pub llvm_body: []u8,
+    pub size: i64,
+    pub alignment: i64,
+}
+
+// from_kizu_scalar is the sole Kizu scalar spelling to LLVM value-type map.
+// Signedness is semantic; LLVM integer value types are width-only. Physical
+// properties remain owned by describe rather than repeated in this spelling map.
+pub fn from_kizu_scalar(spelling: []u8) -> FixedAbi {
+    if std::mem::equal_bytes(spelling, "void") {
+        return describe(FixedAbiKind::Void);
+    }
+    if std::mem::equal_bytes(spelling, "bool") {
+        return describe(FixedAbiKind::Bool);
+    }
+    if std::mem::equal_bytes(spelling, "i8") or
+        std::mem::equal_bytes(spelling, "u8") {
+        return describe(FixedAbiKind::Integer8);
+    }
+    if std::mem::equal_bytes(spelling, "i16") or
+        std::mem::equal_bytes(spelling, "u16") {
+        return describe(FixedAbiKind::Integer16);
+    }
+    if std::mem::equal_bytes(spelling, "i32") or
+        std::mem::equal_bytes(spelling, "u32") {
+        return describe(FixedAbiKind::Integer32);
+    }
+    if std::mem::equal_bytes(spelling, "i64") or
+        std::mem::equal_bytes(spelling, "u64") or
+        std::mem::equal_bytes(spelling, "isize") or
+        std::mem::equal_bytes(spelling, "usize") {
+        return describe(FixedAbiKind::Integer64);
+    }
+    if std::mem::equal_bytes(spelling, "f32") {
+        return describe(FixedAbiKind::Float32);
+    }
+    if std::mem::equal_bytes(spelling, "f64") {
+        return describe(FixedAbiKind::Float64);
+    }
+    return describe(FixedAbiKind::Missing);
+}
+
+// from_llvm recognizes every representation an abi-repr fact may claim and
+// every fixed-width scalar consumed by aggregate layout. Callers fail closed
+// when found is false.
+pub fn from_llvm(llvm_name: []u8) -> FixedAbi {
+    if std::mem::equal_bytes(llvm_name, "void") {
+        return describe(FixedAbiKind::Void);
+    }
+    if std::mem::equal_bytes(llvm_name, "i1") {
+        return describe(FixedAbiKind::Bool);
+    }
+    if std::mem::equal_bytes(llvm_name, "i8") {
+        return describe(FixedAbiKind::Integer8);
+    }
+    if std::mem::equal_bytes(llvm_name, "i16") {
+        return describe(FixedAbiKind::Integer16);
+    }
+    if std::mem::equal_bytes(llvm_name, "i32") {
+        return describe(FixedAbiKind::Integer32);
+    }
+    if std::mem::equal_bytes(llvm_name, "i64") {
+        return describe(FixedAbiKind::Integer64);
+    }
+    if std::mem::equal_bytes(llvm_name, "float") {
+        return describe(FixedAbiKind::Float32);
+    }
+    if std::mem::equal_bytes(llvm_name, "double") {
+        return describe(FixedAbiKind::Float64);
+    }
+    if std::mem::equal_bytes(llvm_name, "ptr") {
+        return describe(FixedAbiKind::Pointer);
+    }
+    if std::mem::equal_bytes(llvm_name, "%kizu.owned") {
+        return describe(FixedAbiKind::Owned);
+    }
+    if std::mem::equal_bytes(llvm_name, "%kizu.slice.u8") {
+        return describe(FixedAbiKind::SliceU8);
+    }
+    if std::mem::equal_bytes(llvm_name, "%kizu.handle") {
+        return describe(FixedAbiKind::Handle);
+    }
+    return describe(FixedAbiKind::Missing);
+}
+
+// describe is the only LLVM name/body/size/alignment table. Handle deliberately
+// keeps the current 16-byte selfhost ABI; the Go mismatch is tracked by #1476.
+pub fn describe(kind: FixedAbiKind) -> FixedAbi {
+    if kind == FixedAbiKind::Void {
+        return FixedAbi {
+            kind: kind, llvm_name: "void", llvm_body: "", size: 0, alignment: 1
+        };
+    }
+    if kind == FixedAbiKind::Bool {
+        return FixedAbi {
+            kind: kind, llvm_name: "i1", llvm_body: "", size: 1, alignment: 1
+        };
+    }
+    if kind == FixedAbiKind::Integer8 {
+        return FixedAbi {
+            kind: kind, llvm_name: "i8", llvm_body: "", size: 1, alignment: 1
+        };
+    }
+    if kind == FixedAbiKind::Integer16 {
+        return FixedAbi {
+            kind: kind, llvm_name: "i16", llvm_body: "", size: 2, alignment: 2
+        };
+    }
+    if kind == FixedAbiKind::Integer32 {
+        return FixedAbi {
+            kind: kind, llvm_name: "i32", llvm_body: "", size: 4, alignment: 4
+        };
+    }
+    if kind == FixedAbiKind::Integer64 {
+        return FixedAbi {
+            kind: kind, llvm_name: "i64", llvm_body: "", size: 8, alignment: 8
+        };
+    }
+    if kind == FixedAbiKind::Float32 {
+        return FixedAbi {
+            kind: kind, llvm_name: "float", llvm_body: "", size: 4, alignment: 4
+        };
+    }
+    if kind == FixedAbiKind::Float64 {
+        return FixedAbi {
+            kind: kind, llvm_name: "double", llvm_body: "", size: 8, alignment: 8
+        };
+    }
+    if kind == FixedAbiKind::Pointer {
+        return FixedAbi {
+            kind: kind, llvm_name: "ptr", llvm_body: "", size: 8, alignment: 8
+        };
+    }
+    if kind == FixedAbiKind::Owned {
+        return FixedAbi {
+            kind: kind, llvm_name: "%kizu.owned",
+            llvm_body: "{ ptr }", size: 8, alignment: 8
+        };
+    }
+    if kind == FixedAbiKind::SliceU8 {
+        return FixedAbi {
+            kind: kind, llvm_name: "%kizu.slice.u8",
+            llvm_body: "{ ptr, i64 }", size: 16, alignment: 8
+        };
+    }
+    if kind == FixedAbiKind::Handle {
+        return FixedAbi {
+            kind: kind, llvm_name: "%kizu.handle",
+            llvm_body: "{ ptr, i64 }", size: 16, alignment: 8
+        };
+    }
+    return FixedAbi {
+        kind: FixedAbiKind::Missing,
+        llvm_name: "",
+        llvm_body: "",
+        size: 0,
+        alignment: 0
+    };
+}
+
+pub fn named_declaration_at(index: i64) -> !FixedAbi {
+    if index == 0 { return describe(FixedAbiKind::SliceU8); }
+    if index == 1 { return describe(FixedAbiKind::Owned); }
+    if index == 2 { return describe(FixedAbiKind::Handle); }
+    return error("fixed ABI contract: declaration index out of range");
+}
+
+pub fn append_named_declarations(
+    out: &var std::string::String,
+    include_handle: bool
+) -> !void {
+    var count = 2;
+    if include_handle { count = 3; }
+    var index = 0;
+    while index < count {
+        let abi = try named_declaration_at(index);
+        try out.append_bytes(abi.llvm_name);
+        try out.append_bytes(" = type ");
+        try out.append_bytes(abi.llvm_body);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    return;
+}
+
+pub fn slice_pointer_field_index() -> i64 {
+    return 0;
+}
+
+pub fn slice_length_field_index() -> i64 {
+    return 1;
+}
+
+pub fn validate_template_declarations(bytes: []u8, include_handle: bool) -> !void {
+    var count = 2;
+    if include_handle { count = 3; }
+    var index = 0;
+    while index < count {
+        let abi = try named_declaration_at(index);
+        if !contains_declaration(bytes, &abi) {
+            return error("runtime template: fixed ABI declaration mismatch");
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn contains_declaration(bytes: []u8, abi: &FixedAbi) -> bool {
+    let separator = " = type ";
+    let line_len = std::mem::len(abi.llvm_name) +
+        std::mem::len(separator) + std::mem::len(abi.llvm_body);
+    var cursor = 0;
+    while cursor + line_len <= std::mem::len(bytes) {
+        let name_end = cursor + std::mem::len(abi.llvm_name);
+        let separator_end = name_end + std::mem::len(separator);
+        let body_end = separator_end + std::mem::len(abi.llvm_body);
+        if (cursor == 0 or bytes[cursor - 1] == cast<u8>(10)) and
+            std::mem::equal_bytes(bytes[cursor..name_end], abi.llvm_name) and
+            std::mem::equal_bytes(bytes[name_end..separator_end], separator) and
+            std::mem::equal_bytes(bytes[separator_end..body_end], abi.llvm_body) and
+            (body_end == std::mem::len(bytes) or bytes[body_end] == cast<u8>(10)) {
+            return true;
+        }
+        cursor = cursor + 1;
+    }
+    return false;
+}

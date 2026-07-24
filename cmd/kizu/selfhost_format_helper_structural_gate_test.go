@@ -167,12 +167,10 @@ var formatCompiledHelperSeeds = []string{
 // source-structural gate, so it runs without the bootstrap or clang.
 func TestSelfhostFormatHelperStructuralGate(t *testing.T) {
 	irEmission := readSelfhostSrc(t, filepath.Join("ir", "executable_functions.kizu"))
-	backendEmission := readSelfhostSrc(t, filepath.Join("backend", "cli_llvm.kizu"))
+	backendEmission := readSelfhostSrc(t, filepath.Join("backend", "compiled_program_llvm.kizu"))
 	parseLLVM := readSelfhostSrc(t, filepath.Join("backend", "cli_parse_llvm.kizu"))
 
-	assertFormatClosureCatalogDriven(t, irEmission, backendEmission)
-	assertFormatClosureSeeds(t, irEmission, backendEmission)
-	assertFormatClosureIncludesDriver(t, irEmission, backendEmission)
+	assertFormatClosurePackageGraphDriven(t, irEmission, backendEmission)
 	assertParseFormatAllocNotExtended(t, parseLLVM)
 	assertImportSortShapeValidated(t)
 	assertLeadingImportShapeValidated(t)
@@ -512,31 +510,46 @@ func readSelfhostSrc(t *testing.T, rel string) string {
 	return string(data)
 }
 
-// assertFormatClosureCatalogDriven pins that the formatter facts flow through the shared
-// component catalog + body-call collector rather than a hand-written per-helper metadata
-// table, and that the backend resolves each member's symbol/params from signature facts.
-func assertFormatClosureCatalogDriven(t *testing.T, irEmission, backendEmission string) {
+// assertFormatClosurePackageGraphDriven pins that formatter facts flow through
+// the semantic package graph while the backend resolves each compiled member
+// from signature facts.
+func assertFormatClosurePackageGraphDriven(t *testing.T, irEmission, backendEmission string) {
 	t.Helper()
 	irRequired := []string{
-		`component_function_catalog::collect_from_ast`,
-		`"selfhost::parser::format"`,
-		`executable_body::append_catalog_helper_body_ir`,
-		`collect_catalog_closure_direct_callees`,
-		`"selfhost::parser::format::"`,
+		`package_catalog_collect::collect_from_parsed_files`,
+		`package_dependency_graph::dependency_graph`,
+		`package_call_resolution::append_resolved_dependencies`,
+		`append_numeric_package_definition(`,
 	}
 	for _, fragment := range irRequired {
 		if !strings.Contains(irEmission, fragment) {
-			t.Errorf("executable_functions.kizu missing catalog-driven format emission: %q", fragment)
+			t.Errorf("executable_functions.kizu missing package-graph emission: %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`component_function_catalog::`,
+		`collect_catalog_closure_`,
+	} {
+		if strings.Contains(irEmission, fragment) {
+			t.Errorf("executable_functions.kizu retains legacy closure path: %q", fragment)
 		}
 	}
 	backendRequired := []string{
-		`fn append_format_reachable_compiled_functions`,
-		`"selfhost::parser::format::"`,
-		`append_component_reachable_compiled_functions`,
+		`pub fn append_reachable_functions`,
+		`fn emit_numeric_package_definition`,
+		`compiled_llvm::append_compiled_function_auto_indexed`,
 	}
 	for _, fragment := range backendRequired {
 		if !strings.Contains(backendEmission, fragment) {
-			t.Errorf("cli_llvm.kizu missing catalog-driven format emission: %q", fragment)
+			t.Errorf("compiled_program_llvm.kizu missing generic package emission: %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`append_format_reachable_compiled_functions`,
+		`append_component_reachable_compiled_functions`,
+	} {
+		if strings.Contains(backendEmission, fragment) {
+			t.Errorf("compiled_program_llvm.kizu retains manual format closure: %q", fragment)
 		}
 	}
 }
@@ -560,40 +573,22 @@ func assertFormatClosureSeeds(t *testing.T, irEmission, backendEmission string) 
 // check only confirms it is wired into the artifact-producing facts and backend BFS.
 func assertFormatClosureIncludesDriver(t *testing.T, irEmission, backendEmission string) {
 	t.Helper()
-	seedEmitter := formatClosureSeedEmitter(t, irEmission)
-	quoted := `"format_source"`
-	if !strings.Contains(seedEmitter, quoted) {
-		t.Errorf("append_format_function_facts does not seed format_source")
+	for _, fragment := range []string{
+		"fn append_facts_from_parsed(",
+		"package_call_resolution::append_resolved_dependencies(",
+		"fn append_numeric_package_closure(",
+	} {
+		if !strings.Contains(irEmission, fragment) {
+			t.Errorf("generic package closure missing %q", fragment)
+		}
 	}
+	quoted := `"format_source"`
 	if !strings.Contains(backendEmission, quoted) {
 		t.Errorf("cli_llvm.kizu format closure does not seed format_source")
 	}
-}
-
-// formatClosureSeedEmitter returns the body of append_format_function_facts, the function that
-// seeds the selfhost::parser::format compiled closure into the BFS pending queue. Scoping the
-// hand-path exclusion to this function lets the behavior gates reference format_source by name
-// (to drive the real catalog / closure / lowering over it) without tripping the seed check.
-func formatClosureSeedEmitter(t *testing.T, irEmission string) string {
-	t.Helper()
-	lines := strings.Split(irEmission, "\n")
-	start := -1
-	for i, line := range lines {
-		if strings.HasPrefix(line, "fn append_format_function_facts") {
-			start = i
-			break
-		}
+	if strings.Contains(irEmission, "append_format_function_facts") {
+		t.Error("legacy format fact collector remains")
 	}
-	if start < 0 {
-		t.Fatalf("append_format_function_facts not found in executable_functions.kizu")
-	}
-	for i := start; i < len(lines); i++ {
-		if lines[i] == "}" {
-			return strings.Join(lines[start:i+1], "\n")
-		}
-	}
-	t.Fatalf("append_format_function_facts has no closing brace")
-	return ""
 }
 
 // The format_source driver call surface (the std::string::String(allocator) constructor, the

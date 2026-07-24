@@ -703,6 +703,8 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 		return l.emit("array.reserve", "!void", args, elem), nil
 	case "pop":
 		return l.emit("array.pop", "!"+elem, args, elem), nil
+	case "pop_or_panic":
+		return l.emit("array.pop_or_panic", elem, args, elem), nil
 	case "get":
 		return l.emit("array.get", "!"+elem, args, elem), nil
 	case "get_or_panic":

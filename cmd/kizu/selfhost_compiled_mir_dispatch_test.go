@@ -88,26 +88,28 @@ func TestSelfhostCompiledMIRUsesPerFunctionStructuralCache(t *testing.T) {
 	}
 }
 
-// TestSelfhostReachabilityCollectUsesNodeLineIndex keeps the component BFS collector
-// from rescanning a function's body-node facts from the body start for every sequence.
-func TestSelfhostReachabilityCollectUsesNodeLineIndex(t *testing.T) {
-	cliLLVM := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
-	collect := selfhostKizuFunctionBody(t, cliLLVM, "fn collect_component_compiled_body_callees(")
+// TestSelfhostPackageDefinitionConsumerUsesIrIndex keeps the backend on the
+// generic package-definition contract. Reachability belongs to the frontend
+// package graph; the backend consumes indexed facts and lowers each definition.
+func TestSelfhostPackageDefinitionConsumerUsesIrIndex(t *testing.T) {
+	programLLVM := readSelfhostFile(t, "../../selfhost/src/backend/compiled_program_llvm.kizu")
+	consumer := selfhostKizuFunctionBody(t, programLLVM, "pub fn append_reachable_functions(")
 	for _, fragment := range []string{
-		"std::array::Array<i64>",
-		"ir_contract::collect_body_node_line_starts(",
-		"let line_start = try node_line_starts.get(sequence);",
-		"ir_contract::body_node_kind_from(ir_bytes, name, sequence, line_start)",
-		"ir_contract::body_call_callee_or_empty_from(",
+		`let prefix = "package-dependency ";`,
+		"ir_index::first_entry_with_fact_prefix(lookup_index, ir_bytes, prefix)",
+		"ir_index::entry_key_starts_with(lookup_index, ir_bytes, entry, prefix)",
+		`let name_prefix = "package-definition-name ";`,
+		"out, lookup_index, canonical_facts, ir_bytes, name",
 	} {
-		if !strings.Contains(collect, fragment) {
-			t.Fatalf("collect_component_compiled_body_callees missing %q", fragment)
+		if !strings.Contains(consumer, fragment) {
+			t.Fatalf("generic package dependency consumer missing %q", fragment)
 		}
 	}
-	if strings.Contains(collect, "ir_contract::body_node_count_from(") {
-		t.Fatal("reachability collect should use the node line index, not a count plus repeated scans")
+	emit := selfhostKizuFunctionBody(t, programLLVM, "fn emit_numeric_package_definition(")
+	if !strings.Contains(emit, "compiled_llvm::append_compiled_function_auto_indexed(") {
+		t.Fatal("generic package definition should lower through indexed compiled lowering")
 	}
-	if strings.Contains(collect, "sequence, body_start") {
-		t.Fatal("reachability collect should not read each node from the function body start")
+	if strings.Contains(programLLVM, "collect_component_compiled_body_callees") {
+		t.Fatal("backend-local component reachability collector should remain removed")
 	}
 }

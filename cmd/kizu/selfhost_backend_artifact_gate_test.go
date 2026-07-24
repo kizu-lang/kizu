@@ -83,6 +83,7 @@ func countRuntimeStorageTemplateMetadataFailures(t *testing.T, metaContent strin
 	required := []string{
 		"array-storage copy-element-byte-buffer\n",
 		"array-at returns-stored-element\n",
+		"array-pop-or-panic removes-last-element-view\n",
 		"array-set in-place-element-overwrite\n",
 		"array-deinit releases-element-buffer\n",
 		"array-invalid-element-diagnostic invalid array element\n",
@@ -91,10 +92,13 @@ func countRuntimeStorageTemplateMetadataFailures(t *testing.T, metaContent strin
 		"string-as-bytes returns-stored-bytes\n",
 		"string-deinit releases-byte-buffer\n",
 		"string-invalid-slice-diagnostic invalid slice\n",
-		"map-storage string-key-i64-two-entry\n",
+		"map-storage string-key-generic-byte-buffer\n",
+		"map-value-layout constructor-sized\n",
+		"map-growth geometric-entry-buffer\n",
+		"map-get returns-stored-value-view\n",
+		"map-deinit releases-key-value-entry-buffers\n",
 		"map-key-ownership copies-key-bytes\n",
 		"map-missing-key-diagnostic Map.get key not found\n",
-		"map-capacity-diagnostic map capacity exceeded\n",
 		"reachable arena ast-node-storage\n",
 		"reachable handle ast-node-id\n",
 		"arena-storage ast-node-inline-two-slot\n",
@@ -190,6 +194,11 @@ func appendSelfhostBackendArtifactReport(t *testing.T, out *strings.Builder) int
 // countSelfhostBackendArtifactFileFailures validates deterministic LLVM artifacts.
 func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 	t.Helper()
+	irBytes, err := os.ReadFile("../../target/selfhost/selfhost.ir")
+	if err != nil {
+		t.Errorf("read full selfhost IR artifact: %v", err)
+		return 1
+	}
 	llBytes, err := os.ReadFile("../../target/selfhost/selfhost.ll")
 	if err != nil {
 		t.Errorf("read LLVM artifact: %v", err)
@@ -220,7 +229,8 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 		t.Errorf("read host capability metadata: %v", err)
 		return 1
 	}
-	failures := countTextualLLVMValidationFailures(t, string(llBytes), string(metaBytes))
+	failures := countEveryEmittedBodyCallClassificationFailures(t, string(irBytes))
+	failures += countTextualLLVMValidationFailures(t, string(llBytes), string(metaBytes))
 	failures += countRuntimeStorageValidationFailures(
 		t,
 		string(storageBytes),
@@ -285,10 +295,14 @@ func requiredLLVMRuntimeFragments() []string {
 		"%kizu.handle = type { ptr, i64 }\n",
 		"%kizu.error.bool = type { i1, i1, %kizu.slice.u8 }\n",
 		"%kizu.error.owned = type { i1, %kizu.owned, %kizu.slice.u8 }\n",
+		"%kizu.selfhost.types.constructor_facts.constructor_facts = type { " +
+			"%kizu.owned, %kizu.owned, %kizu.owned, %kizu.owned, %kizu.owned }\n",
+		"%kizu.selfhost.types.primitive_type.type_record = type { i64, i64, i64, i1 }\n",
 		"declare %kizu.owned @kizu_rt_mem_page_allocator()\n",
 		"declare ptr @kizu_rt_alloc(ptr, i64)\n",
 		"declare void @kizu_rt_free(ptr, ptr)\n",
 		"declare void @llvm.memcpy.p0.p0.i64",
+		"declare void @llvm.trap()\n",
 		"declare %kizu.owned @kizu_rt_io_blocking()\n",
 		"declare %kizu.error.bool @kizu_rt_fs_exists",
 		"declare %kizu.error.metadata @kizu_rt_fs_metadata",
@@ -360,8 +374,8 @@ func requiredLLVMCLIRunTestFragments() []string {
 			"@kizu_selfhost__cli_execute_render_checked_run_artifact",
 		"%test_parsed = call %kizu.kizu.ast.parse_result " +
 			"@kizu_selfhost__cli_parse_validated_ast",
-		"%test_executable = call %kizu.selfhost.executable " +
-			"@kizu_selfhost__cli_lower_test_parse_result",
+		"%test_lowered = call %kizu.error.kizu.selfhost.backend.data.executable " +
+			"@kizu_selfhost__backend_executable_lower_test_executable",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
@@ -380,15 +394,13 @@ func requiredLLVMCLICheckFragments() []string {
 		"%check_parse_ok = call i1 @kizu_selfhost__parse_write_missing_expr",
 		"%check_missing_assign = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_assign_ok = call i1 @kizu_selfhost__parse_write_missing_assign",
-		"define %kizu.slice.u8 @kizu_selfhost__cli_moved_value_name",
-		"@.kizu.cli.move_prefix",
-		"@.kizu.cli.move_suffix",
-		"%check_moved_name = call %kizu.slice.u8 @kizu_selfhost__cli_moved_value_name",
-		"br i1 %check_has_moved_name, label %check_file_move_error, label %check_file_ok",
-		"%run_check_moved_name = call %kizu.slice.u8 @kizu_selfhost__cli_moved_value_name",
-		"br i1 %run_check_has_moved_name, label %run_check_move_error, label %run_match_source",
-		"%test_check_moved_name = call %kizu.slice.u8 @kizu_selfhost__cli_moved_value_name",
-		"br i1 %test_check_has_moved_name, label %test_check_move_error, label %test_match_source",
+		"define %kizu.error.bool @kizu_selfhost__cli_check_fast_diagnostics_parsed_file",
+		"%check_semantic_result = call %kizu.error.bool " +
+			"@kizu_selfhost__cli_check_fast_diagnostics_parsed_file",
+		"%run_check_semantic_result = call %kizu.error.bool " +
+			"@kizu_selfhost__cli_check_fast_diagnostics_parsed_file",
+		"%test_check_semantic_result = call %kizu.error.bool " +
+			"@kizu_selfhost__cli_check_fast_diagnostics_parsed_file",
 		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
 	}
@@ -397,15 +409,12 @@ func requiredLLVMCLICheckFragments() []string {
 // requiredLLVMExecutableFragments returns mandatory hosted executable fragments.
 func requiredLLVMExecutableFragments() []string {
 	fragments := []string{
-		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
-		"%kizu.selfhost.codegen.run_ast = type { i1, i64, %kizu.slice.u8",
-		"%kizu.error.run_ast = type { i1, %kizu.selfhost.codegen.run_ast, %kizu.slice.u8 }",
-		"%kizu.selfhost.codegen.value = type { i64, %kizu.slice.u8, %kizu.slice.u8 }",
-		"%kizu.selfhost.codegen.instruction = type { i64, i64, %kizu.slice.u8",
-		"%kizu.selfhost.codegen.block = type { %kizu.slice.u8, i64 }",
-		"%kizu.selfhost.codegen.function = type { %kizu.slice.u8, i64 }",
-		"%kizu.selfhost.codegen.program = type { i64, %kizu.slice.u8",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_parse_result",
+		"%kizu.selfhost.backend.data.executable = type { i64, %kizu.slice.u8, %kizu.slice.u8 }",
+		"%kizu.selfhost.ir.codegen.code_eval = type { i1, i64, i64 }",
+		"%kizu.error.kizu.selfhost.ir.codegen.code_eval = type { i1, " +
+			"%kizu.selfhost.ir.codegen.code_eval, %kizu.slice.u8 }",
+		"define %kizu.error.kizu.selfhost.backend.data.executable " +
+			"@kizu_selfhost__backend_executable_lower_test_executable",
 		// #1255 slice4 PR-1: const_string_value / const_string_instruction /
 		// call_instruction / return_void_instruction / lowered_main_print_program were
 		// severed (closure-excluded). Only the live metadata_line constant + define
@@ -415,9 +424,8 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
 		// issue 1157: cli_parse_validated_ast is now a thin glue that calls the compiled
 		// std::kizu::parser::parse_program instead of the retired hand-written tokenize/parse loop.
-		"%parsed_eu = call %kizu.error.parse_result @kizu_kizu__parser_parse_program(",
-		"@kizu_kizu__ast_ast_add_node",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_lower_program",
+		"%parsed_eu = call %kizu.error.kizu.kizu.ast.parse_result @kizu_kizu__parser_parse_program(",
+		"call void @kizu_rt_process_exit(i64 1)",
 		"define %kizu.error.owned @kizu_selfhost__cli_execute_render_checked_run_artifact",
 		"define %kizu.error.owned @kizu_selfhost__ir_code_render_render_run_artifact",
 	}
@@ -589,8 +597,9 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 	return []string{
 		// empty_payload_span and string_literal_span are still used by the current
 		// code-render path for tape-backed run artifacts.
-		"%kizu.selfhost.codegen.payload_span = type { i64, i64 }",
-		"define %kizu.selfhost.codegen.payload_span @kizu_selfhost__ir_codegen_empty_payload_span",
+		"%kizu.selfhost.ir.codegen.payload_span = type { i64, i64 }",
+		"define %kizu.selfhost.ir.codegen.payload_span " +
+			"@kizu_selfhost__ir_codegen_empty_payload_span",
 		"define i1 @kizu_selfhost__ir_codegen_is_payload_supported",
 		"%index = phi i64 [ 0, %loop4_preheader ], [ %index_next, %loop4_latch ]",
 		"%t5 = icmp slt i64 %index, %t4",
@@ -599,11 +608,6 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
 		"%t7_gep = getelementptr i8, ptr %t7_ptr, i64 %index",
 		"%kizu.kizu.ast.child_range = type { i64, i64 }",
-		"%kizu.selfhost.codegen.int_env = type { i64, %kizu.kizu.ast.child_range, " +
-			"%kizu.slice.u8, i64, %kizu.slice.u8, i64, %kizu.slice.u8, i64 }",
-		"define %kizu.selfhost.codegen.int_env @kizu_selfhost__ir_codegen_empty_int_env",
-		"%v0_1 = insertvalue %kizu.selfhost.codegen.int_env %v0_0, " +
-			"%kizu.kizu.ast.child_range %decls, 1",
 		"define %kizu.error.i64 @kizu_selfhost__ir_codegen_parse_int_literal",
 		"call %kizu.error.i64 @kizu_selfhost__ir_codegen_parse_int_literal",
 	}
@@ -663,20 +667,22 @@ func requiredLLVMArrayGetFragments() []string {
 			"%kizu.slice.u8 }",
 		"%kizu.kizu.diagnostic.diagnostic = type { %kizu.kizu.diagnostic.file_span, " +
 			"%kizu.slice.u8, %kizu.owned }",
-		"%kizu.error.related_span = type { i1, %kizu.kizu.diagnostic.related_span, " +
+		"%kizu.error.kizu.kizu.diagnostic.related_span = type { i1, " +
+			"%kizu.kizu.diagnostic.related_span, " +
 			"%kizu.slice.u8 }",
-		"define %kizu.error.related_span @kizu_kizu__diagnostic_diagnostic_related_get",
+		"define %kizu.error.kizu.kizu.diagnostic.related_span " +
+			"@kizu_kizu__diagnostic_diagnostic_related_get",
 		"%array = extractvalue %kizu.kizu.diagnostic.diagnostic %self, 2",
 		"%view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index)",
 		"%view_ok = extractvalue %kizu.error.slice.u8 %view, 0",
 		"br i1 %view_ok, label %array_get_ok, label %array_get_fail",
 		"%elem = load %kizu.kizu.diagnostic.related_span, ptr %elem_ptr",
-		"%ok_value = insertvalue %kizu.error.related_span %ok_flag, " +
+		"%ok_value = insertvalue %kizu.error.kizu.kizu.diagnostic.related_span %ok_flag, " +
 			"%kizu.kizu.diagnostic.related_span %elem, 1",
-		"  ret %kizu.error.related_span %ok_value",
-		"%fail_value = insertvalue %kizu.error.related_span %fail_flag, " +
+		"  ret %kizu.error.kizu.kizu.diagnostic.related_span %ok_value",
+		"%fail_value = insertvalue %kizu.error.kizu.kizu.diagnostic.related_span %fail_flag, " +
 			"%kizu.slice.u8 %fail_msg, 2",
-		"  ret %kizu.error.related_span %fail_value",
+		"  ret %kizu.error.kizu.kizu.diagnostic.related_span %fail_value",
 		"define %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index)",
 	}
 }
@@ -685,49 +691,51 @@ func requiredLLVMArrayGetFragments() []string {
 // accessor compiled into stage2. It composes the checked Array<NodeId>.get accessor
 // with a bounds-check `if index < 0 or index >= range.len { return error(...); }`:
 // the `or` short-circuit branches to the shared error block, which materializes the
-// "child index out of bounds" message and returns a real %kizu.error.node_id failure
+// "child index out of bounds" message and returns a real canonical NodeId error-union failure
 // value (field 2), never `unreachable`. The continuation computes range.start + index
 // (extractvalue of the ChildRange + add), reads the children Array (field 1) off the
 // Ast value, calls the checked @kizu_rt_array_at, and on success loads the NodeId by
 // value and wraps it as the error-union success value (field 1).
 func requiredLLVMChildAtFragments() []string {
 	return []string{
-		"%kizu.kizu.ast.node_id = type { i64 }",
-		"%kizu.error.node_id = type { i1, %kizu.kizu.ast.node_id, %kizu.slice.u8 }",
-		"define %kizu.error.node_id @kizu_kizu__ast_ast_child_at",
+		"%kizu.kizu.ast.node_id = type { %kizu.handle }",
+		"%kizu.error.kizu.kizu.ast.node_id = type { i1, %kizu.kizu.ast.node_id, %kizu.slice.u8 }",
+		"define %kizu.error.kizu.kizu.ast.node_id @kizu_kizu__ast_ast_child_at",
 		"%kizu.kizu.ast.child_range %range",
 		"%t2 = icmp slt i64 %index, 0",
 		"br i1 %t2, label %if0_then, label %if0_rhs",
 		"%t5 = icmp sge i64 %index, %t4",
 		"%t4 = extractvalue %kizu.kizu.ast.child_range %range, 1",
 		"br i1 %t5, label %if0_then, label %if0_cont",
-		"%errfail6 = insertvalue %kizu.error.node_id %errfail6_flag, %kizu.slice.u8 %t6, 2",
-		"  ret %kizu.error.node_id %errfail6",
+		"%errfail6 = insertvalue %kizu.error.kizu.kizu.ast.node_id %errfail6_flag, %kizu.slice.u8 %t6, 2",
+		"  ret %kizu.error.kizu.kizu.ast.node_id %errfail6",
 		"%t7 = extractvalue %kizu.kizu.ast.child_range %range, 0",
 		"%t9 = add i64 %t7, %index",
 		"%array = extractvalue %kizu.kizu.ast.ast %self, 1",
 		"%view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %t9)",
 		"%elem = load %kizu.kizu.ast.node_id, ptr %elem_ptr",
-		"%ok_value = insertvalue %kizu.error.node_id %ok_flag, %kizu.kizu.ast.node_id %elem, 1",
-		"  ret %kizu.error.node_id %ok_value",
-		"  ret %kizu.error.node_id %fail_value",
+		"%ok_value = insertvalue %kizu.error.kizu.kizu.ast.node_id %ok_flag, %kizu.kizu.ast.node_id %elem, 1",
+		"  ret %kizu.error.kizu.kizu.ast.node_id %ok_value",
+		"  ret %kizu.error.kizu.kizu.ast.node_id %fail_value",
 	}
 }
 
 // requiredLLVMUnionAbiFragments returns the tracker-961 AstNode/AstData tagged-union
 // value-type ABI compiled into stage2. std::kizu::ast::Ast.add_node constructs an
 // AstNode (a Span plus the AstData union value forwarded whole) and appends it to the
-// nodes Arena. AstData is the #991 inline layout { i64 tag, [96 x i8] payload storage }
-// where 96 is the largest variant payload capacity; the 44 variant payload structs are
+// nodes Arena. AstData is the fact-derived inline layout { i64 tag, [136 x i8] payload storage }
+// where 136 is the largest variant payload capacity; the 44 variant payload structs are
 // not modelled because add_node forwards the union value without inspecting it. The
 // element is marshalled through stack storage as a %kizu.slice.u8 (ptr + sizeof via the
 // getelementptr-null idiom) and appended through the heap-backed @kizu_rt_arena_add,
-// which returns a %kizu.handle whose index field becomes the NodeId.
+// which returns a %kizu.handle that becomes the opaque NodeId payload without
+// discarding its arena provenance.
 func requiredLLVMUnionAbiFragments() []string {
 	return []string{
 		"%kizu.kizu.ast.span = type { i64, i64 }",
-		"%kizu.kizu.ast.ast_data = type { i64, [96 x i8] }",
+		"%kizu.kizu.ast.ast_data = type { i64, [136 x i8] }",
 		"%kizu.kizu.ast.ast_node = type { %kizu.kizu.ast.span, %kizu.kizu.ast.ast_data }",
+		"%kizu.kizu.ast.parse_result = type { %kizu.kizu.ast.ast, %kizu.kizu.ast.node_id }",
 		"define %kizu.kizu.ast.node_id @kizu_kizu__ast_ast_add_node",
 		"%v0_0 = insertvalue %kizu.kizu.ast.ast_node poison, %kizu.kizu.ast.span %span_value, 0",
 		"%v0_1 = insertvalue %kizu.kizu.ast.ast_node %v0_0, %kizu.kizu.ast.ast_data %data, 1",
@@ -735,9 +743,9 @@ func requiredLLVMUnionAbiFragments() []string {
 		"%raw_slice = insertvalue %kizu.slice.u8 %raw_slice_base, i64 ptrtoint (ptr getelementptr (" +
 			"%kizu.kizu.ast.ast_node, ptr null, i32 1) to i64), 1",
 		"%raw_arena = extractvalue %kizu.kizu.ast.ast %self, 0",
-		"%raw_handle = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %raw_arena, " +
+		"%raw = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %raw_arena, " +
 			"%kizu.slice.u8 %raw_slice)",
-		"%raw = extractvalue %kizu.handle %raw_handle, 1",
+		"%v2_0 = insertvalue %kizu.kizu.ast.node_id poison, %kizu.handle %raw, 0",
 		"  ret %kizu.kizu.ast.node_id %v2_0",
 		"define %kizu.kizu.ast.parse_result @kizu_kizu__ast_parse_result",
 		"%v0_0 = insertvalue %kizu.kizu.ast.parse_result poison, %kizu.kizu.ast.ast %ast, 0",
@@ -750,22 +758,28 @@ func requiredLLVMUnionAbiFragments() []string {
 // requiredLLVMArenaGetFragments returns the tracker-961 std::kizu::ast::Ast.get
 // accessor compiled into stage2. It reads an AstNode back out of the nodes Arena by
 // value (self.nodes.get(id.raw)), reusing the AstNode/AstData union value-type ABI: it
-// computes the index from the NodeId.raw field, reads the Arena handle off the Ast
-// value, calls the checked self-contained @kizu_rt_arena_get, and on success loads the
-// AstNode element by value and returns it. An out-of-bounds index traps via
+// extracts the opaque handle from the NodeId.raw field, reads the Arena owner off the
+// Ast value, calls the checked self-contained @kizu_rt_arena_get, and on success loads
+// the AstNode element by value and returns it. A foreign-arena or out-of-bounds handle traps via
 // @kizu_rt_trap (Arena.get panics rather than returning an error union, so the trap is
 // the genuine failure semantics, not a stubbed-out branch).
 func requiredLLVMArenaGetFragments() []string {
 	return []string{
 		"define %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get",
-		"%index = extractvalue %kizu.kizu.ast.node_id %id, 0",
+		"%handle = extractvalue %kizu.kizu.ast.node_id %id, 0",
 		"%arena = extractvalue %kizu.kizu.ast.ast %self, 0",
-		"%view = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index)",
+		"%view = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %handle)",
 		"br i1 %view_ok, label %arena_get_ok, label %arena_get_fail",
 		"%elem = load %kizu.kizu.ast.ast_node, ptr %elem_ptr",
 		"  ret %kizu.kizu.ast.ast_node %elem",
 		"call void @kizu_rt_trap(%kizu.slice.u8 %fail_msg)",
-		"define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index)",
+		"@.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c\"invalid arena handle\"",
+		"define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %handle)",
+		"%handle_arena = extractvalue %kizu.handle %handle, 0",
+		"%same_arena = icmp eq ptr %raw, %handle_arena",
+		"%index = extractvalue %kizu.handle %handle, 1",
+		"%provenance_ok = and i1 %same_arena, %index_nonnegative",
+		"%bounds_ok = and i1 %provenance_ok, %index_in_bounds",
 	}
 }
 
@@ -807,6 +821,13 @@ func requiredLLVMMatchUnionFragments() []string {
 // foundation; the cluster's lowering lands in a later PR.
 func requiredLLVMNodeCountTypeFragments() []string {
 	return []string{
+		"%kizu.kizu.ast.token_id = type { i64 }",
+		"%kizu.kizu.ast.symbol_id = type { i64 }",
+		"%kizu.kizu.ast.int_node = type { %kizu.kizu.ast.token_id }",
+		"%kizu.kizu.ast.string_node = type { %kizu.kizu.ast.token_id }",
+		"%kizu.kizu.ast.type_name_node = type { %kizu.kizu.ast.symbol_id }",
+		"%kizu.kizu.ast.var_node = type { %kizu.kizu.ast.symbol_id, %kizu.kizu.ast.span }",
+		"%kizu.kizu.ast.bool_node = type { i1 }",
 		"%kizu.kizu.ast.prefix_node = type { i64, %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.binary_node = type { i64, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.field_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, i1 }",
@@ -908,7 +929,7 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"%range_len = extractvalue %kizu.kizu.ast.child_range %range, 1",
 		"%count = phi i64 [ 0, %entry ], [ %count_next, %count_nc_cont ]",
 		"%index = phi i64 [ 0, %entry ], [ %index_next, %count_nc_cont ]",
-		"%child_call = call %kizu.error.node_id @kizu_kizu__ast_ast_child_at(" +
+		"%child_call = call %kizu.error.kizu.kizu.ast.node_id @kizu_kizu__ast_ast_child_at(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %range, i64 %index)",
 		"%nc_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %child)",
@@ -962,7 +983,7 @@ func requiredLLVMTextAccessorFragments() []string {
 }
 
 // requiredLLVMMemStartsWithFragments locks std::mem::starts_with compiled into stage2 as a
-// selfhost-owned checked-index slice-prefix predicate for stdlib-symbol callers.
+// selfhost-owned checked-index slice-prefix predicate for resolved source-call users.
 func requiredLLVMMemStartsWithFragments() []string {
 	return []string{
 		"define i1 @kizu_std__mem_starts_with(",
@@ -990,7 +1011,7 @@ func requiredLLVMMemStartsWithFragments() []string {
 // lowered body shape.
 func requiredLLVMStringLiteralSpanFragments() []string {
 	return []string{
-		"define %kizu.selfhost.codegen.payload_span " +
+		"define %kizu.selfhost.ir.codegen.payload_span " +
 			"@kizu_selfhost__ir_codegen_string_literal_span(",
 		"%sls_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
 			"%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %node_id)",
@@ -1003,9 +1024,9 @@ func requiredLLVMStringLiteralSpanFragments() []string {
 		"%sls_both_q = and i1 %sls_first_q, %sls_last_q",
 		"%sls_supported = call i1 @kizu_selfhost__ir_codegen_is_payload_supported(" +
 			"%kizu.slice.u8 %sls_p1)",
-		"%sls_r1 = insertvalue %kizu.selfhost.codegen.payload_span %sls_r0, " +
+		"%sls_r1 = insertvalue %kizu.selfhost.ir.codegen.payload_span %sls_r0, " +
 			"i64 %sls_payload_end, 1",
-		"%sls_empty_call = call %kizu.selfhost.codegen.payload_span " +
+		"%sls_empty_call = call %kizu.selfhost.ir.codegen.payload_span " +
 			"@kizu_selfhost__ir_codegen_empty_payload_span()",
 	}
 }
@@ -1014,8 +1035,8 @@ func requiredLLVMStringLiteralSpanFragments() []string {
 // std::kizu::lexer leaf byte classifiers compiled into stage2: is_alpha / is_digit / is_space
 // (range/or-chain byte predicates over literal i8 bounds) and is_word (which or-combines is_alpha /
 // is_digit). They are the bottom of the lexer compile chain the eventual scanner removal needs
-// (source -> Ast requires the compiled tokenizer). is_word's i8 call arguments are resolved via the
-// stdlib-symbol arg-type facts rather than the default slice type. These fragments lock the shapes.
+// (source -> Ast requires the compiled tokenizer). is_word's i8 call arguments are resolved from
+// the exact source signature rather than a default slice ABI. These fragments lock the shapes.
 func requiredLLVMLexerClassifierFragments() []string {
 	fragments := []string{
 		"define i1 @kizu_kizu__lexer_is_alpha(",
@@ -1027,13 +1048,11 @@ func requiredLLVMLexerClassifierFragments() []string {
 		"%t17 = icmp eq i8 %byte, 95",
 		"%t0 = call i1 @kizu_kizu__lexer_is_alpha(i8 %byte)",
 		"%t1 = call i1 @kizu_kizu__lexer_is_digit(i8 %byte)",
-		// position(line, column) builds the (line, column) Position cursor struct; its type is
-		// defined for the tokenizer's position-tracking helpers (tracker 961).
+		// position(line, column) builds the fact-derived Position cursor struct.
 		"%kizu.kizu.lexer.position = type { i64, i64 }",
 		"define %kizu.kizu.lexer.position @kizu_kizu__lexer_position(",
 		"insertvalue %kizu.kizu.lexer.position %v0_0, i64 %column, 1",
-		// Token is the tokenizer's output record; its type definition is the base the
-		// first_token / next_token / token_at cluster will consume (tracker 961).
+		// Token is the fact-derived tokenizer output record.
 		"%kizu.kizu.lexer.token = type { i64, i64, i64, i64, i64, i64, i64 }",
 	}
 	return append(fragments, requiredLLVMSelfhostLexerFragments()...)
@@ -1769,6 +1788,10 @@ func requiredLLVMFormatLeadingImportFragments() []string {
 // helper closure that lowers through the same token-kind predicate / generic expression paths.
 func requiredLLVMParserPredicateFragments() []string {
 	parser := []string{
+		"%kizu.kizu.parser.parse_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.lexer.token }",
+		"%kizu.kizu.parser.parse_range = type { %kizu.kizu.ast.child_range, " +
+			"%kizu.kizu.lexer.token }",
 		"define i1 @kizu_kizu__parser_is_double_colon(",
 		"define i1 @kizu_kizu__parser_is_eof_token(",
 		"define i1 @kizu_kizu__parser_is_left_brace_token(",
@@ -1816,7 +1839,31 @@ func forbiddenLLVMFragments() []string {
 	fragments := forbiddenLegacyCLISourceShapeFragments()
 	fragments = append(fragments, forbiddenLegacyRunAstEmissionFragments()...)
 	fragments = append(fragments, forbiddenSeveredShapeEmissionFragments()...)
+	fragments = append(fragments, forbiddenObsoleteTypeDeclarationFragments()...)
 	return append(fragments, forbiddenLegacyRunArtifactFragments()...)
+}
+
+// forbiddenObsoleteTypeDeclarationFragments keeps severed backend-only ABI records
+// out of the hosted module. None is a current canonical declaration; CodeEval and
+// RelatedSpan instead use their fact-derived names.
+func forbiddenObsoleteTypeDeclarationFragments() []string {
+	return []string{
+		"%kizu.selfhost.codegen.run_ast = type",
+		"%kizu.error.run_ast = type",
+		"%kizu.selfhost.codegen.value = type",
+		"%kizu.selfhost.codegen.instruction = type",
+		"%kizu.selfhost.codegen.block = type",
+		"%kizu.selfhost.codegen.function = type",
+		"%kizu.selfhost.codegen.program = type",
+		"%kizu.selfhost.codegen.local_binding = type",
+		"%kizu.selfhost.codegen.local_table = type",
+		"%kizu.selfhost.cli.parse_node_result = type",
+		"%kizu.selfhost.codegen.code_eval = type",
+		"%kizu.error.code_eval = type",
+		"%kizu.error.related_span = type",
+		"%kizu.selfhost.codegen.payload_span = type",
+		"%kizu.error.payload_span = type",
+	}
 }
 
 // forbiddenSeveredShapeEmissionFragments returns the hosted per-shape Program builder
@@ -1854,6 +1901,10 @@ func forbiddenLegacyCLISourceShapeFragments() []string {
 		"@.kizu.cli.test_expect_true_pattern",
 		"@.kizu.cli.test_expect_false_pattern",
 		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
+		"define %kizu.slice.u8 @kizu_selfhost__cli_moved_value_name",
+		"@.kizu.cli.move_prefix",
+		"@.kizu.cli.undefined_prefix",
+		"first_hosted_check_undefined_variable_start_ast_node",
 		"%parse_small",
 		"%corpus_small",
 		"%main_fn_found",
@@ -2016,22 +2067,11 @@ func requiredLLVMMetadataFragments() []string {
 	}...)
 }
 
-// requiredLLVMMetadataSelectedSignatureFragments returns executable signature inputs.
+// requiredLLVMMetadataSelectedSignatureFragments is empty because validation now
+// consumes manifest-owned root signatures directly from IR. Re-emitting a selected
+// subset in metadata would recreate the removed manual root list.
 func requiredLLVMMetadataSelectedSignatureFragments() []string {
-	return []string{
-		"backend-input function-signature-return selfhost::cli::execute::" +
-			"run_file_cli !i64\n",
-		"backend-input function-signature-param selfhost::cli::execute::" +
-			"run_file_cli 0 allocator:runtime:Allocator\n",
-		// #1255 slice4 PR-1: the hosted per-shape signature metadata (lower_run_*/
-		// main_print_program/stdout_payload/lower_run_codegen_program) was severed once
-		// shape emit became closure-excluded. Only the live run_file_cli / metadata_line
-		// / lower_test_executable signature inputs remain.
-		"backend-input function-signature-return selfhost::ir::codegen::" +
-			"metadata_line []u8\n",
-		"backend-input function-signature-param selfhost::backend::executable::" +
-			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast\n",
-	}
+	return nil
 }
 
 // requiredLLVMMetadataSelectedBodyFragments returns executable body IR facts.
@@ -2137,7 +2177,10 @@ func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 			return failures
 		}
 	}
-	forbiddenMarkers := []string{"std.builtin", "stdprim", "internal/interp", "internal global"}
+	forbiddenMarkers := []string{
+		"std.builtin", "stdprim", "internal/interp", "internal global",
+		"@kizu_rt_map_get_i64", "@.kizu.rt.map_full",
+	}
 	for _, forbidden := range forbiddenMarkers {
 		if strings.Contains(llContent, forbidden) {
 			t.Errorf("runtime storage artifact contains Go fallback marker %q", forbidden)
@@ -2182,7 +2225,8 @@ func runtimeStorageLayoutLLFragments() []string {
 		"%kizu.error.record.abi.summary = type { i1, %kizu.record.abi.summary, %kizu.slice.u8 }\n",
 		"%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }\n",
 		"%kizu.rt.string = type { ptr, ptr, i64, i64 }\n",
-		"%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }\n",
+		"%kizu.rt.map = type { ptr, ptr, i64, i64, i64 }\n",
+		"%kizu.rt.map.entry = type { ptr, i64, ptr }\n",
 		"%kizu.rt.box = type { ptr, ptr, i64 }\n",
 		"%kizu.rt.arena = type { ptr, i64, i64, [64 x i8] }\n",
 		"@.kizu.rt.arena_invalid_handle",
@@ -2195,8 +2239,10 @@ func runtimeStorageLayoutLLFragments() []string {
 		"@.kizu.rt.string_smoke",
 		"@.kizu.rt.map_key_alpha",
 		"@.kizu.rt.map_key_beta",
+		"@.kizu.rt.map_key_delta",
+		"@.kizu.rt.map_value_update",
 		"@.kizu.rt.map_key_not_found",
-		"@.kizu.rt.map_full",
+		"@.kizu.rt.invalid_map_value",
 		"@.kizu.rt.invalid_slice",
 		"@.kizu.rt.invalid_box",
 		"declare ptr @kizu_rt_alloc(ptr, i64)\n",
@@ -2211,6 +2257,7 @@ func runtimeStorageFunctionLLFragments() []string {
 		"define %kizu.owned @kizu_rt_array_new",
 		"define %kizu.error.void @kizu_rt_array_append",
 		"define %kizu.error.slice.u8 @kizu_rt_array_at",
+		"define %kizu.slice.u8 @kizu_rt_array_pop_or_panic(%kizu.owned %array)",
 		// array_set is the checked in-place element overwrite backing the formatter
 		// import-sort Array<i64>.set (issue 1165 slice 2).
 		"define %kizu.error.void @kizu_rt_array_set(%kizu.owned %array, i64 %index,",
@@ -2218,11 +2265,14 @@ func runtimeStorageFunctionLLFragments() []string {
 		"define %kizu.error.void @kizu_rt_string_append_bytes",
 		"define %kizu.error.void @kizu_rt_string_append_byte",
 		"define %kizu.slice.u8 @kizu_rt_string_as_bytes",
-		"define %kizu.owned @kizu_rt_map_new",
-		"define %kizu.error.void @kizu_rt_map_insert",
+		"define %kizu.owned @kizu_rt_map_new(%kizu.owned %allocator, i64 %value_size)",
+		"define %kizu.error.void @kizu_rt_map_insert(",
+		"define i1 @kizu_rt_map_reserve",
 		"define i1 @kizu_rt_map_key_equal",
 		"define i1 @kizu_rt_map_contains",
-		"define %kizu.error.i64 @kizu_rt_map_get_i64",
+		"define i64 @kizu_rt_map_len",
+		"define %kizu.error.slice.u8 @kizu_rt_map_get",
+		"define void @kizu_rt_map_deinit",
 		"define %kizu.error.owned @kizu_rt_box_new",
 		"define %kizu.error.slice.u8 @kizu_rt_box_borrow",
 		"define void @kizu_rt_box_deinit",
@@ -2259,7 +2309,8 @@ func runtimeStorageSmokeLLFragments() []string {
 		"call i64 @kizu_selfhost__runtime_string_invalid_smoke",
 		"call %kizu.error.void @kizu_rt_map_insert",
 		"call i1 @kizu_rt_map_contains",
-		"call %kizu.error.i64 @kizu_rt_map_get_i64",
+		"call %kizu.error.slice.u8 @kizu_rt_map_get",
+		"call i64 @kizu_rt_map_len",
 		"call %kizu.error.owned @kizu_rt_box_new",
 		"call %kizu.error.slice.u8 @kizu_rt_box_borrow",
 		"call void @kizu_rt_box_deinit",
@@ -2292,6 +2343,7 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 		"reachable array ast-child-list\n",
 		"array-storage copy-element-byte-buffer\n",
 		"array-at returns-stored-element\n",
+		"array-pop-or-panic removes-last-element-view\n",
 		"array-set in-place-element-overwrite\n",
 		"array-deinit releases-element-buffer\n",
 		"array-invalid-element-diagnostic invalid array element\n",
@@ -2305,10 +2357,13 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 		"reachable map resolver-symbol-table\n",
 		"reachable map type-symbol-table\n",
 		"reachable map ownership-state-table\n",
-		"map-storage string-key-i64-two-entry\n",
+		"map-storage string-key-generic-byte-buffer\n",
+		"map-value-layout constructor-sized\n",
+		"map-growth geometric-entry-buffer\n",
+		"map-get returns-stored-value-view\n",
+		"map-deinit releases-key-value-entry-buffers\n",
 		"map-key-ownership copies-key-bytes\n",
 		"map-missing-key-diagnostic Map.get key not found\n",
-		"map-capacity-diagnostic map capacity exceeded\n",
 		"reachable diagnostic compiler-failure-buffer\n",
 		"reachable arena ast-node-storage\n",
 		"reachable handle ast-node-id\n",
@@ -2720,6 +2775,7 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 	failures := countHostedCompilerCLIRealSourceCheckFailures(t, exePath)
 
 	failures += countHostedCompilerCLIMovedCheckFailures(t, exePath, dir)
+	failures += countHostedCompilerCLISharedUndefinedFailures(t, exePath, dir)
 
 	invalidPath := filepath.Join(dir, "hosted_check_invalid.kizu")
 	invalidSource := "fn main() { let value = ; }\n"
@@ -2752,6 +2808,30 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 		expectedAssignStderr,
 		"missing assign check",
 	)
+	return failures
+}
+
+// countHostedCompilerCLISharedUndefinedFailures proves check/run/test enter the
+// same parsed semantic facade before command-specific lowering.
+func countHostedCompilerCLISharedUndefinedFailures(t *testing.T, exePath string, dir string) int {
+	t.Helper()
+	undefinedPath := filepath.Join(dir, "hosted_shared_undefined.kizu")
+	undefinedSource := "fn main() {\n    print(name);\n}\n"
+	if err := os.WriteFile(undefinedPath, []byte(undefinedSource), 0o644); err != nil {
+		t.Errorf("write hosted shared undefined source: %v", err)
+		return 1
+	}
+	failures := 0
+	for _, command := range []string{"check", "run", "test"} {
+		failures += countHostedCompilerCLIExpectedFailure(
+			t,
+			exePath,
+			command,
+			undefinedPath,
+			"error: type error: undefined variable `name` at 2:11\n",
+			command+" shared undefined variable",
+		)
+	}
 	return failures
 }
 

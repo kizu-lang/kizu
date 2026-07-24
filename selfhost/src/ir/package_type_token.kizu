@@ -1,0 +1,135 @@
+import selfhost::ir::intrinsic_type_contract;
+import selfhost::type_spelling;
+
+struct RenderState {
+    snake_identity: bool,
+    canonical_bytes_seen: i64,
+}
+
+// append_canonical writes an unambiguous, space-free IR type token. Optional
+// source whitespace is consumed by the parser instead of being rewritten to
+// underscores, so Map<K, V> and Map<K,_V> remain distinct.
+pub fn append_canonical(out: &var std::string::String, spelling: []u8) -> !void {
+    var state = RenderState {
+        snake_identity: false,
+        canonical_bytes_seen: 0
+    };
+    return append_canonical_with_state(out, spelling, &var state);
+}
+
+// append_function_owner_identity writes the same canonical type grammar while
+// applying the qualified-function owner naming convention. It is allocation
+// free, so identity construction does not need to retain a borrowed temporary.
+pub fn append_function_owner_identity(
+    out: &var std::string::String,
+    spelling: []u8
+) -> !void {
+    var state = RenderState {
+        snake_identity: true,
+        canonical_bytes_seen: 0
+    };
+    return append_canonical_with_state(out, spelling, &var state);
+}
+
+fn append_canonical_with_state(
+    out: &var std::string::String,
+    spelling: []u8,
+    state: &var RenderState
+) -> !void {
+    let layer = try type_spelling::parse(spelling);
+    if layer.kind == type_spelling::layer_error_union() {
+        let first_child = try type_spelling::first_child(&layer, spelling);
+        let second_child = try type_spelling::second_child(&layer, spelling);
+        if std::mem::len(first_child) > 0 {
+            try append_canonical_with_state(out, first_child, state);
+        }
+        try append_rendered_byte(out, cast<u8>(33), state);
+        return append_canonical_with_state(out, second_child, state);
+    }
+    if layer.kind != type_spelling::layer_named() {
+        try append_wrapper_prefix(out, layer.kind, state);
+        let first_child = try type_spelling::first_child(&layer, spelling);
+        return append_canonical_with_state(out, first_child, state);
+    }
+    let constructor = try type_spelling::constructor(&layer, spelling);
+    let intrinsic = intrinsic_type_contract::from_source_name(constructor);
+    if intrinsic >= 0 {
+        try append_rendered_bytes(
+            out, try intrinsic_type_contract::canonical_name(intrinsic), state
+        );
+    } else {
+        try append_rendered_bytes(out, constructor, state);
+    }
+    if !layer.has_arguments { return; }
+    try append_rendered_byte(out, cast<u8>(60), state);
+    let arguments = try type_spelling::arguments(&layer, spelling);
+    var start = 0;
+    var index = 0;
+    while start < std::mem::len(arguments) {
+        if index > 0 { try append_rendered_byte(out, cast<u8>(44), state); }
+        let argument = try type_spelling::next_argument(arguments, start);
+        try append_canonical_with_state(out, argument, state);
+        let next = try type_spelling::next_argument_start(arguments, start);
+        if next <= start { return error("type token canonicalizer did not advance"); }
+        start = next;
+        index = index + 1;
+    }
+    try append_rendered_byte(out, cast<u8>(62), state);
+    return;
+}
+
+fn append_wrapper_prefix(
+    out: &var std::string::String,
+    kind: i64,
+    state: &var RenderState
+) -> !void {
+    if kind == type_spelling::layer_borrow() {
+        return append_rendered_byte(out, cast<u8>(38), state);
+    }
+    if kind == type_spelling::layer_borrow_var() {
+        return append_rendered_bytes(out, "&var_", state);
+    }
+    if kind == type_spelling::layer_slice() {
+        return append_rendered_bytes(out, "[]", state);
+    }
+    if kind == type_spelling::layer_nullable() {
+        return append_rendered_byte(out, cast<u8>(63), state);
+    }
+    if kind == type_spelling::layer_dynamic() {
+        return append_rendered_bytes(out, "dyn_", state);
+    }
+    if kind == type_spelling::layer_const() {
+        return append_rendered_bytes(out, "const_", state);
+    }
+    return error("type token canonicalizer: unsupported wrapper");
+}
+
+fn append_rendered_bytes(
+    out: &var std::string::String,
+    bytes: []u8,
+    state: &var RenderState
+) -> !void {
+    var index = 0;
+    while index < std::mem::len(bytes) {
+        try append_rendered_byte(out, bytes[index], state);
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_rendered_byte(
+    out: &var std::string::String,
+    byte: u8,
+    state: &var RenderState
+) -> !void {
+    if state.snake_identity and byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+        if state.canonical_bytes_seen > 0 {
+            try out.append_byte(cast<u8>(95));
+        }
+        try out.append_byte(byte + cast<u8>(32));
+    } else {
+        try out.append_byte(byte);
+    }
+    state.canonical_bytes_seen = state.canonical_bytes_seen + 1;
+    return;
+}

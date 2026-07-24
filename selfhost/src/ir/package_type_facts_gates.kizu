@@ -1,0 +1,141 @@
+import selfhost::parser;
+import selfhost::source;
+import selfhost::abi::fixed_abi_contract;
+import selfhost::ir::intrinsic_type_contract;
+import selfhost::ir::package_catalog;
+import selfhost::ir::package_catalog_collect;
+import selfhost::ir::package_type_facts;
+
+fn component_type_test_file(id: i64, module: []u8, text: []u8) -> source::SourceFile {
+    return source::SourceFile {
+        id: id,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    };
+}
+
+pub fn external_abi_contract_gate() -> !void {
+    let allocator = try intrinsic_type_contract::external_abi_contract_at(0);
+    std::testing::expect(std::mem::equal_bytes(allocator.identity, "Allocator"));
+    std::testing::expect(allocator.generic_arity == 0);
+    std::testing::expect(
+        allocator.fixed_abi.kind == fixed_abi_contract::FixedAbiKind::Owned
+    );
+    std::testing::expect(
+        allocator.dependence == intrinsic_type_contract::ExternalAbiDependence::Fixed
+    );
+
+    let array = try intrinsic_type_contract::external_abi_contract_at(2);
+    std::testing::expect(std::mem::equal_bytes(array.identity, "std::array::Array"));
+    std::testing::expect(array.generic_arity == 1);
+    std::testing::expect(std::mem::equal_bytes(array.owned_family, "sequence"));
+    std::testing::expect(!array.nullable);
+    std::testing::expect(
+        array.dependence == intrinsic_type_contract::ExternalAbiDependence::Fixed
+    );
+
+    let map = try intrinsic_type_contract::external_abi_contract_at(3);
+    std::testing::expect(std::mem::equal_bytes(map.identity, "std::map::Map"));
+    std::testing::expect(map.generic_arity == 2);
+    std::testing::expect(std::mem::equal_bytes(map.owned_family, "map"));
+    std::testing::expect(
+        map.dependence == intrinsic_type_contract::ExternalAbiDependence::Fixed
+    );
+
+    let ptr = try intrinsic_type_contract::external_abi_contract_at(10);
+    std::testing::expect(std::mem::equal_bytes(ptr.identity, "ptr"));
+    std::testing::expect(ptr.generic_arity == 1);
+    std::testing::expect(ptr.nullable);
+    std::testing::expect(
+        ptr.fixed_abi.kind == fixed_abi_contract::FixedAbiKind::Pointer
+    );
+    print("ok");
+    return;
+}
+
+pub fn external_abi_contract_out_of_range_gate() -> !void {
+    let entry = try intrinsic_type_contract::external_abi_contract_at(
+        intrinsic_type_contract::external_abi_len()
+    );
+    print(entry.identity);
+    return;
+}
+
+pub fn component_type_facts_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let source_text = "pub struct Child { pub value: i64, }
+pub struct Model { pub child: Child, pub items: std::array::Array<Model>, pub bytes: Channel<[]u8>, pub models: Channel<std::array::Array<Model>>, pub by_name: std::map::Map<[]u8, Model>, }
+pub struct Tokens<V, _V> { pub plain: std::map::Map<[]u8, V>, pub underscored: std::map::Map<[]u8, _V>, }
+pub enum State { Ready, Done, }
+pub union Event { Empty, Model(Model), Bytes([]u8), }
+pub union GenericEvent<K, V> { Empty, Entry(std::map::Map<K, V>), }";
+    let parsed = try parser::parse_checked_file(
+        allocator, "component_type_facts_gate.kizu", source_text
+    );
+    defer parsed.deinit();
+    var facts = std::string::String(allocator);
+    defer facts.deinit();
+    let module_prefix = "app::model::";
+    try package_type_facts::append_component_declaration_type_facts(
+        &var facts, source_text, parsed.ast, parsed.root, &module_prefix
+    );
+    let fact_bytes = facts.as_bytes();
+    print(fact_bytes);
+    return;
+}
+
+pub fn external_abi_owner_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let source_text = "pub struct String { pub bytes: std::array::Array<u8>, }";
+    let parsed = try parser::parse_checked_file(
+        allocator, "external_abi_owner_gate.kizu", source_text
+    );
+    defer parsed.deinit();
+    var facts = std::string::String(allocator);
+    defer facts.deinit();
+    try package_type_facts::append_core_abi_representation_facts(&var facts);
+    let module_prefix = "std::string::";
+    try package_type_facts::append_component_declaration_type_facts(
+        &var facts, source_text, parsed.ast, parsed.root, &module_prefix
+    );
+    let bytes = facts.as_bytes();
+    print(bytes);
+    return;
+}
+
+// This gate proves that package declaration discovery includes a component with
+// no functions. Production backend/data has this shape for ABI records.
+pub fn package_component_type_facts_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(component_type_test_file(
+        0,
+        "backend/data",
+        "pub struct RunArtifact { pub bytes: i64, pub metadata_bytes: i64, }
+pub enum OutputStream { None, Stdout, }"
+    ));
+    try files.append(component_type_test_file(
+        1,
+        "backend",
+        "fn emit() -> i64 { return 0; }"
+    ));
+    var parsed = try parser::parse_source_files(allocator, &files);
+    var catalog = try package_catalog_collect::collect_from_parsed_files(
+        allocator, &files, &parsed
+    );
+    defer catalog.deinit();
+    var facts = std::string::String(allocator);
+    defer facts.deinit();
+    try package_type_facts::append_package_component_type_facts(
+        &var facts, &files, &parsed, &catalog
+    );
+    let fact_bytes = facts.as_bytes();
+    print(fact_bytes);
+    try parser::deinit_parsed_source_files(parsed);
+    return;
+}

@@ -27,7 +27,9 @@ std::array::Array<T>(allocator: Allocator) -> std::array::Array<T>
 array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
+array.reserve(additional: i64) -> !void
 array.pop() -> !T
+array.pop_or_panic() -> T
 array.get(index: i64) -> !T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T borrows self
@@ -40,7 +42,10 @@ array.deinit() -> void
 allocator factory or binding; `std::array::Array<T>()` is rejected.
 
 `append` moves non-copy values into the array. `pop` moves the last initialized
-element back out as `!T`. In v0.2, `get` is copy-only and returns `!T` so
+element back out as `!T`. `pop_or_panic` performs the same move, supports both
+copy and non-copy elements, returns `T`, and traps when the array is empty.
+It is for invariant-checked cleanup and traversal; recoverable empty cases use
+`pop`. In v0.2, `get` is copy-only and returns `!T` so
 out-of-bounds access is a recoverable checked error.
 `get_or_panic` is the explicit trap variant for tests and invariant-checked
 code where a bounds failure should stop execution instead of propagating.
@@ -53,7 +58,8 @@ storage. Element drop calls an explicit `deinit(self: T) -> void` method when
 one exists; otherwise it recursively drops known owned fields and union
 payloads.
 
-While an element borrow is alive, `append`, `pop`, `set`, and `deinit` are rejected.
+While an element borrow is alive, `append`, `pop`, `pop_or_panic`, `set`, and
+`deinit` are rejected.
 While a mutable element borrow is alive, reads such as `get`, `len`, and
 `capacity` are also rejected. This keeps Rust-style aliasing and reallocation
 safety without exposing lifetime annotations.
@@ -72,7 +78,8 @@ after `deinit` is a move/use-after-free style error in safe Kizu.
 
 - Safe Kizu has an explicit allocator boundary before owned collections.
 - Recoverable bounds failures stay readable `!T` errors through `get`.
-- Test/invariant code can opt into a named trap with `get_or_panic`.
+- Test/invariant code can opt into named traps with `get_or_panic` and
+  `pop_or_panic`.
 - `Array<T>` does not expose raw pointers.
 - `Array<T>` cannot cross task/thread/channel boundaries in v0.2.
 - Self-host work can use copy token enums with `get` and non-copy token structs

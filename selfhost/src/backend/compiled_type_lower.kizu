@@ -1,250 +1,6 @@
-import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::compiled_error_abi;
+import selfhost::backend::compiled_type_resolver;
 import selfhost::backend::ir_index;
-
-pub fn kizu_type_to_llvm(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    kizu_type: []u8
-) -> ![]u8 {
-    let type_len = std::mem::len(kizu_type);
-    if type_len == 0 {
-        print("empty-type-prefix");
-        print(module_prefix);
-        return error("compiled function: empty type");
-    }
-    if kizu_type[0] == cast<u8>(38) {
-        return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type[1..type_len]);
-    }
-    // A '&var <T>' mutable borrow records its 'var ' keyword as a 'var_' prefix once the leading
-    // '&' is stripped above (the param-type token replaces the keyword's trailing space with '_',
-    // e.g. '&var std::string::String' -> '&var_std::string::String'). A mutable borrow shares its
-    // pointee's ABI representation, so drop the marker and lower the pointee <T> (issue 1201).
-    if std::mem::starts_with(kizu_type, "var_") {
-        return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type[4..type_len]);
-    }
-    if kizu_type[0] == cast<u8>(33) {
-        let inner = kizu_type[1..type_len];
-        if std::mem::equal_bytes(inner, "void") {
-            return "%kizu.error.void";
-        }
-        if std::mem::equal_bytes(inner, "[]u8") {
-            return "%kizu.error.slice.u8";
-        }
-        // Error union over a read-only diagnostic value type backs the checked
-        // Array<RelatedSpan>.get accessor (Diagnostic.related_get -> !RelatedSpan,
-        // tracker 961). The success value is the RelatedSpan struct at field 1.
-        if std::mem::equal_bytes(inner, "std::kizu::diagnostic::RelatedSpan") {
-            return "%kizu.error.related_span";
-        }
-        // Error union over a NodeId backs the checked Array<NodeId>.get accessor that
-        // Ast.child_at returns (Ast.child_at -> !NodeId, tracker 961). The success
-        // value is the NodeId struct at field 1.
-        if std::mem::equal_bytes(inner, "std::kizu::ast::NodeId") {
-            return "%kizu.error.node_id";
-        }
-        if std::mem::equal_bytes(inner, "NodeId") {
-            return "%kizu.error.node_id";
-        }
-        // !i64 backs the node_count recursive AST-traversal cluster (node_count + the count_*
-        // helpers, tracker 961): every one returns !i64 = %kizu.error.i64.
-        if std::mem::equal_bytes(inner, "i64") {
-            return "%kizu.error.i64";
-        }
-        // !bool backs the formatter's token-array read predicates (issue 1165):
-        // next_token_text_equals / rbrace_wants_newline read tokens.get(...) (a
-        // checked Array<Token>.get) and return !bool, so their try-propagation and
-        // failure wrapping use the %kizu.error.bool ABI { i1, i1, %kizu.slice.u8 }
-        // already declared in the runtime.
-        if std::mem::equal_bytes(inner, "bool") {
-            return "%kizu.error.bool";
-        }
-        // !std::string::String backs the std::string::String builder cluster
-        // (issue 1165 slice 1). String lowers to the runtime-owned handle
-        // %kizu.owned, so its error union is %kizu.error.owned, i.e.
-        // { i1, %kizu.owned, %kizu.slice.u8 } (the same shape lexer::tokenize
-        // already returns).
-        if std::mem::equal_bytes(inner, "std::string::String") {
-            return "%kizu.error.owned";
-        }
-        if std::mem::equal_bytes(inner, "String") {
-            return "%kizu.error.owned";
-        }
-        // !std::array::Array<T> backs the dynamic Array<T> builder cluster
-        // (issue 1165). Array<T>, like std::string::String, lowers to the
-        // runtime-owned handle %kizu.owned, so its error union is the shared
-        // %kizu.error.owned shape { i1, %kizu.owned, %kizu.slice.u8 } (the same
-        // shape lexer::tokenize already returns for !Array<Token>). The element
-        // type only affects the runtime element_size, not the LLVM handle type,
-        // so every Array<T> instantiation shares one prefix rule.
-        if std::mem::starts_with(inner, "std::array::Array<") {
-            return "%kizu.error.owned";
-        }
-        // !CommentFormatState backs the comment-preservation driver
-        // append_preserved_line_comments (issue 1165 / 1162): the loop-carried scalar state
-        // { last: u8, at_line_start: bool, after_comment: bool } returned by value in an error
-        // union. The success value is the CommentFormatState struct at field 1, so its error union
-        // is { i1, %kizu.selfhost.parser.format.comment_format_state, %kizu.slice.u8 } -- the same
-        // struct-in-error-union shape RelatedSpan / NodeId already use.
-        if std::mem::equal_bytes(inner, "CommentFormatState") {
-            return "%kizu.error.comment_format_state";
-        }
-        // !CodeEval backs the run codegen IR v1 tape lowering cluster (lower_code_expr
-        // and the record builders): the success value is the CodeEval scalar struct
-        // { ok: bool, value: i64, next: i64 } at field 1, the same struct-in-error-union
-        // shape RelatedSpan / NodeId / CommentFormatState already use.
-        if std::mem::equal_bytes(inner, "CodeEval") {
-            return "%kizu.error.code_eval";
-        }
-        if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeEval") {
-            return "%kizu.error.code_eval";
-        }
-        // !std::kizu::ast::ParseResult backs the full std::kizu::parser::parse_program
-        // signature (issue 1157): parse_program returns the parsed AST + root node by
-        // value in an error union. ParseResult lowers to the %kizu.kizu.ast.parse_result
-        // value type the run pipeline already declares, so its error union follows the
-        // canonical { i1 ok, <value>, %kizu.slice.u8 message } shape RelatedSpan / NodeId /
-        // CodeEval already use: %kizu.error.parse_result. The closure spells the return
-        // type fully qualified, so only the qualified spelling reaches here.
-        if std::mem::equal_bytes(inner, "std::kizu::ast::ParseResult") {
-            return "%kizu.error.parse_result";
-        }
-        // !std::kizu::parser::ParseNode backs the recursive-descent parser helper cluster
-        // (parse_top_level_decl / parse_decl_with_visibility / parse_fn_decl / parse_statement /
-        // parse_expr / parse_binary_expr / parse_primary / ... , issue 1157): each helper returns
-        // the ParseNode cursor { node, next } by value in an error union. ParseNode lowers to the
-        // %kizu.kizu.parser.parse_node value type the parser facts already declare, so its error
-        // union follows the canonical { i1 ok, <value>, %kizu.slice.u8 message } shape RelatedSpan /
-        // NodeId / ParseResult already use: %kizu.error.parse_node. The closure spells the return
-        // type fully qualified, so only the qualified spelling reaches here.
-        if std::mem::equal_bytes(inner, "std::kizu::parser::ParseNode") {
-            return "%kizu.error.parse_node";
-        }
-        if std::mem::equal_bytes(inner, "std::kizu::parser::ParseRange") {
-            return "%kizu.error.parse_range";
-        }
-        // The same !ParseNode error union also reaches here spelled the bare way the parser
-        // closure emits it (function_signature::append_return does not qualify the type), so
-        // the unqualified 'ParseNode' takes the same %kizu.error.parse_node lowering as the
-        // fully-qualified spelling above -- mirroring the bare NodeId / String branches
-        // (issue 1157 PJ).
-        if std::mem::equal_bytes(inner, "ParseNode") {
-            return "%kizu.error.parse_node";
-        }
-        if std::mem::equal_bytes(inner, "ParseRange") {
-            return "%kizu.error.parse_range";
-        }
-        // !std::kizu::lexer::Token backs the parser's expect_* token helper cluster
-        // (expect_identifier / expect_keyword / ... that parse_type_name threads, issue 1157):
-        // each helper returns the matched Token value by value in an error union. Token lowers to
-        // the %kizu.kizu.lexer.token value type (seven i64 fields) the lexer facts already declare,
-        // so its error union follows the canonical { i1 ok, <value>, %kizu.slice.u8 message } shape
-        // RelatedSpan / NodeId / ParseNode already use: %kizu.error.token. The closure spells the
-        // return type fully qualified, so the qualified spelling reaches here.
-        if std::mem::equal_bytes(inner, "std::kizu::lexer::Token") {
-            return "%kizu.error.token";
-        }
-        // The same !Token error union also reaches here spelled the bare way the parser closure
-        // emits it (function_signature::append_return does not qualify the type), so the
-        // unqualified 'Token' takes the same %kizu.error.token lowering as the fully-qualified
-        // spelling above -- mirroring the bare NodeId / ParseNode branches (issue 1157).
-        if std::mem::equal_bytes(inner, "Token") {
-            return "%kizu.error.token";
-        }
-        let enum_error_union = error_union_enum_abi_or_empty(ir_bytes, module_prefix, inner);
-        if std::mem::len(enum_error_union) > 0 {
-            return enum_error_union;
-        }
-        return error("compiled function: unsupported error type");
-    }
-    if std::mem::equal_bytes(kizu_type, "i64") {
-        return "i64";
-    }
-    if std::mem::equal_bytes(kizu_type, "bool") {
-        return "i1";
-    }
-    if std::mem::equal_bytes(kizu_type, "u8") {
-        return "i8";
-    }
-    if std::mem::equal_bytes(kizu_type, "[]u8") {
-        return "%kizu.slice.u8";
-    }
-    if std::mem::equal_bytes(kizu_type, "void") {
-        return "void";
-    }
-    // std::string::String is the runtime-owned byte-buffer handle %kizu.owned
-    // (issue 1165 slice 1); String values are produced by @kizu_rt_string_new
-    // and mutated through the @kizu_rt_string_* ABI.
-    if std::mem::equal_bytes(kizu_type, "std::string::String") {
-        return "%kizu.owned";
-    }
-    if std::mem::equal_bytes(kizu_type, "String") {
-        return "%kizu.owned";
-    }
-    // std::array::Array<T> is the runtime-owned dynamic-array handle %kizu.owned
-    // (issue 1165), produced by @kizu_rt_array_new and mutated through the
-    // @kizu_rt_array_* ABI. Like std::string::String the LLVM handle is the same
-    // %kizu.owned regardless of the element type T, so a single prefix rule covers
-    // every Array<T> instantiation (Array<Token>, Array<i64>, ...).
-    if std::mem::starts_with(kizu_type, "std::array::Array<") {
-        return "%kizu.owned";
-    }
-    // Allocator is the runtime allocator handle, passed by the %kizu.owned representation like
-    // every other runtime-owned handle (the same ABI compiled_abi_params assigns it). It is the
-    // first argument of the formatter's tokenizer crossing 'lexer::tokenize(allocator, source)'
-    // (issue 1165 / 1162), so the cross-module call's arg-type resolution lowers it here.
-    if std::mem::equal_bytes(kizu_type, "Allocator") {
-        return "%kizu.owned";
-    }
-    // std::kizu::ast::SourceFile is the source record { path: []u8, text: []u8 } the full
-    // std::kizu::parser::parse_program takes by value (issue 1157). It lowers to the
-    // %kizu.kizu.ast.source_file value type (two %kizu.slice.u8 fields) the run pipeline
-    // already declares, so the SourceFile parameter and its field reads resolve here without
-    // a per-closure type-llvm fact (the strict ABI mapper assigns the same type).
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::SourceFile") {
-        return "%kizu.kizu.ast.source_file";
-    }
-    // std::kizu::parser::ParseNode is the recursive-descent parser cursor record { node: NodeId,
-    // next: Token } the parser helper cluster threads and returns by value (issue 1157). It lowers
-    // to the %kizu.kizu.parser.parse_node value type the parser facts already declare, so a
-    // ParseNode local and its field reads (e.g. 'declaration.next' / 'body.node') resolve here when
-    // spelled fully qualified, matching the unqualified 'ParseNode' ABI mapping compiled_abi_params
-    // already assigns. No new runtime ABI is invented; only the existing value type is reused.
-    if std::mem::equal_bytes(kizu_type, "std::kizu::parser::ParseNode") {
-        return "%kizu.kizu.parser.parse_node";
-    }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::parser::ParseRange") {
-        return "%kizu.kizu.parser.parse_range";
-    }
-    if std::mem::equal_bytes(kizu_type, "ParseRange") {
-        return "%kizu.kizu.parser.parse_range";
-    }
-    // CommentFormatState is the comment-preservation driver's loop-carried scalar state value
-    // { last: u8, at_line_start: bool, after_comment: bool } -> { i8, i1, i1 }, constructed by
-    // 'return CommentFormatState { ... }' in append_preserved_line_comments (issue 1165 / 1162).
-    if std::mem::equal_bytes(kizu_type, "CommentFormatState") {
-        return "%kizu.selfhost.parser.format.comment_format_state";
-    }
-    if compiled_fact_lookup::is_enum_type(ir_bytes, module_prefix, kizu_type) {
-        return "i64";
-    }
-    // A fully-qualified type (one carrying a '::' path, e.g. a recursive node_count cluster
-    // call forwarding a std::kizu::ast::Ast receiver across the module-local callee) already
-    // names its whole module in the type-llvm fact, so look it up with an empty module prefix
-    // rather than concatenating the caller's module onto it (tracker 961).
-    if type_is_qualified(kizu_type) {
-        // A fully-qualified enum (e.g. std::kizu::lexer::TokenKind written out in a Token field
-        // or signature) lowers to i64 like any enum; the enum-variant facts carry the whole path,
-        // so match them with an empty prefix before falling back to the struct type-llvm fact
-        // (tracker 961, scope 4 prerequisite).
-        if compiled_fact_lookup::is_enum_type(ir_bytes, ir_bytes[0..0], kizu_type) {
-            return "i64";
-        }
-        return try compiled_fact_lookup::lookup_type_llvm_by_prefix(
-            ir_bytes, ir_bytes[0..0], kizu_type
-        );
-    }
-    return try compiled_fact_lookup::lookup_type_llvm_by_prefix(ir_bytes, module_prefix, kizu_type);
-}
 
 pub fn kizu_type_to_llvm_indexed(
     index: &ir_index::IrIndex,
@@ -252,72 +8,27 @@ pub fn kizu_type_to_llvm_indexed(
     module_prefix: []u8,
     kizu_type: []u8
 ) -> ![]u8 {
-    let type_len = std::mem::len(kizu_type);
+    let normalized = strip_reference_prefixes(kizu_type);
+    let type_len = std::mem::len(normalized);
     if type_len == 0 {
-        return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled function: empty type in ");
+        try message.append_bytes(module_prefix);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
-    if kizu_type[0] == cast<u8>(38) {
-        return try kizu_type_to_llvm_indexed(index, ir_bytes, module_prefix, kizu_type[1..type_len]);
-    }
-    if std::mem::starts_with(kizu_type, "var_") {
-        return try kizu_type_to_llvm_indexed(index, ir_bytes, module_prefix, kizu_type[4..type_len]);
-    }
-    if kizu_type[0] == cast<u8>(33) {
-        let inner = kizu_type[1..type_len];
-        let direct = error_union_type_llvm_direct_or_empty(inner);
-        if std::mem::len(direct) > 0 {
-            return direct;
+    if normalized[0] == cast<u8>(33) {
+        let inner = normalized[1..type_len];
+        if std::mem::len(inner) == 0 {
+            return error("compiled function: empty error payload");
         }
-        let enum_error_union = error_union_enum_abi_or_empty_indexed(
+        return try error_union_inner_to_llvm_indexed(
             index, ir_bytes, module_prefix, inner
         );
-        if std::mem::len(enum_error_union) > 0 {
-            return enum_error_union;
-        }
-        return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
     }
-    let direct = non_error_type_llvm_direct_or_empty(kizu_type);
-    if std::mem::len(direct) > 0 {
-        return direct;
-    }
-    if type_is_qualified(kizu_type) {
-        if compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, ir_bytes[0..0], kizu_type) {
-            return "i64";
-        }
-        let qualified = compiled_fact_lookup::lookup_type_llvm_by_prefix_or_empty_indexed(
-            index, ir_bytes, ir_bytes[0..0], kizu_type
-        );
-        if std::mem::len(qualified) > 0 {
-            return qualified;
-        }
-    } else {
-        if compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, module_prefix, kizu_type) {
-            return "i64";
-        }
-        let local = compiled_fact_lookup::lookup_type_llvm_by_prefix_or_empty_indexed(
-            index, ir_bytes, module_prefix, kizu_type
-        );
-        if std::mem::len(local) > 0 {
-            return local;
-        }
-    }
-    return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
-}
-
-pub fn error_union_inner_to_llvm(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    inner: []u8
-) -> ![]u8 {
-    let direct = error_union_type_llvm_direct_or_empty(inner);
-    if std::mem::len(direct) > 0 {
-        return direct;
-    }
-    let enum_error_union = error_union_enum_abi_or_empty(ir_bytes, module_prefix, inner);
-    if std::mem::len(enum_error_union) > 0 {
-        return enum_error_union;
-    }
-    return error("compiled function: unsupported error type");
+    return try compiled_type_resolver::resolve_indexed(
+        index, ir_bytes, module_prefix, normalized
+    );
 }
 
 pub fn error_union_inner_to_llvm_indexed(
@@ -326,192 +37,27 @@ pub fn error_union_inner_to_llvm_indexed(
     module_prefix: []u8,
     inner: []u8
 ) -> ![]u8 {
-    let direct = error_union_type_llvm_direct_or_empty(inner);
-    if std::mem::len(direct) > 0 {
-        return direct;
-    }
-    let enum_error_union = error_union_enum_abi_or_empty_indexed(
-        index, ir_bytes, module_prefix, inner
+    let payload_abi = try compiled_type_resolver::resolve_indexed(
+        index, ir_bytes, module_prefix, strip_reference_prefixes(inner)
     );
-    if std::mem::len(enum_error_union) > 0 {
-        return enum_error_union;
-    }
-    return error("compiled function: unsupported error type");
+    return try compiled_error_abi::lookup_indexed(index, ir_bytes, payload_abi);
 }
 
-// The indexed lowerer uses these direct maps before falling back to the non-indexed scanner.
-// Keep them byte-equivalent to the direct branches in kizu_type_to_llvm.
-fn error_union_type_llvm_direct_or_empty(inner: []u8) -> []u8 {
-    if std::mem::equal_bytes(inner, "void") {
-        return "%kizu.error.void";
-    }
-    if std::mem::equal_bytes(inner, "[]u8") {
-        return "%kizu.error.slice.u8";
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::diagnostic::RelatedSpan") {
-        return "%kizu.error.related_span";
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::ast::NodeId") {
-        return "%kizu.error.node_id";
-    }
-    if std::mem::equal_bytes(inner, "NodeId") {
-        return "%kizu.error.node_id";
-    }
-    if std::mem::equal_bytes(inner, "i64") {
-        return "%kizu.error.i64";
-    }
-    if std::mem::equal_bytes(inner, "bool") {
-        return "%kizu.error.bool";
-    }
-    if std::mem::equal_bytes(inner, "std::string::String") {
-        return "%kizu.error.owned";
-    }
-    if std::mem::equal_bytes(inner, "String") {
-        return "%kizu.error.owned";
-    }
-    if std::mem::starts_with(inner, "std::array::Array<") {
-        return "%kizu.error.owned";
-    }
-    if std::mem::equal_bytes(inner, "CommentFormatState") {
-        return "%kizu.error.comment_format_state";
-    }
-    if std::mem::equal_bytes(inner, "CodeEval") {
-        return "%kizu.error.code_eval";
-    }
-    if std::mem::equal_bytes(inner, "selfhost::ir::codegen::CodeEval") {
-        return "%kizu.error.code_eval";
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::ast::ParseResult") {
-        return "%kizu.error.parse_result";
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::parser::ParseNode") {
-        return "%kizu.error.parse_node";
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::parser::ParseRange") {
-        return "%kizu.error.parse_range";
-    }
-    if std::mem::equal_bytes(inner, "ParseNode") {
-        return "%kizu.error.parse_node";
-    }
-    if std::mem::equal_bytes(inner, "ParseRange") {
-        return "%kizu.error.parse_range";
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::lexer::Token") {
-        return "%kizu.error.token";
-    }
-    if std::mem::equal_bytes(inner, "Token") {
-        return "%kizu.error.token";
-    }
-    return "";
-}
-
-fn non_error_type_llvm_direct_or_empty(kizu_type: []u8) -> []u8 {
-    if std::mem::equal_bytes(kizu_type, "i64") {
-        return "i64";
-    }
-    if std::mem::equal_bytes(kizu_type, "bool") {
-        return "i1";
-    }
-    if std::mem::equal_bytes(kizu_type, "u8") {
-        return "i8";
-    }
-    if std::mem::equal_bytes(kizu_type, "[]u8") {
-        return "%kizu.slice.u8";
-    }
-    if std::mem::equal_bytes(kizu_type, "void") {
-        return "void";
-    }
-    if std::mem::equal_bytes(kizu_type, "std::string::String") {
-        return "%kizu.owned";
-    }
-    if std::mem::equal_bytes(kizu_type, "String") {
-        return "%kizu.owned";
-    }
-    if std::mem::starts_with(kizu_type, "std::array::Array<") {
-        return "%kizu.owned";
-    }
-    if std::mem::equal_bytes(kizu_type, "Allocator") {
-        return "%kizu.owned";
-    }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::SourceFile") {
-        return "%kizu.kizu.ast.source_file";
-    }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::parser::ParseNode") {
-        return "%kizu.kizu.parser.parse_node";
-    }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::parser::ParseRange") {
-        return "%kizu.kizu.parser.parse_range";
-    }
-    if std::mem::equal_bytes(kizu_type, "ParseRange") {
-        return "%kizu.kizu.parser.parse_range";
-    }
-    if std::mem::equal_bytes(kizu_type, "CommentFormatState") {
-        return "%kizu.selfhost.parser.format.comment_format_state";
-    }
-    return "";
-}
-
-// type_is_qualified reports whether a kizu type spelling carries a '::' module path, i.e. it
-// is already fully qualified (tracker 961).
-fn type_is_qualified(kizu_type: []u8) -> bool {
-    let len = std::mem::len(kizu_type);
-    var index = 0;
-    while index < len {
-        if kizu_type[index] == cast<u8>(58) {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
-fn error_union_enum_abi_or_empty(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    inner: []u8
-) -> []u8 {
-    if type_is_qualified(inner) {
-        if !compiled_fact_lookup::is_enum_type(ir_bytes, ir_bytes[0..0], inner) {
-            return ir_bytes[0..0];
-        }
-    } else {
-        if !compiled_fact_lookup::is_enum_type(ir_bytes, module_prefix, inner) {
-            return ir_bytes[0..0];
+fn strip_reference_prefixes(kizu_type: []u8) -> []u8 {
+    var result = kizu_type;
+    var changed = true;
+    while changed {
+        changed = false;
+        let len = std::mem::len(result);
+        if len > 0 and result[0] == cast<u8>(38) {
+            result = result[1..len];
+            changed = true;
+        } else {
+            if std::mem::starts_with(result, "var_") {
+                result = result[4..len];
+                changed = true;
+            }
         }
     }
-    if std::mem::equal_bytes(inner, "std::kizu::ast::PrefixOp") or
-        std::mem::equal_bytes(inner, "PrefixOp") {
-        return "%kizu.error.prefix_op";
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::ast::BinaryOp") or
-        std::mem::equal_bytes(inner, "BinaryOp") {
-        return "%kizu.error.binary_op";
-    }
-    return ir_bytes[0..0];
-}
-
-fn error_union_enum_abi_or_empty_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    inner: []u8
-) -> []u8 {
-    if type_is_qualified(inner) {
-        if !compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, ir_bytes[0..0], inner) {
-            return ir_bytes[0..0];
-        }
-    } else {
-        if !compiled_fact_lookup::is_enum_type_indexed(index, ir_bytes, module_prefix, inner) {
-            return ir_bytes[0..0];
-        }
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::ast::PrefixOp") or
-        std::mem::equal_bytes(inner, "PrefixOp") {
-        return "%kizu.error.prefix_op";
-    }
-    if std::mem::equal_bytes(inner, "std::kizu::ast::BinaryOp") or
-        std::mem::equal_bytes(inner, "BinaryOp") {
-        return "%kizu.error.binary_op";
-    }
-    return ir_bytes[0..0];
+    return result;
 }

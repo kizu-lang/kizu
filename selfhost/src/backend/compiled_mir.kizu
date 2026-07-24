@@ -1,3 +1,43 @@
+import selfhost::ir::builtin_contract;
+
+pub struct MirNameStore {
+    names: std::array::Array<std::string::String>,
+    views: std::map::Map<[]u8, []u8>,
+}
+
+pub fn mir_name_store() -> MirNameStore {
+    return MirNameStore {
+        names: std::array::Array<std::string::String>(
+            std::mem::page_allocator()
+        ),
+        views: std::map::Map<[]u8, []u8>(std::mem::page_allocator())
+    };
+}
+
+impl MirNameStore {
+    fn deinit(self: MirNameStore) -> void {
+        self.views.deinit();
+        while self.names.len() > 0 {
+            let name = self.names.pop_or_panic();
+            name.deinit();
+        }
+        self.names.deinit();
+        return;
+    }
+
+    fn own(
+        self: &var MirNameStore,
+        name: std::string::String
+    ) -> ![]u8 {
+        try self.names.append(name);
+        let names = &self.names;
+        let stored_name = try names.at(names.len() - 1);
+        let generated = stored_name.as_bytes();
+        try self.views.insert(generated, generated);
+        return try self.views.get(generated);
+    }
+}
+
 pub enum MirTypeKind {
     SliceU8,
     I64,
@@ -37,7 +77,21 @@ pub enum MirCallArgKind {
     Arith,
     Temp,
     Call,
+    TypeSize,
 }
+
+pub enum MirStorageCodec {
+    None,
+    IdentityI64,
+    BoolI64,
+    UnsignedNarrowI64,
+    SignedNarrowI64,
+    ByteView,
+}
+
+// The codec names the semantic/storage pair, not only the encode operation.
+// Encoding uses zext/sext; a future read path can use the same value to decode
+// BoolI64 with icmp-ne and both narrow integer codecs with trunc.
 
 // A FieldAccess call arg mirrors MirStructField's nested layout: source_type /
 // source_field_index extract the first field off the Var receiver, and when
@@ -62,6 +116,8 @@ pub enum MirCallArgKind {
 // offset. slice_*_field_index == -1 keeps the plain register/literal bound.
 pub struct MirCallArg {
     pub ty: []u8,
+    pub semantic_type: []u8,
+    pub storage_codec: MirStorageCodec,
     pub kind: MirCallArgKind,
     pub value: []u8,
     pub bool_value: bool,
@@ -95,7 +151,6 @@ pub enum MirStructFieldKind {
     EmptySlice,
     Call,
     StructLiteral,
-    ArrayNew,
 }
 
 // A Call struct field carries a resolved direct call (callee + module prefix +
@@ -117,6 +172,11 @@ pub struct MirStructField {
     pub source_field_index: i64,
     pub nested_source_type: []u8,
     pub computed_rhs_name: []u8,
+    pub computed_op: []u8,
+    pub computed_lhs_literal: i64,
+    pub computed_lhs_is_literal: bool,
+    pub computed_rhs_literal: i64,
+    pub computed_rhs_is_literal: bool,
     pub call_module_prefix: []u8,
     pub call_callee_name: []u8,
     pub call_args: std::array::Array<MirCallArg>,
@@ -235,7 +295,12 @@ pub struct MirSliceExpr {
 
 pub struct MirCallExpr {
     pub id: i64,
+    // llvm_type is the semantic expression result. storage_llvm_type is the
+    // physical callee result decoded according to result_transport.
     pub llvm_type: []u8,
+    pub storage_llvm_type: []u8,
+    pub success_llvm_type: []u8,
+    pub result_transport: builtin_contract::RuntimeResultTransport,
     pub call_module_prefix: []u8,
     pub call_callee_name: []u8,
     pub call_args: std::array::Array<MirCallArg>,
@@ -356,10 +421,10 @@ pub struct MirLetStructStmt {
 }
 
 // MirLetArenaAddStmt backs a 'let <name> = self.<field>.add(<struct literal>);'
-// (Arena<T>.add(T) -> handle index, tracker 961). It constructs the element struct
+// (Arena<T>.add(T) -> opaque handle, tracker 961). It constructs the element struct
 // (T) from struct_fields, marshals it through stack storage as a %kizu.slice.u8
 // (ptr + sizeof(T)), reads the Arena<T> handle off the struct value receiver, calls
-// @kizu_rt_arena_add, and binds <name> to the appended slot index. Ast.add_node is
+// @kizu_rt_arena_add, and binds <name> to the pointer-plus-index handle. Ast.add_node is
 // its first consumer: it constructs an AstNode (Span + AstData union) and appends it
 // to the nodes Arena, exercising the AstNode/AstData union value-type ABI.
 pub struct MirLetArenaAddStmt {
@@ -460,6 +525,7 @@ pub struct MirLetTryCallStmt {
     pub name: []u8,
     pub called_error_union: []u8,
     pub success_type: []u8,
+    pub result_transport: builtin_contract::RuntimeResultTransport,
     pub own_error_union: []u8,
     pub call_module_prefix: []u8,
     pub call_callee_name: []u8,
@@ -529,6 +595,22 @@ pub struct MirCondOperand {
     pub insts: std::array::Array<MirExprInst>,
 }
 
+// MirCondTarget names the two destinations a short-circuit chain leaf branches to. A leaf is one
+// operand of the condition's and/or tree, and the leaves are lowered in left-to-right evaluation
+// order, so an arbitrarily nested tree ('a or b or (c and d)') is representable as a flat leaf
+// list: nesting only changes where each leaf's edges go, never the evaluation order. The two
+// targets are renderer-agnostic so the same list drives an if (true -> ifN_then, false ->
+// ifN_cont) and a while head (true -> loopN_body, false -> loopN_exit):
+//   -1 = the condition-true destination
+//   -2 = the condition-false destination
+//   k >= 0 = leaf k's own block (always k > the branching leaf's index)
+// A flat 'and' chain therefore yields (next, -2) per leaf and (-1, -2) for the last, and a flat
+// 'or' chain yields (-1, next) and (-1, -2), reproducing the pre-nesting edge layout exactly.
+pub struct MirCondTarget {
+    pub true_target: i64,
+    pub false_target: i64,
+}
+
 // MirIfMergeVar describes one mutable local crossing a no-else void if join. input_name is the
 // incoming SSA alias before the if, then_name is the alias after the then body, and output_name is
 // the alias loaded in the fall-through continuation.
@@ -543,8 +625,8 @@ pub struct MirIfMergeVar {
 
 // cond_short_circuit selects how the condition drives the branch:
 //   0 = single condition (cond_insts / cond_result_id only)
-//   1 = lhs and rhs short-circuit; rhs is only evaluated when lhs is true
-//   2 = lhs or rhs short-circuit; rhs is only evaluated when lhs is false
+//   1 = a short-circuit leaf chain; cond_targets names each leaf's two branch destinations, so
+//       an arbitrarily nested and/or tree needs no separate and/or discriminator here
 // cond_try_call selects a hoisted 'try <free !bool call>' condition that propagates the
 // call failure as this function's own error union and branches on the unwrapped success bool.
 // cond_try_then_on_success records the condition polarity: positive try-call conditions branch to
@@ -554,14 +636,15 @@ pub struct MirIfMergeVar {
 // When short-circuit is active cond_insts/cond_result_id hold the lhs (the first
 // operand) and cond_rhs_insts/cond_rhs_result_id hold the second operand, lowered in
 // the guarded block so a trapping/loading operand (e.g. a byte index) never runs unless
-// reached. An 'and' or 'or' header may carry further operands in cond_extra_operands: each
-// is guarded by every earlier operand, so a chained 'a and b and c' short-circuit
-// (after_line_break's 'source[index] == 13 and index + 1 < length and source[index + 1]
-// == 10') evaluates the guarded byte loads only when their guards hold, and a chained 'a or
-// b or c' short-circuit (should_insert_space's 'last == 0 or last == 10 or last == 32')
-// stops at the first true operand (issue 1165 / 1162). cond_extra_operands is empty for a
-// single condition and a two-operand 'and' / 'or', so those keep their existing block
-// layout; a multi-operand 'and' or 'or' fills it with the third and later operand blocks.
+// reached. Any further leaves live in cond_extra_operands, each in its own guarded block, so a
+// chained 'a and b and c' short-circuit (after_line_break's 'source[index] == 13 and index + 1 <
+// length and source[index + 1] == 10') evaluates the guarded byte loads only when their guards
+// hold, and a chained 'a or b or c' short-circuit (should_insert_space's 'last == 0 or last == 10
+// or last == 32') stops at the first true operand (issue 1165 / 1162). cond_extra_operands is
+// empty for a single condition and a two-leaf condition, so those keep their existing block
+// layout. Because cond_targets carries each leaf's edges, a mixed tree such as
+// function_call_error_for_ast_call's 'a or b or (try c) or (d and e) or (f and g)' uses the same
+// flat leaf list -- only the edges differ.
 pub struct MirIfStmt {
     pub if_index: i64,
     pub string_index: i64,
@@ -572,6 +655,10 @@ pub struct MirIfStmt {
     pub cond_rhs_result_id: i64,
     pub cond_rhs_insts: std::array::Array<MirExprInst>,
     pub cond_extra_operands: std::array::Array<MirCondOperand>,
+    // cond_targets holds one MirCondTarget per chain leaf in evaluation order -- leaf 0 is
+    // cond_insts, leaf 1 is cond_rhs_insts, and leaf j >= 2 is cond_extra_operands[j - 2]. It is
+    // empty when cond_short_circuit is 0, exactly like cond_rhs_insts / cond_extra_operands.
+    pub cond_targets: std::array::Array<MirCondTarget>,
     pub cond_try_call: bool,
     pub cond_try_then_on_success: bool,
     pub cond_called_error_union: []u8,
@@ -609,20 +696,22 @@ pub struct MirIfStmt {
 // 'var index = <param-or-local>' initializer, e.g. index_after_import's import_index),
 // otherwise from the induction_init integer literal ('var index = <int>'); only those
 // two init shapes are accepted (issue 1165).
-// The header condition is one of three shapes, selected by cond_short_circuit:
-//   0 = a single comparison, or an 'and' chain whose operands are all side-effect-free
+// The header condition is one of two shapes, selected by cond_short_circuit:
+//   0 = a single comparison, or an and/or tree whose operands are all side-effect-free
 //       (an eager 'and i1' is observably identical to short-circuit, so it folds into
 //       cond_insts / cond_result_id and the head emits one 'br i1');
-//   1 = a genuine short-circuit 'and' chain whose later operands could trap when an
-//       earlier one is false (line_end_excluding_break's 'index < length and
+//   1 = a genuine short-circuit leaf chain whose later leaves could trap when an
+//       earlier one decides the condition (line_end_excluding_break's 'index < length and
 //       !is_line_break(source[index])' loads source[index] only when index < length),
-//       so cond_insts / cond_result_id hold the first operand in the head, cond_rhs_insts
-//       / cond_rhs_result_id hold the second in a guarded loopN_head_rhs block, and any
-//       further operands fill cond_extra_operands, each guarded by every earlier operand.
-// An 'or' header is rejected. cond_rhs_insts / cond_extra_operands are empty when
-// cond_short_circuit is 0 (issue 1165 / 1162).
+//       so cond_insts / cond_result_id hold leaf 0 in the head, cond_rhs_insts
+//       / cond_rhs_result_id hold leaf 1 in a guarded loopN_head_rhs block, and any
+//       further leaves fill cond_extra_operands. cond_targets names each leaf's two
+//       branch destinations, so the tree may nest 'and' and 'or' freely.
+// cond_rhs_insts / cond_extra_operands / cond_targets are empty when cond_short_circuit is 0
+// (issue 1165 / 1162).
 // The latch advances the induction variable. When latch_stmts is empty the latch is the
-// constant-step 'add i64 %<var>, induction_step' (the 'index = index + <int>' increment).
+// constant update '<op> i64 %<var>, induction_step'. Most loops use add; bounded formatting
+// loops also use mul/sdiv to advance a decimal divisor.
 // When latch_stmts holds one statement the latch is a generic loop-carried update: a
 // 'index = try <callee>(.., index);' try-call whose success value (field 1) feeds the
 // phi as %<var>_next and whose failure propagates as this function's own error union
@@ -664,6 +753,7 @@ pub struct MirWhileStmt {
     // computes '%<var>_init = add i64 %<init_var>, offset' and the phi seeds from it; a zero
     // offset keeps the plain '%<init_var>' copy seed (issue 1165 / 1162).
     pub induction_init_offset: i64,
+    pub induction_op: []u8,
     pub induction_step: i64,
     pub cond_result_id: i64,
     pub cond_insts: std::array::Array<MirExprInst>,
@@ -671,6 +761,9 @@ pub struct MirWhileStmt {
     pub cond_rhs_result_id: i64,
     pub cond_rhs_insts: std::array::Array<MirExprInst>,
     pub cond_extra_operands: std::array::Array<MirCondOperand>,
+    // cond_targets holds one MirCondTarget per chain leaf in evaluation order, indexed exactly
+    // like MirIfStmt.cond_targets. It is empty when cond_short_circuit is 0.
+    pub cond_targets: std::array::Array<MirCondTarget>,
     pub body_stmts: std::array::Array<MirStmt>,
     pub latch_stmts: std::array::Array<MirStmt>,
     // latch_copy_var names the body-local a copy-decrement latch assigns into the induction
@@ -709,17 +802,14 @@ pub struct MirWhileStmt {
     pub branch_latch_advance_stmts: std::array::Array<MirStmt>,
 }
 
-// MirTraversalArg is one payload-field argument forwarded to a node_count traversal arm's
-// count_* callee: extractvalue field_index off the bound variant payload, typed arg_llvm_type
-// (tracker 961). The receiver (the Ast tree) is always the implicit first call argument and
-// is not modelled here. It owns nothing.
-pub struct MirTraversalArg {
+// MirTraversalPayloadArg is the one traversal-specific argument setup that cannot be
+// expressed before the match arm has materialized its tagged-union payload. The lowerer
+// reserves temp_id in the arm's common expression namespace, the renderer extracts
+// field_index into %t<temp_id>, and the final call consumes that value through an ordinary
+// MirCallArg::Temp. It owns nothing.
+pub struct MirTraversalPayloadArg {
     pub field_index: i64,
-    pub arg_llvm_type: []u8,
-    pub is_param: bool,
-    pub param_name: []u8,
-    pub is_literal: bool,
-    pub literal_value: i64,
+    pub temp_id: i64,
 }
 
 // MirTraversalArm is one arm of the node_count match-over-AstData traversal (tracker 961).
@@ -729,7 +819,9 @@ pub struct MirTraversalArg {
 // returns its error union directly (the callee and node_count share the !i64 return type, so
 // the try is an identity tail return needing no ok/fail branch). A leaf arm ('Variant(_) => 1'
 // / 'Empty => 1') sets is_literal and returns the literal wrapped as the error-union success.
-// It owns the payload-field arg Array.
+// Parameter/literal/string/computed arguments use the same MirExprInst + MirCallArg path as
+// every other call. Only payload_args retains traversal-specific materialization metadata.
+// It owns all three Arrays.
 pub struct MirTraversalArm {
     pub tag: i64,
     pub is_literal: bool,
@@ -739,8 +831,13 @@ pub struct MirTraversalArm {
     pub callee_module: []u8,
     pub callee_name: []u8,
     pub is_plain_call: bool,
+    pub is_payload_value: bool,
+    pub is_expr_value: bool,
+    pub value_result_id: i64,
     pub success_llvm: []u8,
-    pub args: std::array::Array<MirTraversalArg>,
+    pub arg_insts: std::array::Array<MirExprInst>,
+    pub call_args: std::array::Array<MirCallArg>,
+    pub payload_args: std::array::Array<MirTraversalPayloadArg>,
 }
 
 // MirCountRangeStmt backs count_range: 'var count = 0; var index = 0; while index <
@@ -749,12 +846,21 @@ pub struct MirTraversalArm {
 // emits a two-phi accumulator loop (count + index) whose body calls the checked Ast.child_at
 // and the recursive node_count, propagating either error union as this function's own !i64
 // failure, and on the exhausted loop returns the accumulated count wrapped as the success.
+// child_error_union is the exact fact-derived ABI of Ast.child_at's !NodeId result;
+// the renderer must not infer it from a nominal spelling.
 pub struct MirCountRangeStmt {
     pub receiver_name: []u8,
     pub receiver_type: []u8,
     pub range_name: []u8,
+    pub range_type: []u8,
+    pub range_len_field_index: i64,
+    pub child_module: []u8,
+    pub child_name: []u8,
+    pub child_index_type: []u8,
+    pub child_value_type: []u8,
     pub node_count_module: []u8,
     pub node_count_name: []u8,
+    pub child_error_union: []u8,
     pub own_error_union: []u8,
 }
 
@@ -779,6 +885,13 @@ pub struct MirAstNodeTextStmt {
     pub ast_type: []u8,
     pub node_id_name: []u8,
     pub node_id_type: []u8,
+    pub get_module: []u8,
+    pub get_name: []u8,
+    pub node_type: []u8,
+    pub span_type: []u8,
+    pub span_field_index: i64,
+    pub span_start_index: i64,
+    pub span_end_index: i64,
     pub trim_module: []u8,
     pub trim_name: []u8,
 }
@@ -894,9 +1007,9 @@ pub struct MirParserSpanPredicateStmt {
     pub source_name: []u8,
     pub span_name: []u8,
     pub span_type: []u8,
-    pub is_name_symbol: []u8,
-    pub is_double_colon_symbol: []u8,
-    pub is_upper_symbol: []u8,
+    pub is_name_callee_qualified: []u8,
+    pub is_double_colon_callee_qualified: []u8,
+    pub is_upper_callee_qualified: []u8,
 }
 
 // MirParserPostfixStartStmt backs the parser's AST-aware postfix disambiguators:
@@ -913,11 +1026,14 @@ pub struct MirParserPostfixStartStmt {
     pub token_type: []u8,
     pub ast_node_type: []u8,
     pub span_type: []u8,
+    pub get_module: []u8,
+    pub get_name: []u8,
+    pub node_id_type: []u8,
     pub node_field_index: i64,
     pub next_field_index: i64,
     pub ast_node_span_field_index: i64,
-    pub guard_symbol: []u8,
-    pub span_symbol: []u8,
+    pub guard_callee_qualified: []u8,
+    pub span_callee_qualified: []u8,
 }
 
 // MirArrayNewStmt backs 'var <result> = std::array::Array<T>(<allocator>)': it binds a fresh
@@ -928,6 +1044,7 @@ pub struct MirParserPostfixStartStmt {
 pub struct MirArrayNewStmt {
     pub result_name: []u8,
     pub owned_type: []u8,
+    pub allocator_type: []u8,
     pub allocator_name: []u8,
     pub element_type: []u8,
 }
@@ -1219,10 +1336,16 @@ pub struct MirGuardedCursorLoopStmt {
 // so it is dispatched by name.
 pub struct MirFirstTokenStmt {
     pub source_name: []u8,
+    pub source_type: []u8,
     pub position_type: []u8,
     pub token_type: []u8,
-    pub position_symbol: []u8,
-    pub token_at_symbol: []u8,
+    pub position_line_type: []u8,
+    pub position_column_type: []u8,
+    pub offset_type: []u8,
+    pub position_module: []u8,
+    pub position_name: []u8,
+    pub token_at_module: []u8,
+    pub token_at_name: []u8,
 }
 
 // MirNextTokenStmt backs next_token(source, previous): it reads previous.start / end / line /
@@ -1232,12 +1355,24 @@ pub struct MirFirstTokenStmt {
 // name.
 pub struct MirNextTokenStmt {
     pub source_name: []u8,
+    pub source_type: []u8,
     pub previous_name: []u8,
     pub position_type: []u8,
     pub token_type: []u8,
-    pub position_symbol: []u8,
-    pub advance_position_symbol: []u8,
-    pub token_at_symbol: []u8,
+    pub start_field_type: []u8,
+    pub end_field_type: []u8,
+    pub line_field_type: []u8,
+    pub column_field_type: []u8,
+    pub start_field_index: i64,
+    pub end_field_index: i64,
+    pub line_field_index: i64,
+    pub column_field_index: i64,
+    pub position_module: []u8,
+    pub position_name: []u8,
+    pub advance_position_module: []u8,
+    pub advance_position_name: []u8,
+    pub token_at_module: []u8,
+    pub token_at_name: []u8,
 }
 
 // MirOperator is one entry of raw_token_at's operator dispatch table (tracker 961, scope 4
@@ -1327,6 +1462,13 @@ pub struct MirStringLiteralSpanStmt {
     pub ast_type: []u8,
     pub node_id_name: []u8,
     pub node_id_type: []u8,
+    pub get_module: []u8,
+    pub get_name: []u8,
+    pub node_type: []u8,
+    pub span_type: []u8,
+    pub span_field_index: i64,
+    pub span_start_index: i64,
+    pub span_end_index: i64,
     pub callee_module: []u8,
     pub is_payload_name: []u8,
     pub empty_name: []u8,
@@ -1431,22 +1573,60 @@ pub struct MirArrayTrySetStmt {
     pub call_args: std::array::Array<MirCallArg>,
 }
 
-// MirVoidTryCallStmt backs a bare 'try <callee>(<args>);' statement whose callee is a free
-// function returning an error-union void success ('append_sorted_imports(...) -> !void', issue
-// 1201). It composes LetTryCall's free-function failure propagation with StringTryAppend's
-// value-less continuation: the callee resolves to a module-prefixed symbol returning
-// %kizu.error.void, so the renderer emits the call, extracts the ok flag (field 0), and branches
-// on a try_index-suffixed label pair -- try<N>_fail re-wraps the callee message (%kizu.error.void
-// field 1) into this function's own error union (own_error_union) and returns it (propagation,
-// never 'unreachable'); try<N>_cont continues with no bound value because the success type is
-// void. It owns the call-argument Array, mirroring MirLetTryCallStmt.
+// MirVoidTryCallStmt backs a bare 'try <callee>(<args>);' statement. The callee may return any
+// error-union success type; the success value is intentionally discarded because the call is in
+// statement position. called_error_union retains the callee's physical ABI so the renderer can
+// extract its ok flag and message without assuming a void success.
 pub struct MirVoidTryCallStmt {
     pub own_error_union: []u8,
+    pub called_error_union: []u8,
     pub call_module_prefix: []u8,
     pub call_callee_name: []u8,
     pub string_index: i64,
     pub try_index: i64,
     pub call_args: std::array::Array<MirCallArg>,
+}
+
+// MirVoidTryExprStmt backs a bare 'try <expr>;' statement whose operand is not a call --
+// the deferred-propagation shape 'let r = <fallible call>; <cleanup>; try r;'. expr_insts
+// lower the operand generically (any expression kind) and expr_result_id names the temp
+// holding its error-union aggregate, whose physical ABI is called_error_union. The renderer
+// extracts the ok flag and propagates the message through own_error_union exactly like
+// MirVoidTryCallStmt; the success value is discarded because the try is in statement
+// position. It owns the expression instruction Array.
+pub struct MirVoidTryExprStmt {
+    pub own_error_union: []u8,
+    pub called_error_union: []u8,
+    pub string_index: i64,
+    pub try_index: i64,
+    pub expr_result_id: i64,
+    pub expr_insts: std::array::Array<MirExprInst>,
+}
+
+// MirVoidCallStmt backs a resolved non-error-union call used as an expression
+// statement. The call target is already instance-scoped by lowering; the value
+// is intentionally discarded because its canonical result is void.
+pub struct MirVoidCallStmt {
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub string_index: i64,
+    pub call_args: std::array::Array<MirCallArg>,
+}
+
+// MirErrDeferStmt registers a resolved zero-argument cleanup call. It emits no
+// code on the success path; failure renderers replay active registrations in
+// reverse order immediately before returning the propagated error.
+pub struct MirErrDeferStmt {
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub call_args: std::array::Array<MirCallArg>,
+}
+
+pub struct MirPrintStmt {
+    pub transport: builtin_contract::PrintRuntimeTransport,
+    pub value_llvm_type: []u8,
+    pub value_result_id: i64,
+    pub value_insts: std::array::Array<MirExprInst>,
 }
 
 // MirOwnedDeinitStmt backs a non-try '<receiver>.deinit();' expression statement on a value
@@ -1457,13 +1637,17 @@ pub struct MirOwnedDeinitStmt {
     pub receiver_name: []u8,
 }
 
-// MirMatchTraversalStmt backs the node_count recursive AST-traversal accessor: 'let node =
-// tree.get(node_id); return match node.data { <44 arms> };' (tracker 961). The renderer binds
-// the AstNode by value off the Ast.get call, extracts the AstData union (field
-// data_field_index) and its i64 tag, then emits an exhaustive icmp/br chain over the arms,
+// MirMatchTraversalStmt backs a recursive tagged-union traversal accessor: 'let node =
+// tree.get(node_id); return match node.data { ... };'. The lowerer resolves the get callee,
+// returned node ABI, and exact union field ABI before constructing MIR; the renderer only
+// consumes these fields and emits an exhaustive icmp/br chain over the arms,
 // each arm returning a real value (no 'unreachable'). own_error_union is the node_count return
 // type the leaf arms wrap into. It owns the arm Array.
 pub struct MirMatchTraversalStmt {
+    pub get_module: []u8,
+    pub get_name: []u8,
+    pub node_type: []u8,
+    pub union_type: []u8,
     pub receiver_type: []u8,
     pub receiver_name: []u8,
     pub index_type: []u8,
@@ -1528,7 +1712,11 @@ pub union MirStmt {
     StringTryAppend(MirStringTryAppendStmt),
     ArrayTryAppend(MirArrayTryAppendStmt),
     ArrayTrySet(MirArrayTrySetStmt),
+    ErrDefer(MirErrDeferStmt),
+    VoidCall(MirVoidCallStmt),
     VoidTryCall(MirVoidTryCallStmt),
+    VoidTryExpr(MirVoidTryExprStmt),
+    Print(MirPrintStmt),
     OwnedDeinit(MirOwnedDeinitStmt),
     CountRange(MirCountRangeStmt),
     TrimAscii(MirTrimAsciiStmt),
@@ -1614,19 +1802,19 @@ pub struct MirArenaGetInst {
     pub index_field_index: i64,
 }
 
-// MirMatchUnionInst backs the first 'match <ast node>.data { Variant(bind) =>
-// bind.<field>.<field>, _ => <int> }' accessor compiled into stage2 (tracker 961).
-// It is a read-only AST accessor whose body first binds an AstNode by value from an
-// Ast.get method call (self_name.get(index_name)), then matches on the AstNode/AstData
-// tagged-union value: the renderer extracts the AstData union (AstNode field
-// data_field_index), reads its i64 tag (field 0), and dispatches on variant_tag. The
+// MirMatchUnionInst backs a 'match <node>.data { Variant(bind) =>
+// bind.<field>.<field>, _ => <int> }' accessor. It first binds the resolved node value
+// from a resolved get method call, then matches on the exact tagged-union field ABI:
+// the renderer reads its i64 tag (field 0) and dispatches on variant_tag. The
 // active arm extracts the variant payload out of the inline union storage (the canonical
 // alloca+store+gep field 1+load ABI) and returns a two-level field access off it
 // (payload field0_index : field0_type, then field1_index : the i64 return type). The
-// default arm returns default_value. The Ast.get callee symbol and the AstNode/AstData
-// llvm types are the fixed AstData match ABI, so the renderer hardcodes them; everything
-// variant-specific flows through this instruction. It owns nothing, so it is copy-only.
+// default arm returns default_value. It owns nothing, so it is copy-only.
 pub struct MirMatchUnionInst {
+    pub get_module: []u8,
+    pub get_name: []u8,
+    pub node_type: []u8,
+    pub union_type: []u8,
     pub receiver_type: []u8,
     pub receiver_name: []u8,
     pub index_type: []u8,
@@ -1880,6 +2068,34 @@ impl MirVoidTryCallStmt {
     }
 }
 
+impl MirVoidTryExprStmt {
+    fn deinit(self: MirVoidTryExprStmt) -> void {
+        self.expr_insts.deinit();
+        return;
+    }
+}
+
+impl MirVoidCallStmt {
+    fn deinit(self: MirVoidCallStmt) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
+impl MirErrDeferStmt {
+    fn deinit(self: MirErrDeferStmt) -> void {
+        self.call_args.deinit();
+        return;
+    }
+}
+
+impl MirPrintStmt {
+    fn deinit(self: MirPrintStmt) -> void {
+        self.value_insts.deinit();
+        return;
+    }
+}
+
 impl MirOwnedDeinitStmt {
     fn deinit(self: MirOwnedDeinitStmt) -> void {
         return;
@@ -2074,7 +2290,9 @@ impl MirStringLiteralSpanStmt {
 
 impl MirTraversalArm {
     fn deinit(self: MirTraversalArm) -> void {
-        self.args.deinit();
+        self.arg_insts.deinit();
+        self.call_args.deinit();
+        self.payload_args.deinit();
         return;
     }
 }
@@ -2127,6 +2345,7 @@ impl MirIfStmt {
         self.cond_insts.deinit();
         self.cond_rhs_insts.deinit();
         self.cond_extra_operands.deinit();
+        self.cond_targets.deinit();
         self.cond_call_args.deinit();
         self.then_call_args.deinit();
         self.then_expr_insts.deinit();
@@ -2147,6 +2366,7 @@ impl MirWhileStmt {
         self.cond_insts.deinit();
         self.cond_rhs_insts.deinit();
         self.cond_extra_operands.deinit();
+        self.cond_targets.deinit();
         self.body_stmts.deinit();
         self.latch_stmts.deinit();
         self.secondary_inductions.deinit();
@@ -2218,7 +2438,11 @@ impl MirStmt {
             StringTryAppend(payload) => payload.deinit(),
             ArrayTryAppend(payload) => payload.deinit(),
             ArrayTrySet(payload) => payload.deinit(),
+            ErrDefer(payload) => payload.deinit(),
+            VoidCall(payload) => payload.deinit(),
             VoidTryCall(payload) => payload.deinit(),
+            VoidTryExpr(payload) => payload.deinit(),
+            Print(payload) => payload.deinit(),
             OwnedDeinit(payload) => payload.deinit(),
             CountRange(payload) => payload.deinit(),
             TrimAscii(payload) => payload.deinit(),
@@ -2360,6 +2584,7 @@ pub fn multi_result_value(id: i64, ty: MirType, name: []u8) -> MirValue {
 pub fn var_call_arg(ty: []u8, name: []u8) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::Var,
         value: name,
         bool_value: false,
@@ -2386,6 +2611,7 @@ pub fn var_call_arg(ty: []u8, name: []u8) -> MirCallArg {
 pub fn string_call_arg(ty: []u8, payload: []u8, string_index: i64) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::String,
         value: payload,
         bool_value: false,
@@ -2412,6 +2638,7 @@ pub fn string_call_arg(ty: []u8, payload: []u8, string_index: i64) -> MirCallArg
 pub fn bool_call_arg(ty: []u8, value: bool) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::Bool,
         value: "",
         bool_value: value,
@@ -2443,6 +2670,7 @@ pub fn field_access_call_arg(
 ) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::FieldAccess,
         value: source_name,
         bool_value: false,
@@ -2481,6 +2709,7 @@ pub fn nested_field_access_call_arg(
 ) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::FieldAccess,
         value: source_name,
         bool_value: false,
@@ -2507,6 +2736,7 @@ pub fn nested_field_access_call_arg(
 pub fn empty_slice_call_arg(ty: []u8) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::EmptySlice,
         value: "",
         bool_value: false,
@@ -2544,6 +2774,7 @@ pub fn slice_call_arg(
 ) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::Slice,
         value: target,
         bool_value: false,
@@ -2573,11 +2804,45 @@ pub fn slice_call_arg(
 pub fn int_literal_call_arg(ty: []u8, value: i64) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::IntLiteral,
         value: "",
         bool_value: false,
         string_index: -1,
         int_value: value,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        nested_field_index: -1,
+        slice_start_base: "",
+        slice_start_offset: 0,
+        slice_start_source_type: "",
+        slice_start_field_index: -1,
+        slice_end_base: "",
+        slice_end_offset: 0,
+        slice_end_source_type: "",
+        slice_end_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+// type_size_call_arg passes the compile-time byte width of a concrete LLVM
+// type as an i64 constant expression. Constructor descriptors use it without
+// introducing a container-specific MIR statement or hardcoded width.
+pub fn type_size_call_arg(concrete_llvm_type: []u8) -> !MirCallArg {
+    if std::mem::len(concrete_llvm_type) == 0 {
+        return error("compiled mir: type-size argument requires a concrete LLVM type");
+    }
+    return MirCallArg {
+        ty: "i64",
+        semantic_type: "i64", storage_codec: MirStorageCodec::None,
+        kind: MirCallArgKind::TypeSize,
+        value: concrete_llvm_type,
+        bool_value: false,
+        string_index: -1,
+        int_value: 0,
         source_type: "",
         source_field_index: -1,
         nested_source_type: "",
@@ -2605,6 +2870,7 @@ pub fn int_literal_call_arg(ty: []u8, value: i64) -> MirCallArg {
 pub fn temp_call_arg(ty: []u8, temp_id: i64) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::Temp,
         value: "",
         bool_value: false,
@@ -2638,6 +2904,7 @@ pub fn call_call_arg(
 ) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::Call,
         value: "",
         bool_value: false,
@@ -2675,6 +2942,7 @@ pub fn arith_field_call_arg(
 ) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::Arith,
         value: source_name,
         bool_value: subtract,
@@ -2709,6 +2977,7 @@ pub fn arith_var_call_arg(
 ) -> MirCallArg {
     return MirCallArg {
         ty: ty,
+        semantic_type: ty, storage_codec: MirStorageCodec::None,
         kind: MirCallArgKind::Arith,
         value: var_name,
         bool_value: subtract,
@@ -2757,6 +3026,11 @@ pub fn var_struct_field(index: i64, ty: []u8, name: []u8) -> MirStructField {
         source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2776,6 +3050,11 @@ pub fn string_struct_field(index: i64, payload: []u8) -> MirStructField {
         source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2795,6 +3074,11 @@ pub fn int_struct_field(index: i64, value: i64) -> MirStructField {
         source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2814,6 +3098,11 @@ pub fn bool_struct_field(index: i64, value: bool) -> MirStructField {
         source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2833,6 +3122,11 @@ pub fn enum_tag_struct_field(index: i64, tag: i64) -> MirStructField {
         source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2858,6 +3152,11 @@ pub fn field_access_struct_field(
         source_field_index: source_field_index,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2885,6 +3184,11 @@ pub fn nested_field_access_struct_field(
         source_field_index: source_field_index,
         nested_source_type: nested_type,
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2911,6 +3215,44 @@ pub fn computed_binary_struct_field(
         source_field_index: source_field_index,
         nested_source_type: "",
         computed_rhs_name: rhs_name,
+        computed_op: "sub",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: empty_struct_call_args(),
+        nested_fields: empty_struct_nested_fields()
+    };
+}
+
+pub fn computed_scalar_binary_struct_field(
+    index: i64,
+    op: []u8,
+    lhs_name: []u8,
+    lhs_literal: i64,
+    lhs_is_literal: bool,
+    rhs_name: []u8,
+    rhs_literal: i64,
+    rhs_is_literal: bool
+) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::ComputedBinary,
+        llvm_type: "i64",
+        value: lhs_name,
+        int_value: 0,
+        bool_value: false,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: "",
+        computed_rhs_name: rhs_name,
+        computed_op: op,
+        computed_lhs_literal: lhs_literal,
+        computed_lhs_is_literal: lhs_is_literal,
+        computed_rhs_literal: rhs_literal,
+        computed_rhs_is_literal: rhs_is_literal,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2930,6 +3272,11 @@ pub fn empty_slice_struct_field(index: i64) -> MirStructField {
         source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -2955,42 +3302,14 @@ pub fn call_struct_field(
         source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: call_module_prefix,
         call_callee_name: call_callee_name,
         call_args: call_args,
-        nested_fields: empty_struct_nested_fields()
-    };
-}
-
-// array_new_struct_field backs an owned-container constructor used as a struct
-// field value (e.g. 'Ast { nodes: std::arena::Arena<AstNode>(allocator), ... }').
-// Both std::array::Array<T>(alloc) and std::arena::Arena<T>(alloc) lower to the
-// element-size-generic @kizu_rt_array_new builtin returning the %kizu.owned handle,
-// so the field carries only the owned type (llvm_type), the allocator value name
-// (value), and the element LLVM type (source_type) the renderer needs for the
-// element-size constant expression. The renderer emits the kizu_rt_array_new call
-// before insertvalue-ing the owned handle into the struct, mirroring the standalone
-// var ArrayNew statement lowering.
-pub fn array_new_struct_field(
-    index: i64,
-    owned_type: []u8,
-    allocator_name: []u8,
-    element_llvm: []u8
-) -> MirStructField {
-    return MirStructField {
-        index: index,
-        kind: MirStructFieldKind::ArrayNew,
-        llvm_type: owned_type,
-        value: allocator_name,
-        int_value: -1,
-        bool_value: false,
-        source_type: element_llvm,
-        source_field_index: -1,
-        nested_source_type: "",
-        computed_rhs_name: "",
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: empty_struct_call_args(),
         nested_fields: empty_struct_nested_fields()
     };
 }
@@ -3011,6 +3330,11 @@ pub fn struct_literal_struct_field(
         source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
+        computed_op: "",
+        computed_lhs_literal: 0,
+        computed_lhs_is_literal: false,
+        computed_rhs_literal: 0,
+        computed_rhs_is_literal: false,
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
@@ -3194,6 +3518,36 @@ pub fn call_expr_inst(
     return MirExprInst::Call(MirCallExpr {
         id: id,
         llvm_type: llvm_type,
+        storage_llvm_type: llvm_type,
+        success_llvm_type: "",
+        result_transport: builtin_contract::RuntimeResultTransport::Semantic,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args
+    });
+}
+
+pub fn storage_call_expr_inst(
+    id: i64,
+    semantic_llvm_type: []u8,
+    storage_llvm_type: []u8,
+    success_llvm_type: []u8,
+    result_transport: builtin_contract::RuntimeResultTransport,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> !MirExprInst {
+    if result_transport == builtin_contract::RuntimeResultTransport::Semantic or
+        std::mem::len(storage_llvm_type) == 0 or
+        std::mem::len(success_llvm_type) == 0 {
+        return error("compiled mir: erased result call descriptor invalid");
+    }
+    return MirExprInst::Call(MirCallExpr {
+        id: id,
+        llvm_type: semantic_llvm_type,
+        storage_llvm_type: storage_llvm_type,
+        success_llvm_type: success_llvm_type,
+        result_transport: result_transport,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
         call_args: args
@@ -3309,11 +3663,43 @@ pub fn copy_call_arg(arg: &MirCallArg) -> !MirCallArg {
     let copied_call_args = try copy_call_args(&arg.call_args);
     return MirCallArg {
         ty: arg.ty,
+        semantic_type: arg.semantic_type,
+        storage_codec: arg.storage_codec,
         kind: arg.kind,
         value: arg.value,
         bool_value: arg.bool_value,
         string_index: arg.string_index,
         int_value: arg.int_value,
+        source_type: arg.source_type,
+        source_field_index: arg.source_field_index,
+        nested_source_type: arg.nested_source_type,
+        nested_field_index: arg.nested_field_index,
+        slice_start_base: arg.slice_start_base,
+        slice_start_offset: arg.slice_start_offset,
+        slice_start_source_type: arg.slice_start_source_type,
+        slice_start_field_index: arg.slice_start_field_index,
+        slice_end_base: arg.slice_end_base,
+        slice_end_offset: arg.slice_end_offset,
+        slice_end_source_type: arg.slice_end_source_type,
+        slice_end_field_index: arg.slice_end_field_index,
+        call_module_prefix: arg.call_module_prefix,
+        call_callee_name: arg.call_callee_name,
+        call_args: copied_call_args
+    };
+}
+
+pub fn storage_call_arg(
+    arg: &MirCallArg, storage_type: []u8, conversion: MirStorageCodec
+) -> !MirCallArg {
+    if conversion == MirStorageCodec::None or std::mem::len(storage_type) == 0 {
+        return error("compiled mir: storage conversion missing");
+    }
+    let copied_call_args = try copy_call_args(&arg.call_args);
+    return MirCallArg {
+        ty: storage_type, semantic_type: arg.ty,
+        storage_codec: conversion,
+        kind: arg.kind, value: arg.value, bool_value: arg.bool_value,
+        string_index: arg.string_index, int_value: arg.int_value,
         source_type: arg.source_type,
         source_field_index: arg.source_field_index,
         nested_source_type: arg.nested_source_type,
@@ -3355,6 +3741,11 @@ pub fn copy_struct_field(field: &MirStructField) -> !MirStructField {
         source_field_index: field.source_field_index,
         nested_source_type: field.nested_source_type,
         computed_rhs_name: field.computed_rhs_name,
+        computed_op: field.computed_op,
+        computed_lhs_literal: field.computed_lhs_literal,
+        computed_lhs_is_literal: field.computed_lhs_is_literal,
+        computed_rhs_literal: field.computed_rhs_literal,
+        computed_rhs_is_literal: field.computed_rhs_is_literal,
         call_module_prefix: field.call_module_prefix,
         call_callee_name: field.call_callee_name,
         call_args: try copy_call_args(&field.call_args),
@@ -3439,6 +3830,9 @@ pub fn copy_expr_inst(inst: &MirExprInst) -> !MirExprInst {
         Call(payload) => MirExprInst::Call(MirCallExpr {
             id: payload.id,
             llvm_type: payload.llvm_type,
+            storage_llvm_type: payload.storage_llvm_type,
+            success_llvm_type: payload.success_llvm_type,
+            result_transport: payload.result_transport,
             call_module_prefix: payload.call_module_prefix,
             call_callee_name: payload.call_callee_name,
             call_args: try copy_call_args(&payload.call_args)
@@ -3636,6 +4030,38 @@ pub fn let_try_call_stmt(
         name: name,
         called_error_union: called_error_union,
         success_type: success_type,
+        result_transport: builtin_contract::RuntimeResultTransport::Semantic,
+        own_error_union: own_error_union,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        string_index: string_index,
+        try_index: try_index,
+        arg_insts: arg_insts,
+        call_args: args
+    });
+}
+
+pub fn let_try_storage_call_stmt(
+    name: []u8,
+    storage_error_union: []u8,
+    semantic_success_type: []u8,
+    result_transport: builtin_contract::RuntimeResultTransport,
+    own_error_union: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    string_index: i64,
+    try_index: i64,
+    arg_insts: std::array::Array<MirExprInst>,
+    args: std::array::Array<MirCallArg>
+) -> !MirStmt {
+    if result_transport == builtin_contract::RuntimeResultTransport::Semantic {
+        return error("compiled mir: erased try-call result codec missing");
+    }
+    return MirStmt::LetTryCall(MirLetTryCallStmt {
+        name: name,
+        called_error_union: storage_error_union,
+        success_type: semantic_success_type,
+        result_transport: result_transport,
         own_error_union: own_error_union,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
@@ -3726,6 +4152,7 @@ pub fn array_try_set_stmt(
 
 pub fn void_try_call_stmt(
     own_error_union: []u8,
+    called_error_union: []u8,
     module_prefix: []u8,
     callee_name: []u8,
     string_index: i64,
@@ -3734,6 +4161,7 @@ pub fn void_try_call_stmt(
 ) -> MirStmt {
     return MirStmt::VoidTryCall(MirVoidTryCallStmt {
         own_error_union: own_error_union,
+        called_error_union: called_error_union,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
         string_index: string_index,
@@ -3742,9 +4170,67 @@ pub fn void_try_call_stmt(
     });
 }
 
+pub fn void_try_expr_stmt(
+    own_error_union: []u8,
+    called_error_union: []u8,
+    string_index: i64,
+    try_index: i64,
+    result_id: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt::VoidTryExpr(MirVoidTryExprStmt {
+        own_error_union: own_error_union,
+        called_error_union: called_error_union,
+        string_index: string_index,
+        try_index: try_index,
+        expr_result_id: result_id,
+        expr_insts: insts
+    });
+}
+
+pub fn void_call_stmt(
+    module_prefix: []u8,
+    callee_name: []u8,
+    string_index: i64,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::VoidCall(MirVoidCallStmt {
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        string_index: string_index,
+        call_args: args
+    });
+}
+
+pub fn errdefer_stmt(
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt::ErrDefer(MirErrDeferStmt {
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args
+    });
+}
+
 pub fn owned_deinit_stmt(receiver_name: []u8) -> MirStmt {
     return MirStmt::OwnedDeinit(MirOwnedDeinitStmt {
         receiver_name: receiver_name,
+    });
+}
+
+pub fn print_stmt(
+    transport: builtin_contract::PrintRuntimeTransport,
+    value_llvm_type: []u8,
+    value_result_id: i64,
+    value_insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt::Print(MirPrintStmt {
+        transport: transport,
+        value_llvm_type: value_llvm_type,
+        value_result_id: value_result_id,
+        value_insts: value_insts
     });
 }
 
@@ -3812,16 +4298,30 @@ pub fn count_range_stmt(
     receiver_name: []u8,
     receiver_type: []u8,
     range_name: []u8,
+    range_type: []u8,
+    range_len_field_index: i64,
+    child_module: []u8,
+    child_name: []u8,
+    child_index_type: []u8,
+    child_value_type: []u8,
     node_count_module: []u8,
     node_count_name: []u8,
+    child_error_union: []u8,
     own_error_union: []u8
 ) -> MirStmt {
     return MirStmt::CountRange(MirCountRangeStmt {
         receiver_name: receiver_name,
         receiver_type: receiver_type,
         range_name: range_name,
+        range_type: range_type,
+        range_len_field_index: range_len_field_index,
+        child_module: child_module,
+        child_name: child_name,
+        child_index_type: child_index_type,
+        child_value_type: child_value_type,
         node_count_module: node_count_module,
         node_count_name: node_count_name,
+        child_error_union: child_error_union,
         own_error_union: own_error_union
     });
 }
@@ -3960,18 +4460,18 @@ pub fn parser_span_predicate_stmt(
     source_name: []u8,
     span_name: []u8,
     span_type: []u8,
-    is_name_symbol: []u8,
-    is_double_colon_symbol: []u8,
-    is_upper_symbol: []u8
+    is_name_callee_qualified: []u8,
+    is_double_colon_callee_qualified: []u8,
+    is_upper_callee_qualified: []u8
 ) -> MirStmt {
     return MirStmt::ParserSpanPredicate(MirParserSpanPredicateStmt {
         mode: mode,
         source_name: source_name,
         span_name: span_name,
         span_type: span_type,
-        is_name_symbol: is_name_symbol,
-        is_double_colon_symbol: is_double_colon_symbol,
-        is_upper_symbol: is_upper_symbol
+        is_name_callee_qualified: is_name_callee_qualified,
+        is_double_colon_callee_qualified: is_double_colon_callee_qualified,
+        is_upper_callee_qualified: is_upper_callee_qualified
     });
 }
 
@@ -3985,11 +4485,14 @@ pub fn parser_postfix_start_stmt(
     token_type: []u8,
     ast_node_type: []u8,
     span_type: []u8,
+    get_module: []u8,
+    get_name: []u8,
+    node_id_type: []u8,
     node_field_index: i64,
     next_field_index: i64,
     ast_node_span_field_index: i64,
-    guard_symbol: []u8,
-    span_symbol: []u8
+    guard_callee_qualified: []u8,
+    span_callee_qualified: []u8
 ) -> MirStmt {
     return MirStmt::ParserPostfixStart(MirParserPostfixStartStmt {
         mode: mode,
@@ -4001,23 +4504,28 @@ pub fn parser_postfix_start_stmt(
         token_type: token_type,
         ast_node_type: ast_node_type,
         span_type: span_type,
+        get_module: get_module,
+        get_name: get_name,
+        node_id_type: node_id_type,
         node_field_index: node_field_index,
         next_field_index: next_field_index,
         ast_node_span_field_index: ast_node_span_field_index,
-        guard_symbol: guard_symbol,
-        span_symbol: span_symbol
+        guard_callee_qualified: guard_callee_qualified,
+        span_callee_qualified: span_callee_qualified
     });
 }
 
 pub fn array_new_stmt(
     result_name: []u8,
     owned_type: []u8,
+    allocator_type: []u8,
     allocator_name: []u8,
     element_type: []u8
 ) -> MirStmt {
     return MirStmt::ArrayNew(MirArrayNewStmt {
         result_name: result_name,
         owned_type: owned_type,
+        allocator_type: allocator_type,
         allocator_name: allocator_name,
         element_type: element_type
     });
@@ -4167,6 +4675,7 @@ pub fn value_cursor_try_call_latch(
         name: name,
         called_error_union: called_error_union,
         success_type: success_type,
+        result_transport: builtin_contract::RuntimeResultTransport::Semantic,
         own_error_union: own_error_union,
         call_module_prefix: module_prefix,
         call_callee_name: callee_name,
@@ -4399,37 +4908,73 @@ pub fn guarded_cursor_loop_stmt(
 
 pub fn first_token_stmt(
     source_name: []u8,
+    source_type: []u8,
     position_type: []u8,
     token_type: []u8,
-    position_symbol: []u8,
-    token_at_symbol: []u8
+    position_line_type: []u8,
+    position_column_type: []u8,
+    offset_type: []u8,
+    position_module: []u8,
+    position_name: []u8,
+    token_at_module: []u8,
+    token_at_name: []u8
 ) -> MirStmt {
     return MirStmt::FirstToken(MirFirstTokenStmt {
         source_name: source_name,
+        source_type: source_type,
         position_type: position_type,
         token_type: token_type,
-        position_symbol: position_symbol,
-        token_at_symbol: token_at_symbol
+        position_line_type: position_line_type,
+        position_column_type: position_column_type,
+        offset_type: offset_type,
+        position_module: position_module,
+        position_name: position_name,
+        token_at_module: token_at_module,
+        token_at_name: token_at_name
     });
 }
 
 pub fn next_token_stmt(
     source_name: []u8,
+    source_type: []u8,
     previous_name: []u8,
     position_type: []u8,
     token_type: []u8,
-    position_symbol: []u8,
-    advance_position_symbol: []u8,
-    token_at_symbol: []u8
+    start_field_type: []u8,
+    end_field_type: []u8,
+    line_field_type: []u8,
+    column_field_type: []u8,
+    start_field_index: i64,
+    end_field_index: i64,
+    line_field_index: i64,
+    column_field_index: i64,
+    position_module: []u8,
+    position_name: []u8,
+    advance_position_module: []u8,
+    advance_position_name: []u8,
+    token_at_module: []u8,
+    token_at_name: []u8
 ) -> MirStmt {
     return MirStmt::NextToken(MirNextTokenStmt {
         source_name: source_name,
+        source_type: source_type,
         previous_name: previous_name,
         position_type: position_type,
         token_type: token_type,
-        position_symbol: position_symbol,
-        advance_position_symbol: advance_position_symbol,
-        token_at_symbol: token_at_symbol
+        start_field_type: start_field_type,
+        end_field_type: end_field_type,
+        line_field_type: line_field_type,
+        column_field_type: column_field_type,
+        start_field_index: start_field_index,
+        end_field_index: end_field_index,
+        line_field_index: line_field_index,
+        column_field_index: column_field_index,
+        position_module: position_module,
+        position_name: position_name,
+        advance_position_module: advance_position_module,
+        advance_position_name: advance_position_name,
+        token_at_module: token_at_module,
+        token_at_name: token_at_name
     });
 }
 
@@ -4545,6 +5090,13 @@ pub fn ast_node_text_stmt(
     ast_type: []u8,
     node_id_name: []u8,
     node_id_type: []u8,
+    get_module: []u8,
+    get_name: []u8,
+    node_type: []u8,
+    span_type: []u8,
+    span_field_index: i64,
+    span_start_index: i64,
+    span_end_index: i64,
     trim_module: []u8,
     trim_name: []u8
 ) -> MirStmt {
@@ -4554,6 +5106,13 @@ pub fn ast_node_text_stmt(
         ast_type: ast_type,
         node_id_name: node_id_name,
         node_id_type: node_id_type,
+        get_module: get_module,
+        get_name: get_name,
+        node_type: node_type,
+        span_type: span_type,
+        span_field_index: span_field_index,
+        span_start_index: span_start_index,
+        span_end_index: span_end_index,
         trim_module: trim_module,
         trim_name: trim_name
     });
@@ -4565,6 +5124,13 @@ pub fn string_literal_span_stmt(
     ast_type: []u8,
     node_id_name: []u8,
     node_id_type: []u8,
+    get_module: []u8,
+    get_name: []u8,
+    node_type: []u8,
+    span_type: []u8,
+    span_field_index: i64,
+    span_start_index: i64,
+    span_end_index: i64,
     callee_module: []u8,
     is_payload_name: []u8,
     empty_name: []u8
@@ -4575,45 +5141,26 @@ pub fn string_literal_span_stmt(
         ast_type: ast_type,
         node_id_name: node_id_name,
         node_id_type: node_id_type,
+        get_module: get_module,
+        get_name: get_name,
+        node_type: node_type,
+        span_type: span_type,
+        span_field_index: span_field_index,
+        span_start_index: span_start_index,
+        span_end_index: span_end_index,
         callee_module: callee_module,
         is_payload_name: is_payload_name,
         empty_name: empty_name
     });
 }
 
-pub fn traversal_arg(field_index: i64, arg_llvm_type: []u8) -> MirTraversalArg {
-    return MirTraversalArg {
+pub fn traversal_payload_arg(
+    field_index: i64,
+    temp_id: i64
+) -> MirTraversalPayloadArg {
+    return MirTraversalPayloadArg {
         field_index: field_index,
-        arg_llvm_type: arg_llvm_type,
-        is_param: false,
-        param_name: "",
-        is_literal: false,
-        literal_value: 0
-    };
-}
-
-// traversal_param_arg forwards a caller parameter (or the bound tree receiver) into a
-// traversal arm call by name, with no payload extraction.
-pub fn traversal_param_arg(param_name: []u8, arg_llvm_type: []u8) -> MirTraversalArg {
-    return MirTraversalArg {
-        field_index: 0,
-        arg_llvm_type: arg_llvm_type,
-        is_param: true,
-        param_name: param_name,
-        is_literal: false,
-        literal_value: 0
-    };
-}
-
-// traversal_literal_arg passes an integer literal into a traversal arm call.
-pub fn traversal_literal_arg(literal_value: i64) -> MirTraversalArg {
-    return MirTraversalArg {
-        field_index: 0,
-        arg_llvm_type: "i64",
-        is_param: false,
-        param_name: "",
-        is_literal: true,
-        literal_value: literal_value
+        temp_id: temp_id
     };
 }
 
@@ -4622,7 +5169,9 @@ pub fn traversal_try_arm(
     payload_type: []u8,
     callee_module: []u8,
     callee_name: []u8,
-    args: std::array::Array<MirTraversalArg>
+    arg_insts: std::array::Array<MirExprInst>,
+    call_args: std::array::Array<MirCallArg>,
+    payload_args: std::array::Array<MirTraversalPayloadArg>
 ) -> MirTraversalArm {
     return MirTraversalArm {
         tag: tag,
@@ -4633,8 +5182,13 @@ pub fn traversal_try_arm(
         callee_module: callee_module,
         callee_name: callee_name,
         is_plain_call: false,
+        is_payload_value: false,
+        is_expr_value: false,
+        value_result_id: -1,
         success_llvm: "",
-        args: args
+        arg_insts: arg_insts,
+        call_args: call_args,
+        payload_args: payload_args
     };
 }
 
@@ -4647,7 +5201,9 @@ pub fn traversal_plain_call_arm(
     callee_module: []u8,
     callee_name: []u8,
     success_llvm: []u8,
-    args: std::array::Array<MirTraversalArg>
+    arg_insts: std::array::Array<MirExprInst>,
+    call_args: std::array::Array<MirCallArg>,
+    payload_args: std::array::Array<MirTraversalPayloadArg>
 ) -> MirTraversalArm {
     return MirTraversalArm {
         tag: tag,
@@ -4658,8 +5214,13 @@ pub fn traversal_plain_call_arm(
         callee_module: callee_module,
         callee_name: callee_name,
         is_plain_call: true,
+        is_payload_value: false,
+        is_expr_value: false,
+        value_result_id: -1,
         success_llvm: success_llvm,
-        args: args
+        arg_insts: arg_insts,
+        call_args: call_args,
+        payload_args: payload_args
     };
 }
 
@@ -4676,8 +5237,13 @@ pub fn traversal_literal_arm(
         callee_module: "",
         callee_name: "",
         is_plain_call: false,
+        is_payload_value: false,
+        is_expr_value: false,
+        value_result_id: -1,
         success_llvm: "",
-        args: std::array::Array<MirTraversalArg>(std::mem::page_allocator())
+        arg_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        payload_args: std::array::Array<MirTraversalPayloadArg>(std::mem::page_allocator())
     };
 }
 
@@ -4699,12 +5265,80 @@ pub fn traversal_bool_literal_arm(
         callee_module: "",
         callee_name: "",
         is_plain_call: false,
+        is_payload_value: false,
+        is_expr_value: false,
+        value_result_id: -1,
         success_llvm: "",
-        args: std::array::Array<MirTraversalArg>(std::mem::page_allocator())
+        arg_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        payload_args: std::array::Array<MirTraversalPayloadArg>(std::mem::page_allocator())
+    };
+}
+
+// traversal_payload_value_arm backs a matched payload field returned directly from
+// an arm, such as `Block(block) => block.statements`. The field is materialized by
+// the same traversal payload extraction metadata used for call arguments.
+pub fn traversal_payload_value_arm(
+    tag: i64,
+    payload_type: []u8,
+    success_llvm: []u8,
+    field_index: i64,
+    temp_id: i64
+) -> !MirTraversalArm {
+    var payload_args =
+        std::array::Array<MirTraversalPayloadArg>(std::mem::page_allocator());
+    try payload_args.append(traversal_payload_arg(field_index, temp_id));
+    return MirTraversalArm {
+        tag: tag,
+        is_literal: false,
+        literal_value: 0,
+        literal_llvm: "",
+        payload_type: payload_type,
+        callee_module: "",
+        callee_name: "",
+        is_plain_call: false,
+        is_payload_value: true,
+        is_expr_value: false,
+        value_result_id: -1,
+        success_llvm: success_llvm,
+        arg_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        payload_args: payload_args
+    };
+}
+
+pub fn traversal_expr_value_arm(
+    tag: i64,
+    success_llvm: []u8,
+    value_result_id: i64,
+    value_insts: std::array::Array<MirExprInst>
+) -> MirTraversalArm {
+    return MirTraversalArm {
+        tag: tag,
+        is_literal: false,
+        literal_value: 0,
+        literal_llvm: "",
+        payload_type: "",
+        callee_module: "",
+        callee_name: "",
+        is_plain_call: false,
+        is_payload_value: false,
+        is_expr_value: true,
+        value_result_id: value_result_id,
+        success_llvm: success_llvm,
+        arg_insts: value_insts,
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        payload_args: std::array::Array<MirTraversalPayloadArg>(
+            std::mem::page_allocator()
+        )
     };
 }
 
 pub fn match_traversal_stmt(
+    get_module: []u8,
+    get_name: []u8,
+    node_type: []u8,
+    union_type: []u8,
     receiver_type: []u8,
     receiver_name: []u8,
     index_type: []u8,
@@ -4714,6 +5348,10 @@ pub fn match_traversal_stmt(
     arms: std::array::Array<MirTraversalArm>
 ) -> MirStmt {
     return MirStmt::MatchTraversal(MirMatchTraversalStmt {
+        get_module: get_module,
+        get_name: get_name,
+        node_type: node_type,
+        union_type: union_type,
         receiver_type: receiver_type,
         receiver_name: receiver_name,
         index_type: index_type,
@@ -4927,6 +5565,7 @@ pub fn while_stmt(
     induction_init: i64,
     induction_init_var: []u8,
     induction_init_offset: i64,
+    induction_op: []u8,
     induction_step: i64,
     cond_result_id: i64,
     cond_insts: std::array::Array<MirExprInst>,
@@ -4934,6 +5573,7 @@ pub fn while_stmt(
     cond_rhs_result_id: i64,
     cond_rhs_insts: std::array::Array<MirExprInst>,
     cond_extra_operands: std::array::Array<MirCondOperand>,
+    cond_targets: std::array::Array<MirCondTarget>,
     body_stmts: std::array::Array<MirStmt>,
     latch_stmts: std::array::Array<MirStmt>,
     latch_copy_var: []u8,
@@ -4952,6 +5592,7 @@ pub fn while_stmt(
         induction_init: induction_init,
         induction_init_var: induction_init_var,
         induction_init_offset: induction_init_offset,
+        induction_op: induction_op,
         induction_step: induction_step,
         cond_result_id: cond_result_id,
         cond_insts: cond_insts,
@@ -4959,6 +5600,7 @@ pub fn while_stmt(
         cond_rhs_result_id: cond_rhs_result_id,
         cond_rhs_insts: cond_rhs_insts,
         cond_extra_operands: cond_extra_operands,
+        cond_targets: cond_targets,
         body_stmts: body_stmts,
         latch_stmts: latch_stmts,
         latch_copy_var: latch_copy_var,
@@ -5018,6 +5660,31 @@ pub fn cond_operand(
     };
 }
 
+// The two renderer-agnostic destinations a condition leaf can branch to, distinct from any
+// leaf index because leaf indices are non-negative.
+pub fn cond_target_condition_true() -> i64 { return -1; }
+pub fn cond_target_condition_false() -> i64 { return -2; }
+
+pub fn cond_target(true_target: i64, false_target: i64) -> MirCondTarget {
+    return MirCondTarget {
+        true_target: true_target,
+        false_target: false_target
+    };
+}
+
+pub fn copy_cond_targets(
+    targets: &std::array::Array<MirCondTarget>
+) -> !std::array::Array<MirCondTarget> {
+    var copied = std::array::Array<MirCondTarget>(std::mem::page_allocator());
+    var index = 0;
+    while index < targets.len() {
+        let target = try targets.at(index);
+        try copied.append(cond_target(target.true_target, target.false_target));
+        index = index + 1;
+    }
+    return copied;
+}
+
 pub fn if_merge_var(
     source_name: []u8,
     input_name: []u8,
@@ -5062,6 +5729,7 @@ pub fn if_stmt(
     cond_rhs_result_id: i64,
     cond_rhs_insts: std::array::Array<MirExprInst>,
     cond_extra_operands: std::array::Array<MirCondOperand>,
+    cond_targets: std::array::Array<MirCondTarget>,
     then_kind: MirIfThenKind,
     bool_value: bool,
     call_type: []u8,
@@ -5085,6 +5753,7 @@ pub fn if_stmt(
         cond_rhs_result_id: cond_rhs_result_id,
         cond_rhs_insts: cond_rhs_insts,
         cond_extra_operands: cond_extra_operands,
+        cond_targets: cond_targets,
         cond_try_call: false,
         cond_try_then_on_success: true,
         cond_called_error_union: "",
@@ -5126,6 +5795,7 @@ pub fn if_else_void_body_stmt(
         cond_rhs_result_id: -1,
         cond_rhs_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
         cond_extra_operands: std::array::Array<MirCondOperand>(std::mem::page_allocator()),
+        cond_targets: std::array::Array<MirCondTarget>(std::mem::page_allocator()),
         cond_try_call: false,
         cond_try_then_on_success: true,
         cond_called_error_union: "",
@@ -5170,6 +5840,7 @@ pub fn if_try_call_void_body_stmt(
         cond_rhs_result_id: -1,
         cond_rhs_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
         cond_extra_operands: std::array::Array<MirCondOperand>(std::mem::page_allocator()),
+        cond_targets: std::array::Array<MirCondTarget>(std::mem::page_allocator()),
         cond_try_call: true,
         cond_try_then_on_success: then_on_success,
         cond_called_error_union: called_error_union,
@@ -5264,6 +5935,10 @@ pub fn arena_get_instruction(
 }
 
 pub fn match_union_instruction(
+    get_module: []u8,
+    get_name: []u8,
+    node_type: []u8,
+    union_type: []u8,
     receiver_type: []u8,
     receiver_name: []u8,
     index_type: []u8,
@@ -5277,6 +5952,10 @@ pub fn match_union_instruction(
     default_value: i64
 ) -> MirInstruction {
     return MirInstruction::MatchUnion(MirMatchUnionInst {
+        get_module: get_module,
+        get_name: get_name,
+        node_type: node_type,
+        union_type: union_type,
         receiver_type: receiver_type,
         receiver_name: receiver_name,
         index_type: index_type,

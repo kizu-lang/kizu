@@ -1,10 +1,341 @@
 import selfhost::resolver;
+import selfhost::parser;
 import selfhost::source;
 import selfhost::source::loader;
+import selfhost::type_constructor;
+import selfhost::type_spelling;
 import selfhost::types;
 import selfhost::types::diagnostic;
+import selfhost::types::expression_facts;
+import selfhost::types::expression_infer;
+import selfhost::types::function_calls;
 import selfhost::types::model;
 import selfhost::types::symbols;
+
+pub fn constructor_resolution_regression_gate() -> !void {
+    std::testing::expect(type_constructor::is_builtin_name("std::array::Array"));
+    std::testing::expect(!(try type_constructor::is_builtin_application(
+        "std::array::Array"
+    )));
+    std::testing::expect(try type_constructor::is_builtin_application(
+        "std::array::Array<i64>"
+    ));
+    std::testing::expect(!(try type_constructor::is_builtin_application(
+        "identity<i64>"
+    )));
+
+    let allocator = std::mem::page_allocator();
+    let module = "types/generic_function_constructor_regression";
+    let text = "fn identity<T>(value: T) -> T { return value; } fn read() -> i64 { return identity<i64>(7); }";
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    });
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    std::testing::expect_equal<i64>(0, typed.diagnostics);
+    print("constructor-resolution-regression-ok");
+    return;
+}
+
+pub fn nested_type_spelling_regression_gate() -> !void {
+    let spelling = "Outer<i64, Inner<?ptr<u8>, std::map::Map<[]u8, i64>>>";
+    let outer = try type_spelling::parse(spelling);
+    std::testing::expect(outer.has_arguments);
+    std::testing::expect_equal<[]u8>(
+        "Outer", try type_spelling::constructor(&outer, spelling)
+    );
+    let arguments = try type_spelling::arguments(&outer, spelling);
+    let first = try type_spelling::next_argument(arguments, 0);
+    std::testing::expect_equal<[]u8>("i64", first);
+    let second_start = try type_spelling::next_argument_start(arguments, 0);
+    let second = try type_spelling::next_argument(arguments, second_start);
+    let nested = try type_spelling::parse(second);
+    std::testing::expect_equal<[]u8>(
+        "Inner", try type_spelling::constructor(&nested, second)
+    );
+    let nested_arguments = try type_spelling::arguments(&nested, second);
+    let nested_second_start = try type_spelling::next_argument_start(
+        nested_arguments, 0
+    );
+    let nested_second = try type_spelling::next_argument(
+        nested_arguments, nested_second_start
+    );
+    let map = try type_spelling::parse(nested_second);
+    std::testing::expect_equal<[]u8>(
+        "std::map::Map",
+        try type_spelling::constructor(&map, nested_second)
+    );
+    print("nested-type-spelling-regression-ok");
+    return;
+}
+
+pub fn malformed_empty_type_arguments_gate() -> !void {
+    let ignored = try type_spelling::parse("Foo<>");
+    return;
+}
+
+pub fn malformed_trailing_type_argument_gate() -> !void {
+    let ignored = try type_spelling::parse("Foo<T,>");
+    return;
+}
+
+pub fn malformed_unbalanced_type_gate() -> !void {
+    let ignored = try type_spelling::parse("Foo>");
+    return;
+}
+
+pub fn malformed_nested_empty_type_gate() -> !void {
+    let ignored = try type_spelling::parse("Foo<Bar<>>");
+    return;
+}
+
+pub fn unknown_owner_field_regression_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let module = "types/unknown_owner_field_regression";
+    let text = "fn read<T>(record: T) -> bool { return record.value; }";
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    });
+    var parsed_sources = try parser::parse_source_files(allocator, files);
+    defer parsed_sources.deinit();
+    let parsed_items = &parsed_sources.parsed;
+    let parsed = try parsed_items.at(0);
+    let value = try first_function_return_value(&parsed.ast, parsed.root);
+    var locals = std::map::Map<[]u8, []u8>(allocator);
+    var facts = expression_facts::init(allocator);
+    defer locals.deinit();
+    defer facts.deinit();
+    try locals.insert("record", "T");
+    let file = try files.at(0);
+    let inferred = try expression_infer::infer_expression_type(
+        allocator, file, parsed.ast, value, locals, facts
+    );
+    std::testing::expect_equal<[]u8>("unknown", inferred);
+    print("unknown-owner-field-regression-ok");
+    return;
+}
+
+fn first_function_return_value(
+    ast: &std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let root_node = ast.get(root);
+    match root_node.data {
+        Program(program) => return first_declaration_return_value(
+            ast, program.declarations
+        );,
+        _ => return error("expected program");,
+    }
+}
+
+fn first_declaration_return_value(
+    ast: &std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !std::kizu::ast::NodeId {
+    let declaration = try ast.child_at(declarations, 0);
+    let declaration_node = ast.get(declaration);
+    match declaration_node.data {
+        FnDecl(function) => return first_block_return_value(ast, function.body);,
+        _ => return error("expected function declaration");,
+    }
+}
+
+fn first_block_return_value(
+    ast: &std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let body_node = ast.get(body);
+    match body_node.data {
+        Block(block) => return first_statement_return_value(
+            ast, block.statements
+        );,
+        _ => return error("expected function block");,
+    }
+}
+
+fn first_statement_return_value(
+    ast: &std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !std::kizu::ast::NodeId {
+    let statement = try ast.child_at(statements, 0);
+    let statement_node = ast.get(statement);
+    match statement_node.data {
+        Return(return_node) => return return_node.value;,
+        _ => return error("expected return statement");,
+    }
+}
+
+pub fn borrowed_declared_struct_field_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let module = "types/borrowed_declared_struct_field_gate";
+    let text = "struct Record { name: i64 } fn read(record: &Record) -> i64 { return record.name; }";
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    });
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    std::testing::expect_equal<i64>(0, typed.diagnostics);
+    print("borrowed-declared-struct-field-ok");
+    return;
+}
+
+pub fn exact_struct_field_owner_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let alpha_module = "types/exact_struct_field_owner_alpha";
+    let beta_module = "types/exact_struct_field_owner_beta";
+    let gamma_module = "types/exact_struct_field_owner_gamma";
+    let alpha_text = "struct Record { value: bool } fn read(record: Record) -> bool { return record.value; }";
+    let beta_text = "pub struct Record { pub value: i64, pub nested: std::array::Array<?Record> } fn read(record: Record) -> i64 { return record.value; } fn identity(record: Record) -> Record { return record; }";
+    let gamma_text = "import selfhost::types::exact_struct_field_owner_beta; fn read(record: exact_struct_field_owner_beta::Record) -> i64 { return record.value; } fn array_read(records: std::array::Array<exact_struct_field_owner_beta::Record>) -> i64 { let record = try records.at(0); return record.value; }";
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(alpha_module),
+        path: alpha_module,
+        text: alpha_text
+    });
+    try files.append(source::SourceFile {
+        id: 1,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(beta_module),
+        path: beta_module,
+        text: beta_text
+    });
+    try files.append(source::SourceFile {
+        id: 2,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(gamma_module),
+        path: gamma_module,
+        text: gamma_text
+    });
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    std::testing::expect_equal<i64>(0, typed.diagnostics);
+
+    var parsed_sources = try parser::parse_source_files(allocator, files);
+    try check_exact_struct_field_package_facts(allocator, files, &parsed_sources);
+    try parser::deinit_parsed_source_files(parsed_sources);
+    print("exact-struct-field-owner-ok");
+    return;
+}
+
+fn check_exact_struct_field_package_facts(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_sources: &parser::ParsedSourceFiles
+) -> !void {
+    var function_arities = std::map::Map<[]u8, i64>(allocator);
+    var expression_types = expression_facts::init(allocator);
+    defer function_arities.deinit();
+    defer expression_types.deinit();
+    let parsed_results = &parsed_sources.parsed;
+    let source_indexes = &parsed_sources.source_indexes;
+    var index = 0;
+    while index < parsed_results.len() {
+        let parsed = try parsed_results.at(index);
+        let source_index = try source_indexes.get(index);
+        let parsed_file = try files.at(source_index);
+        try types::collect_nominal_resolution_facts_from_ast(
+            allocator,
+            parsed_file,
+            parsed.ast,
+            parsed.root,
+            expression_types
+        );
+        index = index + 1;
+    }
+    index = 0;
+    while index < parsed_results.len() {
+        let parsed = try parsed_results.at(index);
+        let source_index = try source_indexes.get(index);
+        let parsed_file = try files.at(source_index);
+        try function_calls::collect_function_signatures_from_ast(
+            allocator,
+            parsed_file,
+            &parsed.ast,
+            parsed.root,
+            function_arities,
+            expression_types
+        );
+        try types::collect_struct_field_resolution_facts_from_ast(
+            allocator,
+            parsed_file,
+            parsed.ast,
+            parsed.root,
+            expression_types
+        );
+        index = index + 1;
+    }
+    let beta_file = try files.at(1);
+    var nested_key = std::string::String(allocator);
+    defer nested_key.deinit();
+    try expression_infer::append_struct_field_key(
+        nested_key,
+        allocator,
+        beta_file,
+        "Record",
+        "nested",
+        expression_types
+    );
+    let nested_key_bytes = nested_key.as_bytes();
+    std::testing::expect(expression_types.contains_field(&nested_key_bytes));
+    let nested_type = try expression_types.get_field(&nested_key_bytes);
+    std::testing::expect_equal<[]u8>(
+        "std::array::Array<?selfhost::types::exact_struct_field_owner_beta::Record>",
+        nested_type
+    );
+    let identity_type = try expression_types.get_source(
+        "selfhost::types::exact_struct_field_owner_beta::identity"
+    );
+    std::testing::expect_equal<[]u8>(
+        "selfhost::types::exact_struct_field_owner_beta::Record",
+        identity_type
+    );
+    let gamma_parsed = try parsed_results.at(2);
+    let gamma_file = try files.at(2);
+    var report = try types::first_post_move_check_diagnostic_ast_node_with_facts(
+        allocator,
+        gamma_file,
+        gamma_parsed.ast,
+        gamma_parsed.root,
+        expression_types
+    );
+    std::testing::expect_equal<bool>(false, report.found);
+    report.deinit();
+    return;
+}
 
 pub fn gate() -> !void {
     let allocator = std::mem::page_allocator();

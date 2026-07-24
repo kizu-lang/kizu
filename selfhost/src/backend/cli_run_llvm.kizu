@@ -39,7 +39,11 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     return;
 }
 
-pub fn append_cli_run_blocks(out: &var std::string::String, ir_bytes: []u8) -> !void {
+pub fn append_cli_run_blocks(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    parse_result_abi: []u8
+) -> !void {
     try append_line(out, "dispatch_run:");
     try append_line(out, "  %run_io = call %kizu.owned @kizu_rt_io_blocking()");
     try append_line(out,
@@ -48,7 +52,7 @@ pub fn append_cli_run_blocks(out: &var std::string::String, ir_bytes: []u8) -> !
     try append_line(out, "  br i1 %run_file_ok, label %run_read_ok, label %check_failed");
     try append_line(out, "run_read_ok:");
     try append_line(out, "  %run_bytes = extractvalue %kizu.error.slice.u8 %run_file, 1");
-    try cli_check_gate_llvm::append_static_check_gate(
+    try cli_check_gate_llvm::append_parse_validation_gate(
         out,
         "run_check",
         "run_check",
@@ -59,13 +63,29 @@ pub fn append_cli_run_blocks(out: &var std::string::String, ir_bytes: []u8) -> !
     try append_line(out, "run_match_source:");
     try append_line(out,
         "  %run_allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
-    try append_line(out,
-        "  %run_parsed = call %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast(%kizu.owned %run_allocator, %kizu.slice.u8 %target, %kizu.slice.u8 %run_bytes)");
+    try out.append_bytes("  %run_parsed = call ");
+    try out.append_bytes(parse_result_abi);
+    try out.append_bytes(" @kizu_selfhost__cli_parse_validated_ast(%kizu.owned %run_allocator, %kizu.slice.u8 %target, %kizu.slice.u8 %run_bytes)");
+    try out.append_byte(cast<u8>(10));
+    try cli_check_gate_llvm::append_semantic_check_gate(
+        out,
+        parse_result_abi,
+        "run_check",
+        "run_io",
+        "run_allocator",
+        "target",
+        "run_bytes",
+        "run_parsed",
+        "run_semantic_ok"
+    );
+    try append_line(out, "run_semantic_ok:");
     // The compiled Kizu helper owns ConstructorFacts initialization/collection and
     // the seven-argument renderer call. Static CLI LLVM passes only the checked
     // source inputs across this single boundary.
-    try append_line(out,
-        "  %run_render = call %kizu.error.owned @kizu_selfhost__cli_execute_render_checked_run_artifact(%kizu.owned %run_allocator, %kizu.slice.u8 %target, %kizu.slice.u8 %run_bytes, %kizu.kizu.ast.parse_result %run_parsed)");
+    try out.append_bytes("  %run_render = call %kizu.error.owned @kizu_selfhost__cli_execute_render_checked_run_artifact(%kizu.owned %run_allocator, %kizu.slice.u8 %target, %kizu.slice.u8 %run_bytes, ");
+    try out.append_bytes(parse_result_abi);
+    try out.append_bytes(" %run_parsed)");
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %run_render_ok = extractvalue %kizu.error.owned %run_render, 0");
     try append_line(out, "  br i1 %run_render_ok, label %run_render_ready, label %run_unsupported");
     try append_line(out, "run_render_ready:");

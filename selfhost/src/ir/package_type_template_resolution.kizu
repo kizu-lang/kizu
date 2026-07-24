@@ -1,0 +1,262 @@
+import selfhost::ir::intrinsic_type_contract;
+import selfhost::ir::package_catalog;
+import selfhost::ir::package_exact_lookup;
+import selfhost::ir::package_type_environment;
+import selfhost::type_spelling;
+import selfhost::ir::package_type_resolution;
+
+pub fn resolve_in_environment(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    spelling_component_id: i64,
+    spelling: []u8,
+    store: &var package_type_resolution::TypeStore,
+    type_environment: &package_type_environment::Environment
+) -> !package_type_resolution::ResolvedType {
+    return resolve_template(
+        catalog, spelling_component_id, spelling,
+        package_type_resolution::formal_owner_none(), -1, false,
+        store, type_environment
+    );
+}
+
+pub fn resolve_function_template(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    function_index: i64,
+    spelling_component_id: i64,
+    spelling: []u8,
+    store: &var package_type_resolution::TypeStore,
+    type_environment: &package_type_environment::Environment
+) -> !package_type_resolution::ResolvedType {
+    return resolve_template(
+        catalog, spelling_component_id, spelling,
+        package_type_resolution::formal_owner_function(), function_index,
+        false, store, type_environment
+    );
+}
+
+pub fn resolve_declared_template(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    declaration_index: i64,
+    spelling_component_id: i64,
+    spelling: []u8,
+    store: &var package_type_resolution::TypeStore,
+    type_environment: &package_type_environment::Environment
+) -> !package_type_resolution::ResolvedType {
+    return resolve_template(
+        catalog, spelling_component_id, spelling,
+        package_type_resolution::formal_owner_declared(), declaration_index,
+        false, store, type_environment
+    );
+}
+
+fn resolve_template(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    spelling_component_id: i64,
+    spelling: []u8,
+    formal_owner_kind: i64,
+    formal_owner_id: i64,
+    allow_const: bool,
+    store: &var package_type_resolution::TypeStore,
+    type_environment: &package_type_environment::Environment
+) -> !package_type_resolution::ResolvedType {
+    let full_spelling = std::mem::trim_ascii(spelling);
+    if std::mem::equal_bytes(full_spelling, "unknown") {
+        return package_type_resolution::unknown_type();
+    }
+    let layer = try type_spelling::parse(full_spelling);
+    if layer.kind != type_spelling::layer_named() {
+        return resolve_wrapper(
+            catalog, spelling_component_id, full_spelling, &layer,
+            formal_owner_kind, formal_owner_id, allow_const,
+            store, type_environment
+        );
+    }
+    let constructor = try type_spelling::constructor(&layer, full_spelling);
+    if std::mem::equal_bytes(constructor, "Self") {
+        if layer.has_arguments { return error("Self type cannot have arguments"); }
+        let self_type = package_type_environment::self_type_id(type_environment);
+        if self_type >= 0 {
+            return package_type_resolution::type_at(store, self_type);
+        }
+        if formal_owner_kind == package_type_resolution::formal_owner_function() and
+            package_catalog::function_is_impl_method_at(catalog, formal_owner_id) {
+            return resolve_template(
+                catalog,
+                package_catalog::function_component_id_at(catalog, formal_owner_id),
+                package_catalog::function_owner_type_at(catalog, formal_owner_id),
+                package_type_resolution::formal_owner_none(), -1, false,
+                store, type_environment
+            );
+        }
+        return error("Self type is only valid in an impl method");
+    }
+    let formal = try package_type_environment::exact_formal(
+        catalog, type_environment, formal_owner_kind, formal_owner_id,
+        constructor
+    );
+    if formal.found {
+        if layer.has_arguments { return error("formal type cannot have arguments"); }
+        return package_type_resolution::intern_type_leaf(
+            store, package_type_resolution::type_kind_formal(),
+            full_spelling, constructor,
+            -1, -1, package_type_resolution::no_declaration_component(),
+            spelling_component_id,
+            formal.owner_kind, formal.owner_id, formal.slot
+        );
+    }
+    var child_ids = std::array::Array<i64>(std::mem::page_allocator());
+    defer child_ids.deinit();
+    try resolve_arguments(
+        catalog, spelling_component_id, full_spelling, &layer,
+        formal_owner_kind, formal_owner_id,
+        store, type_environment, &var child_ids
+    );
+    let identity = try package_exact_lookup::declared_type_identity(
+        catalog, spelling_component_id, constructor
+    );
+    if identity.found {
+        if child_ids.len() != package_catalog::declared_type_parameter_len(
+            catalog, identity.declaration_index
+        ) {
+            return error("declared type argument arity mismatch");
+        }
+        return package_type_resolution::intern_type_record(
+            store, package_type_resolution::type_kind_declared(),
+            full_spelling, identity.local_name,
+            -1, identity.declaration_index, identity.component_id,
+            spelling_component_id, package_type_resolution::formal_owner_none(),
+            -1, -1, &child_ids
+        );
+    }
+    let intrinsic = intrinsic_type_contract::from_source_name(constructor);
+    if intrinsic < 0 { return error("exact type declaration not found"); }
+    if intrinsic_type_contract::arity(intrinsic) != child_ids.len() {
+        return error("intrinsic type argument arity mismatch");
+    }
+    return package_type_resolution::intern_type_record(
+        store, package_type_resolution::type_kind_intrinsic(), full_spelling,
+        try intrinsic_type_contract::canonical_name(intrinsic),
+        intrinsic, -1, package_type_resolution::no_declaration_component(),
+        spelling_component_id, package_type_resolution::formal_owner_none(),
+        -1, -1, &child_ids
+    );
+}
+
+fn resolve_wrapper(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    spelling_component_id: i64,
+    full_spelling: []u8,
+    layer: &type_spelling::TypeLayer,
+    formal_owner_kind: i64,
+    formal_owner_id: i64,
+    allow_const: bool,
+    store: &var package_type_resolution::TypeStore,
+    type_environment: &package_type_environment::Environment
+) -> !package_type_resolution::ResolvedType {
+    if layer.kind == type_spelling::layer_const() and !allow_const {
+        return error("const type is only valid as a ptr pointee");
+    }
+    var children = std::array::Array<i64>(std::mem::page_allocator());
+    defer children.deinit();
+    if layer.kind == type_spelling::layer_error_union() {
+        let first_child = try type_spelling::first_child(layer, full_spelling);
+        let second_child = try type_spelling::second_child(layer, full_spelling);
+        if std::mem::len(first_child) == 0 {
+            let error_type = try package_type_resolution::intern_type_leaf(
+                store, package_type_resolution::type_kind_intrinsic(),
+                "error", "error", intrinsic_type_contract::kind_error(),
+                -1, package_type_resolution::no_declaration_component(),
+                spelling_component_id,
+                package_type_resolution::formal_owner_none(), -1, -1
+            );
+            try children.append(error_type.type_id);
+        } else {
+            let error_type = try resolve_template(
+                catalog, spelling_component_id, first_child,
+                formal_owner_kind, formal_owner_id, false,
+                store, type_environment
+            );
+            try children.append(error_type.type_id);
+        }
+        let success = try resolve_template(
+            catalog, spelling_component_id, second_child,
+            formal_owner_kind, formal_owner_id, false,
+            store, type_environment
+        );
+        try children.append(success.type_id);
+        return package_type_resolution::intern_type_wrapper(
+            store, package_type_resolution::type_kind_error_union(),
+            full_spelling, "!", spelling_component_id, &children
+        );
+    }
+    let first_child = try type_spelling::first_child(layer, full_spelling);
+    let child = try resolve_template(
+        catalog, spelling_component_id, first_child,
+        formal_owner_kind, formal_owner_id, false,
+        store, type_environment
+    );
+    if layer.kind == type_spelling::layer_nullable() and
+        (child.kind != package_type_resolution::type_kind_intrinsic() or
+        child.intrinsic_kind != intrinsic_type_contract::kind_ptr()) {
+        return error("nullable type must wrap ptr<T>");
+    }
+    try children.append(child.type_id);
+    var kind = package_type_resolution::type_kind_borrow();
+    if layer.kind == type_spelling::layer_borrow_var() {
+        kind = package_type_resolution::type_kind_borrow_var();
+    } else {
+        if layer.kind == type_spelling::layer_slice() {
+            kind = package_type_resolution::type_kind_slice();
+        } else {
+            if layer.kind == type_spelling::layer_nullable() {
+                kind = package_type_resolution::type_kind_nullable();
+            } else {
+                if layer.kind == type_spelling::layer_dynamic() {
+                    kind = package_type_resolution::type_kind_dynamic();
+                } else {
+                    if layer.kind == type_spelling::layer_const() {
+                        kind = package_type_resolution::type_kind_const();
+                    }
+                }
+            }
+        }
+    }
+    return package_type_resolution::intern_type_wrapper(
+        store, kind, full_spelling,
+        try type_spelling::constructor(layer, full_spelling),
+        spelling_component_id, &children
+    );
+}
+
+fn resolve_arguments(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    spelling_component_id: i64,
+    full_spelling: []u8,
+    layer: &type_spelling::TypeLayer,
+    formal_owner_kind: i64,
+    formal_owner_id: i64,
+    store: &var package_type_resolution::TypeStore,
+    type_environment: &package_type_environment::Environment,
+    child_ids: &var std::array::Array<i64>
+) -> !void {
+    if !layer.has_arguments { return; }
+    let arguments = try type_spelling::arguments(layer, full_spelling);
+    let constructor = try type_spelling::constructor(layer, full_spelling);
+    var start = 0;
+    while start < std::mem::len(arguments) {
+        let argument = try type_spelling::next_argument(arguments, start);
+        if std::mem::len(argument) == 0 { return error("empty type argument"); }
+        let resolved = try resolve_template(
+            catalog, spelling_component_id, argument,
+            formal_owner_kind, formal_owner_id,
+            std::mem::equal_bytes(constructor, "ptr"),
+            store, type_environment
+        );
+        if resolved.type_id < 0 { return error("unknown type argument"); }
+        try child_ids.append(resolved.type_id);
+        let next = try type_spelling::next_argument_start(arguments, start);
+        if next <= start { return error("type argument parser did not advance"); }
+        start = next;
+    }
+    return;
+}

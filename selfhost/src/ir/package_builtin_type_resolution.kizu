@@ -1,0 +1,374 @@
+import selfhost::ir::builtin_call_identity;
+import selfhost::ir::package_type_resolution;
+import selfhost::ir::package_type_environment;
+import selfhost::ir::package_type_template_resolution;
+import selfhost::ir::package_call_facts;
+import selfhost::ir::package_catalog;
+
+// Free-call result typing consumes the already-classified builtin identity.
+// It never reads the callee AST spelling and therefore cannot drift from call
+// classification. Runtime free calls keep their canonical identity because it
+// is their exact ABI key; numeric receiver/language operations use operation.
+pub fn free_operation_return_type(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    environment: &package_type_environment::Environment,
+    component_id: i64,
+    operation: i64,
+    canonical_identity: []u8
+) -> !package_type_resolution::ResolvedType {
+    if operation == package_call_facts::builtin_operation_print() {
+        return named_in_component(catalog, store, environment, component_id, "void");
+    }
+    if operation == package_call_facts::builtin_operation_error() {
+        let void_type = try named_in_component(
+            catalog, store, environment, component_id, "void"
+        );
+        return error_union(store, &void_type);
+    }
+    if operation != package_call_facts::builtin_operation_none() {
+        return error("free builtin operation has no result descriptor");
+    }
+    let return_type = builtin_call_identity::free_runtime_return_type(
+        canonical_identity
+    );
+    if std::mem::len(return_type) == 0 {
+        return error("free builtin identity has no structural result descriptor");
+    }
+    return named_in_component(
+        catalog, store, environment, component_id, return_type
+    );
+}
+
+pub fn type_apply_operation_return_type(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    environment: &package_type_environment::Environment,
+    component_id: i64,
+    canonical_identity: []u8,
+    template: &builtin_call_identity::TypeApplyResultTemplate,
+    actual_ids: &std::array::Array<i64>
+) -> !package_type_resolution::ResolvedType {
+    let fixed = builtin_call_identity::free_runtime_return_type(canonical_identity);
+    if std::mem::len(fixed) > 0 {
+        return named_in_component(
+            catalog, store, environment, component_id, fixed
+        );
+    }
+    if template.shape == builtin_call_identity::TypeApplyResultShape::None {
+        return error("type-applied builtin has no exact result template");
+    }
+    let shape = template.shape;
+    if shape == builtin_call_identity::TypeApplyResultShape::Intrinsic or
+        shape == builtin_call_identity::TypeApplyResultShape::ErrorIntrinsic {
+        let value = try package_type_resolution::intrinsic_application(
+            store, component_id, template.intrinsic_kind, actual_ids
+        );
+        if shape == builtin_call_identity::TypeApplyResultShape::ErrorIntrinsic {
+            return error_union(store, &value);
+        }
+        return value;
+    }
+    if template.actual_slot < 0 or template.actual_slot >= actual_ids.len() {
+        return error("type-applied builtin result actual slot out of range");
+    }
+    let actual = try package_type_resolution::type_at(
+        store, try actual_ids.get(template.actual_slot)
+    );
+    if shape == builtin_call_identity::TypeApplyResultShape::Actual {
+        return package_type_resolution::copy(&actual);
+    }
+    if shape == builtin_call_identity::TypeApplyResultShape::ErrorActual {
+        return error_union(store, &actual);
+    }
+    if shape == builtin_call_identity::TypeApplyResultShape::BorrowActual or
+        shape == builtin_call_identity::TypeApplyResultShape::ErrorBorrowActual or
+        shape == builtin_call_identity::TypeApplyResultShape::BorrowVarActual or
+        shape == builtin_call_identity::TypeApplyResultShape::ErrorBorrowVarActual {
+        let mutable = shape == builtin_call_identity::TypeApplyResultShape::BorrowVarActual or
+            shape == builtin_call_identity::TypeApplyResultShape::ErrorBorrowVarActual;
+        let borrowed = try package_type_resolution::builtin_borrow(
+            store, &actual, mutable
+        );
+        if shape == builtin_call_identity::TypeApplyResultShape::ErrorBorrowActual or
+            shape == builtin_call_identity::TypeApplyResultShape::ErrorBorrowVarActual {
+            return error_union(store, &borrowed);
+        }
+        return borrowed;
+    }
+    return error("type-applied builtin result template has invalid shape");
+}
+
+// Builtin result typing is keyed only by the closed numeric operation chosen
+// by builtin_call_identity. Generic results come from structural receiver
+// children; source spelling and method names are never reclassified here.
+pub fn receiver_operation_return_type(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    environment: &package_type_environment::Environment,
+    receiver: &package_type_resolution::ResolvedType,
+    operation: i64
+) -> !package_type_resolution::ResolvedType {
+    let value = try package_type_resolution::without_borrow(store, receiver);
+    if operation == package_call_facts::builtin_operation_array_get() or
+        operation == package_call_facts::builtin_operation_array_pop() {
+        let element = try generic_argument(
+            store, &value, package_type_resolution::intrinsic_array_kind(), 1, 0
+        );
+        return error_union(store, &element);
+    }
+    if operation == package_call_facts::builtin_operation_array_get_or_panic() or
+        operation == package_call_facts::builtin_operation_array_pop_or_panic() {
+        return generic_argument(
+            store, &value, package_type_resolution::intrinsic_array_kind(), 1, 0
+        );
+    }
+    if operation == package_call_facts::builtin_operation_array_at() or
+        operation == package_call_facts::builtin_operation_array_at_mut() {
+        let element = try generic_argument(
+            store, &value, package_type_resolution::intrinsic_array_kind(), 1, 0
+        );
+        let borrowed = try package_type_resolution::builtin_borrow(
+            store, &element,
+            operation == package_call_facts::builtin_operation_array_at_mut()
+        );
+        return error_union(store, &borrowed);
+    }
+    if operation == package_call_facts::builtin_operation_array_len() or
+        operation == package_call_facts::builtin_operation_array_capacity() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_array_kind(), 1
+        );
+        return named(catalog, store, environment, &value, "i64");
+    }
+    if operation == package_call_facts::builtin_operation_array_as_bytes() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_array_kind(), 1
+        );
+        return named(catalog, store, environment, &value, "[]u8");
+    }
+    if operation == package_call_facts::builtin_operation_array_append() or
+        operation == package_call_facts::builtin_operation_array_set() or
+        operation == package_call_facts::builtin_operation_array_reserve() or
+        operation == package_call_facts::builtin_operation_array_truncate() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_array_kind(), 1
+        );
+        let void_type = try named(catalog, store, environment, &value, "void");
+        return error_union(store, &void_type);
+    }
+    if operation == package_call_facts::builtin_operation_array_clear() or
+        operation == package_call_facts::builtin_operation_array_deinit() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_array_kind(), 1
+        );
+        return named(catalog, store, environment, &value, "void");
+    }
+    if operation == package_call_facts::builtin_operation_map_get() {
+        let result = try generic_argument(
+            store, &value, package_type_resolution::intrinsic_map_kind(), 2, 1
+        );
+        return error_union(store, &result);
+    }
+    if operation == package_call_facts::builtin_operation_map_contains() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_map_kind(), 2
+        );
+        return named(catalog, store, environment, &value, "bool");
+    }
+    if operation == package_call_facts::builtin_operation_map_len() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_map_kind(), 2
+        );
+        return named(catalog, store, environment, &value, "i64");
+    }
+    if operation == package_call_facts::builtin_operation_map_insert() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_map_kind(), 2
+        );
+        let void_type = try named(catalog, store, environment, &value, "void");
+        return error_union(store, &void_type);
+    }
+    if operation == package_call_facts::builtin_operation_map_deinit() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_map_kind(), 2
+        );
+        return named(catalog, store, environment, &value, "void");
+    }
+    if operation == package_call_facts::builtin_operation_box_borrow() or
+        operation == package_call_facts::builtin_operation_box_borrow_mut() {
+        let element = try generic_argument(
+            store, &value, package_type_resolution::intrinsic_box_kind(), 1, 0
+        );
+        return package_type_resolution::builtin_borrow(
+            store, &element,
+            operation == package_call_facts::builtin_operation_box_borrow_mut()
+        );
+    }
+    if operation == package_call_facts::builtin_operation_box_deinit() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_box_kind(), 1
+        );
+        return named(catalog, store, environment, &value, "void");
+    }
+    if operation == package_call_facts::builtin_operation_arena_get() {
+        return generic_argument(
+            store, &value, package_type_resolution::intrinsic_arena_kind(), 1, 0
+        );
+    }
+    if operation == package_call_facts::builtin_operation_arena_add() {
+        let element = try generic_argument(
+            store, &value, package_type_resolution::intrinsic_arena_kind(), 1, 0
+        );
+        return package_type_resolution::builtin_arena_handle(store, &element);
+    }
+    if operation == package_call_facts::builtin_operation_arena_deinit() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_arena_kind(), 1
+        );
+        return named(catalog, store, environment, &value, "void");
+    }
+    if operation == package_call_facts::builtin_operation_channel_recv() or
+        operation == package_call_facts::builtin_operation_atomic_load() or
+        operation == package_call_facts::builtin_operation_mutex_get() or
+        operation == package_call_facts::builtin_operation_task_await() {
+        return generic_argument(
+            store, &value, generic_receiver_kind(operation), 1, 0
+        );
+    }
+    if operation == package_call_facts::builtin_operation_channel_send() or
+        operation == package_call_facts::builtin_operation_channel_close() or
+        operation == package_call_facts::builtin_operation_atomic_store() or
+        operation == package_call_facts::builtin_operation_task_cancel() {
+        try require_receiver(store, &value, generic_receiver_kind(operation), 1);
+        return named(catalog, store, environment, &value, "void");
+    }
+    if operation == package_call_facts::builtin_operation_string_len() or
+        operation == package_call_facts::builtin_operation_string_capacity() {
+        return named(catalog, store, environment, &value, "i64");
+    }
+    if operation == package_call_facts::builtin_operation_partition_at() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_partition_kind(), 0
+        );
+        return named(catalog, store, environment, &value, "i64");
+    }
+    if operation == package_call_facts::builtin_operation_local_buffer_get() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_local_buffer_kind(), 0
+        );
+        return named(catalog, store, environment, &value, "i64");
+    }
+    if operation == package_call_facts::builtin_operation_string_as_bytes() {
+        return named(catalog, store, environment, &value, "[]u8");
+    }
+    if operation == package_call_facts::builtin_operation_string_append_bytes() or
+        operation == package_call_facts::builtin_operation_string_append_byte() or
+        operation == package_call_facts::builtin_operation_string_reserve() or
+        operation == package_call_facts::builtin_operation_string_truncate() {
+        let void_type = try named(catalog, store, environment, &value, "void");
+        return error_union(store, &void_type);
+    }
+    if operation == package_call_facts::builtin_operation_string_clear() or
+        operation == package_call_facts::builtin_operation_string_deinit() {
+        return named(catalog, store, environment, &value, "void");
+    }
+    if operation == package_call_facts::builtin_operation_queue_enqueue() or
+        operation == package_call_facts::builtin_operation_queue_drain() {
+        try require_receiver(
+            store, &value, package_type_resolution::intrinsic_queue_kind(), 0
+        );
+        return named(catalog, store, environment, &value, "void");
+    }
+    return error("builtin receiver operation has no result descriptor");
+}
+
+pub fn task_spawn_return_type(
+    store: &var package_type_resolution::TypeStore,
+    receiver: &package_type_resolution::ResolvedType,
+    worker_result: &package_type_resolution::ResolvedType
+) -> !package_type_resolution::ResolvedType {
+    let value = try package_type_resolution::without_borrow(store, receiver);
+    try require_receiver(
+        store, &value, package_type_resolution::intrinsic_task_group_kind(), 0
+    );
+    return package_type_resolution::builtin_task(store, worker_result);
+}
+
+fn generic_receiver_kind(operation: i64) -> i64 {
+    if operation == package_call_facts::builtin_operation_channel_recv() or
+        operation == package_call_facts::builtin_operation_channel_send() or
+        operation == package_call_facts::builtin_operation_channel_close() {
+        return package_type_resolution::intrinsic_channel_kind();
+    }
+    if operation == package_call_facts::builtin_operation_atomic_load() or
+        operation == package_call_facts::builtin_operation_atomic_store() {
+        return package_type_resolution::intrinsic_atomic_kind();
+    }
+    if operation == package_call_facts::builtin_operation_mutex_get() {
+        return package_type_resolution::intrinsic_mutex_kind();
+    }
+    if operation == package_call_facts::builtin_operation_task_await() or
+        operation == package_call_facts::builtin_operation_task_cancel() {
+        return package_type_resolution::intrinsic_task_kind();
+    }
+    return -1;
+}
+
+fn generic_argument(
+    store: &package_type_resolution::TypeStore,
+    receiver: &package_type_resolution::ResolvedType,
+    intrinsic_kind: i64,
+    arity: i64,
+    index: i64
+) -> !package_type_resolution::ResolvedType {
+    try require_receiver(store, receiver, intrinsic_kind, arity);
+    return package_type_resolution::type_argument(store, receiver, index);
+}
+
+fn require_receiver(
+    store: &package_type_resolution::TypeStore,
+    receiver: &package_type_resolution::ResolvedType,
+    intrinsic_kind: i64,
+    arity: i64
+) -> !void {
+    if receiver.kind != package_type_resolution::type_kind_intrinsic() or
+        receiver.intrinsic_kind != intrinsic_kind {
+        return error("builtin operation receiver identity mismatch");
+    }
+    if try package_type_resolution::type_argument_len(store, receiver) != arity {
+        return error("builtin operation receiver arity mismatch");
+    }
+    return;
+}
+
+fn error_union(
+    store: &var package_type_resolution::TypeStore,
+    success: &package_type_resolution::ResolvedType
+) -> !package_type_resolution::ResolvedType {
+    return package_type_resolution::builtin_error_union(store, success);
+}
+
+fn named(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    environment: &package_type_environment::Environment,
+    receiver: &package_type_resolution::ResolvedType,
+    spelling: []u8
+) -> !package_type_resolution::ResolvedType {
+    return package_type_template_resolution::resolve_in_environment(
+        catalog, receiver.spelling_component_id, spelling, store, environment
+    );
+}
+
+fn named_in_component(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    environment: &package_type_environment::Environment,
+    component_id: i64,
+    spelling: []u8
+) -> !package_type_resolution::ResolvedType {
+    return package_type_template_resolution::resolve_in_environment(
+        catalog, component_id, spelling, store, environment
+    );
+}

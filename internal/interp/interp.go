@@ -415,6 +415,12 @@ func (i *Interpreter) evalCallArg(param ast.Param, arg ast.Expression, env *Env)
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", ident.Name)
 	}
+	// Forward an existing borrow as the same runtime reference. Wrapping the
+	// parameter binding would create a reference to a reference, so field
+	// writes would target the intermediate call frame instead of the owner.
+	if binding.value.kind == kindRef {
+		return binding.value, nil
+	}
 	return refValue(binding), nil
 }
 
@@ -2355,7 +2361,8 @@ func (i *Interpreter) evalBuiltinTypeApply(
 		value, err := i.evalArrayConstructor(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_pop", "std.builtin.array_get", "std.builtin.array_get_or_panic",
+		"std.builtin.array_pop", "std.builtin.array_pop_or_panic",
+		"std.builtin.array_get", "std.builtin.array_get_or_panic",
 		"std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
 		value, err := i.evalArrayPrimitive(name, args, env)
@@ -3522,7 +3529,10 @@ func (i *Interpreter) evalArrayMutationRuntimeMethod(
 		value, err := i.evalArrayAppend(array, args, env)
 		return value, true, err
 	case "pop":
-		value, err := i.evalArrayPop(array, args)
+		value, err := i.evalArrayPop(array, args, false)
+		return value, true, err
+	case "pop_or_panic":
+		value, err := i.evalArrayPop(array, args, true)
 		return value, true, err
 	case "reserve":
 		value, err := i.evalArrayReserve(array, args, env)
@@ -3722,11 +3732,22 @@ func (i *Interpreter) evalArrayAppend(array Value, args []ast.Expression, env *E
 }
 
 // evalArrayPop moves the last initialized element out of an Array.
-func (i *Interpreter) evalArrayPop(array Value, args []ast.Expression) (Value, error) {
+func (i *Interpreter) evalArrayPop(
+	array Value,
+	args []ast.Expression,
+	panicOnEmpty bool,
+) (Value, error) {
 	if len(args) != 0 {
-		return voidValue(), fmt.Errorf("runtime error: Array.pop expects 0 args")
+		name := "pop"
+		if panicOnEmpty {
+			name = "pop_or_panic"
+		}
+		return voidValue(), fmt.Errorf("runtime error: Array.%s expects 0 args", name)
 	}
 	if len(array.arrayPayload().values) == 0 {
+		if panicOnEmpty {
+			return voidValue(), fmt.Errorf("runtime error: Array.pop_or_panic empty array")
+		}
 		return errorUnionValue("Array.pop empty array"), nil
 	}
 	index := len(array.arrayPayload().values) - 1

@@ -22,6 +22,10 @@ pub struct ParsedSourceFiles {
 
 impl ParsedSourceFiles {
     fn deinit(self: ParsedSourceFiles) -> void {
+        while self.parsed.len() > 0 {
+            let parsed = self.parsed.pop_or_panic();
+            parsed.deinit();
+        }
         self.source_indexes.deinit();
         self.parsed.deinit();
         return;
@@ -32,30 +36,36 @@ pub fn parse_source_files(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>
 ) -> !ParsedSourceFiles {
-    var parsed = std::array::Array<std::kizu::ast::ParseResult>(allocator);
-    var source_indexes = std::array::Array<i64>(allocator);
+    var parsed_files = ParsedSourceFiles {
+        parsed: std::array::Array<std::kizu::ast::ParseResult>(allocator),
+        source_indexes: std::array::Array<i64>(allocator)
+    };
+    errdefer parsed_files.deinit();
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
         if source::is_source_code(file.kind) {
-            try parsed.append(try parse_checked_file(allocator, file.path, file.text));
-            try source_indexes.append(index);
+            let parsed = try parse_checked_file(allocator, file.path, file.text);
+            try append_parsed_source_file(&var parsed_files, parsed, index);
         }
         index = index + 1;
     }
-    return ParsedSourceFiles {
-        parsed: parsed,
-        source_indexes: source_indexes
-    };
+    return parsed_files;
+}
+
+fn append_parsed_source_file(
+    parsed_files: &var ParsedSourceFiles,
+    parsed: std::kizu::ast::ParseResult,
+    source_index: i64
+) -> !void {
+    try parsed_files.parsed.append(parsed);
+    try parsed_files.source_indexes.append(source_index);
+    return;
 }
 
 pub fn deinit_parsed_source_files(
     parsed_files: ParsedSourceFiles
 ) -> !void {
-    while parsed_files.parsed.len() > 0 {
-        let parsed = try parsed_files.parsed.pop();
-        parsed.deinit();
-    }
     parsed_files.deinit();
     return;
 }

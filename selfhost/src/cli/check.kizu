@@ -8,6 +8,7 @@ import selfhost::source;
 import selfhost::source::loader;
 import selfhost::types;
 import selfhost::types::constructor_facts;
+import selfhost::types::expression_facts;
 import selfhost::types::function_calls;
 import selfhost::types::model;
 import selfhost::types::type_refs;
@@ -114,7 +115,9 @@ fn package_fast_diagnostics(
     var parsed_sources = std::array::Array<std::kizu::ast::ParseResult>(allocator);
     var parsed_file_indexes = std::array::Array<i64>(allocator);
     var facts = FastDiagnosticContext(allocator);
+    var expression_types = expression_facts::init(allocator);
     defer facts.deinit();
+    defer expression_types.deinit();
     try seed_fast_diagnostic_context(&var facts);
     var ok = try parse_package_fast_diagnostic_sources(
         allocator,
@@ -122,8 +125,19 @@ fn package_fast_diagnostics(
         files,
         parsed_sources,
         parsed_file_indexes,
-        &var facts
+        &var facts,
+        &var expression_types
     );
+    if ok {
+        try collect_package_struct_resolution_facts(
+            allocator,
+            files,
+            parsed_sources,
+            parsed_file_indexes,
+            &var facts.function_arities,
+            &var expression_types
+        );
+    }
     var index = 0;
     while ok and index < parsed_sources.len() {
         let file_index = try parsed_file_indexes.get(index);
@@ -138,6 +152,7 @@ fn package_fast_diagnostics(
                 parsed.ast,
                 parsed.root,
                 &var facts,
+                &var expression_types,
                 true
             )) {
                 ok = false;
@@ -160,7 +175,8 @@ fn parse_package_fast_diagnostic_sources(
     files: &std::array::Array<source::SourceFile>,
     parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
     parsed_file_indexes: &var std::array::Array<i64>,
-    facts: &var FastDiagnosticContext
+    facts: &var FastDiagnosticContext,
+    expression_types: &var expression_facts::ExpressionTypeFacts
 ) -> !bool {
     var index = 0;
     while index < files.len() {
@@ -173,7 +189,8 @@ fn parse_package_fast_diagnostic_sources(
                 index,
                 parsed_sources,
                 parsed_file_indexes,
-                facts
+                facts,
+                expression_types
             )) {
                 return false;
             }
@@ -190,7 +207,8 @@ fn parse_package_fast_diagnostic_source(
     file_index: i64,
     parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
     parsed_file_indexes: &var std::array::Array<i64>,
-    facts: &var FastDiagnosticContext
+    facts: &var FastDiagnosticContext,
+    expression_types: &var expression_facts::ExpressionTypeFacts
 ) -> !bool {
     if source::is_frontend_source(file.kind) {
         var parsed_validation = try parser::validate_diagnostic_file(
@@ -216,7 +234,8 @@ fn parse_package_fast_diagnostic_source(
             parsed,
             parsed_sources,
             parsed_file_indexes,
-            facts
+            facts,
+            expression_types
         );
         return true;
     }
@@ -232,7 +251,8 @@ fn parse_package_fast_diagnostic_source(
         parsed,
         parsed_sources,
         parsed_file_indexes,
-        facts
+        facts,
+        expression_types
     );
     return true;
 }
@@ -244,7 +264,8 @@ fn append_package_fast_diagnostic_source(
     parsed: std::kizu::ast::ParseResult,
     parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
     parsed_file_indexes: &var std::array::Array<i64>,
-    facts: &var FastDiagnosticContext
+    facts: &var FastDiagnosticContext,
+    expression_types: &var expression_facts::ExpressionTypeFacts
 ) -> !void {
     try type_refs::collect_declared_types_from_ast(
         allocator,
@@ -262,15 +283,55 @@ fn append_package_fast_diagnostic_source(
         parsed.root,
         &var facts.borrow_params
     );
-    try function_calls::collect_function_arities_from_ast(
-        allocator,
-        file,
-        &parsed.ast,
-        parsed.root,
-        &var facts.function_arities
-    );
     try parsed_sources.append(parsed);
     try parsed_file_indexes.append(file_index);
+    return;
+}
+
+fn collect_package_struct_resolution_facts(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_sources: &std::array::Array<std::kizu::ast::ParseResult>,
+    parsed_file_indexes: &std::array::Array<i64>,
+    function_arities: &var std::map::Map<[]u8, i64>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    var index = 0;
+    while index < parsed_sources.len() {
+        let parsed = try parsed_sources.at(index);
+        let file_index = try parsed_file_indexes.get(index);
+        let file = try files.at(file_index);
+        try types::collect_nominal_resolution_facts_from_ast(
+            allocator,
+            file,
+            parsed.ast,
+            parsed.root,
+            expression_types
+        );
+        index = index + 1;
+    }
+    index = 0;
+    while index < parsed_sources.len() {
+        let parsed = try parsed_sources.at(index);
+        let file_index = try parsed_file_indexes.get(index);
+        let file = try files.at(file_index);
+        try function_calls::collect_function_signatures_from_ast(
+            allocator,
+            file,
+            &parsed.ast,
+            parsed.root,
+            function_arities,
+            expression_types
+        );
+        try types::collect_struct_field_resolution_facts_from_ast(
+            allocator,
+            file,
+            parsed.ast,
+            parsed.root,
+            expression_types
+        );
+        index = index + 1;
+    }
     return;
 }
 
@@ -309,7 +370,9 @@ pub fn fast_diagnostics_ast_node(
     root: std::kizu::ast::NodeId
 ) -> !bool {
     var facts = FastDiagnosticContext(allocator);
+    var expression_types = expression_facts::init(allocator);
     defer facts.deinit();
+    defer expression_types.deinit();
     try seed_fast_diagnostic_context(&var facts);
     try type_refs::collect_declared_types_from_ast(
         allocator,
@@ -327,6 +390,28 @@ pub fn fast_diagnostics_ast_node(
         root,
         &var facts.borrow_params
     );
+    try types::collect_nominal_resolution_facts_from_ast(
+        allocator,
+        file,
+        ast,
+        root,
+        &var expression_types
+    );
+    try function_calls::collect_function_signatures_from_ast(
+        allocator,
+        file,
+        &ast,
+        root,
+        &var facts.function_arities,
+        &var expression_types
+    );
+    try types::collect_struct_field_resolution_facts_from_ast(
+        allocator,
+        file,
+        ast,
+        root,
+        &var expression_types
+    );
     return try fast_diagnostics_ast_node_with_context(
         allocator,
         io,
@@ -335,7 +420,32 @@ pub fn fast_diagnostics_ast_node(
         ast,
         root,
         &var facts,
+        &var expression_types,
         false
+    );
+}
+
+// fast_diagnostics_parsed_file is the single hosted check/run/test semantic
+// boundary. The static CLI passes only source inputs and the canonical parser
+// result; SourceFile construction and referenced stdlib loading stay owned by
+// the Kizu semantic layer.
+pub fn fast_diagnostics_parsed_file(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8,
+    parsed: std::kizu::ast::ParseResult
+) -> !bool {
+    var files = try loader::load_file_sources(allocator, io, path, file_text);
+    defer files.deinit();
+    let file = try files.at(0);
+    return try fast_diagnostics_ast_node(
+        allocator,
+        io,
+        files,
+        file,
+        parsed.ast,
+        parsed.root
     );
 }
 
@@ -386,6 +496,7 @@ fn fast_diagnostics_ast_node_with_context(
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId,
     facts: &var FastDiagnosticContext,
+    expression_types: &var expression_facts::ExpressionTypeFacts,
     use_cached_arities: bool
 ) -> !bool {
     let duplicate = try resolver::first_duplicate_declaration_ast_node(
@@ -400,14 +511,15 @@ fn fast_diagnostics_ast_node_with_context(
         return false;
     }
 
-    let pre_move = try types::first_pre_move_check_diagnostic_ast_node_with_types(
+    let pre_move = try types::first_pre_move_check_diagnostic_ast_node_with_facts(
         allocator,
         file,
         ast,
         root,
         &var facts.type_kinds,
         &var facts.type_arities,
-        &var facts.copyable_types
+        &var facts.copyable_types,
+        expression_types
     );
     if !(try write_check_diagnostic(allocator, io, file.path, file.text, pre_move)) {
         return false;
@@ -433,11 +545,12 @@ fn fast_diagnostics_ast_node_with_context(
         return false;
     }
 
-    let post_move = try types::first_post_move_check_diagnostic_ast_node(
+    let post_move = try types::first_post_move_check_diagnostic_ast_node_with_facts(
         allocator,
         file,
         ast,
-        root
+        root,
+        expression_types
     );
     if !(try write_check_diagnostic(allocator, io, file.path, file.text, post_move)) {
         return false;

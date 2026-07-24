@@ -1,988 +1,147 @@
 import selfhost::backend::compiled_util;
 import selfhost::backend::ir_index;
+import selfhost::backend::compiled_type_resolver;
 
 pub struct StructFieldLookup {
     pub found: bool,
     pub index: i64,
     pub field_type: []u8,
+    pub canonical_struct_identity: []u8,
+    pub declaring_module: []u8,
 }
 
-pub fn lookup_type_llvm_by_prefix(
+pub struct StructFieldAtIndexLookup {
+    pub found: bool,
+    pub index: i64,
+    pub field_name: []u8,
+    pub field_type: []u8,
+    pub canonical_struct_identity: []u8,
+    pub declaring_module: []u8,
+}
+
+pub struct StructFieldFact {
+    pub index: i64,
+    pub name: []u8,
+    pub field_type: []u8,
+}
+
+// validate_struct_field_owner_indexed validates one exact owner range without
+// allocating a parallel field table. Field facts are canonical source order:
+// indexes start at zero and advance by one.
+pub fn validate_struct_field_owner_indexed(
+    index: &ir_index::IrIndex,
     ir_bytes: []u8,
-    module_prefix: []u8,
-    short_name: []u8
-) -> ![]u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "type-llvm ";
-    let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(module_prefix);
-    let name_len = std::mem::len(short_name);
-    var suffix_value = ir_bytes[0..0];
-    var index = 0;
-    while index + prefix_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let type_start = index + prefix_len;
-            let type_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), type_start);
-            let mp_end = type_start + mp_len;
-            let name_end = mp_end + name_len;
-            if name_end == type_end and
-                std::mem::equal_bytes(ir_bytes[type_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) {
-                var pos = type_end;
-                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-                    pos = pos + 1;
-                }
-                let value_end = compiled_util::find_line_end(ir_bytes, pos);
-                return ir_bytes[pos..value_end];
-            }
-            // A bare struct spelling recorded by another module's field facts (e.g.
-            // AstNode.span recording 'Span') resolves to whichever module actually
-            // carries the type, mirroring the struct-field suffix matching.
-            if std::mem::len(suffix_value) == 0 and
-                type_matches_suffix(ir_bytes[type_start..type_end], short_name) {
-                var spos = type_end;
-                while spos < byte_len and ir_bytes[spos] == cast<u8>(32) {
-                    spos = spos + 1;
-                }
-                let svalue_end = compiled_util::find_line_end(ir_bytes, spos);
-                suffix_value = ir_bytes[spos..svalue_end];
-            }
+    canonical_struct_identity: []u8
+) -> !i64 {
+    let prefix = "struct-field ";
+    var entry = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, ir_bytes[0..0], canonical_struct_identity
+    );
+    var count = 0;
+    while entry >= 0 and ir_index::entry_matches_query(
+        index, ir_bytes, entry, prefix,
+        ir_bytes[0..0], canonical_struct_identity
+    ) {
+        let field = try parse_struct_field_entry(index, ir_bytes, entry);
+        if field.index < count {
+            return error("compiled function: duplicate struct field index");
         }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+        if field.index > count {
+            return error("compiled function: struct field index gap");
+        }
+        var previous = ir_index::first_matching_entry(
+            index, ir_bytes, prefix, ir_bytes[0..0], canonical_struct_identity
+        );
+        while previous >= 0 and previous < entry {
+            let previous_field = try parse_struct_field_entry(
+                index, ir_bytes, previous
+            );
+            if std::mem::equal_bytes(previous_field.name, field.name) {
+                return error("compiled function: duplicate struct field name");
+            }
+            previous = previous + 1;
+        }
+        count = count + 1;
+        entry = entry + 1;
     }
-    if std::mem::len(suffix_value) > 0 {
-        return suffix_value;
-    }
-    return error("compiled function: type-llvm mapping not found");
+    return count;
 }
 
-pub fn lookup_type_llvm_by_prefix_or_empty_indexed(
+// lookup_struct_field_exact_indexed accepts the canonical identity produced by
+// compiled_type_resolver. It never guesses by suffix: a field belongs to one
+// declaration, and its bare type spelling is relative to that declaration's
+// module. A duplicate exact struct field is rejected instead of becoming
+// order-dependent.
+pub fn lookup_struct_field_exact_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
-    module_prefix: []u8,
-    short_name: []u8
-) -> []u8 {
-    return ir_index::lookup_fact_value_by_prefix_or_empty(
-        index, ir_bytes, "type-llvm ", module_prefix, short_name
-    );
-}
-
-pub fn lookup_type_llvm_by_prefix_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_name: []u8
-) -> ![]u8 {
-    let value = lookup_type_llvm_by_prefix_or_empty_indexed(
-        index, ir_bytes, module_prefix, short_name
-    );
-    if std::mem::len(value) > 0 {
-        return value;
-    }
-    return try lookup_type_llvm_by_prefix(ir_bytes, module_prefix, short_name);
-}
-
-pub fn lookup_struct_field_index_by_prefix(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
-    field_name: []u8
-) -> !i64 {
-    let lookup = try lookup_struct_field_by_prefix(
-        ir_bytes, module_prefix, short_type, field_name
-    );
-    if lookup.found {
-        return lookup.index;
-    }
-    return error("compiled function: struct field not found");
-}
-
-pub fn lookup_struct_field_index_by_prefix_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
-    field_name: []u8
-) -> !i64 {
-    let lookup = try lookup_struct_field_by_prefix_indexed(
-        index, ir_bytes, module_prefix, short_type, field_name
-    );
-    if lookup.found {
-        return lookup.index;
-    }
-    return error("compiled function: struct field not found");
-}
-
-pub fn lookup_struct_field_type_by_prefix(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
-    target_index: i64
-) -> ![]u8 {
-    let field_type = try lookup_struct_field_type_by_prefix_or_empty(
-        ir_bytes, module_prefix, short_type, target_index
-    );
-    if std::mem::len(field_type) > 0 {
-        return field_type;
-    }
-    return error("compiled function: struct field type not found");
-}
-
-pub fn lookup_struct_field_type_by_prefix_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
-    target_index: i64
-) -> ![]u8 {
-    let field_type = try lookup_struct_field_type_by_prefix_or_empty_indexed(
-        index, ir_bytes, module_prefix, short_type, target_index
-    );
-    if std::mem::len(field_type) > 0 {
-        return field_type;
-    }
-    return error("compiled function: struct field type not found");
-}
-
-pub fn lookup_struct_field_by_prefix(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
+    canonical_struct_identity: []u8,
     field_name: []u8
 ) -> !StructFieldLookup {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "struct-field ";
-    let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(module_prefix);
-    let type_len = std::mem::len(short_type);
-    var suffix_match = empty_struct_field_lookup(ir_bytes);
-    var index = 0;
-    while index + prefix_len + mp_len + type_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let type_start = index + prefix_len;
-            let type_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), type_start);
-            let mp_start = type_start;
-            let mp_end = mp_start + mp_len;
-            let short_end = mp_end + type_len;
-            if short_end == type_end and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..short_end], short_type) {
-                let field = try extract_struct_field_by_name(
-                    ir_bytes, type_end, field_name
-                );
-                if field.found {
-                    return field;
-                }
-            } else {
-                if !suffix_match.found and
-                    type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
-                    let field = try extract_struct_field_by_name(
-                        ir_bytes, type_end, field_name
-                    );
-                    if field.found {
-                        suffix_match = field;
-                    }
-                }
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    return suffix_match;
-}
-
-pub fn lookup_struct_field_by_prefix_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
-    field_name: []u8
-) -> !StructFieldLookup {
-    let prefix = "struct-field ";
-    var entry_index = ir_index::first_matching_entry(
-        index, ir_bytes, prefix, module_prefix, short_type
+    let field_count = try validate_struct_field_owner_indexed(
+        index, ir_bytes, canonical_struct_identity
     );
-    while entry_index >= 0 and
-        ir_index::entry_matches_query(
-            index, ir_bytes, entry_index, prefix, module_prefix, short_type
-        ) {
-        let field = try extract_struct_field_by_name(
-            ir_bytes, ir_index::entry_key_end(index, entry_index), field_name
-        );
-        if field.found {
-            return field;
+    var result = empty_struct_field_lookup(ir_bytes);
+    let prefix = "struct-field ";
+    var entry = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, ir_bytes[0..0], canonical_struct_identity
+    );
+    var visited = 0;
+    while visited < field_count {
+        let field = try parse_struct_field_entry(index, ir_bytes, entry);
+        if std::mem::equal_bytes(field.name, field_name) {
+            result = StructFieldLookup {
+                found: true,
+                index: field.index,
+                field_type: field.field_type,
+                canonical_struct_identity: canonical_struct_identity,
+                declaring_module: compiled_util::module_prefix_of(
+                    canonical_struct_identity
+                )
+            };
         }
-        entry_index = entry_index + 1;
+        visited = visited + 1;
+        entry = entry + 1;
     }
-    return try lookup_struct_field_by_suffix_indexed(index, ir_bytes, short_type, field_name);
+    return result;
 }
 
-fn lookup_struct_field_by_suffix_indexed(
+pub fn lookup_struct_field_at_index_exact_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
-    short_type: []u8,
-    field_name: []u8
-) -> !StructFieldLookup {
-    let prefix = "struct-field ";
-    let prefix_len = std::mem::len(prefix);
-    var suffix_match = empty_struct_field_lookup(ir_bytes);
-    var suffix_line = 0;
-    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
-    while entry_index >= 0 and ir_index::entry_key_starts_with(
-        index, ir_bytes, entry_index, prefix
-    ) {
-        let type_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
-        let type_end = ir_index::entry_key_end(index, entry_index);
-        if type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
-            let field = try extract_struct_field_by_name(
-                ir_bytes, type_end, field_name
-            );
-            if field.found {
-                let line_start = ir_index::entry_line_start(index, entry_index);
-                if !suffix_match.found or line_start < suffix_line {
-                    suffix_match = field;
-                    suffix_line = line_start;
-                }
-            }
-        }
-        entry_index = entry_index + 1;
-    }
-    return suffix_match;
-}
-
-fn lookup_struct_field_type_by_prefix_or_empty(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
+    canonical_struct_identity: []u8,
     target_index: i64
-) -> ![]u8 {
-    let byte_len = std::mem::len(ir_bytes);
+) -> !StructFieldAtIndexLookup {
+    let field_count = try validate_struct_field_owner_indexed(
+        index, ir_bytes, canonical_struct_identity
+    );
+    if target_index < 0 or target_index >= field_count {
+        return StructFieldAtIndexLookup {
+            found: false,
+            index: target_index,
+            field_name: ir_bytes[0..0],
+            field_type: ir_bytes[0..0],
+            canonical_struct_identity: canonical_struct_identity,
+            declaring_module: compiled_util::module_prefix_of(canonical_struct_identity)
+        };
+    }
     let prefix = "struct-field ";
-    let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(module_prefix);
-    let type_len = std::mem::len(short_type);
-    var suffix_type = ir_bytes[0..0];
-    var index = 0;
-    while index + prefix_len + mp_len + type_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let type_start = index + prefix_len;
-            let type_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), type_start);
-            let mp_start = type_start;
-            let mp_end = mp_start + mp_len;
-            let short_end = mp_end + type_len;
-            if short_end == type_end and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..short_end], short_type) {
-                let field_type = try extract_struct_field_type_at_index(
-                    ir_bytes, type_end, target_index
-                );
-                if std::mem::len(field_type) > 0 {
-                    return field_type;
-                }
-            } else {
-                if std::mem::len(suffix_type) == 0 and
-                    type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
-                    let field_type = try extract_struct_field_type_at_index(
-                        ir_bytes, type_end, target_index
-                    );
-                    if std::mem::len(field_type) > 0 {
-                        suffix_type = field_type;
-                    }
-                }
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    return suffix_type;
-}
-
-pub fn lookup_struct_field_type_by_prefix_or_empty_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
-    target_index: i64
-) -> ![]u8 {
-    let prefix = "struct-field ";
-    var entry_index = ir_index::first_matching_entry(
-        index, ir_bytes, prefix, module_prefix, short_type
+    var entry = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, ir_bytes[0..0], canonical_struct_identity
     );
-    while entry_index >= 0 and
-        ir_index::entry_matches_query(
-            index, ir_bytes, entry_index, prefix, module_prefix, short_type
-        ) {
-        let field_type = try extract_struct_field_type_at_index(
-            ir_bytes, ir_index::entry_key_end(index, entry_index), target_index
-        );
-        if std::mem::len(field_type) > 0 {
-            return field_type;
-        }
-        entry_index = entry_index + 1;
+    var field = try parse_struct_field_entry(index, ir_bytes, entry);
+    while field.index < target_index {
+        entry = entry + 1;
+        field = try parse_struct_field_entry(index, ir_bytes, entry);
     }
-    return try lookup_struct_field_type_by_suffix_or_empty_indexed(
-        index, ir_bytes, short_type, target_index
-    );
-}
-
-fn lookup_struct_field_type_by_suffix_or_empty_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    short_type: []u8,
-    target_index: i64
-) -> ![]u8 {
-    let prefix = "struct-field ";
-    let prefix_len = std::mem::len(prefix);
-    var suffix_type = ir_bytes[0..0];
-    var suffix_line = 0;
-    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
-    while entry_index >= 0 and ir_index::entry_key_starts_with(
-        index, ir_bytes, entry_index, prefix
-    ) {
-        let type_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
-        let type_end = ir_index::entry_key_end(index, entry_index);
-        if type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
-            let field_type = try extract_struct_field_type_at_index(
-                ir_bytes, type_end, target_index
-            );
-            if std::mem::len(field_type) > 0 {
-                let line_start = ir_index::entry_line_start(index, entry_index);
-                if std::mem::len(suffix_type) == 0 or line_start < suffix_line {
-                    suffix_type = field_type;
-                    suffix_line = line_start;
-                }
-            }
-        }
-        entry_index = entry_index + 1;
-    }
-    return suffix_type;
-}
-
-// lookup_struct_field_name_by_prefix_indexed returns the field name recorded at target_index in the
-// 'struct-field <Type> <index> <name> <type>' facts for short_type. It mirrors the field-type
-// lookup so a fact-driven struct constructor emitter can read both the field name (for passthrough
-// SSA values) and the field type (for owned-container detection) without parsing the body. Returns
-// empty when target_index has no field, so callers can use it to count fields.
-pub fn lookup_struct_field_name_by_prefix_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
-    target_index: i64
-) -> ![]u8 {
-    let prefix = "struct-field ";
-    var entry_index = ir_index::first_matching_entry(
-        index, ir_bytes, prefix, module_prefix, short_type
-    );
-    while entry_index >= 0 and
-        ir_index::entry_matches_query(
-            index, ir_bytes, entry_index, prefix, module_prefix, short_type
-        ) {
-        let field_name = try extract_struct_field_name_at_index(
-            ir_bytes, ir_index::entry_key_end(index, entry_index), target_index
-        );
-        if std::mem::len(field_name) > 0 {
-            return field_name;
-        }
-        entry_index = entry_index + 1;
-    }
-    return try lookup_struct_field_name_by_suffix_or_empty_indexed(
-        index, ir_bytes, short_type, target_index
-    );
-}
-
-fn lookup_struct_field_name_by_suffix_or_empty_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    short_type: []u8,
-    target_index: i64
-) -> ![]u8 {
-    let prefix = "struct-field ";
-    let prefix_len = std::mem::len(prefix);
-    var suffix_name = ir_bytes[0..0];
-    var suffix_line = 0;
-    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
-    while entry_index >= 0 and ir_index::entry_key_starts_with(
-        index, ir_bytes, entry_index, prefix
-    ) {
-        let type_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
-        let type_end = ir_index::entry_key_end(index, entry_index);
-        if type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
-            let field_name = try extract_struct_field_name_at_index(
-                ir_bytes, type_end, target_index
-            );
-            if std::mem::len(field_name) > 0 {
-                let line_start = ir_index::entry_line_start(index, entry_index);
-                if std::mem::len(suffix_name) == 0 or line_start < suffix_line {
-                    suffix_name = field_name;
-                    suffix_line = line_start;
-                }
-            }
-        }
-        entry_index = entry_index + 1;
-    }
-    return suffix_name;
-}
-
-fn lookup_struct_field_name_by_prefix_or_empty(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_type: []u8,
-    target_index: i64
-) -> ![]u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "struct-field ";
-    let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(module_prefix);
-    let type_len = std::mem::len(short_type);
-    var suffix_name = ir_bytes[0..0];
-    var index = 0;
-    while index + prefix_len + mp_len + type_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let type_start = index + prefix_len;
-            let type_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), type_start);
-            let mp_start = type_start;
-            let mp_end = mp_start + mp_len;
-            let short_end = mp_end + type_len;
-            if short_end == type_end and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..short_end], short_type) {
-                let field_name = try extract_struct_field_name_at_index(
-                    ir_bytes, type_end, target_index
-                );
-                if std::mem::len(field_name) > 0 {
-                    return field_name;
-                }
-            } else {
-                if std::mem::len(suffix_name) == 0 and
-                    type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
-                    let field_name = try extract_struct_field_name_at_index(
-                        ir_bytes, type_end, target_index
-                    );
-                    if std::mem::len(field_name) > 0 {
-                        suffix_name = field_name;
-                    }
-                }
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    return suffix_name;
-}
-
-// extract_struct_field_name_at_index parses the field name token from a 'struct-field <Type>'
-// fact body of the form '<index> <name> <type>', returning the name only when the leading index
-// matches target_index. It mirrors extract_struct_field_type_at_index but stops at the name token.
-pub fn extract_struct_field_name_at_index(
-    ir_bytes: []u8,
-    after_type: i64,
-    target_index: i64
-) -> ![]u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    var pos = after_type;
-    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-        pos = pos + 1;
-    }
-    var field_index = 0;
-    var found_digit = false;
-    while pos < byte_len and ir_bytes[pos] >= cast<u8>(48) and ir_bytes[pos] <= cast<u8>(57) {
-        field_index = field_index * 10 + cast<i64>(ir_bytes[pos]) - 48;
-        found_digit = true;
-        pos = pos + 1;
-    }
-    if !found_digit or field_index != target_index {
-        return ir_bytes[0..0];
-    }
-    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-        pos = pos + 1;
-    }
-    let name_start = pos;
-    while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
-        pos = pos + 1;
-    }
-    return ir_bytes[name_start..pos];
-}
-
-fn type_matches_suffix(full_type: []u8, short_type: []u8) -> bool {
-    if std::mem::equal_bytes(full_type, short_type) {
-        return true;
-    }
-    let full_len = std::mem::len(full_type);
-    let short_len = std::mem::len(short_type);
-    if full_len <= short_len + 2 {
-        return false;
-    }
-    let suffix_start = full_len - short_len;
-    return full_type[suffix_start - 2] == cast<u8>(58) and
-        full_type[suffix_start - 1] == cast<u8>(58) and
-        std::mem::equal_bytes(full_type[suffix_start..full_len], short_type);
-}
-
-pub fn lookup_fact_value_by_prefix(
-    ir_bytes: []u8,
-    fact_prefix: []u8,
-    module_prefix: []u8,
-    short_name: []u8
-) -> ![]u8 {
-    let value = lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, fact_prefix, module_prefix, short_name
-    );
-    if std::mem::len(value) > 0 {
-        return value;
-    }
-    return error("compiled function: fact not found");
-}
-
-pub fn lookup_fact_value_by_prefix_or_empty(
-    ir_bytes: []u8,
-    fact_prefix: []u8,
-    module_prefix: []u8,
-    short_name: []u8
-) -> []u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    let fp_len = std::mem::len(fact_prefix);
-    let mp_len = std::mem::len(module_prefix);
-    let name_len = std::mem::len(short_name);
-    var index = 0;
-    while index + fp_len + mp_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + fp_len], fact_prefix) {
-            let mp_start = index + fp_len;
-            let mp_end = mp_start + mp_len;
-            let name_end = mp_end + name_len;
-            if name_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) and
-                ir_bytes[name_end] == cast<u8>(32) {
-                var pos = name_end;
-                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-                    pos = pos + 1;
-                }
-                let value_end = compiled_util::find_line_end(ir_bytes, pos);
-                return ir_bytes[pos..value_end];
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    return ir_bytes[0..0];
-}
-
-pub fn lookup_fact_value_by_prefix_or_empty_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    fact_prefix: []u8,
-    module_prefix: []u8,
-    short_name: []u8
-) -> []u8 {
-    return ir_index::lookup_fact_value_by_prefix_or_empty(
-        index, ir_bytes, fact_prefix, module_prefix, short_name
-    );
-}
-
-// lookup_qualified_function_name_by_callee_suffix resolves an alias-qualified callee
-// (a call written through an import alias such as 'lexer::tokenize', reached via
-// 'import selfhost::lexer') to the fully-qualified name of the emitted function whose
-// function-signature-return fact name ends with '::' + callee_name. The compiled backend
-// emits each function's signature under its real owning module, so the alias-qualified
-// call matches whichever module actually carries it: lexer::is_eof resolves to
-// selfhost::lexer::is_eof (the compiled selfhost predicate) and lexer::tokenize resolves
-// to std::kizu::lexer::tokenize (the compiled tokenizer entry the selfhost::lexer wrapper
-// forwards to). This derives the qualified name from real signature facts rather than a
-// handwritten alias table, so any allowed cross-module callee resolves generically (issue
-// 1165 / 1162). Returns "" when no signature fact's tail matches.
-pub fn lookup_qualified_function_name_by_callee_suffix(
-    ir_bytes: []u8,
-    callee_name: []u8
-) -> []u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "function-signature-return ";
-    let prefix_len = std::mem::len(prefix);
-    var index = 0;
-    while index + prefix_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let name_start = index + prefix_len;
-            let name_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), name_start);
-            if name_end < byte_len {
-                let name = ir_bytes[name_start..name_end];
-                if !std::mem::equal_bytes(name, callee_name) and
-                    type_matches_suffix(name, callee_name) {
-                    return name;
-                }
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    return ir_bytes[0..0];
-}
-
-pub fn lookup_qualified_function_name_by_callee_suffix_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    callee_name: []u8
-) -> []u8 {
-    let prefix = "function-signature-return ";
-    let prefix_len = std::mem::len(prefix);
-    var entry_index = ir_index::first_entry_with_fact_prefix(index, ir_bytes, prefix);
-    while entry_index >= 0 and
-        ir_index::entry_key_starts_with(index, ir_bytes, entry_index, prefix) {
-        let name_start = ir_index::entry_line_start(index, entry_index) + prefix_len;
-        let name_end = ir_index::entry_key_end(index, entry_index);
-        let name = ir_bytes[name_start..name_end];
-        if !std::mem::equal_bytes(name, callee_name) and
-            type_matches_suffix(name, callee_name) {
-            return name;
-        }
-        entry_index = entry_index + 1;
-    }
-    return ir_bytes[0..0];
-}
-
-pub fn lookup_stdlib_symbol(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "stdlib-symbol ";
-    let prefix_len = std::mem::len(prefix);
-    let name_len = std::mem::len(callee_name);
-    var index = 0;
-    while index + prefix_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let name_start = index + prefix_len;
-            let name_end = name_start + name_len;
-            if name_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[name_start..name_end], callee_name) and
-                ir_bytes[name_end] == cast<u8>(32) {
-                var pos = name_end;
-                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-                    pos = pos + 1;
-                }
-                let sym_start = pos;
-                while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
-                    pos = pos + 1;
-                }
-                return ir_bytes[sym_start..pos];
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    var message = std::string::String(std::mem::page_allocator());
-    try message.append_bytes("compiled function: stdlib symbol not found: ");
-    try message.append_bytes(callee_name);
-    let message_bytes = message.as_bytes();
-    return error(message_bytes);
-}
-
-pub fn lookup_stdlib_symbol_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    callee_name: []u8
-) -> ![]u8 {
-    let entry_index = ir_index::first_matching_entry(
-        index, ir_bytes, "stdlib-symbol ", ir_bytes[0..0], callee_name
-    );
-    if entry_index < 0 {
-        var message = std::string::String(std::mem::page_allocator());
-        try message.append_bytes("compiled function: stdlib symbol not found: ");
-        try message.append_bytes(callee_name);
-        let message_bytes = message.as_bytes();
-        return error(message_bytes);
-    }
-    let line_end = ir_index::entry_line_end(index, entry_index);
-    let sym_start = skip_spaces_until(ir_bytes, ir_index::entry_key_end(index, entry_index), line_end);
-    let sym_end = token_end_until(ir_bytes, sym_start, line_end);
-    return ir_bytes[sym_start..sym_end];
-}
-
-pub fn lookup_stdlib_return(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
-    let fact_return = lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, "stdlib-return ", ir_bytes[0..0], callee_name
-    );
-    if std::mem::len(fact_return) > 0 {
-        return fact_return;
-    }
-    let generic_return = lookup_generic_stdlib_return_or_empty(ir_bytes, callee_name);
-    if std::mem::len(generic_return) > 0 {
-        return generic_return;
-    }
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "stdlib-symbol ";
-    let prefix_len = std::mem::len(prefix);
-    let name_len = std::mem::len(callee_name);
-    var index = 0;
-    while index + prefix_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let name_start = index + prefix_len;
-            let name_end = name_start + name_len;
-            if name_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[name_start..name_end], callee_name) and
-                ir_bytes[name_end] == cast<u8>(32) {
-                var pos = name_end;
-                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-                    pos = pos + 1;
-                }
-                while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
-                    pos = pos + 1;
-                }
-                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-                    pos = pos + 1;
-                }
-                // The return type is the third token; an optional fourth arg-type token may
-                // follow, so stop at the next space rather than the line end (tracker 961).
-                let ret_start = pos;
-                let line_end = compiled_util::find_line_end(ir_bytes, pos);
-                var ret_end = ret_start;
-                while ret_end < line_end and ir_bytes[ret_end] != cast<u8>(32) {
-                    ret_end = ret_end + 1;
-                }
-                return ir_bytes[ret_start..ret_end];
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    return error("compiled function: stdlib return not found");
-}
-
-pub fn lookup_stdlib_return_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    callee_name: []u8
-) -> ![]u8 {
-    let fact_return = ir_index::lookup_fact_value_by_prefix_or_empty(
-        index, ir_bytes, "stdlib-return ", ir_bytes[0..0], callee_name
-    );
-    if std::mem::len(fact_return) > 0 {
-        return fact_return;
-    }
-    let generic_return = lookup_generic_stdlib_return_or_empty_indexed(
-        index, ir_bytes, callee_name
-    );
-    if std::mem::len(generic_return) > 0 {
-        return generic_return;
-    }
-    let entry_index = ir_index::first_matching_entry(
-        index, ir_bytes, "stdlib-symbol ", ir_bytes[0..0], callee_name
-    );
-    if entry_index < 0 {
-        return error("compiled function: stdlib return not found");
-    }
-    let line_end = ir_index::entry_line_end(index, entry_index);
-    var pos = skip_spaces_until(ir_bytes, ir_index::entry_key_end(index, entry_index), line_end);
-    pos = token_end_until(ir_bytes, pos, line_end);
-    pos = skip_spaces_until(ir_bytes, pos, line_end);
-    let ret_start = pos;
-    let ret_end = token_end_until(ir_bytes, ret_start, line_end);
-    return ir_bytes[ret_start..ret_end];
-}
-
-fn lookup_generic_stdlib_return_or_empty(ir_bytes: []u8, callee_name: []u8) -> []u8 {
-    if !is_generic_array_constructor(callee_name) {
-        return ir_bytes[0..0];
-    }
-    let fact_return = lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, "stdlib-return-generic ", ir_bytes[0..0], "std::array::Array"
-    );
-    if std::mem::equal_bytes(fact_return, "std::array::Array") {
-        return callee_name;
-    }
-    return ir_bytes[0..0];
-}
-
-fn lookup_generic_stdlib_return_or_empty_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    callee_name: []u8
-) -> []u8 {
-    if !is_generic_array_constructor(callee_name) {
-        return ir_bytes[0..0];
-    }
-    let fact_return = ir_index::lookup_fact_value_by_prefix_or_empty(
-        index, ir_bytes, "stdlib-return-generic ", ir_bytes[0..0], "std::array::Array"
-    );
-    if std::mem::equal_bytes(fact_return, "std::array::Array") {
-        return callee_name;
-    }
-    return ir_bytes[0..0];
-}
-
-fn is_generic_array_constructor(callee_name: []u8) -> bool {
-    let prefix = "std::array::Array<";
-    let callee_len = std::mem::len(callee_name);
-    let prefix_len = std::mem::len(prefix);
-    if callee_len <= prefix_len {
-        return false;
-    }
-    if !std::mem::starts_with(callee_name, prefix) {
-        return false;
-    }
-    return callee_name[callee_len - 1] == cast<u8>(62);
-}
-
-// lookup_stdlib_arg_type resolves the LLVM argument type of a stdlib callee from the optional
-// trailing tokens of its 'stdlib-symbol <name> <symbol> <return> <arg-llvm-type>...' fact
-// (tracker 961). A single arg-type token remains the legacy uniform type for every argument;
-// multiple arg-type tokens are matched by argument index. When no arg type is present, the
-// canonical byte-slice default preserves equal_bytes / len lowering.
-pub fn lookup_stdlib_arg_type(ir_bytes: []u8, callee_name: []u8, arg_index: i64) -> ![]u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "stdlib-symbol ";
-    let prefix_len = std::mem::len(prefix);
-    let name_len = std::mem::len(callee_name);
-    var index = 0;
-    while index + prefix_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let name_start = index + prefix_len;
-            let name_end = name_start + name_len;
-            if name_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[name_start..name_end], callee_name) and
-                ir_bytes[name_end] == cast<u8>(32) {
-                let line_end = compiled_util::find_line_end(ir_bytes, name_end);
-                var pos = name_end;
-                // Skip the symbol token, the return-type token, then read the arg-type token.
-                var token = 0;
-                while token < 2 {
-                    while pos < line_end and ir_bytes[pos] == cast<u8>(32) {
-                        pos = pos + 1;
-                    }
-                    while pos < line_end and ir_bytes[pos] != cast<u8>(32) {
-                        pos = pos + 1;
-                    }
-                    token = token + 1;
-                }
-                while pos < line_end and ir_bytes[pos] == cast<u8>(32) {
-                    pos = pos + 1;
-                }
-                if pos >= line_end {
-                    return "%kizu.slice.u8";
-                }
-                let args_start = pos;
-                var scan = args_start;
-                var arg_count = 0;
-                while scan < line_end {
-                    while scan < line_end and ir_bytes[scan] == cast<u8>(32) {
-                        scan = scan + 1;
-                    }
-                    if scan < line_end {
-                        arg_count = arg_count + 1;
-                        while scan < line_end and ir_bytes[scan] != cast<u8>(32) {
-                            scan = scan + 1;
-                        }
-                    }
-                }
-                scan = args_start;
-                var current = 0;
-                while scan < line_end {
-                    while scan < line_end and ir_bytes[scan] == cast<u8>(32) {
-                        scan = scan + 1;
-                    }
-                    if scan < line_end {
-                        let arg_start = scan;
-                        while scan < line_end and ir_bytes[scan] != cast<u8>(32) {
-                            scan = scan + 1;
-                        }
-                        if arg_count == 1 or current == arg_index {
-                            return ir_bytes[arg_start..scan];
-                        }
-                        current = current + 1;
-                    }
-                }
-                return error("compiled function: stdlib arg type not found");
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    return "%kizu.slice.u8";
-}
-
-pub fn lookup_stdlib_arg_type_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    callee_name: []u8,
-    arg_index: i64
-) -> ![]u8 {
-    let entry_index = ir_index::first_matching_entry(
-        index, ir_bytes, "stdlib-symbol ", ir_bytes[0..0], callee_name
-    );
-    if entry_index < 0 {
-        return "%kizu.slice.u8";
-    }
-    let line_end = ir_index::entry_line_end(index, entry_index);
-    var pos = ir_index::entry_key_end(index, entry_index);
-    var token = 0;
-    while token < 2 {
-        pos = skip_spaces_until(ir_bytes, pos, line_end);
-        pos = token_end_until(ir_bytes, pos, line_end);
-        token = token + 1;
-    }
-    pos = skip_spaces_until(ir_bytes, pos, line_end);
-    if pos >= line_end {
-        return "%kizu.slice.u8";
-    }
-    let args_start = pos;
-    var scan = args_start;
-    var arg_count = 0;
-    while scan < line_end {
-        scan = skip_spaces_until(ir_bytes, scan, line_end);
-        if scan < line_end {
-            arg_count = arg_count + 1;
-            scan = token_end_until(ir_bytes, scan, line_end);
-        }
-    }
-    scan = args_start;
-    var current = 0;
-    while scan < line_end {
-        scan = skip_spaces_until(ir_bytes, scan, line_end);
-        if scan < line_end {
-            let arg_start = scan;
-            scan = token_end_until(ir_bytes, scan, line_end);
-            if arg_count == 1 or current == arg_index {
-                return ir_bytes[arg_start..scan];
-            }
-            current = current + 1;
-        }
-    }
-    return error("compiled function: stdlib arg type not found");
-}
-
-pub fn enum_variant_tag_by_prefix(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_enum: []u8,
-    variant: []u8
-) -> !i64 {
-    let prefix_len = std::mem::len(module_prefix);
-    let short_len = std::mem::len(short_enum);
-    let qualified_len = prefix_len + short_len;
-    let byte_len = std::mem::len(ir_bytes);
-    let marker = "enum-variant ";
-    let marker_len = std::mem::len(marker);
-    var index = 0;
-    while index + marker_len + qualified_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + marker_len], marker) {
-            let name_start = index + marker_len;
-            let prefix_end = name_start + prefix_len;
-            let enum_end = prefix_end + short_len;
-            if enum_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[name_start..prefix_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[prefix_end..enum_end], short_enum) and
-                ir_bytes[enum_end] == cast<u8>(32) {
-                let tag = try match_enum_variant_suffix(
-                    ir_bytes,
-                    enum_end,
-                    variant
-                );
-                if tag >= 0 {
-                    return tag;
-                }
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    return enum_variant_not_found(short_enum, variant);
+    return StructFieldAtIndexLookup {
+        found: true,
+        index: target_index,
+        field_name: field.name,
+        field_type: field.field_type,
+        canonical_struct_identity: canonical_struct_identity,
+        declaring_module: compiled_util::module_prefix_of(canonical_struct_identity)
+    };
 }
 
 pub fn enum_variant_tag_by_prefix_indexed(
@@ -1023,71 +182,19 @@ fn enum_variant_not_found(short_enum: []u8, variant: []u8) -> !i64 {
     return error(message_bytes);
 }
 
-// UnionVariantLookup carries the discriminant tag and the qualified kizu payload type
-// of a tagged-union variant resolved from a 'union-variant <union> <variant> <tag>
-// <payload-kizu>' fact (tracker 961). It backs the first 'match node.data' AST accessor;
-// the payload's llvm type and struct-field layout are resolved from payload_kizu.
+// UnionVariantLookup carries the discriminant, canonical union identity, and
+// declaration-relative payload spelling. Every consumer resolves payload_kizu
+// against declaring_module; a bare payload must never fall back to the caller.
 pub struct UnionVariantLookup {
     pub found: bool,
     pub tag: i64,
     pub payload_kizu: []u8,
+    pub canonical_identity: []u8,
+    pub declaring_module: []u8,
 }
 
-// lookup_union_variant_by_prefix resolves the tag + qualified kizu payload type of a
-// tagged-union variant. The fact line is 'union-variant <module_prefix><short_union>
-// <variant> <tag> <payload-kizu>'; pass an empty module_prefix with a fully qualified
-// short_union to match the whole name (tracker 961).
-pub fn lookup_union_variant_by_prefix(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    short_union: []u8,
-    variant: []u8
-) -> !UnionVariantLookup {
-    let prefix_len = std::mem::len(module_prefix);
-    let short_len = std::mem::len(short_union);
-    let qualified_len = prefix_len + short_len;
-    let byte_len = std::mem::len(ir_bytes);
-    let marker = "union-variant ";
-    let marker_len = std::mem::len(marker);
-    var suffix_match = UnionVariantLookup {
-        found: false,
-        tag: 0,
-        payload_kizu: ir_bytes[0..0]
-    };
-    var index = 0;
-    while index + marker_len + qualified_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + marker_len], marker) {
-            let name_start = index + marker_len;
-            let prefix_end = name_start + prefix_len;
-            let union_end = prefix_end + short_len;
-            if union_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[name_start..prefix_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[prefix_end..union_end], short_union) and
-                ir_bytes[union_end] == cast<u8>(32) {
-                let lookup = try match_union_variant_suffix(ir_bytes, union_end, variant);
-                if lookup.found {
-                    return lookup;
-                }
-            } else {
-                let name_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), name_start);
-                if !suffix_match.found and
-                    type_matches_suffix(ir_bytes[name_start..name_end], short_union) {
-                    let lookup = try match_union_variant_suffix(ir_bytes, name_end, variant);
-                    if lookup.found {
-                        suffix_match = lookup;
-                    }
-                }
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    if suffix_match.found {
-        return suffix_match;
-    }
-    return error("compiled function: union variant not found");
-}
-
+// Resolve through the canonical type resolver, then read the variant from the
+// declaration layout's validated name/tag/payload table.
 pub fn lookup_union_variant_by_prefix_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
@@ -1095,93 +202,26 @@ pub fn lookup_union_variant_by_prefix_indexed(
     short_union: []u8,
     variant: []u8
 ) -> !UnionVariantLookup {
-    let marker = "union-variant ";
-    var entry_index = ir_index::first_matching_entry(
-        index, ir_bytes, marker, module_prefix, short_union
+    let resolved = try compiled_type_resolver::resolve_type_indexed(
+        index, ir_bytes, module_prefix, short_union
     );
-    while entry_index >= 0 and
-        ir_index::entry_matches_query(
-            index, ir_bytes, entry_index, marker, module_prefix, short_union
-        ) {
-        let lookup = try match_union_variant_suffix(
-            ir_bytes,
-            ir_index::entry_key_end(index, entry_index),
-            variant
-        );
-        if lookup.found {
-            return lookup;
-        }
-        entry_index = entry_index + 1;
+    let union_type = try compiled_type_resolver::exact_union_type_indexed(
+        index, ir_bytes, resolved.canonical_identity
+    );
+    if !union_type.found {
+        return error("compiled function: union variant not found");
     }
-    return try lookup_union_variant_by_prefix(ir_bytes, module_prefix, short_union, variant);
-}
-
-fn match_union_variant_suffix(
-    ir_bytes: []u8,
-    after_union: i64,
-    variant: []u8
-) -> !UnionVariantLookup {
-    let byte_len = std::mem::len(ir_bytes);
-    let variant_len = std::mem::len(variant);
-    var pos = after_union;
-    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-        pos = pos + 1;
-    }
-    let variant_end = pos + variant_len;
-    if variant_end >= byte_len {
-        return empty_union_variant_lookup(ir_bytes);
-    }
-    if !std::mem::equal_bytes(ir_bytes[pos..variant_end], variant) {
-        return empty_union_variant_lookup(ir_bytes);
-    }
-    if ir_bytes[variant_end] != cast<u8>(32) {
-        return empty_union_variant_lookup(ir_bytes);
-    }
-    var tag_start = variant_end;
-    while tag_start < byte_len and ir_bytes[tag_start] == cast<u8>(32) {
-        tag_start = tag_start + 1;
-    }
-    var tag_value = 0;
-    var found = false;
-    var tag_pos = tag_start;
-    while tag_pos < byte_len {
-        let byte = ir_bytes[tag_pos];
-        if byte < cast<u8>(48) or byte > cast<u8>(57) {
-            break;
-        }
-        tag_value = tag_value * 10 + cast<i64>(byte) - 48;
-        found = true;
-        tag_pos = tag_pos + 1;
-    }
-    if !found {
-        return empty_union_variant_lookup(ir_bytes);
-    }
-    var payload_start = tag_pos;
-    while payload_start < byte_len and ir_bytes[payload_start] == cast<u8>(32) {
-        payload_start = payload_start + 1;
-    }
-    let payload_end = compiled_util::find_line_end(ir_bytes, payload_start);
+    let found = try compiled_type_resolver::resolve_union_variant_indexed(
+        index, ir_bytes, resolved.canonical_identity, variant
+    );
+    if !found.found { return error("compiled function: union variant not found"); }
     return UnionVariantLookup {
         found: true,
-        tag: tag_value,
-        payload_kizu: ir_bytes[payload_start..payload_end]
+        tag: found.tag,
+        payload_kizu: found.payload_kizu,
+        canonical_identity: resolved.canonical_identity,
+        declaring_module: resolved.declaring_module
     };
-}
-
-fn empty_union_variant_lookup(ir_bytes: []u8) -> UnionVariantLookup {
-    return UnionVariantLookup {
-        found: false,
-        tag: -1,
-        payload_kizu: ir_bytes[0..0]
-    };
-}
-
-pub fn is_stdlib_callee(callee_name: []u8) -> bool {
-    let len = std::mem::len(callee_name);
-    if len > 5 and std::mem::equal_bytes(callee_name[0..5], "std::") {
-        return true;
-    }
-    return false;
 }
 
 fn match_enum_variant_suffix(
@@ -1216,7 +256,12 @@ fn match_enum_variant_suffix(
         if byte < cast<u8>(48) or byte > cast<u8>(57) {
             break;
         }
-        tag_value = tag_value * 10 + cast<i64>(byte) - 48;
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if tag_value > 922337203685477580 or
+            (tag_value == 922337203685477580 and digit > 7) {
+            return error("compiled function: enum variant tag overflow");
+        }
+        tag_value = tag_value * 10 + digit;
         found = true;
         tag_start = tag_start + 1;
     }
@@ -1230,123 +275,54 @@ fn empty_struct_field_lookup(ir_bytes: []u8) -> StructFieldLookup {
     return StructFieldLookup {
         found: false,
         index: -1,
-        field_type: ir_bytes[0..0]
+        field_type: ir_bytes[0..0],
+        canonical_struct_identity: ir_bytes[0..0],
+        declaring_module: ir_bytes[0..0]
     };
 }
 
-fn extract_struct_field_by_name(
+pub fn parse_struct_field_entry(
+    index: &ir_index::IrIndex,
     ir_bytes: []u8,
-    after_type: i64,
-    field_name: []u8
-) -> !StructFieldLookup {
-    let field_index = try extract_struct_field_match(ir_bytes, after_type, field_name);
-    if field_index < 0 {
-        return empty_struct_field_lookup(ir_bytes);
-    }
-    let field_type = try extract_struct_field_type_at_index(
-        ir_bytes, after_type, field_index
+    entry: i64
+) -> !StructFieldFact {
+    let line_end = ir_index::entry_line_end(index, entry);
+    let index_start = skip_spaces_until(
+        ir_bytes, ir_index::entry_key_end(index, entry), line_end
     );
-    if std::mem::len(field_type) == 0 {
-        return empty_struct_field_lookup(ir_bytes);
-    }
-    return StructFieldLookup {
-        found: true,
-        index: field_index,
-        field_type: field_type
-    };
-}
-
-pub fn extract_struct_field_match(
-    ir_bytes: []u8,
-    after_type: i64,
-    field_name: []u8
-) -> !i64 {
-    let byte_len = std::mem::len(ir_bytes);
-    var pos = after_type;
-    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-        pos = pos + 1;
+    let index_end = token_end_until(ir_bytes, index_start, line_end);
+    if index_start >= index_end {
+        return error("compiled function: malformed struct field fact");
     }
     var field_index = 0;
-    var found_digit = false;
-    while pos < byte_len and ir_bytes[pos] >= cast<u8>(48) and ir_bytes[pos] <= cast<u8>(57) {
-        field_index = field_index * 10 + cast<i64>(ir_bytes[pos]) - 48;
-        found_digit = true;
-        pos = pos + 1;
-    }
-    if !found_digit {
-        return -1;
-    }
-    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-        pos = pos + 1;
-    }
-    let name_start = pos;
-    while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
-        pos = pos + 1;
-    }
-    let actual_name = ir_bytes[name_start..pos];
-    if std::mem::equal_bytes(actual_name, field_name) {
-        return field_index;
-    }
-    return -1;
-}
-
-pub fn extract_struct_field_type_at_index(
-    ir_bytes: []u8,
-    after_type: i64,
-    target_index: i64
-) -> ![]u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    var pos = after_type;
-    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-        pos = pos + 1;
-    }
-    var field_index = 0;
-    var found_digit = false;
-    while pos < byte_len and ir_bytes[pos] >= cast<u8>(48) and ir_bytes[pos] <= cast<u8>(57) {
-        field_index = field_index * 10 + cast<i64>(ir_bytes[pos]) - 48;
-        found_digit = true;
-        pos = pos + 1;
-    }
-    if !found_digit or field_index != target_index {
-        return ir_bytes[0..0];
-    }
-    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-        pos = pos + 1;
-    }
-    while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
-        pos = pos + 1;
-    }
-    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
-        pos = pos + 1;
-    }
-    let type_start = pos;
-    let type_end = compiled_util::find_line_end(ir_bytes, pos);
-    return ir_bytes[type_start..type_end];
-}
-
-pub fn is_enum_type(ir_bytes: []u8, module_prefix: []u8, short_name: []u8) -> bool {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "enum-variant ";
-    let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(module_prefix);
-    let name_len = std::mem::len(short_name);
-    var index = 0;
-    while index + prefix_len + mp_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let mp_start = index + prefix_len;
-            let mp_end = mp_start + mp_len;
-            let name_end = mp_end + name_len;
-            if name_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) and
-                ir_bytes[name_end] == cast<u8>(32) {
-                return true;
-            }
+    var cursor = index_start;
+    while cursor < index_end {
+        let byte = ir_bytes[cursor];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("compiled function: invalid struct field index");
         }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if field_index > 922337203685477580 or
+            (field_index == 922337203685477580 and digit > 7) {
+            return error("compiled function: struct field index overflow");
+        }
+        field_index = field_index * 10 + digit;
+        cursor = cursor + 1;
     }
-    return false;
+    let name_start = skip_spaces_until(ir_bytes, index_end, line_end);
+    let name_end = token_end_until(ir_bytes, name_start, line_end);
+    let type_start = skip_spaces_until(ir_bytes, name_end, line_end);
+    if name_start >= name_end {
+        return error("compiled function: empty struct field name");
+    }
+    if type_start >= line_end {
+        return error("compiled function: empty struct field type");
+    }
+    return StructFieldFact {
+        index: field_index,
+        name: ir_bytes[name_start..name_end],
+        field_type: ir_bytes[type_start..line_end]
+    };
 }
 
 pub fn is_enum_type_indexed(
@@ -1361,35 +337,77 @@ pub fn is_enum_type_indexed(
     return entry_index >= 0;
 }
 
-// is_union_type_indexed reports whether short_name (under module_prefix) names a
-// tagged-union type, i.e. at least one 'union-variant <prefix><name> ...' fact exists. It
-// mirrors is_enum_type_indexed and lets the compiled-MIR Call lowering distinguish a union
-// constructor call (Union::Variant(payload)) from a free/namespaced function call without
-// raising an error on a non-union receiver (issue 1157 PR-P2).
+// is_union_type_indexed accepts only the exact module-qualified identity. A
+// same-basename union in another component must never classify this spelling.
 pub fn is_union_type_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
     module_prefix: []u8,
     short_name: []u8
-) -> bool {
-    let entry_index = ir_index::first_matching_entry(
-        index, ir_bytes, "union-variant ", module_prefix, short_name
+) -> !bool {
+    let resolved = try compiled_type_resolver::resolve_type_indexed(
+        index, ir_bytes, module_prefix, short_name
     );
-    if entry_index >= 0 {
-        return true;
+    let union_type = try compiled_type_resolver::exact_union_type_indexed(
+        index, ir_bytes, resolved.canonical_identity
+    );
+    return union_type.found;
+}
+
+pub fn gate_exact_union_identity() -> !void {
+    let facts = "module-alias gamma::models alpha::
+union-type alpha::State %alpha.state
+union-variant alpha::State Ready 0 Model
+union-type beta::State %beta.state
+union-variant beta::State Ready 0 bool";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let alpha = try lookup_union_variant_by_prefix_indexed(
+        &index, facts, "alpha::", "State", "Ready"
+    );
+    let beta = try lookup_union_variant_by_prefix_indexed(
+        &index, facts, "", "beta::State", "Ready"
+    );
+    let imported = try lookup_union_variant_by_prefix_indexed(
+        &index, facts, "gamma::", "models::State", "Ready"
+    );
+    if alpha.tag != 0 or beta.tag != 0 or imported.tag != 0 {
+        return error("compiled function: exact union identity selected wrong tag");
     }
-    let marker = "union-variant ";
-    let marker_len = std::mem::len(marker);
-    var scan = ir_index::first_entry_with_fact_prefix(index, ir_bytes, marker);
-    while scan >= 0 and ir_index::entry_key_starts_with(index, ir_bytes, scan, marker) {
-        let name_start = ir_index::entry_line_start(index, scan) + marker_len;
-        let name_end = ir_index::entry_key_end(index, scan);
-        if type_matches_suffix(ir_bytes[name_start..name_end], short_name) {
-            return true;
-        }
-        scan = scan + 1;
+    if !std::mem::equal_bytes(alpha.canonical_identity, "alpha::State") or
+        !std::mem::equal_bytes(alpha.declaring_module, "alpha::") or
+        !std::mem::equal_bytes(alpha.payload_kizu, "Model") or
+        !std::mem::equal_bytes(imported.canonical_identity, "alpha::State") or
+        !std::mem::equal_bytes(imported.declaring_module, "alpha::") {
+        return error("compiled function: union payload lost declaration context");
     }
-    return false;
+    print("union-exact");
+    return;
+}
+
+pub fn gate_union_suffix_rejected() -> !void {
+    let facts = "union-type alpha::State %alpha.state
+union-variant alpha::State Ready 0 i64";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let value = try lookup_union_variant_by_prefix_indexed(
+        &index, facts, "", "State", "Ready"
+    );
+    print(value.tag);
+    return;
+}
+
+pub fn gate_invalid_union_variant_facts_rejected() -> !void {
+    let facts = "union-type alpha::State %alpha.state
+union-variant alpha::State Ready 0 i64
+union-variant alpha::State Waiting 2 bool";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let value = try lookup_union_variant_by_prefix_indexed(
+        &index, facts, "alpha::", "State", "Ready"
+    );
+    print(value.tag);
+    return;
 }
 
 fn skip_spaces_until(ir_bytes: []u8, start: i64, end: i64) -> i64 {

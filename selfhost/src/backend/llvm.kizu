@@ -1,5 +1,10 @@
 import selfhost::backend::cli_llvm;
+import selfhost::backend::compiled_run_entry_llvm;
+import selfhost::backend::compiled_runtime_declarations;
+import selfhost::backend::compiled_type_declarations;
 import selfhost::backend::data;
+import selfhost::backend::external_abi_validation;
+import selfhost::abi::fixed_abi_contract;
 import selfhost::backend::ir_contract;
 import selfhost::backend::ir_index;
 import selfhost::backend::profile;
@@ -412,15 +417,6 @@ fn record_ir_fact_profile_metrics(
         "ir.fact.union_variant.line_bytes",
         "union-variant "
     );
-    try record_fact_prefix_metrics(
-        backend_profile,
-        profile_out,
-        lookup_index,
-        ir_bytes,
-        "ir.fact.stdlib_return.entries",
-        "ir.fact.stdlib_return.line_bytes",
-        "stdlib-return "
-    );
     return;
 }
 
@@ -468,7 +464,7 @@ fn validate_ir_artifact(bytes: []u8) -> !void {
         bytes,
         "executable-contract-source lowering selfhost::backend::executable"
     );
-    try require_executable_function_signatures(bytes);
+    try external_abi_validation::require_manifest_roots(bytes);
     try require_selected_executable_body_ir(bytes);
     try require_selected_executable_body_parsing(bytes);
     try ir_contract::require_fact(bytes, "frontend-executable-lowering checked-body-ir");
@@ -480,76 +476,11 @@ fn validate_ir_artifact(bytes: []u8) -> !void {
 }
 
 fn require_selected_executable_body_ir(bytes: []u8) -> !void {
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::cli::execute::run_file_cli",
-        "check::checked_ast_node"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::cli::execute::run_file_cli",
-        "backend::render_run_codegen_artifact"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::cli::execute::run_file_cli",
-        "backend::emit_rendered_run_artifact"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::render_run_codegen_artifact",
-        "code_render::render_run_ast_artifact"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::emit_rendered_run_artifact",
-        "hosted::emit_rendered_run_artifact"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::hosted::emit_rendered_run_artifact",
-        "write_backend_bytes"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::hosted::emit_rendered_run_artifact",
-        "rendered_run_metadata_executable"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::hosted::rendered_run_metadata_executable",
-        "codegen::metadata_line"
-    );
     try require_metadata_line_body(bytes);
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::cli::execute::test_file_cli",
-        "check::checked_ast_node"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::cli::execute::test_file_cli",
-        "backend::lower_test_executable"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::cli::execute::test_file_cli",
-        "backend::emit_test_executable_artifact"
-    );
     try ir_contract::require_body_call(
         bytes,
         "selfhost::backend::executable::lower_test_executable",
         "executable_lowering::lower_test_executable"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::hosted::emit_test_executable_artifact",
-        "ensure_hosted_artifact_dir"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::hosted::emit_test_executable_artifact",
-        "write_test_artifact"
     );
     return;
 }
@@ -569,94 +500,6 @@ fn require_metadata_line_body(bytes: []u8) -> !void {
     let token = try ir_contract::body_token_or_empty(bytes, function_name, value);
     if std::mem::len(token) < 2 {
         return error("invalid metadata line body");
-    }
-    return;
-}
-
-fn require_executable_function_signatures(bytes: []u8) -> !void {
-    try require_function_signature_param_count(
-        bytes,
-        "selfhost::cli::execute::run_file_cli",
-        3
-    );
-    try require_function_signature_return(bytes, "selfhost::cli::execute::run_file_cli", "!i64");
-    try require_function_signature_param(
-        bytes,
-        "selfhost::cli::execute::run_file_cli",
-        0,
-        "allocator:runtime:Allocator"
-    );
-    try require_function_signature_return(
-        bytes,
-        "selfhost::ir::codegen::metadata_line",
-        "[]u8"
-    );
-    try require_function_signature_param(
-        bytes,
-        "selfhost::backend::executable::lower_test_executable",
-        1,
-        "ast:runtime:std::kizu::ast::Ast"
-    );
-    return;
-}
-
-fn require_function_signature_param_count(
-    bytes: []u8,
-    name: []u8,
-    expected: i64
-) -> !void {
-    let actual = try function_signature_param_count(bytes, name);
-    if actual != expected {
-        return error("invalid IR artifact fact");
-    }
-    return;
-}
-
-fn require_function_signature_return(bytes: []u8, name: []u8, return_type: []u8) -> !void {
-    try ir_contract::require_named_fact(bytes, "function-signature-return ", name, return_type);
-    return;
-}
-
-fn require_function_signature_param(
-    bytes: []u8,
-    name: []u8,
-    sequence: i64,
-    value: []u8
-) -> !void {
-    try ir_contract::require_sequence_fact(
-        bytes,
-        "function-signature-param ",
-        name,
-        sequence,
-        value
-    );
-    return;
-}
-
-fn function_signature_param_count(bytes: []u8, name: []u8) -> !i64 {
-    return try ir_contract::sequence_fact_count(
-        bytes,
-        "function-signature-param ",
-        name
-    );
-}
-
-fn append_function_signature_params_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    name: []u8
-) -> !void {
-    let count = try function_signature_param_count(ir_bytes, name);
-    var index = 0;
-    while index < count {
-        try append_backend_input_sequence_fact(
-            out,
-            ir_bytes,
-            "function-signature-param ",
-            name,
-            index
-        );
-        index = index + 1;
     }
     return;
 }
@@ -747,249 +590,7 @@ fn render_llvm_module(
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
     try append_line(out, "");
-    try append_line(out, "%kizu.slice.u8 = type { ptr, i64 }");
-    try append_line(out, "%kizu.owned = type { ptr }");
-    try append_line(out, "%kizu.handle = type { ptr, i64 }");
-    try append_line(out, "%kizu.fs.metadata = type { i64, i1 }");
-    try append_line(out, "%kizu.error.bool = type { i1, i1, %kizu.slice.u8 }");
-    try append_line(out, "%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }");
-    try append_line(out, "%kizu.error.owned = type { i1, %kizu.owned, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.error.metadata = type { i1, %kizu.fs.metadata, %kizu.slice.u8 }");
-    try append_line(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
-    try append_line(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
-    try append_line(out, "%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.run_ast = type { i1, i64, %kizu.slice.u8, i64, i64, i64, %kizu.slice.u8, i64, %kizu.slice.u8, %kizu.slice.u8, i64, i64, %kizu.slice.u8, i64, i64, i64, i64, i64, i64 }");
-    // !RunAst error union (tracker 961, scope 4 prerequisite): the lower_run_ast traversal
-    // cluster returns RunAst wrapped in an error union; the success value is the RunAst struct
-    // and the failure carries a diagnostic byte slice, matching the canonical { ok, value, error }
-    // error-union layout.
-    try append_line(out,
-        "%kizu.error.run_ast = type { i1, %kizu.selfhost.codegen.run_ast, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.value = type { i64, %kizu.slice.u8, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.instruction = type { i64, i64, %kizu.slice.u8, %kizu.slice.u8, %kizu.slice.u8, i64, %kizu.slice.u8, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.block = type { %kizu.slice.u8, i64 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.function = type { %kizu.slice.u8, i64 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.program = type { i64, %kizu.slice.u8, i64, %kizu.slice.u8, i64, i64, i64, %kizu.slice.u8, %kizu.slice.u8, i64, %kizu.slice.u8, i64, %kizu.slice.u8, %kizu.slice.u8, i64, i1, %kizu.slice.u8, i64, i64, %kizu.slice.u8, i64, i64, i64, i64, i64, i64 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.local_binding = type { %kizu.slice.u8, i64, i64 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.local_table = type { i64, %kizu.selfhost.codegen.local_binding, %kizu.selfhost.codegen.local_binding }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.payload_span = type { i64, i64 }");
-    try append_line(out,
-        "%kizu.error.payload_span = type { i1, %kizu.selfhost.codegen.payload_span, %kizu.slice.u8 }");
-    // CodeEval threads the run codegen IR v1 tape lowering result (the unified ok
-    // flag, the result value id, and the next free SSA counter) through the
-    // recursive expression descent; its error union follows the canonical
-    // { ok, value, error } layout.
-    try append_line(out,
-        "%kizu.selfhost.codegen.code_eval = type { i1, i64, i64 }");
-    try append_line(out,
-        "%kizu.error.code_eval = type { i1, %kizu.selfhost.codegen.code_eval, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.kizu.ast.child_range = type { i64, i64 }");
-    try append_line(out,
-        "%kizu.selfhost.codegen.int_env = type { i64, %kizu.kizu.ast.child_range, %kizu.slice.u8, i64, %kizu.slice.u8, i64, %kizu.slice.u8, i64 }");
-    // std::kizu::ast::Ast is the first AST container value pulled into stage2 for the
-    // read-only Ast.len accessor (tracker 961). Its nodes (Arena<AstNode>) and
-    // children (Array<NodeId>) fields lower to the %kizu.owned heap handle the
-    // selfhost runtime uses for owned containers; only the children field (index 1)
-    // is read by Ast.len. The AstNode/AstData union layout is intentionally NOT
-    // modelled here.
-    try append_line(out,
-        "%kizu.kizu.ast.source_file = type { %kizu.slice.u8, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.kizu.ast.ast = type { %kizu.owned, %kizu.owned, %kizu.kizu.ast.source_file }");
-    // selfhost::source::SourceFile is the source-loader record constructed by the
-    // compiled source_file helper. SourceKind is an enum and lowers to i64.
-    try append_line(out,
-        "%kizu.selfhost.source.source_file = type { i64, i64, %kizu.slice.u8, i64, i64, %kizu.slice.u8, %kizu.slice.u8 }");
-    // selfhost::types::constructor_facts::ConstructorFacts is the numeric package
-    // collector state. Each Array<i64> field uses the runtime-owned handle ABI.
-    try append_line(out,
-        "%kizu.selfhost.types.constructor_facts.constructor_facts = type { %kizu.owned, %kizu.owned, %kizu.owned, %kizu.owned, %kizu.owned }");
-    // selfhost::types::primitive_type::TypeRecord is the checked primitive
-    // identity and storage descriptor seed. Its layout mirrors the emitted
-    // struct facts: identity, kind, bit_width, signed.
-    try append_line(out,
-        "%kizu.selfhost.types.primitive_type.type_record = type { i64, i64, i64, i1 }");
-    // NodeId is the children Array element type; Ast.child_at returns one by value as
-    // !NodeId via the checked Array<NodeId>.get accessor (tracker 961).
-    try append_line(out,
-        "%kizu.kizu.ast.node_id = type { i64 }");
-    try append_line(out,
-        "%kizu.kizu.ast.parse_result = type { %kizu.kizu.ast.ast, %kizu.kizu.ast.node_id }");
-    // !std::kizu::ast::ParseResult is the full std::kizu::parser::parse_program return type
-    // (issue 1157): the parsed ParseResult value carried in the canonical error union
-    // { i1 ok, <value>, %kizu.slice.u8 message }, the same struct-in-error-union shape
-    // node_id / related_span already use.
-    try append_line(out,
-        "%kizu.error.parse_result = type { i1, %kizu.kizu.ast.parse_result, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.error.node_id = type { i1, %kizu.kizu.ast.node_id, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.selfhost.cli.parse_node_result = type { i1, i64, %kizu.kizu.ast.node_id }");
-    // The AstNode/AstData tagged-union ABI (tracker 961). AstData is the inline
-    // tagged-union layout { i64 tag, [N x i8] payload storage }, where N (96) is the
-    // byte capacity of the largest variant payload, matching the canonical backend
-    // union capacity. AstNode bundles a Span with the AstData union value; Ast.add_node
-    // constructs an AstNode and appends it to the nodes Arena. The individual 44 variant
-    // payload structs are not modelled here: add_node forwards the AstData value whole.
-    // std::kizu::lexer::Position is the lexer's (line, column) cursor (tracker 961, scope 4
-    // prerequisite): the bottom of the tokenizer's position-tracking helpers.
-    try append_line(out,
-        "%kizu.kizu.lexer.position = type { i64, i64 }");
-    // std::kizu::lexer::Token is the tokenizer's output record (tracker 961, scope 4
-    // prerequisite): { TokenKind kind, i64 start, i64 end, i64 line, i64 column, i64
-    // doc_start, i64 doc_end }. TokenKind is an enum, so it lowers to i64, making the
-    // whole struct seven i64 fields. first_token / next_token / token_at thread it.
-    try append_line(out,
-        "%kizu.kizu.lexer.token = type { i64, i64, i64, i64, i64, i64, i64 }");
-    // std::kizu::parser::ParseNode threads the parser's current AST node and lookahead token
-    // between recursive-descent parser helpers (tracker 961).
-    try append_line(out,
-        "%kizu.kizu.parser.parse_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.lexer.token }");
-    try append_line(out,
-        "%kizu.kizu.parser.parse_range = type { %kizu.kizu.ast.child_range, %kizu.kizu.lexer.token }");
-    // !std::kizu::parser::ParseNode is the return type of the recursive-descent parser
-    // helper cluster (parse_top_level_decl / parse_decl_with_visibility / parse_fn_decl /
-    // parse_statement / parse_expr / ... , issue 1157): the ParseNode cursor value carried
-    // in the canonical error union { i1 ok, <value>, %kizu.slice.u8 message }, the same
-    // struct-in-error-union shape node_id / related_span / parse_result already use. It
-    // reuses the %kizu.kizu.parser.parse_node value type declared just above as its payload.
-    try append_line(out,
-        "%kizu.error.parse_node = type { i1, %kizu.kizu.parser.parse_node, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.error.parse_range = type { i1, %kizu.kizu.parser.parse_range, %kizu.slice.u8 }");
-    // !std::kizu::lexer::Token is the return type of the parser's expect_* token helper cluster
-    // (parse_type_name's expect_identifier / expect_keyword / ... , issue 1157): the matched Token
-    // value carried in the canonical error union { i1 ok, <value>, %kizu.slice.u8 message }, the
-    // same struct-in-error-union shape node_id / related_span / parse_node already use. It reuses
-    // the %kizu.kizu.lexer.token value type declared just above as its payload (seven i64 fields).
-    try append_line(out,
-        "%kizu.error.token = type { i1, %kizu.kizu.lexer.token, %kizu.slice.u8 }");
-    // !std::kizu::ast::PrefixOp / !std::kizu::ast::BinaryOp carry enum tags
-    // as i64 success payloads in the same canonical error-union shape.
-    try append_line(out,
-        "%kizu.error.prefix_op = type { i1, i64, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.error.binary_op = type { i1, i64, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.kizu.ast.span = type { i64, i64 }");
-    try append_line(out,
-        "%kizu.kizu.ast.ast_data = type { i64, [96 x i8] }");
-    try append_line(out,
-        "%kizu.kizu.ast.ast_node = type { %kizu.kizu.ast.span, %kizu.kizu.ast.ast_data }");
-    // ProgramNode is the first AstData variant payload struct modelled in stage2 for the
-    // 'match node.data { Program(program) => program.declarations.len, _ => 0 }' accessor
-    // (selfhost::ast::declaration_count, tracker 961). It is read out of the inline AstData
-    // payload storage by value.
-    try append_line(out,
-        "%kizu.kizu.ast.program_node = type { %kizu.kizu.ast.child_range }");
-    // The remaining AstData variant payload structs read by the node_count traversal
-    // cluster (selfhost::ast::node_count + the count_* helpers, tracker 961). Each is
-    // loaded by value out of the inline AstData payload storage so a match-over-AstData
-    // arm can follow the NodeId / ChildRange fields it counts. Field types follow the
-    // value layout table: bool -> i1, an enum tag -> i64, NodeId / ChildRange / Span ->
-    // their already-modelled value types. Leaf payload structs used by compiled Ast.add_*
-    // constructors are declared here even when the node_count arms do not load them.
-    try append_line(out,
-        "%kizu.kizu.ast.token_id = type { i64 }");
-    try append_line(out,
-        "%kizu.kizu.ast.symbol_id = type { i64 }");
-    try append_line(out,
-        "%kizu.kizu.ast.int_node = type { %kizu.kizu.ast.token_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.string_node = type { %kizu.kizu.ast.token_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.type_name_node = type { %kizu.kizu.ast.symbol_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.var_node = type { %kizu.kizu.ast.symbol_id, %kizu.kizu.ast.span }");
-    try append_line(out,
-        "%kizu.kizu.ast.bool_node = type { i1 }");
-    try append_line(out,
-        "%kizu.kizu.ast.prefix_node = type { i64, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.binary_node = type { i64, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.field_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, i1 }");
-    try append_line(out,
-        "%kizu.kizu.ast.deref_expr_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.call_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }");
-    try append_line(out,
-        "%kizu.kizu.ast.type_apply_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }");
-    try append_line(out,
-        "%kizu.kizu.ast.cast_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.index_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, i1 }");
-    try append_line(out,
-        "%kizu.kizu.ast.struct_literal_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }");
-    try append_line(out,
-        "%kizu.kizu.ast.struct_field_init_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.arena_new_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.try_expr_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.comptime_expr_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.block_node = type { %kizu.kizu.ast.child_range }");
-    try append_line(out,
-        "%kizu.kizu.ast.if_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.let_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.assign_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.return_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.defer_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.err_defer_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.expr_stmt_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.while_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.for_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.break_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.continue_node = type { %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.import_decl_node = type { %kizu.kizu.ast.child_range }");
-    try append_line(out,
-        "%kizu.kizu.ast.param_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.field_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.span }");
-    try append_line(out,
-        "%kizu.kizu.ast.struct_decl_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, %kizu.kizu.ast.span }");
-    try append_line(out,
-        "%kizu.kizu.ast.enum_decl_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range, %kizu.kizu.ast.span }");
-    try append_line(out,
-        "%kizu.kizu.ast.union_decl_node = type { i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, %kizu.kizu.ast.span }");
-    try append_line(out,
-        "%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }");
-    try append_line(out,
-        "%kizu.kizu.ast.union_variant_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.span }");
-    try append_line(out,
-        "%kizu.kizu.ast.match_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }");
-    try append_line(out,
-        "%kizu.kizu.ast.match_arm_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.unsafe_node = type { %kizu.kizu.ast.child_range, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.comptime_if_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }");
-    try append_line(out,
-        "%kizu.kizu.ast.fn_decl_node = type { i1, i1, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id, %kizu.kizu.ast.span }");
+    try compiled_runtime_declarations::append_foundation_types(out);
     // kizu.rt.array mirrors the runtime storage Array<T> record layout
     // { allocator, data, len, capacity, element_size }; the read-only Ast.len
     // accessor reads its len field (index 2) through the array_len builtin
@@ -1003,66 +604,17 @@ fn render_llvm_module(
     // links the storage module), the same split used for %kizu.rt.array.
     try append_line(out,
         "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
-    // std::kizu::diagnostic value types back the first checked Array<T>.get accessor
-    // compiled into stage2: Diagnostic.related_get reads the related Array<RelatedSpan>
-    // field (index 2) and returns a single RelatedSpan by value as !RelatedSpan
-    // (tracker 961). FileSpan/RelatedSpan/Diagnostic mirror their declaration field
-    // order; []u8 fields lower to %kizu.slice.u8 and the related Array to %kizu.owned.
-    try append_line(out,
-        "%kizu.kizu.diagnostic.file_span = type { i64, %kizu.slice.u8, i64, i64, i64, i64 }");
-    try append_line(out,
-        "%kizu.kizu.diagnostic.related_span = type { %kizu.kizu.diagnostic.file_span, %kizu.slice.u8 }");
-    try append_line(out,
-        "%kizu.kizu.diagnostic.diagnostic = type { %kizu.kizu.diagnostic.file_span, %kizu.slice.u8, %kizu.owned }");
-    try append_line(out,
-        "%kizu.error.related_span = type { i1, %kizu.kizu.diagnostic.related_span, %kizu.slice.u8 }");
-    // selfhost::parser::format::CommentFormatState is the comment-preservation driver's
-    // loop-carried scalar state { last: u8, at_line_start: bool, after_comment: bool } returned
-    // by value from append_preserved_line_comments (issue 1165 / 1162). u8 -> i8, bool -> i1, so
-    // the struct value is { i8, i1, i1 } and its error union mirrors the RelatedSpan / NodeId
-    // struct-in-error-union shape { i1 ok, <value>, %kizu.slice.u8 message }.
-    try append_line(out,
-        "%kizu.selfhost.parser.format.comment_format_state = type { i8, i1, i1 }");
-    try append_line(out,
-        "%kizu.error.comment_format_state = type { i1, %kizu.selfhost.parser.format.comment_format_state, %kizu.slice.u8 }");
+    // Reachable Kizu function facts now own source-defined nominal and error-union
+    // declarations. The registry is seeded from the remaining ABI foundation
+    // above, so matching declarations dedupe and conflicting layouts fail.
+    try compiled_type_declarations::append_reachable_fact_declarations_indexed(
+        out, lookup_index, ir_bytes
+    );
     try append_line(out, "");
     try cli_llvm::append_globals(out, ir_bytes);
     try append_line(out, "");
-    try append_line(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
-    try append_line(out, "declare ptr @kizu_rt_alloc(ptr, i64)");
-    try append_line(out, "declare void @kizu_rt_free(ptr, ptr)");
-    try append_line(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)");
-    try append_line(out, "declare void @llvm.trap()");
-    try append_line(out, "declare %kizu.owned @kizu_rt_io_blocking()");
-    try append_line(out,
-        "declare %kizu.error.bool @kizu_rt_fs_exists(%kizu.owned, %kizu.slice.u8)");
-    try append_line(out,
-        "declare %kizu.error.metadata @kizu_rt_fs_metadata(%kizu.owned, %kizu.slice.u8)");
-    try append_line(out,
-        "declare %kizu.error.owned @kizu_rt_fs_read_dir(%kizu.owned, %kizu.slice.u8)");
-    try append_line(out,
-        "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
-    try append_line(out,
-        "declare %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8)");
-    try append_line(out,
-        "declare %kizu.error.void @kizu_rt_fs_create_dir(%kizu.owned, %kizu.slice.u8)");
-    try append_line(out,
-        "declare %kizu.error.void @kizu_rt_fs_rename(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8)");
-    try append_line(out,
-        "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
-    try append_line(out,
-        "declare %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned, %kizu.slice.u8)");
-    try append_line(out, "declare i64 @kizu_rt_process_arg_count()");
-    try append_line(out, "declare %kizu.error.slice.u8 @kizu_rt_process_arg(i64)");
-    try append_line(out, "declare %kizu.error.slice.u8 @kizu_rt_process_env(%kizu.slice.u8)");
-    try append_line(out, "declare %kizu.slice.u8 @kizu_rt_process_env_or_empty(%kizu.slice.u8)");
-    try append_line(out, "declare i64 @kizu_rt_process_monotonic_millis()");
-    try append_line(out, "declare i64 @kizu_rt_process_exit_code(i64)");
-    try append_line(out, "declare void @kizu_rt_process_exit(i64) noreturn");
-    try append_line(out,
-        "declare %kizu.error.i64 @kizu_rt_process_spawn_wait8(i64, %kizu.slice.u8, %kizu.slice.u8, %kizu.slice.u8, %kizu.slice.u8, %kizu.slice.u8, %kizu.slice.u8, %kizu.slice.u8, %kizu.slice.u8)");
-    try append_line(out, "declare void @kizu_rt_owned_deinit(%kizu.owned)");
-    try append_line(out, "declare void @kizu_rt_trap(%kizu.slice.u8) noreturn");
+    try compiled_runtime_declarations::append_linked_host_externals(out);
+    try compiled_run_entry_llvm::append_host_declarations(out);
     try append_line(out, "declare i64 @kizu_selfhost__runtime_storage_smoke()");
     try append_line(out, "declare i64 @kizu_selfhost__host_capability_smoke()");
     try append_line(out, "");
@@ -1088,6 +640,12 @@ fn render_llvm_module(
         "@.kizu.rt.array_index_out_of_bounds = private unnamed_addr constant [25 x i8] c");
     try out.append_byte(cast<u8>(34));
     try out.append_bytes("array index out of bounds");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(
+        "@.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("invalid arena handle");
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
     try append_line(out, "");
@@ -1141,6 +699,47 @@ fn render_llvm_module(
     try append_line(out,
         "  %invalid_result = insertvalue %kizu.error.slice.u8 %invalid_value, %kizu.slice.u8 %message, 2");
     try append_line(out, "  ret %kizu.error.slice.u8 %invalid_result");
+    try append_line(out, "}");
+    try append_line(out, "");
+    // pop_or_panic removes the final Array<T> element and returns a borrowed byte
+    // view for immediate result-side decoding. The semantic element type remains a
+    // compiled-call fact; this runtime only owns the uniform array storage layout.
+    // Empty, null, and invalid storage trap instead of manufacturing a value.
+    try append_line(out,
+        "define %kizu.slice.u8 @kizu_rt_array_pop_or_panic(%kizu.owned %array) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
+    try append_line(out, "  %raw_ok = icmp ne ptr %raw, null");
+    try append_line(out, "  br i1 %raw_ok, label %inspect, label %invalid");
+    try append_line(out, "inspect:");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  %data = load ptr, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %len = load i64, ptr %len_field");
+    try append_line(out,
+        "  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4");
+    try append_line(out, "  %element_size = load i64, ptr %element_size_field");
+    try append_line(out, "  %data_ok = icmp ne ptr %data, null");
+    try append_line(out, "  %len_ok = icmp sgt i64 %len, 0");
+    try append_line(out, "  %size_ok = icmp sgt i64 %element_size, 0");
+    try append_line(out, "  %storage_ok = and i1 %data_ok, %size_ok");
+    try append_line(out, "  %ok = and i1 %len_ok, %storage_ok");
+    try append_line(out, "  br i1 %ok, label %valid, label %invalid");
+    try append_line(out, "valid:");
+    try append_line(out, "  %next_len = sub i64 %len, 1");
+    try append_line(out, "  %offset = mul i64 %next_len, %element_size");
+    try append_line(out, "  %element_ptr = getelementptr i8, ptr %data, i64 %offset");
+    try append_line(out, "  store i64 %next_len, ptr %len_field");
+    try append_line(out,
+        "  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %element_ptr, 0");
+    try append_line(out,
+        "  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %element_size, 1");
+    try append_line(out, "  ret %kizu.slice.u8 %slice");
+    try append_line(out, "invalid:");
+    try append_line(out, "  call void @llvm.trap()");
+    try append_line(out, "  unreachable");
     try append_line(out, "}");
     try append_line(out, "");
     // array_new / array_append back the dynamic Array<T> builder backing
@@ -1313,16 +912,19 @@ fn render_llvm_module(
     try append_line(out, "}");
     try append_line(out, "");
     // arena_get is the heap-backed Arena<T> element read backing Ast.get (tracker 961).
-    // It mirrors the array element accessor: the i64 index selects an element_size-byte
-    // slot in the arena's heap buffer and a borrowed %kizu.error.slice.u8 view (ptr +
-    // element_size) is returned, so the caller can load the element by value. An
-    // out-of-bounds index returns the failure message (the caller traps). The arena
-    // reuses the %kizu.rt.array record layout; the hosted module carries its own
-    // self-contained copy.
+    // It accepts the full opaque handle: the arena pointer must match the receiver and
+    // the slot index must be in bounds before a borrowed %kizu.error.slice.u8 view is
+    // returned. Invalid provenance and invalid indexes share the canonical
+    // "invalid arena handle" diagnostic required by ADR-0062. The arena reuses the
+    // %kizu.rt.array record layout; the hosted module carries its own self-contained
+    // copy.
     try append_line(out,
-        "define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, i64 %index) {");
+        "define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %handle) {");
     try append_line(out, "entry:");
     try append_line(out, "  %raw = extractvalue %kizu.owned %arena, 0");
+    try append_line(out, "  %handle_arena = extractvalue %kizu.handle %handle, 0");
+    try append_line(out, "  %same_arena = icmp eq ptr %raw, %handle_arena");
+    try append_line(out, "  %index = extractvalue %kizu.handle %handle, 1");
     try append_line(out,
         "  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1");
     try append_line(out, "  %data = load ptr, ptr %data_field");
@@ -1335,7 +937,8 @@ fn render_llvm_module(
     try append_line(out, "  %index_nonnegative = icmp sge i64 %index, 0");
     try append_line(out, "  %index_in_bounds = icmp slt i64 %index, %len");
     try append_line(out, "  %data_ok = icmp ne ptr %data, null");
-    try append_line(out, "  %bounds_ok = and i1 %index_nonnegative, %index_in_bounds");
+    try append_line(out, "  %provenance_ok = and i1 %same_arena, %index_nonnegative");
+    try append_line(out, "  %bounds_ok = and i1 %provenance_ok, %index_in_bounds");
     try append_line(out, "  %ok = and i1 %bounds_ok, %data_ok");
     try append_line(out, "  br i1 %ok, label %valid, label %invalid");
     try append_line(out, "valid:");
@@ -1351,9 +954,9 @@ fn render_llvm_module(
     try append_line(out, "  ret %kizu.error.slice.u8 %valid_result");
     try append_line(out, "invalid:");
     try append_line(out,
-        "  %message_ptr = getelementptr inbounds [25 x i8], ptr @.kizu.rt.array_index_out_of_bounds, i64 0, i64 0");
+        "  %message_ptr = getelementptr inbounds [20 x i8], ptr @.kizu.rt.arena_invalid_handle, i64 0, i64 0");
     try append_line(out, "  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0");
-    try append_line(out, "  %message = insertvalue %kizu.slice.u8 %message_base, i64 25, 1");
+    try append_line(out, "  %message = insertvalue %kizu.slice.u8 %message_base, i64 20, 1");
     try append_line(out, "  %invalid_ok = insertvalue %kizu.error.slice.u8 poison, i1 false, 0");
     try append_line(out,
         "  %invalid_value = insertvalue %kizu.error.slice.u8 %invalid_ok, %kizu.slice.u8 zeroinitializer, 1");
@@ -1731,7 +1334,6 @@ fn render_llvm_metadata(
         out,
         "backend-input executable-contract-source lowering selfhost::backend::executable"
     );
-    try append_executable_function_signature_metadata(out, ir_bytes);
     try append_line(out, "backend-input hosted-executable-abi executable-result-layout-v1");
     try append_line(out, "backend-input executable-layout kind:i64 callee:[]u8 payload:[]u8");
     try append_backend_input_executable_tag(out, "executable-kind ", "Unsupported");
@@ -1781,40 +1383,6 @@ fn render_llvm_metadata(
     return out;
 }
 
-fn append_executable_function_signature_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8
-) -> !void {
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "function-signature-return ",
-        "selfhost::cli::execute::run_file_cli"
-    );
-    try append_function_signature_params_metadata(
-        out,
-        ir_bytes,
-        "selfhost::cli::execute::run_file_cli"
-    );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "function-signature-return ",
-        "selfhost::ir::codegen::metadata_line"
-    );
-    try append_function_signature_params_metadata(
-        out,
-        ir_bytes,
-        "selfhost::ir::codegen::metadata_line"
-    );
-    try append_function_signature_params_metadata(
-        out,
-        ir_bytes,
-        "selfhost::backend::executable::lower_test_executable"
-    );
-    return;
-}
-
 fn append_backend_input_executable_tag(
     out: &var std::string::String,
     prefix: []u8,
@@ -1848,22 +1416,6 @@ fn executable_tag_value(prefix: []u8, name: []u8) -> !i64 {
         return try data::executable_kind_tag_by_name(name);
     }
     return error("invalid executable tag prefix");
-}
-
-fn append_backend_input_named_fact(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    prefix: []u8,
-    name: []u8
-) -> !void {
-    let value = try ir_contract::named_fact_value(ir_bytes, prefix, name);
-    try out.append_bytes("backend-input ");
-    try out.append_bytes(prefix);
-    try out.append_bytes(name);
-    try out.append_byte(cast<u8>(32));
-    try out.append_bytes(value);
-    try out.append_byte(cast<u8>(10));
-    return;
 }
 
 fn append_backend_input_named_line_fact(

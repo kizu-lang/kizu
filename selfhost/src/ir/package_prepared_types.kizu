@@ -1,0 +1,441 @@
+import selfhost::ir::package_type_resolution;
+import selfhost::ir::package_type_environment;
+import selfhost::ir::package_type_template_resolution;
+import selfhost::ir::package_type_substitutions;
+import selfhost::ir::package_catalog;
+
+pub struct PreparedTypeCatalog {
+    function_owner_template_ids: std::array::Array<i64>,
+    function_return_template_ids: std::array::Array<i64>,
+    struct_field_template_ids: std::array::Array<i64>,
+    union_payload_template_ids: std::array::Array<i64>,
+    scratch: package_type_substitutions::Substitutions,
+}
+
+pub fn prepare(
+    allocator: Allocator,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore
+) -> !PreparedTypeCatalog {
+    var prepared = PreparedTypeCatalog {
+        function_owner_template_ids: std::array::Array<i64>(allocator),
+        function_return_template_ids: std::array::Array<i64>(allocator),
+        struct_field_template_ids: std::array::Array<i64>(allocator),
+        union_payload_template_ids: std::array::Array<i64>(allocator),
+        scratch: package_type_substitutions::substitutions(allocator)
+    };
+    errdefer prepared.deinit();
+    let function_len = package_catalog::function_len(catalog);
+    try prepared.function_owner_template_ids.reserve(function_len);
+    try prepared.function_return_template_ids.reserve(function_len);
+    try prepared.struct_field_template_ids.reserve(
+        package_catalog::struct_field_template_len(catalog)
+    );
+    try prepared.union_payload_template_ids.reserve(
+        package_catalog::union_payload_template_len(catalog)
+    );
+    var environment = package_type_environment::environment(allocator);
+    defer environment.deinit();
+    var index = 0;
+    while index < package_catalog::function_len(catalog) {
+        let component = package_catalog::function_component_id_at(catalog, index);
+        let return_type = try package_type_template_resolution::resolve_function_template(
+            catalog, index, component,
+            package_catalog::function_return_type_at(catalog, index),
+            store, &environment
+        );
+        try prepared.function_return_template_ids.append(return_type.type_id);
+        try prepared.function_owner_template_ids.append(
+            try prepare_function_owner(catalog, store, &environment, index)
+        );
+        index = index + 1;
+    }
+    index = 0;
+    while index < package_catalog::struct_field_template_len(catalog) {
+        let declaration = package_catalog::struct_field_template_declaration_at(
+            catalog, index
+        );
+        let field_type = try package_type_template_resolution::resolve_declared_template(
+            catalog,
+            declaration,
+            package_catalog::struct_field_template_component_at(catalog, index),
+            package_catalog::struct_field_template_spelling_at(catalog, index),
+            store, &environment
+        );
+        try prepared.struct_field_template_ids.append(field_type.type_id);
+        index = index + 1;
+    }
+    index = 0;
+    while index < package_catalog::union_payload_template_len(catalog) {
+        let payload_spelling = package_catalog::union_payload_template_spelling_at(
+            catalog, index
+        );
+        if std::mem::len(std::mem::trim_ascii(payload_spelling)) == 0 {
+            try prepared.union_payload_template_ids.append(-1);
+        } else {
+            let declaration = package_catalog::union_payload_template_declaration_at(
+                catalog, index
+            );
+            let payload = try package_type_template_resolution::resolve_declared_template(
+                catalog,
+                declaration,
+                package_catalog::union_payload_template_component_at(catalog, index),
+                payload_spelling, store, &environment
+            );
+            try prepared.union_payload_template_ids.append(payload.type_id);
+        }
+        index = index + 1;
+    }
+    return prepared;
+}
+
+fn prepare_function_owner(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    environment: &package_type_environment::Environment,
+    function_index: i64
+) -> !i64 {
+    if !package_catalog::function_is_impl_method_at(catalog, function_index) {
+        return -1;
+    }
+    let spelling = package_catalog::function_owner_type_at(catalog, function_index);
+    if std::mem::len(std::mem::trim_ascii(spelling)) == 0 {
+        return error("impl method has no prepared owner spelling");
+    }
+    let declaration = package_catalog::function_owner_declaration_index_at(
+        catalog, function_index
+    );
+    let owner = try package_type_template_resolution::resolve_in_environment(
+        catalog,
+        package_catalog::function_component_id_at(catalog, function_index),
+        spelling, store, environment
+    );
+    if declaration >= 0 {
+        if owner.kind != package_type_resolution::type_kind_declared() or
+            owner.declaration_index != declaration {
+            return error("impl owner declaration identity mismatch");
+        }
+        return owner.type_id;
+    }
+    if owner.kind != package_type_resolution::type_kind_intrinsic() {
+        return error("impl owner is neither declared nor intrinsic");
+    }
+    return owner.type_id;
+}
+
+pub fn function_return(
+    prepared: &PreparedTypeCatalog,
+    store: &var package_type_resolution::TypeStore,
+    function_index: i64
+) -> !package_type_resolution::ResolvedType {
+    if function_index < 0 or function_index >= prepared.function_return_template_ids.len() {
+        return error("prepared function return index out of range");
+    }
+    return package_type_resolution::type_at(
+        store, prepared.function_return_template_ids.get_or_panic(function_index)
+    );
+}
+
+pub fn function_owner(
+    prepared: &PreparedTypeCatalog,
+    store: &package_type_resolution::TypeStore,
+    function_index: i64
+) -> !package_type_resolution::ResolvedType {
+    if function_index < 0 or function_index >= prepared.function_owner_template_ids.len() {
+        return error("prepared function owner index out of range");
+    }
+    let type_id = prepared.function_owner_template_ids.get_or_panic(function_index);
+    if type_id < 0 { return package_type_resolution::unknown_type(); }
+    return package_type_resolution::type_at(store, type_id);
+}
+
+pub fn instantiate_function_return(
+    prepared: &var PreparedTypeCatalog,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    function_index: i64,
+    actuals: &std::array::Array<i64>
+) -> !package_type_resolution::ResolvedType {
+    let wanted = package_catalog::function_type_parameter_len(catalog, function_index);
+    if actuals.len() != wanted { return error("function type argument arity mismatch"); }
+    let template = try function_return(prepared, store, function_index);
+    let scratch = &var prepared.scratch;
+    let mark = package_type_substitutions::mark(scratch);
+    let result = instantiate_function_return_with_scratch(
+        store, function_index, actuals, wanted, &template, scratch
+    );
+    try package_type_substitutions::clear_to(scratch, mark);
+    return result;
+}
+
+pub fn infer_function_owner_actuals(
+    prepared: &PreparedTypeCatalog,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &package_type_resolution::TypeStore,
+    function_index: i64,
+    receiver: &package_type_resolution::ResolvedType,
+    out: &var std::array::Array<i64>
+) -> !void {
+    let expected = package_catalog::function_type_parameter_len(
+        catalog, function_index
+    );
+    if expected == 0 { return; }
+    if out.len() != 0 {
+        return error("receiver generic inference requires empty actual vector");
+    }
+    var slot = 0;
+    while slot < expected {
+        try out.append(-1);
+        slot = slot + 1;
+    }
+    let owner = try function_owner(prepared, store, function_index);
+    if owner.type_id < 0 {
+        return error("generic method has no owner type template");
+    }
+    try infer_template_actuals(
+        store, function_index, &owner, receiver, out
+    );
+    slot = 0;
+    while slot < expected {
+        if try out.get(slot) < 0 {
+            return error("generic method receiver does not bind every type formal");
+        }
+        slot = slot + 1;
+    }
+    return;
+}
+
+fn infer_template_actuals(
+    store: &package_type_resolution::TypeStore,
+    function_index: i64,
+    template: &package_type_resolution::ResolvedType,
+    actual: &package_type_resolution::ResolvedType,
+    out: &var std::array::Array<i64>
+) -> !void {
+    let formal_slot = try package_type_resolution::function_formal_slot(
+        store, template, function_index
+    );
+    if formal_slot >= 0 {
+        if formal_slot >= out.len() {
+            return error("generic method receiver formal slot out of range");
+        }
+        let existing = try out.get(formal_slot);
+        if existing >= 0 {
+            let existing_type = try package_type_resolution::type_at(store, existing);
+            if !(try package_type_resolution::same_type(
+                store, &existing_type, actual
+            )) {
+                return error("generic method receiver formal binding mismatch");
+            }
+            return;
+        }
+        try out.set(formal_slot, actual.type_id);
+        return;
+    }
+    if template.kind != actual.kind or
+        template.intrinsic_kind != actual.intrinsic_kind or
+        template.declaration_index != actual.declaration_index or
+        template.declaration_component_id != actual.declaration_component_id {
+        return error("generic method receiver does not match owner template");
+    }
+    let template_len = try package_type_resolution::type_child_len(store, template);
+    let actual_len = try package_type_resolution::type_child_len(store, actual);
+    if template_len != actual_len {
+        return error("generic method receiver template arity mismatch");
+    }
+    var child = 0;
+    while child < template_len {
+        let template_child = try package_type_resolution::type_child(
+            store, template, child
+        );
+        let actual_child = try package_type_resolution::type_child(
+            store, actual, child
+        );
+        try infer_template_actuals(
+            store, function_index, &template_child, &actual_child, out
+        );
+        child = child + 1;
+    }
+    return;
+}
+
+fn instantiate_function_return_with_scratch(
+    store: &var package_type_resolution::TypeStore,
+    function_index: i64,
+    actuals: &std::array::Array<i64>,
+    wanted: i64,
+    template: &package_type_resolution::ResolvedType,
+    scratch: &var package_type_substitutions::Substitutions
+) -> !package_type_resolution::ResolvedType {
+    var slot = 0;
+    while slot < wanted {
+        let actual = try package_type_resolution::type_at(store, try actuals.get(slot));
+        try package_type_resolution::bind_substitution(
+            store, scratch,
+            package_type_resolution::formal_owner_function(),
+            function_index, slot, &actual
+        );
+        slot = slot + 1;
+    }
+    let result = try package_type_resolution::instantiate_template(
+        store, template, scratch
+    );
+    return result;
+}
+
+pub fn instantiate_struct_field(
+    prepared: &var PreparedTypeCatalog,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    receiver: &package_type_resolution::ResolvedType,
+    field_name: []u8
+) -> !package_type_resolution::ResolvedType {
+    try require_declared_receiver(receiver);
+    let row = try exact_struct_field_row(catalog, receiver.declaration_index, field_name);
+    let template_id = prepared.struct_field_template_ids.get_or_panic(row);
+    return instantiate_declared_member(
+        prepared, catalog, store, receiver, template_id
+    );
+}
+
+pub fn instantiate_union_payload(
+    prepared: &var PreparedTypeCatalog,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    receiver: &package_type_resolution::ResolvedType,
+    variant_name: []u8
+) -> !package_type_resolution::ResolvedType {
+    try require_declared_receiver(receiver);
+    let row = try exact_union_payload_row(
+        catalog, receiver.declaration_index, variant_name
+    );
+    let template_id = prepared.union_payload_template_ids.get_or_panic(row);
+    if template_id < 0 { return error("union variant has no payload type"); }
+    return instantiate_declared_member(
+        prepared, catalog, store, receiver, template_id
+    );
+}
+
+fn instantiate_declared_member(
+    prepared: &var PreparedTypeCatalog,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    store: &var package_type_resolution::TypeStore,
+    receiver: &package_type_resolution::ResolvedType,
+    template_id: i64
+) -> !package_type_resolution::ResolvedType {
+    try require_declared_receiver(receiver);
+    let wanted = package_catalog::declared_type_parameter_len(
+        catalog, receiver.declaration_index
+    );
+    let actual_len = try package_type_resolution::type_argument_len(store, receiver);
+    if actual_len != wanted {
+        return error("declared member receiver type argument arity mismatch");
+    }
+    let template = try package_type_resolution::type_at(store, template_id);
+    let scratch = &var prepared.scratch;
+    let mark = package_type_substitutions::mark(scratch);
+    let result = instantiate_declared_member_with_scratch(
+        store, receiver, wanted, &template, scratch
+    );
+    try package_type_substitutions::clear_to(scratch, mark);
+    return result;
+}
+
+fn instantiate_declared_member_with_scratch(
+    store: &var package_type_resolution::TypeStore,
+    receiver: &package_type_resolution::ResolvedType,
+    wanted: i64,
+    template: &package_type_resolution::ResolvedType,
+    scratch: &var package_type_substitutions::Substitutions
+) -> !package_type_resolution::ResolvedType {
+    var slot = 0;
+    while slot < wanted {
+        let actual = try package_type_resolution::type_argument(
+            store, receiver, slot
+        );
+        try package_type_resolution::bind_substitution(
+            store, scratch,
+            package_type_resolution::formal_owner_declared(),
+            receiver.declaration_index, slot, &actual
+        );
+        slot = slot + 1;
+    }
+    return package_type_resolution::instantiate_template(
+        store, template, scratch
+    );
+}
+
+fn require_declared_receiver(
+    receiver: &package_type_resolution::ResolvedType
+) -> !void {
+    if receiver.kind != package_type_resolution::type_kind_declared() or
+        receiver.declaration_index < 0 {
+        return error("prepared member receiver has no declaration identity");
+    }
+    return;
+}
+
+fn exact_struct_field_row(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    declaration_index: i64,
+    field_name: []u8
+) -> !i64 {
+    let start = package_catalog::declared_struct_field_start(
+        catalog, declaration_index
+    );
+    let len = package_catalog::declared_struct_field_len(
+        catalog, declaration_index
+    );
+    var index = start;
+    var found = -1;
+    while index < start + len {
+        if std::mem::equal_bytes(
+            package_catalog::struct_field_template_name_at(catalog, index),
+            field_name
+        ) {
+            if found >= 0 { return error("duplicate prepared struct field"); }
+            found = index;
+        }
+        index = index + 1;
+    }
+    if found < 0 { return error("prepared struct field not found"); }
+    return found;
+}
+
+fn exact_union_payload_row(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    declaration_index: i64,
+    variant_name: []u8
+) -> !i64 {
+    let start = package_catalog::declared_union_variant_start(
+        catalog, declaration_index
+    );
+    let len = package_catalog::declared_union_variant_len(
+        catalog, declaration_index
+    );
+    var index = start;
+    var found = -1;
+    while index < start + len {
+        if std::mem::equal_bytes(
+            package_catalog::union_payload_template_name_at(catalog, index),
+            variant_name
+        ) {
+            if found >= 0 { return error("duplicate prepared union variant"); }
+            found = index;
+        }
+        index = index + 1;
+    }
+    if found < 0 { return error("prepared union variant not found"); }
+    return found;
+}
+
+impl PreparedTypeCatalog {
+    fn deinit(self: PreparedTypeCatalog) -> void {
+        self.function_owner_template_ids.deinit();
+        self.function_return_template_ids.deinit();
+        self.struct_field_template_ids.deinit();
+        self.union_payload_template_ids.deinit();
+        self.scratch.deinit();
+        return;
+    }
+}
