@@ -1709,6 +1709,9 @@ pub struct MirEnumDispatchArm {
     // both empty and therefore emit no payload load.
     pub binding_name: []u8,
     pub payload_type: []u8,
+    // result_value_name is the SSA name this arm leaves its produced value in when the
+    // dispatch binds a value ('let x = match ..'). It is empty for return and effect arms.
+    pub result_value_name: []u8,
     pub arm_stmts: std::array::Array<MirStmt>,
 }
 
@@ -1724,6 +1727,12 @@ pub struct MirEnumDispatchStmt {
     pub scrutinee_result_id: i64,
     pub scrutinee_llvm_type: []u8,
     pub scrutinee_is_union: bool,
+    // result_name / result_llvm bind the dispatch's value ('let x = match ..'): the renderer
+    // reserves a slot before the dispatch, each falling-through arm stores its
+    // result_value_name into it, and the join loads it into result_name. result_name is empty
+    // for a statement dispatch, whose arms return or produce only effects.
+    pub result_name: []u8,
+    pub result_llvm: []u8,
     pub arms: std::array::Array<MirEnumDispatchArm>,
 }
 
@@ -5409,6 +5418,7 @@ pub fn enum_dispatch_arm(
         falls_through: false,
         binding_name: "",
         payload_type: "",
+        result_value_name: "",
         arm_stmts: arm_stmts
     };
 }
@@ -5425,6 +5435,7 @@ pub fn enum_dispatch_payload_arm(
         falls_through: false,
         binding_name: binding_name,
         payload_type: payload_type,
+        result_value_name: "",
         arm_stmts: arm_stmts
     };
 }
@@ -5440,6 +5451,7 @@ pub fn enum_dispatch_fallthrough_arm(
         falls_through: true,
         binding_name: "",
         payload_type: "",
+        result_value_name: "",
         arm_stmts: arm_stmts
     };
 }
@@ -5456,6 +5468,29 @@ pub fn enum_dispatch_fallthrough_payload_arm(
         falls_through: true,
         binding_name: binding_name,
         payload_type: payload_type,
+        result_value_name: "",
+        arm_stmts: arm_stmts
+    };
+}
+
+// enum_dispatch_value_arm backs one arm of a value-binding dispatch ('let x = match ..'). Its
+// statements leave the arm's value in result_value_name and it always falls through to the join,
+// where the dispatch loads the merged value.
+pub fn enum_dispatch_value_arm(
+    tag: i64,
+    is_default: bool,
+    binding_name: []u8,
+    payload_type: []u8,
+    result_value_name: []u8,
+    arm_stmts: std::array::Array<MirStmt>
+) -> MirEnumDispatchArm {
+    return MirEnumDispatchArm {
+        tag: tag,
+        is_default: is_default,
+        falls_through: true,
+        binding_name: binding_name,
+        payload_type: payload_type,
+        result_value_name: result_value_name,
         arm_stmts: arm_stmts
     };
 }
@@ -5465,6 +5500,8 @@ pub fn enum_dispatch_stmt(
     scrutinee_result_id: i64,
     scrutinee_llvm_type: []u8,
     scrutinee_is_union: bool,
+    result_name: []u8,
+    result_llvm: []u8,
     arms: std::array::Array<MirEnumDispatchArm>
 ) -> MirStmt {
     return MirStmt::EnumDispatch(MirEnumDispatchStmt {
@@ -5472,6 +5509,8 @@ pub fn enum_dispatch_stmt(
         scrutinee_result_id: scrutinee_result_id,
         scrutinee_llvm_type: scrutinee_llvm_type,
         scrutinee_is_union: scrutinee_is_union,
+        result_name: result_name,
+        result_llvm: result_llvm,
         arms: arms
     });
 }

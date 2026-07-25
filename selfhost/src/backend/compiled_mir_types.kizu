@@ -3389,6 +3389,34 @@ fn resolve_let_value_kizu_type_for_value_with_kind(
     if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
         return try resolve_struct_literal_kizu_type_from(ir_bytes, function_name, value, value_sf);
     }
+    // 'let x = match <scrutinee> { .. };' binds the value every arm produces. The arms share one
+    // type, so the first arm's body resolves the binding through this same value resolver; the
+    // MIR lowering separately requires the remaining arms to agree on the resulting ABI.
+    if std::mem::equal_bytes(value_kind, "Match") {
+        let first_arm = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, value, "arm", 0, value_sf
+        );
+        let arm_sf = try ir_contract::body_node_line_offset_from(
+            ir_bytes, function_name, first_arm, value_sf
+        );
+        var arm_body = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, first_arm, "body", 0, arm_sf
+        );
+        var arm_body_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, arm_body, arm_sf
+        );
+        if std::mem::equal_bytes(arm_body_kind, "ExprStmt") {
+            arm_body = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, arm_body, "expr", 0, arm_sf
+            );
+            arm_body_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, arm_body, arm_sf
+            );
+        }
+        return try resolve_let_value_kizu_type_for_value_with_kind(
+            ir_bytes, function_name, module_prefix, arm_body, arm_sf, bs, arm_body_kind
+        );
+    }
     if std::mem::equal_bytes(value_kind, "Call") {
         // A source call bound to a let resolves its return type from the exact call target and
         // function signature. Runtime builtins use their explicit builtin identity and ABI fact.

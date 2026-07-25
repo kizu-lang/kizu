@@ -264,7 +264,7 @@ pub fn union_dispatch_renderer_gate() -> !void {
     try union_arms.append(compiled_mir::enum_dispatch_arm(-1, true, try dispatch_gate_arm(22)));
     var union_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try union_stmts.append(compiled_mir::enum_dispatch_stmt(
-        union_scrutinee, 0, "%test.union", true, union_arms
+        union_scrutinee, 0, "%test.union", true, "", "", union_arms
     ));
     var union_function = compiled_mir_function::multi_statement_function(
         "union_dispatch_gate", "i64", "%test.union value", union_stmts
@@ -288,7 +288,7 @@ pub fn union_dispatch_renderer_gate() -> !void {
     ));
     var void_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try void_stmts.append(compiled_mir::enum_dispatch_stmt(
-        void_scrutinee, 0, "%test.union", true, void_arms
+        void_scrutinee, 0, "%test.union", true, "", "", void_arms
     ));
     var void_function = compiled_mir_function::multi_statement_function(
         "void_dispatch_gate", "%kizu.error.void", "%test.union value", void_stmts
@@ -308,7 +308,7 @@ pub fn union_dispatch_renderer_gate() -> !void {
     try enum_arms.append(compiled_mir::enum_dispatch_arm(-1, true, try dispatch_gate_arm(22)));
     var enum_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try enum_stmts.append(compiled_mir::enum_dispatch_stmt(
-        enum_scrutinee, 0, "i64", false, enum_arms
+        enum_scrutinee, 0, "i64", false, "", "", enum_arms
     ));
     var enum_function = compiled_mir_function::multi_statement_function(
         "enum_dispatch_gate", "i64", "i64 value", enum_stmts
@@ -335,7 +335,7 @@ pub fn union_dispatch_renderer_gate() -> !void {
     ));
     var fallthrough_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try fallthrough_stmts.append(compiled_mir::enum_dispatch_stmt(
-        first_fallthrough_scrutinee, 0, "i64", false, first_fallthrough_arms
+        first_fallthrough_scrutinee, 0, "i64", false, "", "", first_fallthrough_arms
     ));
     var second_fallthrough_scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     try second_fallthrough_scrutinee.append(compiled_mir::var_expr_inst(0, "i64", "value"));
@@ -347,7 +347,7 @@ pub fn union_dispatch_renderer_gate() -> !void {
         -1, true, try dispatch_gate_void_arm()
     ));
     try fallthrough_stmts.append(compiled_mir::enum_dispatch_stmt(
-        second_fallthrough_scrutinee, 0, "i64", false, second_fallthrough_arms
+        second_fallthrough_scrutinee, 0, "i64", false, "", "", second_fallthrough_arms
     ));
     try fallthrough_stmts.append(compiled_mir::return_call_stmt(
         "%kizu.error.void", 45, "test", "post_match", try dispatch_gate_effect_args(45)
@@ -5736,6 +5736,17 @@ fn append_multi_enum_dispatch(
     }
     let arms = &stmt.arms;
     let arm_count = arms.len();
+    // A value-binding dispatch ('let x = match ..') merges its arms through a stack slot: the
+    // slot is reserved here, each arm stores its result before branching to the join, and the
+    // join loads the merged value. This mirrors the no-else if join rather than placing phis.
+    let binds_value = std::mem::len(stmt.result_name) > 0;
+    if binds_value {
+        try out.append_bytes("  %");
+        try append_dispatch_label(out, local_prefix, "slot", 0);
+        try out.append_bytes(" = alloca ");
+        try out.append_bytes(stmt.result_llvm);
+        try out.append_byte(cast<u8>(10));
+    }
     // Phase 1: the icmp/br dispatch chain. The last arm is the exhaustive fallthrough.
     var index = 0;
     while index < arm_count {
@@ -5841,6 +5852,15 @@ fn append_multi_enum_dispatch(
             );
         }
         if arm.falls_through {
+            if std::mem::len(arm.result_value_name) > 0 {
+                try out.append_bytes("  store ");
+                try out.append_bytes(stmt.result_llvm);
+                try out.append_bytes(" %");
+                try out.append_bytes(arm.result_value_name);
+                try out.append_bytes(", ptr %");
+                try append_dispatch_label(out, local_prefix, "slot", 0);
+                try out.append_byte(cast<u8>(10));
+            }
             try out.append_bytes("  br label %");
             try append_dispatch_label(out, local_prefix, "cont", 0);
             try out.append_byte(cast<u8>(10));
@@ -5851,6 +5871,18 @@ fn append_multi_enum_dispatch(
     if has_fallthrough {
         try append_dispatch_label(out, local_prefix, "cont", 0);
         try append_ll_line(out, ":");
+    }
+    if binds_value {
+        if !has_fallthrough {
+            return error("compiled mir llvm: value-binding dispatch needs a join");
+        }
+        try out.append_bytes("  %");
+        try out.append_bytes(stmt.result_name);
+        try out.append_bytes(" = load ");
+        try out.append_bytes(stmt.result_llvm);
+        try out.append_bytes(", ptr %");
+        try append_dispatch_label(out, local_prefix, "slot", 0);
+        try out.append_byte(cast<u8>(10));
     }
     return;
 }
@@ -5874,6 +5906,9 @@ fn append_dispatch_arm_effect(
             out, function, payload, match_index, arm_index
         );,
         Print(payload) => try append_multi_print(out, function.name, payload);,
+        // A value-binding arm copies its lowered value into the arm's result name; the caller
+        // then stores that name into the dispatch slot, so the block stays open.
+        AliasAssign(payload) => try append_alias_assign(out, function, payload);,
         _ => return error("compiled mir llvm: fallthrough enum-dispatch arm must contain a supported effect");,
     }
     return;

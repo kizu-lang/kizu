@@ -10621,7 +10621,9 @@ pub fn lower_multi_statement_function(
                             ir_lookup_index,
                             canonical_facts,
                             &var call_arg_type_cache,
-                            false
+                            false,
+                            "",
+                            ""
                         );
                         string_counter = match_result.string_counter;
                         temp_counter = match_result.temp_counter;
@@ -10730,7 +10732,9 @@ pub fn lower_single_match_statement_function(
         ir_lookup_index,
         canonical_facts,
         &var call_arg_type_cache,
-        false
+        false,
+        "",
+        ""
     );
     return compiled_mir_function::multi_statement_function(
         llvm_symbol,
@@ -10807,6 +10811,9 @@ pub struct MultiMatchLowerResult {
     pub string_counter: i64,
     pub temp_counter: i64,
     pub try_counter: i64,
+    // result_llvm is the ABI every arm of a value-binding dispatch produced, derived from the
+    // first arm and required to match in the rest. It is empty for a statement dispatch.
+    pub result_llvm: []u8,
 }
 
 pub struct CarriedScalarState {
@@ -10892,6 +10899,21 @@ fn dispatch_payload_binding_name(
 ) -> ![]u8 {
     var out = std::string::String(std::mem::page_allocator());
     try out.append_bytes("dispatch.payload.");
+    try std::fmt::append_i64(&var out, statement);
+    try out.append_byte(cast<u8>(46));
+    try std::fmt::append_i64(&var out, arm_index);
+    return call_arg_type_cache.name_store.own(out);
+}
+
+// dispatch_result_arm_name gives every value-binding dispatch arm a distinct SSA name for the
+// value it produces, keyed by the match statement and arm index so arms never collide.
+fn dispatch_result_arm_name(
+    statement: i64,
+    arm_index: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> ![]u8 {
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes("dispatch.result.");
     try std::fmt::append_i64(&var out, statement);
     try out.append_byte(cast<u8>(46));
     try std::fmt::append_i64(&var out, arm_index);
@@ -12498,6 +12520,47 @@ fn lower_multi_let_statement_named(
         ir_bytes, function_name, statement, "value", 0, sf
     );
     let let_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, let_value, sf);
+    // 'let <name> = match <scrutinee> { .. };' binds the dispatch's value: every arm lowers its
+    // body expression into an arm-unique SSA name and the join merges them into <name>. The arms
+    // supply the bound ABI, so no declared-type lookup is needed here.
+    if std::mem::equal_bytes(let_value_kind, "Match") {
+        // The dispatch lowering only reads the incoming aliases (it copies them per arm), so a
+        // local copy satisfies its mutable parameter without exposing this statement's aliases.
+        var match_aliases = try copy_local_aliases(aliases);
+        defer match_aliases.deinit();
+        let match_result = try lower_multi_match_statement(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            let_value,
+            string_counter,
+            temp_counter,
+            try_counter,
+            &var match_aliases,
+            stmts,
+            bs,
+            ir_lookup_index,
+            canonical_facts,
+            call_arg_type_cache,
+            false,
+            let_name,
+            ""
+        );
+        let bound_locals = try compiled_signature::extend_locals_spec(
+            ir_bytes, locals_spec, let_name, match_result.result_llvm
+        );
+        try compiled_mir_types::bind_exact_local_llvm_type(
+            call_arg_type_cache, let_name, match_result.result_llvm
+        );
+        return MultiLowerResult {
+            locals_spec: bound_locals,
+            string_counter: match_result.string_counter,
+            temp_counter: match_result.temp_counter,
+            try_counter: match_result.try_counter
+        };
+    }
     // A 'let <name> = try <callee>(<args>);' try-call over an error-union-returning free
     // function (the node_count traversal cluster, tracker 961). It lowers to a LetTryCall
     // statement: call the error union, branch on its ok flag, propagate the failure as this
@@ -14558,7 +14621,9 @@ fn lower_multi_return_statement(
             ir_lookup_index,
             canonical_facts,
             call_arg_type_cache,
-            true
+            true,
+            "",
+            ""
         );
         if match_stmts.len() != 1 {
             return error("compiled mir: return match must lower to one dispatch statement");
@@ -14612,7 +14677,11 @@ fn lower_multi_match_statement(
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache,
-    arms_are_return_values: bool
+    arms_are_return_values: bool,
+    // result_name / result_llvm bind the dispatch's value ('let x = match ..'). result_name is
+    // empty for a statement dispatch, whose arms return or produce only effects.
+    result_name: []u8,
+    result_llvm: []u8
 ) -> !MultiMatchLowerResult {
     let arm_ssa_stride = 1000;
     // The scrutinee lowers to an i64 discriminant. A bare enum Var resolves its enum type from
@@ -14658,6 +14727,10 @@ fn lower_multi_match_statement(
         return error("compiled mir: enum-dispatch match requires at least one arm");
     }
     var arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    // A value-binding dispatch takes its ABI from the first arm and requires the rest to agree,
+    // so the caller does not have to know the bound type before the arms are lowered.
+    var bound_llvm = result_llvm;
+    let binds_value = std::mem::len(result_name) > 0;
     var next_try_counter = try_counter;
     var index = 0;
     while index < arm_count {
@@ -14689,10 +14762,13 @@ fn lower_multi_match_statement(
                 );
             }
         }
+        // A value-producing arm (a return-match or a value-binding match) takes the arm body as
+        // an expression; an effect arm takes it as a statement.
+        let arm_produces_value = arms_are_return_values or binds_value;
         var arm_body = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, arm_node, "body", 0, bs
         );
-        if !arms_are_return_values {
+        if !arm_produces_value {
             arm_body = try dispatch_arm_body_statement(
                 ir_bytes, function_name, arm_node, bs
             );
@@ -14700,7 +14776,7 @@ fn lower_multi_match_statement(
         var arm_body_kind = try ir_contract::body_node_kind_from(
             ir_bytes, function_name, arm_body, bs
         );
-        if arms_are_return_values and
+        if arm_produces_value and
             std::mem::equal_bytes(arm_body_kind, "ExprStmt") {
             arm_body = try ir_contract::body_child_sequence_from(
                 ir_bytes, function_name, arm_body, "expr", 0, bs
@@ -14745,6 +14821,54 @@ fn lower_multi_match_statement(
         }
         var arm_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
         var falls_through = false;
+        var arm_result_name = ir_bytes[0..0];
+        if binds_value {
+            // A value-binding arm lowers its body expression and copies it into an arm-unique
+            // SSA name. The renderer stores that name into the dispatch slot and the join loads
+            // the merged value into result_name, so every arm reaches the same binding.
+            var value_insts = std::array::Array<compiled_mir::MirExprInst>(
+                std::mem::page_allocator()
+            );
+            let value_result = try lower_expr_with_local_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                arm_body,
+                arm_string,
+                arm_temp,
+                &var value_insts,
+                &arm_aliases,
+                bs,
+                ir_lookup_index, canonical_facts, call_arg_type_cache
+            );
+            let value_type = try expr_inst_llvm_type_by_id(
+                &value_insts, value_result
+            );
+            if std::mem::len(bound_llvm) == 0 {
+                bound_llvm = value_type;
+            }
+            if !std::mem::equal_bytes(value_type, bound_llvm) {
+                var message = std::string::String(std::mem::page_allocator());
+                try message.append_bytes(
+                    "compiled mir: match value arms must share one ABI: "
+                );
+                try message.append_bytes(function_name);
+                try message.append_bytes(" arm value ");
+                try message.append_bytes(value_type);
+                try message.append_bytes(" bound ");
+                try message.append_bytes(bound_llvm);
+                let message_bytes = message.as_bytes();
+                return error(message_bytes);
+            }
+            arm_result_name = try dispatch_result_arm_name(
+                statement, index, call_arg_type_cache
+            );
+            try arm_stmts.append(compiled_mir::alias_assign_stmt(
+                result_name, arm_result_name, bound_llvm, value_result, value_insts
+            ));
+            falls_through = true;
+        } else {
         if arms_are_return_values {
             var value_insts = std::array::Array<compiled_mir::MirExprInst>(
                 std::mem::page_allocator()
@@ -14835,6 +14959,7 @@ fn lower_multi_match_statement(
                 VoidCall(_) => is_supported_effect = true;,
                 VoidTryCall(_) => is_supported_effect = true;,
                 Print(_) => is_supported_effect = true;,
+                AliasAssign(_) => is_supported_effect = true;,
                 _ => is_supported_effect = false;,
             }
             if !is_supported_effect {
@@ -14850,9 +14975,16 @@ fn lower_multi_match_statement(
             falls_through = true;
         }
         }
+        }
         if has_payload_binding {
             try compiled_mir_types::pop_scoped_local_type(call_arg_type_cache);
         }
+        if std::mem::len(arm_result_name) > 0 {
+            try arms.append(compiled_mir::enum_dispatch_value_arm(
+                tag, is_default, payload_output_name, payload_llvm,
+                arm_result_name, arm_stmts
+            ));
+        } else {
         if std::mem::len(payload_output_name) > 0 {
             if falls_through {
                 try arms.append(compiled_mir::enum_dispatch_fallthrough_payload_arm(
@@ -14872,15 +15004,18 @@ fn lower_multi_match_statement(
                 try arms.append(compiled_mir::enum_dispatch_arm(tag, is_default, arm_stmts));
             }
         }
+        }
         index = index + 1;
     }
     try stmts.append(compiled_mir::enum_dispatch_stmt(
-        scrutinee_insts, scrutinee_result_id, scrutinee_llvm_type, scrutinee_is_union, arms
+        scrutinee_insts, scrutinee_result_id, scrutinee_llvm_type, scrutinee_is_union,
+        result_name, bound_llvm, arms
     ));
     return MultiMatchLowerResult {
         string_counter: arm_string_base + arm_count * arm_ssa_stride,
         temp_counter: arm_temp_base + arm_count * arm_ssa_stride,
-        try_counter: next_try_counter
+        try_counter: next_try_counter,
+        result_llvm: bound_llvm
     };
 }
 // resolve_dispatch_enum_kizu_type resolves the fully-qualified enum kizu type of an
@@ -19507,7 +19642,9 @@ fn lower_multi_while_statement(
                             ir_lookup_index,
                             canonical_facts,
                             call_arg_type_cache,
-                            false
+                            false,
+                            "",
+                            ""
                         );
                         body_string_counter = match_result.string_counter;
                         body_temp_counter = match_result.temp_counter;
