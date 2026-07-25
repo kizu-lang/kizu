@@ -622,6 +622,66 @@ fn lower_struct_field_struct(
     );
 }
 
+// append_enum_namespace_name rebuilds the qualified spelling of a namespace-mode receiver chain
+// ('MirStorageCodec' or 'compiled_mir::MirStorageCodec') so an enum path resolves the same way
+// whether or not it is module-qualified.
+fn append_enum_namespace_name(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    node_id: i64,
+    bs: i64
+) -> !void {
+    let kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, node_id, bs
+    );
+    if std::mem::equal_bytes(kind, "Var") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, node_id, bs
+        );
+        if std::mem::len(token) == 0 {
+            return error("compiled mir: enum namespace root token missing");
+        }
+        try out.append_bytes(token);
+        return;
+    }
+    if !std::mem::equal_bytes(kind, "FieldExpr") {
+        return error("compiled mir: enum namespace receiver must be a qualified name");
+    }
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, node_id, bs
+    );
+    if !std::mem::equal_bytes(mode, "namespace") {
+        return error("compiled mir: enum namespace receiver contains a value field");
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node_id, "receiver", 0, bs
+    );
+    try append_enum_namespace_name(out, ir_bytes, function_name, receiver, bs);
+    try out.append_bytes("::");
+    let segment = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, node_id, "namespace", bs
+    );
+    try out.append_bytes(segment);
+    return;
+}
+
+// enum_namespace_name owns the rebuilt spelling in the MIR name store so it outlives this
+// lowering step.
+fn enum_namespace_name(
+    ir_bytes: []u8,
+    function_name: []u8,
+    node_id: i64,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> ![]u8 {
+    var spelling = std::string::String(std::mem::page_allocator());
+    try append_enum_namespace_name(
+        &var spelling, ir_bytes, function_name, node_id, bs
+    );
+    return call_arg_type_cache.name_store.own(spelling);
+}
+
 fn lower_struct_field_expr(
     ir_bytes: []u8,
     function_name: []u8,
@@ -656,17 +716,21 @@ fn lower_struct_field_expr(
             0,
             bs
         );
-        let receiver_token = try ir_contract::body_token_or_empty_from(
-            ir_bytes,
-            function_name,
-            receiver,
-            bs
+        // The enum a variant belongs to may be named bare ('MirStorageCodec::None') or
+        // module-qualified ('compiled_mir::MirStorageCodec::None'). Rebuilding the receiver's
+        // qualified spelling and resolving it to its canonical identity covers both without
+        // branching on the path shape; the variant then resolves against that identity.
+        let enum_name = try enum_namespace_name(
+            ir_bytes, function_name, receiver, bs, call_arg_type_cache
+        );
+        let enum_type = try compiled_type_resolver::resolve_type_indexed(
+            ir_lookup_index, ir_bytes, module_prefix, enum_name
         );
         let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
             ir_lookup_index,
             ir_bytes,
-            module_prefix,
-            receiver_token,
+            ir_bytes[0..0],
+            enum_type.canonical_identity,
             variant_name
         );
         return compiled_mir::enum_tag_struct_field(field_index, tag);
@@ -712,7 +776,7 @@ fn lower_struct_field_expr(
         ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
         field_value, bs, call_arg_type_cache
     );
-    return compiled_mir::field_access_struct_field(
+    return try compiled_mir::field_access_struct_field(
         field_index,
         field.field_llvm_type,
         receiver_name,
@@ -721,6 +785,10 @@ fn lower_struct_field_expr(
     );
 }
 
+// lower_nested_struct_field_expr lowers a struct-literal field read through a '.'-chain of any
+// depth ('executable_function.body.statement.expr.argument.payload'). It walks from the outermost
+// FieldExpr down to the Var root, recording each hop's aggregate type and field index, then emits
+// the steps root-first so the renderer can chain the extractions.
 fn lower_nested_struct_field_expr(
     ir_bytes: []u8,
     function_name: []u8,
@@ -733,31 +801,66 @@ fn lower_nested_struct_field_expr(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
-    let root_receiver = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, receiver, "receiver", 0, bs
+    var reversed = std::array::Array<compiled_mir::MirFieldStep>(
+        std::mem::page_allocator()
     );
-    let root_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, root_receiver, bs);
-    if !std::mem::equal_bytes(root_kind, "Var") {
-        return error("compiled mir: nested field access receiver must start with Var");
-    }
-    let root_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, root_receiver, bs
-    );
-    let first_field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
-        ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
-        receiver, bs, call_arg_type_cache
-    );
-    let second_field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+    defer reversed.deinit();
+    let value_field = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
         ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
         field_value, bs, call_arg_type_cache
     );
-    return compiled_mir::nested_field_access_struct_field(
-        field_index,
-        second_field.field_llvm_type,
-        root_name,
-        first_field.receiver_llvm_type,
-        first_field.field_index,
-        first_field.field_llvm_type,
-        second_field.field_index
+    let result_llvm = value_field.field_llvm_type;
+    try reversed.append(compiled_mir::field_step(
+        value_field.receiver_llvm_type, value_field.field_index
+    ));
+    var current = receiver;
+    var root_name = ir_bytes[0..0];
+    var walking = true;
+    while walking {
+        let kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, current, bs
+        );
+        if std::mem::equal_bytes(kind, "Var") {
+            root_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, current, bs
+            );
+            walking = false;
+        } else {
+            if !std::mem::equal_bytes(kind, "FieldExpr") {
+                var message = std::string::String(std::mem::page_allocator());
+                try message.append_bytes(
+                    "compiled mir: nested field access receiver must start with Var: "
+                );
+                try message.append_bytes(function_name);
+                try message.append_bytes(" node ");
+                try std::fmt::append_i64(&var message, current);
+                try message.append_bytes(" kind ");
+                try message.append_bytes(kind);
+                let message_bytes = message.as_bytes();
+                return error(message_bytes);
+            }
+            let hop = try compiled_mir_types::resolve_field_expr_indexed_with_cache(
+                ir_lookup_index, ir_bytes, function_name, module_prefix, params_spec,
+                current, bs, call_arg_type_cache
+            );
+            try reversed.append(compiled_mir::field_step(
+                hop.receiver_llvm_type, hop.field_index
+            ));
+            current = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, current, "receiver", 0, bs
+            );
+        }
+    }
+    var steps = std::array::Array<compiled_mir::MirFieldStep>(
+        std::mem::page_allocator()
+    );
+    var index = reversed.len();
+    while index > 0 {
+        index = index - 1;
+        let step = try reversed.at(index);
+        try steps.append(compiled_mir::field_step(step.source_type, step.field_index));
+    }
+    return compiled_mir::field_access_path_struct_field(
+        field_index, result_llvm, root_name, steps
     );
 }

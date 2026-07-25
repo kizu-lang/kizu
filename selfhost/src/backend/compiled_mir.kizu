@@ -181,6 +181,42 @@ pub struct MirStructField {
     pub call_callee_name: []u8,
     pub call_args: std::array::Array<MirCallArg>,
     pub nested_fields: std::array::Array<MirStructField>,
+    // access_path holds the FieldAccess extraction chain rooted at `value`, one step per '.'
+    // ('executable_function.body.statement.expr.argument.payload' is five steps). Step 0
+    // extracts from the root SSA value and each later step extracts from the previous result,
+    // so a chain of any depth is representable. It is empty for every other field kind.
+    pub access_path: std::array::Array<MirFieldStep>,
+}
+
+// MirFieldStep is one '.field' hop of a struct-literal FieldAccess chain: source_type is the
+// aggregate being read and field_index is the element extracted from it.
+pub struct MirFieldStep {
+    pub source_type: []u8,
+    pub field_index: i64,
+}
+
+pub fn field_step(source_type: []u8, field_index: i64) -> MirFieldStep {
+    return MirFieldStep {
+        source_type: source_type,
+        field_index: field_index
+    };
+}
+
+fn empty_field_steps() -> std::array::Array<MirFieldStep> {
+    return std::array::Array<MirFieldStep>(std::mem::page_allocator());
+}
+
+pub fn copy_field_steps(
+    steps: &std::array::Array<MirFieldStep>
+) -> !std::array::Array<MirFieldStep> {
+    var copied = std::array::Array<MirFieldStep>(std::mem::page_allocator());
+    var index = 0;
+    while index < steps.len() {
+        let step = try steps.at(index);
+        try copied.append(field_step(step.source_type, step.field_index));
+        index = index + 1;
+    }
+    return copied;
 }
 
 // Per-variant MirExprInst payloads. Each holds only the fields its variant
@@ -1883,6 +1919,7 @@ impl MirStructField {
     fn deinit(self: MirStructField) -> void {
         self.call_args.deinit();
         self.nested_fields.deinit();
+        self.access_path.deinit();
         return;
     }
 }
@@ -3034,7 +3071,8 @@ pub fn var_struct_field(index: i64, ty: []u8, name: []u8) -> MirStructField {
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
@@ -3058,7 +3096,8 @@ pub fn string_struct_field(index: i64, payload: []u8) -> MirStructField {
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
@@ -3082,7 +3121,8 @@ pub fn int_struct_field(index: i64, value: i64) -> MirStructField {
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
@@ -3106,7 +3146,8 @@ pub fn bool_struct_field(index: i64, value: bool) -> MirStructField {
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
@@ -3130,16 +3171,35 @@ pub fn enum_tag_struct_field(index: i64, tag: i64) -> MirStructField {
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
+// field_access_struct_field builds a single-hop 'root.field' struct-literal field. It is the
+// one-step case of the general access path below.
 pub fn field_access_struct_field(
     index: i64,
     field_type: []u8,
     receiver_name: []u8,
     receiver_type: []u8,
     source_field_index: i64
+) -> !MirStructField {
+    var steps = empty_field_steps();
+    try steps.append(field_step(receiver_type, source_field_index));
+    return field_access_path_struct_field(
+        index, field_type, receiver_name, steps
+    );
+}
+
+// field_access_path_struct_field builds a struct-literal field read through an extraction chain
+// of any depth rooted at receiver_name. The renderer walks the steps in order, so a one-hop
+// 'node.kind' and a five-hop 'fn.body.statement.expr.argument.payload' share one representation.
+pub fn field_access_path_struct_field(
+    index: i64,
+    field_type: []u8,
+    receiver_name: []u8,
+    steps: std::array::Array<MirFieldStep>
 ) -> MirStructField {
     return MirStructField {
         index: index,
@@ -3148,8 +3208,8 @@ pub fn field_access_struct_field(
         value: receiver_name,
         int_value: -1,
         bool_value: false,
-        source_type: receiver_type,
-        source_field_index: source_field_index,
+        source_type: "",
+        source_field_index: -1,
         nested_source_type: "",
         computed_rhs_name: "",
         computed_op: "",
@@ -3160,41 +3220,11 @@ pub fn field_access_struct_field(
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: steps
     };
 }
 
-pub fn nested_field_access_struct_field(
-    index: i64,
-    field_type: []u8,
-    receiver_name: []u8,
-    receiver_type: []u8,
-    source_field_index: i64,
-    nested_type: []u8,
-    nested_field_index: i64
-) -> MirStructField {
-    return MirStructField {
-        index: index,
-        kind: MirStructFieldKind::FieldAccess,
-        llvm_type: field_type,
-        value: receiver_name,
-        int_value: nested_field_index,
-        bool_value: false,
-        source_type: receiver_type,
-        source_field_index: source_field_index,
-        nested_source_type: nested_type,
-        computed_rhs_name: "",
-        computed_op: "",
-        computed_lhs_literal: 0,
-        computed_lhs_is_literal: false,
-        computed_rhs_literal: 0,
-        computed_rhs_is_literal: false,
-        call_module_prefix: "",
-        call_callee_name: "",
-        call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
-    };
-}
 
 pub fn computed_binary_struct_field(
     index: i64,
@@ -3223,7 +3253,8 @@ pub fn computed_binary_struct_field(
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
@@ -3256,7 +3287,8 @@ pub fn computed_scalar_binary_struct_field(
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
@@ -3280,7 +3312,8 @@ pub fn empty_slice_struct_field(index: i64) -> MirStructField {
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
@@ -3310,7 +3343,8 @@ pub fn call_struct_field(
         call_module_prefix: call_module_prefix,
         call_callee_name: call_callee_name,
         call_args: call_args,
-        nested_fields: empty_struct_nested_fields()
+        nested_fields: empty_struct_nested_fields(),
+        access_path: empty_field_steps()
     };
 }
 
@@ -3338,7 +3372,8 @@ pub fn struct_literal_struct_field(
         call_module_prefix: "",
         call_callee_name: "",
         call_args: empty_struct_call_args(),
-        nested_fields: nested_fields
+        nested_fields: nested_fields,
+        access_path: empty_field_steps()
     };
 }
 
@@ -3749,7 +3784,8 @@ pub fn copy_struct_field(field: &MirStructField) -> !MirStructField {
         call_module_prefix: field.call_module_prefix,
         call_callee_name: field.call_callee_name,
         call_args: try copy_call_args(&field.call_args),
-        nested_fields: try copy_struct_fields(&field.nested_fields)
+        nested_fields: try copy_struct_fields(&field.nested_fields),
+        access_path: try copy_field_steps(&field.access_path)
     };
 }
 

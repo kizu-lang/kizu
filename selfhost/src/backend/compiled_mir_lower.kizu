@@ -1579,7 +1579,8 @@ fn method_call_info(
         };
         if byte_view {
             success_llvm = try runtime_selector_semantic_abi(
-                ir_lookup_index, canonical_facts, ir_bytes, module_prefix, &call_types,
+                ir_lookup_index, canonical_facts, ir_bytes, module_prefix,
+                function_name, &call_types,
                 selected_result_id, &runtime.return_selector
             );
             if !std::mem::equal_bytes(success_llvm, return_llvm) {
@@ -1597,14 +1598,16 @@ fn method_call_info(
                 runtime.return_selector.receiver_child_slot
             );
             success_llvm = try runtime_selector_semantic_abi(
-                ir_lookup_index, canonical_facts, ir_bytes, module_prefix, &call_types,
+                ir_lookup_index, canonical_facts, ir_bytes, module_prefix,
+                function_name, &call_types,
                 selected_result_id, &runtime.return_selector
             );
             storage_return_llvm = "%kizu.error.slice.u8";
         }
         if semantic {
             let selected_abi = try runtime_selector_semantic_abi(
-                ir_lookup_index, canonical_facts, ir_bytes, module_prefix, &call_types,
+                ir_lookup_index, canonical_facts, ir_bytes, module_prefix,
+                function_name, &call_types,
                 selected_result_id, &runtime.return_selector
             );
             if !std::mem::equal_bytes(selected_abi, return_llvm) {
@@ -1757,7 +1760,7 @@ fn method_call_arg_types(
         );
         let semantic_llvm = try runtime_selector_semantic_abi(
             ir_lookup_index, canonical_facts, ir_bytes, module_prefix,
-            &call_types, actual_id, &selector
+            function_name, &call_types, actual_id, &selector
         );
         var storage_llvm = semantic_llvm;
         var codec = compiled_mir::MirStorageCodec::None;
@@ -1858,6 +1861,7 @@ fn runtime_selector_semantic_abi(
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
     facts: []u8,
     module_prefix: []u8,
+    function_name: []u8,
     call: &compiled_canonical_facts::ParsedCallTypeFact,
     actual_id: i64,
     selector: &builtin_contract::RuntimeTypeSelector
@@ -1866,10 +1870,32 @@ fn runtime_selector_semantic_abi(
         return error("compiled mir: runtime selector missing");
     }
     if selector.kind == builtin_contract::RuntimeTypeSelectorKind::Fixed {
+        // A fixed selector names a value type. Borrows are ABI-transparent here -- the canonical
+        // runtime ABI derivation recurses through them -- so a borrow of that value type carries
+        // the identical LLVM ABI and satisfies the selector. Comparing the borrow's own spelling
+        // would reject it on a nominal difference the ABI does not have.
+        let value_id = try compiled_canonical_facts::parsed_canonical_value_type_id(
+            canonical_facts, actual_id
+        );
         if !try compiled_canonical_facts::parsed_canonical_spelling_matches(
-            canonical_facts, actual_id, selector.fixed_type
+            canonical_facts, value_id, selector.fixed_type
         ) {
-            return error("compiled mir: runtime fixed selector type mismatch");
+            var actual = try compiled_canonical_facts::parsed_canonical_spelling(
+                canonical_facts, value_id
+            );
+            defer actual.deinit();
+            let actual_bytes = actual.as_bytes();
+            var message = std::string::String(std::mem::page_allocator());
+            try message.append_bytes(
+                "compiled mir: runtime fixed selector type mismatch: "
+            );
+            try message.append_bytes(function_name);
+            try message.append_bytes(" expected ");
+            try message.append_bytes(selector.fixed_type);
+            try message.append_bytes(" actual ");
+            try message.append_bytes(actual_bytes);
+            let message_bytes = message.as_bytes();
+            return error(message_bytes);
         }
     } else {
         if selector.kind != builtin_contract::RuntimeTypeSelectorKind::ReceiverChild {
@@ -11497,18 +11523,6 @@ fn lower_multi_expr_statement(
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
     }
-    let callee_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, inner, "callee", 0, sf
-    );
-    let method_name = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, callee_node, "field", sf
-    );
-    let receiver_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, callee_node, "receiver", 0, sf
-    );
-    let receiver_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, receiver_node, sf
-    );
     let arg_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, inner, "arg", 0, sf
     );
@@ -11523,27 +11537,10 @@ fn lower_multi_expr_statement(
             call_arg_type_cache
         );
     }
-    if std::mem::equal_bytes(method_name, "append") and
-        std::mem::equal_bytes(receiver_kind, "FieldExpr") {
-        return try lower_field_array_append_try_call_statement(
-            ir_bytes,
-            function_name,
-            module_prefix,
-            llvm_return_type,
-            locals_spec,
-            receiver_node,
-            arg_node,
-            string_counter,
-            temp_counter,
-            try_counter,
-            aliases,
-            stmts,
-            bs,
-            ir_lookup_index,
-            canonical_facts,
-            call_arg_type_cache
-        );
-    }
+    // A field-receiver append ('self.ranges.append(FactRange { .. })') needs no method-name
+    // branch: the shared method path resolves the FieldExpr receiver through the same struct
+    // facts, extracts the field into the receiver call arg, and hoists a computed argument
+    // (struct literal, binary, cast, nested call) into a preceding binding.
     return lower_void_method_try_call_statement(
         ir_bytes, function_name, module_prefix, llvm_return_type,
         locals_spec, inner, string_counter, temp_counter, try_counter,

@@ -10097,34 +10097,37 @@ fn append_struct_field_access(
     extract_counter: i64,
     prefix: i64
 ) -> !i64 {
-    try out.append_bytes("  %ex");
-    try std::fmt::append_i64(out, prefix);
-    try out.append_bytes("_");
-    try std::fmt::append_i64(out, extract_counter);
-    try out.append_bytes(" = extractvalue ");
-    try out.append_bytes(field.source_type);
-    try out.append_bytes(" %");
-    try out.append_bytes(field.value);
-    try out.append_bytes(", ");
-    try std::fmt::append_i64(out, field.source_field_index);
-    try out.append_byte(cast<u8>(10));
+    // Walk the extraction chain: step 0 reads the root SSA value and each later step reads the
+    // previous step's result, so a one-hop and a five-hop chain share this loop.
+    let steps = &field.access_path;
+    if steps.len() < 1 {
+        return error("compiled mir llvm: struct field access needs an extraction step");
+    }
     var result_counter = extract_counter;
-    if field.int_value >= 0 {
-        let next_counter = extract_counter + 1;
+    var step_index = 0;
+    while step_index < steps.len() {
+        let step = try steps.at(step_index);
+        let step_counter = extract_counter + step_index;
         try out.append_bytes("  %ex");
         try std::fmt::append_i64(out, prefix);
         try out.append_bytes("_");
-        try std::fmt::append_i64(out, next_counter);
+        try std::fmt::append_i64(out, step_counter);
         try out.append_bytes(" = extractvalue ");
-        try out.append_bytes(field.nested_source_type);
-        try out.append_bytes(" %ex");
-        try std::fmt::append_i64(out, prefix);
-        try out.append_bytes("_");
-        try std::fmt::append_i64(out, extract_counter);
+        try out.append_bytes(step.source_type);
+        if step_index == 0 {
+            try out.append_bytes(" %");
+            try out.append_bytes(field.value);
+        } else {
+            try out.append_bytes(" %ex");
+            try std::fmt::append_i64(out, prefix);
+            try out.append_bytes("_");
+            try std::fmt::append_i64(out, step_counter - 1);
+        }
         try out.append_bytes(", ");
-        try std::fmt::append_i64(out, field.int_value);
+        try std::fmt::append_i64(out, step.field_index);
         try out.append_byte(cast<u8>(10));
-        result_counter = next_counter;
+        result_counter = step_counter;
+        step_index = step_index + 1;
     }
     try compiled_util::append_insertvalue_line_with_prefix(
         out,
