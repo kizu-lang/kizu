@@ -396,6 +396,139 @@ pub fn union_dispatch_renderer_gate() -> !void {
     return;
 }
 
+// short_circuit_condition_renderer_gate renders
+// 'if a or b or (c and d) { return true; } return false;' as a four-leaf short-circuit chain.
+// The leaf targets encode the mixed or/and tree: a and b take the condition-true edge, a falls to
+// b, b falls to c, c advances to d, and c/d take the condition-false edge. Rendering it as a
+// standalone i1 function lets a caller check the whole truth table by execution, which is the
+// evidence that a nested and/or condition evaluates left to right and stops at the deciding leaf.
+pub fn short_circuit_condition_renderer_gate() -> !void {
+    var leaf_a = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try leaf_a.append(compiled_mir::var_expr_inst(0, "i1", "a"));
+    var leaf_b = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try leaf_b.append(compiled_mir::var_expr_inst(1, "i1", "b"));
+    var leaf_c = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try leaf_c.append(compiled_mir::var_expr_inst(2, "i1", "c"));
+    var leaf_d = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try leaf_d.append(compiled_mir::var_expr_inst(3, "i1", "d"));
+    var extra = std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator());
+    try extra.append(compiled_mir::cond_operand(2, leaf_c));
+    try extra.append(compiled_mir::cond_operand(3, leaf_d));
+    let on_true = compiled_mir::cond_target_condition_true();
+    let on_false = compiled_mir::cond_target_condition_false();
+    var targets = std::array::Array<compiled_mir::MirCondTarget>(std::mem::page_allocator());
+    try targets.append(compiled_mir::cond_target(on_true, 1));
+    try targets.append(compiled_mir::cond_target(on_true, 2));
+    try targets.append(compiled_mir::cond_target(3, on_false));
+    try targets.append(compiled_mir::cond_target(on_true, on_false));
+    var statements = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try statements.append(compiled_mir::if_stmt(
+        0,
+        0,
+        0,
+        leaf_a,
+        1,
+        1,
+        leaf_b,
+        extra,
+        targets,
+        compiled_mir::MirIfThenKind::ReturnBool,
+        true,
+        "i1",
+        "",
+        "",
+        std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator()),
+        0 - 1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
+        0,
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator())
+    ));
+    var tail_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try tail_insts.append(compiled_mir::bool_expr_inst(4, false));
+    try statements.append(compiled_mir::return_expr_stmt(0, 4, tail_insts));
+    var function = compiled_mir_function::multi_statement_function(
+        "short_circuit_condition_gate", "i1", "i1 a;i1 b;i1 c;i1 d", statements
+    );
+    defer function.deinit();
+    var out = std::string::String(std::mem::page_allocator());
+    defer out.deinit();
+    try append_function(&var out, &function);
+    let bytes = out.as_bytes();
+    print(bytes);
+    return;
+}
+
+// dispatch_value_binding_renderer_gate renders
+// 'let picked = match value { <tag 7> => 10, _ => 20 }; return picked;'. Both arms leave their
+// value in an arm-unique name and the dispatch merges them through its slot, so executing the
+// function is the evidence that each tag selects its own arm's value.
+pub fn dispatch_value_binding_renderer_gate() -> !void {
+    var scrutinee = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try scrutinee.append(compiled_mir::var_expr_inst(0, "i64", "value"));
+    var matched_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try matched_insts.append(compiled_mir::int_expr_inst(1, 10));
+    var matched_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try matched_stmts.append(compiled_mir::alias_assign_stmt(
+        "picked", "dispatch.result.0.0", "i64", 1, matched_insts
+    ));
+    var default_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try default_insts.append(compiled_mir::int_expr_inst(2, 20));
+    var default_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try default_stmts.append(compiled_mir::alias_assign_stmt(
+        "picked", "dispatch.result.0.1", "i64", 2, default_insts
+    ));
+    var arms = std::array::Array<compiled_mir::MirEnumDispatchArm>(std::mem::page_allocator());
+    try arms.append(compiled_mir::enum_dispatch_value_arm(
+        7, false, "", "", "dispatch.result.0.0", matched_stmts
+    ));
+    try arms.append(compiled_mir::enum_dispatch_value_arm(
+        0 - 1, true, "", "", "dispatch.result.0.1", default_stmts
+    ));
+    var statements = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    try statements.append(compiled_mir::enum_dispatch_stmt(
+        scrutinee, 0, "i64", false, "picked", "i64", arms
+    ));
+    var tail_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    try tail_insts.append(compiled_mir::var_expr_inst(3, "i64", "picked"));
+    try statements.append(compiled_mir::return_expr_stmt(0, 3, tail_insts));
+    var function = compiled_mir_function::multi_statement_function(
+        "dispatch_value_binding_gate", "i64", "i64 value", statements
+    );
+    defer function.deinit();
+    var out = std::string::String(std::mem::page_allocator());
+    defer out.deinit();
+    try append_function(&var out, &function);
+    let bytes = out.as_bytes();
+    print(bytes);
+    return;
+}
+
+// struct_field_access_path_renderer_gate renders a struct-literal return whose field reads a
+// three-hop '.'-chain off a parameter ('outer.1.0.1'). Executing it is the evidence that the
+// access path chains each extraction onto the previous result rather than stopping at two hops.
+pub fn struct_field_access_path_renderer_gate() -> !void {
+    var steps = std::array::Array<compiled_mir::MirFieldStep>(std::mem::page_allocator());
+    try steps.append(compiled_mir::field_step("%test.outer", 1));
+    try steps.append(compiled_mir::field_step("%test.mid", 0));
+    try steps.append(compiled_mir::field_step("%test.inner", 1));
+    var fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
+    try fields.append(compiled_mir::field_access_path_struct_field(
+        0, "i64", "outer", steps
+    ));
+    var function = compiled_mir_function::single_struct_return_function(
+        "struct_field_access_path_gate", "%test.result", "%test.outer outer", fields
+    );
+    defer function.deinit();
+    var out = std::string::String(std::mem::page_allocator());
+    defer out.deinit();
+    try append_function(&var out, &function);
+    let bytes = out.as_bytes();
+    print(bytes);
+    return;
+}
+
 pub fn resolved_match_union_renderer_gate() -> !void {
     var function = compiled_mir_function::single_match_union_return_function(
         "use_event",

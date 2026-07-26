@@ -47,6 +47,11 @@ selfhost-oracle-budget:
 selfhost-backend-artifact-gate:
     KIZU_RUN_SELFHOST_GATES=1 go test -timeout=40m ./cmd/kizu -run 'TestSelfhostBackendArtifactGate$' -count=1 -v
 
+# Execute selfhost-emitted control-flow LLVM: each gate is clang-compiled with a driver and run,
+# so a wrong branch edge, arm merge, or field hop fails by exit code rather than by text diff.
+selfhost-control-flow-execution:
+    go test -timeout=10m ./cmd/kizu -run 'TestSelfhost(ShortCircuitCondition|DispatchValueBinding|StructFieldAccessPath)Executes$' -count=1 -v
+
 # Run direct heavyweight interpreted selfhost gates for focused debugging.
 selfhost-integration-gates:
     KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|PipelineGate)$' -v
