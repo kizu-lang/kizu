@@ -6622,12 +6622,15 @@ fn append_multi_return_struct(
     if std::mem::len(stmt.wrap_error_union) > 0 {
         struct_llvm = stmt.success_llvm;
     }
+    var stream = no_expr_insts();
+    defer stream.deinit();
     try append_struct_body_at(
         out,
         function.name,
         struct_llvm,
         &stmt.struct_fields,
-        stmt.string_index
+        stmt.string_index,
+        &stream
     );
     let return_fields = &stmt.struct_fields;
     if std::mem::len(stmt.wrap_error_union) > 0 {
@@ -7541,12 +7544,15 @@ fn append_multi_let_arena_add(
     stmt: &compiled_mir::MirLetArenaAddStmt
 ) -> !void {
     // Build the element struct value as %v<string_index>_<last_field_index>.
+    var stream = no_expr_insts();
+    defer stream.deinit();
     try append_struct_body_at(
         out,
         llvm_symbol,
         stmt.element_type,
         &stmt.struct_fields,
-        stmt.string_index
+        stmt.string_index,
+        &stream
     );
     // Marshal the element through stack storage into a %kizu.slice.u8.
     try out.append_bytes("  %");
@@ -7602,12 +7608,15 @@ fn append_multi_let_struct(
     llvm_symbol: []u8,
     stmt: &compiled_mir::MirLetStructStmt
 ) -> !void {
+    var stream = no_expr_insts();
+    defer stream.deinit();
     try append_struct_body_at(
         out,
         llvm_symbol,
         stmt.llvm_type,
         &stmt.struct_fields,
-        stmt.string_index
+        stmt.string_index,
+        &stream
     );
     try out.append_bytes("  %");
     try out.append_bytes(stmt.name);
@@ -8957,12 +8966,15 @@ fn append_multi_then_struct(
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirIfStmt
 ) -> !void {
+    var stream = no_expr_insts();
+    defer stream.deinit();
     try append_struct_body_at(
         out,
         function.name,
         function.return_type.llvm_name,
         &stmt.then_struct_fields,
-        stmt.then_struct_string_index
+        stmt.then_struct_string_index,
+        &stream
     );
     try out.append_bytes("  ret ");
     try out.append_bytes(function.return_type.llvm_name);
@@ -9562,7 +9574,8 @@ fn append_struct_literal_expr(
     // Reuse the statement-level struct renderer for expression payloads. The
     // expression value reference points at the final %v<expr-prefix>_<field> aggregate.
     try append_struct_body_at(
-        out, llvm_symbol, inst.llvm_type, &inst.struct_fields, expr_struct_prefix(inst.id)
+        out, llvm_symbol, inst.llvm_type, &inst.struct_fields,
+        expr_struct_prefix(inst.id), insts
     );
     return;
 }
@@ -9924,7 +9937,11 @@ fn append_struct_return(
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("entry:");
     try out.append_byte(cast<u8>(10));
-    try append_struct_body(out, function.name, function.return_type.llvm_name, &function.struct_fields);
+    var stream = no_expr_insts();
+    defer stream.deinit();
+    try append_struct_body(
+        out, function.name, function.return_type.llvm_name, &function.struct_fields, &stream
+    );
     try out.append_bytes("  ret ");
     try out.append_bytes(function.return_type.llvm_name);
     if function.struct_fields.len() == 0 {
@@ -9995,22 +10012,34 @@ fn append_struct_globals_at(
     return;
 }
 
+// no_expr_insts backs the struct forms that own no expression instruction stream. Their fields are
+// all shaped -- a literal needing an expression-valued field lowers through the expression path
+// instead -- so nothing ever reads the stream they pass.
+fn no_expr_insts() -> std::array::Array<compiled_mir::MirExprInst> {
+    return std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+}
+
 fn append_struct_body(
     out: &var std::string::String,
     llvm_symbol: []u8,
     llvm_return_type: []u8,
-    fields: &std::array::Array<compiled_mir::MirStructField>
+    fields: &std::array::Array<compiled_mir::MirStructField>,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
-    try append_struct_body_at(out, llvm_symbol, llvm_return_type, fields, 0);
+    try append_struct_body_at(out, llvm_symbol, llvm_return_type, fields, 0, insts);
     return;
 }
 
+// insts is the expression instruction stream this literal builds inside. Expr fields read their
+// value from it; a statement-level struct form owns no stream and passes an empty one, so an Expr
+// field reaching it is a lowering bug rather than an unsupported source construct.
 fn append_struct_body_at(
     out: &var std::string::String,
     llvm_symbol: []u8,
     llvm_return_type: []u8,
     fields: &std::array::Array<compiled_mir::MirStructField>,
-    string_index: i64
+    string_index: i64,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
     var index = 0;
     var extract_counter = 0;
@@ -10042,10 +10071,12 @@ fn append_struct_body_at(
                     } else {
                         if field.kind == compiled_mir::MirStructFieldKind::StructLiteral {
                             try append_struct_nested_field(
-                                out, llvm_symbol, llvm_return_type, field, string_index
+                                out, llvm_symbol, llvm_return_type, field, string_index, insts
                             );
                         } else {
-                            try append_struct_simple_field(out, llvm_return_type, field, string_index);
+                            try append_struct_simple_field(
+                                out, llvm_symbol, llvm_return_type, field, string_index, insts
+                            );
                         }
                     }
                 }
@@ -10056,11 +10087,55 @@ fn append_struct_body_at(
     return;
 }
 
+// struct_field_kind_name spells a field kind for diagnostics so an unsupported field names the
+// shape that reached the renderer instead of only the fact that one did.
+fn struct_field_kind_name(kind: compiled_mir::MirStructFieldKind) -> []u8 {
+    if kind == compiled_mir::MirStructFieldKind::Var {
+        return "Var";
+    }
+    if kind == compiled_mir::MirStructFieldKind::ConstString {
+        return "ConstString";
+    }
+    if kind == compiled_mir::MirStructFieldKind::ConstInt {
+        return "ConstInt";
+    }
+    if kind == compiled_mir::MirStructFieldKind::ConstBool {
+        return "ConstBool";
+    }
+    if kind == compiled_mir::MirStructFieldKind::ConstEnumTag {
+        return "ConstEnumTag";
+    }
+    if kind == compiled_mir::MirStructFieldKind::FieldAccess {
+        return "FieldAccess";
+    }
+    if kind == compiled_mir::MirStructFieldKind::ComputedBinary {
+        return "ComputedBinary";
+    }
+    if kind == compiled_mir::MirStructFieldKind::EmptySlice {
+        return "EmptySlice";
+    }
+    if kind == compiled_mir::MirStructFieldKind::Call {
+        return "Call";
+    }
+    if kind == compiled_mir::MirStructFieldKind::StructLiteral {
+        return "StructLiteral";
+    }
+    if kind == compiled_mir::MirStructFieldKind::PendingExpr {
+        return "PendingExpr";
+    }
+    if kind == compiled_mir::MirStructFieldKind::Expr {
+        return "Expr";
+    }
+    return "unknown";
+}
+
 fn append_struct_simple_field(
     out: &var std::string::String,
+    llvm_symbol: []u8,
     llvm_return_type: []u8,
     field: &compiled_mir::MirStructField,
-    prefix: i64
+    prefix: i64,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
     try compiled_util::append_insertvalue_line_with_prefix(
         out,
@@ -10088,7 +10163,26 @@ fn append_struct_simple_field(
                 if field.kind == compiled_mir::MirStructFieldKind::EmptySlice {
                     try out.append_bytes("zeroinitializer");
                 } else {
-                    return error("compiled mir llvm: unsupported struct field");
+                    // An Expr field reads the instruction the enclosing stream already emitted
+                    // ahead of this insertvalue chain, so it renders exactly like any other
+                    // reference to that result (a temp, a name, or a folded literal).
+                    if field.kind == compiled_mir::MirStructFieldKind::Expr {
+                        try append_expr_value_ref(out, insts, field.expr_value_id);
+                    } else {
+                        var message = std::string::String(std::mem::page_allocator());
+                        try message.append_bytes(
+                            "compiled mir llvm: unsupported struct field: "
+                        );
+                        try message.append_bytes(llvm_symbol);
+                        try message.append_bytes(" kind ");
+                        try message.append_bytes(struct_field_kind_name(field.kind));
+                        try message.append_bytes(" index ");
+                        try std::fmt::append_i64(&var message, field.index);
+                        try message.append_bytes(" prefix ");
+                        try std::fmt::append_i64(&var message, prefix);
+                        let message_bytes = message.as_bytes();
+                        return error(message_bytes);
+                    }
                 }
             }
         }
@@ -10168,11 +10262,14 @@ fn append_struct_nested_field(
     llvm_symbol: []u8,
     llvm_return_type: []u8,
     field: &compiled_mir::MirStructField,
-    prefix: i64
+    prefix: i64,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
 ) -> !void {
     let nested_prefix = nested_struct_prefix(prefix, field.index);
     let nested = &field.nested_fields;
-    try append_struct_body_at(out, llvm_symbol, field.llvm_type, nested, nested_prefix);
+    try append_struct_body_at(
+        out, llvm_symbol, field.llvm_type, nested, nested_prefix, insts
+    );
     try compiled_util::append_insertvalue_line_with_prefix(
         out,
         llvm_return_type,

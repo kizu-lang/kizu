@@ -3201,6 +3201,7 @@ fn build_traversal_arm_args(
 pub fn is_count_range_function(
     ir_bytes: []u8,
     function_name: []u8,
+    params_spec: []u8,
     statement_count: i64,
     bs: i64
 ) -> !bool {
@@ -3352,9 +3353,118 @@ pub fn is_count_range_function(
     if !std::mem::equal_bytes(index_target_name, index_name) {
         return false;
     }
+    // The CountRange statement emits one fixed call shape: the child accessor reads (range, index)
+    // off the receiver and the accumulator recurses on the child alone, with both taken from
+    // params 0 and 1. A four-statement accumulator loop that only shares the outer shape -- an
+    // environment-threading walker whose recursive callee also carries an allocator, a source file
+    // and fact tables, say -- is a different function, and lowering it through this template would
+    // drop those arguments. Checking the call shape the template can actually emit keeps such a
+    // loop on the generic multi-statement path.
+    let matches_template = try count_range_calls_match_template(
+        ir_bytes, function_name, params_spec, child_value, recursive_value, bs
+    );
+    if !matches_template {
+        return false;
+    }
     return try while_assign_is_constant_step(
         ir_bytes, function_name, index_stmt, bs
     );
+}
+
+// count_range_calls_match_template checks the two calls inside the accumulator loop against the
+// shape the CountRange statement renders: '<param0>.<child_at>(<param1>, <index>)' bound by the
+// child let, and '<recursive>(<child>)' on the right of the accumulator add.
+fn count_range_calls_match_template(
+    ir_bytes: []u8,
+    function_name: []u8,
+    params_spec: []u8,
+    child_try: i64,
+    recursive_try: i64,
+    bs: i64
+) -> !bool {
+    let child_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, child_try, "value", 0, bs
+    );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(ir_bytes, function_name, child_call, bs),
+        "Call"
+    ) {
+        return false;
+    }
+    if (try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, child_call, bs
+    )) != 2 {
+        return false;
+    }
+    let recursive_call = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, recursive_try, "value", 0, bs
+    );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(ir_bytes, function_name, recursive_call, bs),
+        "Call"
+    ) {
+        return false;
+    }
+    if (try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, recursive_call, bs
+    )) != 1 {
+        return false;
+    }
+    let child_callee = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, child_call, "callee", 0, bs
+    );
+    if !std::mem::equal_bytes(
+        try ir_contract::body_node_kind_from(ir_bytes, function_name, child_callee, bs),
+        "FieldExpr"
+    ) {
+        return false;
+    }
+    let child_receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, child_callee, "receiver", 0, bs
+    );
+    let child_receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, child_receiver, bs
+    );
+    let child_range = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, child_call, "arg", 0, bs
+    );
+    let child_range_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, child_range, bs
+    );
+    if count_params_spec(params_spec) < 2 {
+        return false;
+    }
+    if !std::mem::equal_bytes(
+        child_receiver_name, try nth_param_field(params_spec, 0, true)
+    ) {
+        return false;
+    }
+    return std::mem::equal_bytes(
+        child_range_name, try nth_param_field(params_spec, 1, true)
+    );
+}
+
+// count_params_spec counts the entries of a 'type name;type name;...' params_spec, so a caller can
+// check an index is in range before asking nth_param_field for it.
+fn count_params_spec(params_spec: []u8) -> i64 {
+    let spec_len = std::mem::len(params_spec);
+    let semicolon = cast<u8>(59);
+    let space = cast<u8>(32);
+    var pos = 0;
+    var count = 0;
+    while pos < spec_len {
+        let entry_end = compiled_util::find_byte(params_spec, semicolon, pos);
+        let space_pos = compiled_util::find_byte(params_spec, space, pos);
+        if space_pos < entry_end {
+            count = count + 1;
+        }
+        if entry_end < spec_len {
+            pos = entry_end + 1;
+        } else {
+            pos = spec_len;
+        }
+    }
+    return count;
 }
 
 // nth_param_field returns the name (want_name true) or LLVM type (false) of the index-th
@@ -3424,7 +3534,13 @@ pub fn lower_count_range_function(
         ir_lookup_index, ir_bytes, range_resolved.canonical_identity, "len"
     );
     if !range_len.found {
-        return error("compiled mir: count range len field not found");
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled mir: count range len field not found: ");
+        try message.append_bytes(function_name);
+        try message.append_bytes(" range ");
+        try message.append_bytes(range_resolved.canonical_identity);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
     let range_len_type = try compiled_type_resolver::resolve_type_indexed(
         ir_lookup_index, ir_bytes, range_len.declaring_module, range_len.field_type
@@ -14594,10 +14710,19 @@ fn lower_multi_return_statement(
         );
     }
     if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
-        return try lower_return_struct_literal(
-            ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-            value, string_counter, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
-        );
+        // A literal whose fields are all shaped keeps the dedicated ReturnStruct statement. One
+        // carrying an expression-valued field needs an instruction stream to build in, which only
+        // the generic return-expression path at the tail of this function owns.
+        let needs_expr_value =
+            try compiled_mir_lower_struct::struct_literal_needs_expr_value(
+                ir_bytes, function_name, value, bs
+            );
+        if !needs_expr_value {
+            return try lower_return_struct_literal(
+                ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+                value, string_counter, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
+            );
+        }
     }
     if std::mem::equal_bytes(value_kind, "Match") {
         var match_stmts = std::array::Array<compiled_mir::MirStmt>(
@@ -21899,6 +22024,136 @@ fn count_strings_in_struct_fields(
     }
     return count;
 }
+// struct_fields_have_pending_expr reports whether any field of a lowered struct literal -- at any
+// nesting depth -- still awaits the general expression path.
+fn struct_fields_have_pending_expr(
+    fields: &std::array::Array<compiled_mir::MirStructField>
+) -> !bool {
+    var index = 0;
+    while index < fields.len() {
+        let field = try fields.at(index);
+        if field.kind == compiled_mir::MirStructFieldKind::PendingExpr {
+            return true;
+        }
+        if field.kind == compiled_mir::MirStructFieldKind::StructLiteral {
+            if try struct_fields_have_pending_expr(&field.nested_fields) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// resolve_struct_field_exprs turns every PendingExpr field of a lowered struct literal into an Expr
+// field: the field's source expression lowers into the enclosing instruction stream, whose
+// instructions the renderer emits before the insertvalue chain reaches the field, and the field
+// keeps only the instruction id producing its value. A literal with no pending field passes through
+// untouched, so the shaped-field lowering stays byte-identical.
+fn resolve_struct_field_exprs(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    fields: std::array::Array<compiled_mir::MirStructField>,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !std::array::Array<compiled_mir::MirStructField> {
+    var shaped = fields;
+    let has_pending = try struct_fields_have_pending_expr(&shaped);
+    if has_pending {
+        let resolved = try lower_pending_struct_fields(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            &shaped,
+            string_index,
+            id_base,
+            insts,
+            aliases,
+            bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+        return resolved;
+    }
+    return shaped;
+}
+
+// lower_pending_struct_fields rebuilds one field list with its pending fields resolved. Nested
+// literals recurse, so a pending field at any depth resolves against the same instruction stream.
+fn lower_pending_struct_fields(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    fields: &std::array::Array<compiled_mir::MirStructField>,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !std::array::Array<compiled_mir::MirStructField> {
+    var resolved = std::array::Array<compiled_mir::MirStructField>(
+        std::mem::page_allocator()
+    );
+    var index = 0;
+    while index < fields.len() {
+        let field = try fields.at(index);
+        if field.kind == compiled_mir::MirStructFieldKind::PendingExpr {
+            let value_id = try lower_expr_into_local_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                params_spec,
+                field.expr_node,
+                string_index,
+                id_base,
+                insts,
+                aliases,
+                bs,
+                ir_lookup_index, canonical_facts, call_arg_type_cache
+            );
+            let value_type = try expr_inst_llvm_type_by_id(insts, value_id);
+            try resolved.append(compiled_mir::expr_value_struct_field(
+                field.index, value_type, value_id
+            ));
+        } else {
+            if field.kind == compiled_mir::MirStructFieldKind::StructLiteral {
+                let nested = try lower_pending_struct_fields(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    params_spec,
+                    &field.nested_fields,
+                    string_index,
+                    id_base,
+                    insts,
+                    aliases,
+                    bs,
+                    ir_lookup_index, canonical_facts, call_arg_type_cache
+                );
+                try resolved.append(compiled_mir::struct_literal_struct_field(
+                    field.index, field.llvm_type, nested
+                ));
+            } else {
+                try resolved.append(try compiled_mir::copy_struct_field(field));
+            }
+        }
+        index = index + 1;
+    }
+    return resolved;
+}
+
 // expr_inst_llvm_type_by_id returns the LLVM type of the lowered expression instruction whose id is
 // result_id, so an assignment lowering can compare its value's type against the reassignment
 // target's resolved type (issue 1201). A missing id is an internal inconsistency rather than a
@@ -22979,8 +23234,16 @@ fn lower_expr_into_local_aliases(
             ir_lookup_index,
             ir_bytes, function_name, module_prefix, expr_node, bs
         );
-        let fields = try compiled_mir_lower_struct::lower_struct_fields(
+        let shaped_fields = try compiled_mir_lower_struct::lower_struct_fields(
             ir_bytes, function_name, module_prefix, params_spec, expr_node, bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+        // Field values the shapes cannot represent lower into this same stream first, so their
+        // instructions render ahead of the struct literal's insertvalue chain and the fields can
+        // reference the produced ids.
+        let fields = try resolve_struct_field_exprs(
+            ir_bytes, function_name, module_prefix, params_spec, shaped_fields,
+            string_index, id_base, insts, aliases, bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
         let struct_id = id_base + insts.len();
@@ -23338,8 +23601,17 @@ fn lower_expr_into(
             ir_lookup_index,
             ir_bytes, function_name, module_prefix, expr_node, bs
         );
-        let fields = try compiled_mir_lower_struct::lower_struct_fields(
+        let shaped_fields = try compiled_mir_lower_struct::lower_struct_fields(
             ir_bytes, function_name, module_prefix, params_spec, expr_node, bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+        // Field values outside the shaped set lower into this stream first; this path binds no
+        // local aliases, so the resolver renames nothing.
+        var no_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+        defer no_aliases.deinit();
+        let fields = try resolve_struct_field_exprs(
+            ir_bytes, function_name, module_prefix, params_spec, shaped_fields,
+            string_index, id_base, insts, &no_aliases, bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
         let struct_id = id_base + insts.len();

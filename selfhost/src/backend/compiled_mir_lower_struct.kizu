@@ -77,6 +77,128 @@ fn count_struct_fields(
     return count;
 }
 
+// struct_field_value_kind_is_shaped lists the value kinds lower_struct_field renders through a
+// dedicated MirStructField shape. Some of those shapes carry further limits, so callers ask
+// struct_field_value_is_shaped rather than this kind gate directly.
+fn struct_field_value_kind_is_shaped(kind: []u8) -> bool {
+    return std::mem::equal_bytes(kind, "Var") or
+        std::mem::equal_bytes(kind, "String") or
+        std::mem::equal_bytes(kind, "Int") or
+        std::mem::equal_bytes(kind, "Prefix") or
+        std::mem::equal_bytes(kind, "Bool") or
+        std::mem::equal_bytes(kind, "IndexExpr") or
+        std::mem::equal_bytes(kind, "FieldExpr") or
+        std::mem::equal_bytes(kind, "Call") or
+        std::mem::equal_bytes(kind, "Binary") or
+        std::mem::equal_bytes(kind, "StructLiteralExpr");
+}
+
+// struct_field_value_is_shaped reports whether lower_struct_field can represent this field value
+// with a dedicated MirStructField shape. It is the single source of truth for that question: the
+// field lowerer consults it to decide whether to defer to the expression path, and
+// struct_literal_needs_expr_value consults it so a caller can pick the statement-level struct form
+// or the expression form before lowering anything.
+pub fn struct_field_value_is_shaped(
+    ir_bytes: []u8,
+    function_name: []u8,
+    field_value: i64,
+    field_value_kind: []u8,
+    bs: i64
+) -> !bool {
+    if !struct_field_value_kind_is_shaped(field_value_kind) {
+        return false;
+    }
+    if std::mem::equal_bytes(field_value_kind, "Call") {
+        // The call-valued field shapes reserve no string-global pool of their own -- the '.f' slots
+        // belong to the fields -- and they carry no error-union propagation, so a call passing a
+        // string literal or raising an error builds in an expression stream instead.
+        if try compiled_mir_lower_call::is_error_call(
+            ir_bytes, function_name, field_value, bs
+        ) {
+            return false;
+        }
+        let has_string_arg = try call_tree_has_string_literal_arg(
+            ir_bytes, function_name, field_value, bs
+        );
+        return !has_string_arg;
+    }
+    return true;
+}
+
+// call_tree_has_string_literal_arg reports whether a call or any nested call argument passes a
+// string literal, matching the recursion count_string_args performs over lowered arguments.
+fn call_tree_has_string_literal_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64,
+    bs: i64
+) -> !bool {
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var index = 0;
+    while index < arg_count {
+        let arg = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", index, bs
+        );
+        let kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, arg, bs
+        );
+        if std::mem::equal_bytes(kind, "String") {
+            return true;
+        }
+        if std::mem::equal_bytes(kind, "Call") {
+            if try call_tree_has_string_literal_arg(
+                ir_bytes, function_name, arg, bs
+            ) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// struct_literal_needs_expr_value reports whether any field of this literal -- at any nesting
+// depth, since a nested literal lowers through the same field shapes -- carries a value the field
+// shapes cannot represent. Such a literal has to build inside an expression instruction stream so
+// its fields can reference the instructions that produce them.
+pub fn struct_literal_needs_expr_value(
+    ir_bytes: []u8,
+    function_name: []u8,
+    value_node: i64,
+    bs: i64
+) -> !bool {
+    let field_count = try count_struct_fields(ir_bytes, function_name, value_node, bs);
+    var field_index = 0;
+    while field_index < field_count {
+        let field_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, value_node, "field", field_index, bs
+        );
+        let field_value = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, field_node, "value", 0, bs
+        );
+        let field_value_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, field_value, bs
+        );
+        let shaped = try struct_field_value_is_shaped(
+            ir_bytes, function_name, field_value, field_value_kind, bs
+        );
+        if !shaped {
+            return true;
+        }
+        if std::mem::equal_bytes(field_value_kind, "StructLiteralExpr") {
+            if try struct_literal_needs_expr_value(
+                ir_bytes, function_name, field_value, bs
+            ) {
+                return true;
+            }
+        }
+        field_index = field_index + 1;
+    }
+    return false;
+}
+
 fn lower_struct_field(
     ir_bytes: []u8,
     function_name: []u8,
@@ -90,6 +212,17 @@ fn lower_struct_field(
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
+    // A value kind none of the struct-field shapes below represents is not an unsupported
+    // construct: it is one the general expression lowerer already handles. The field records its
+    // source node and the enclosing expression lowerer emits the instructions and rewrites it into
+    // an Expr field, so struct-literal fields inherit every expression kind without this file
+    // growing a shape per kind.
+    let shaped = try struct_field_value_is_shaped(
+        ir_bytes, function_name, field_value, field_value_kind, bs
+    );
+    if !shaped {
+        return compiled_mir::pending_expr_struct_field(field_index, field_value);
+    }
     if std::mem::equal_bytes(field_value_kind, "Var") {
         let var_name = try ir_contract::body_token_or_empty_from(
             ir_bytes,
@@ -630,66 +763,6 @@ fn lower_struct_field_struct(
     );
 }
 
-// append_enum_namespace_name rebuilds the qualified spelling of a namespace-mode receiver chain
-// ('MirStorageCodec' or 'compiled_mir::MirStorageCodec') so an enum path resolves the same way
-// whether or not it is module-qualified.
-fn append_enum_namespace_name(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    node_id: i64,
-    bs: i64
-) -> !void {
-    let kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, node_id, bs
-    );
-    if std::mem::equal_bytes(kind, "Var") {
-        let token = try ir_contract::body_token_or_empty_from(
-            ir_bytes, function_name, node_id, bs
-        );
-        if std::mem::len(token) == 0 {
-            return error("compiled mir: enum namespace root token missing");
-        }
-        try out.append_bytes(token);
-        return;
-    }
-    if !std::mem::equal_bytes(kind, "FieldExpr") {
-        return error("compiled mir: enum namespace receiver must be a qualified name");
-    }
-    let mode = try ir_contract::sequence_fact_second_value_from(
-        ir_bytes, "body-field-expr ", function_name, node_id, bs
-    );
-    if !std::mem::equal_bytes(mode, "namespace") {
-        return error("compiled mir: enum namespace receiver contains a value field");
-    }
-    let receiver = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, node_id, "receiver", 0, bs
-    );
-    try append_enum_namespace_name(out, ir_bytes, function_name, receiver, bs);
-    try out.append_bytes("::");
-    let segment = try ir_contract::body_field_expr_name_from(
-        ir_bytes, function_name, node_id, "namespace", bs
-    );
-    try out.append_bytes(segment);
-    return;
-}
-
-// enum_namespace_name owns the rebuilt spelling in the MIR name store so it outlives this
-// lowering step.
-fn enum_namespace_name(
-    ir_bytes: []u8,
-    function_name: []u8,
-    node_id: i64,
-    bs: i64,
-    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
-) -> ![]u8 {
-    var spelling = std::string::String(std::mem::page_allocator());
-    try append_enum_namespace_name(
-        &var spelling, ir_bytes, function_name, node_id, bs
-    );
-    return call_arg_type_cache.name_store.own(spelling);
-}
-
 fn lower_struct_field_expr(
     ir_bytes: []u8,
     function_name: []u8,
@@ -701,47 +774,14 @@ fn lower_struct_field_expr(
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirStructField {
-    let mode = try ir_contract::sequence_fact_second_value_from(
-        ir_bytes,
-        "body-field-expr ",
-        function_name,
-        field_value,
-        bs
+    // An enum variant in field position is a constant tag; the shared reading resolves it whether
+    // the enum is named bare ('MirStorageCodec::None') or module-qualified.
+    let variant = try compiled_mir_types::namespace_enum_variant(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, field_value, bs,
+        call_arg_type_cache
     );
-    if std::mem::equal_bytes(mode, "namespace") {
-        let variant_name = try ir_contract::body_field_expr_name_from(
-            ir_bytes,
-            function_name,
-            field_value,
-            "namespace",
-            bs
-        );
-        let receiver = try ir_contract::body_child_sequence_from(
-            ir_bytes,
-            function_name,
-            field_value,
-            "receiver",
-            0,
-            bs
-        );
-        // The enum a variant belongs to may be named bare ('MirStorageCodec::None') or
-        // module-qualified ('compiled_mir::MirStorageCodec::None'). Rebuilding the receiver's
-        // qualified spelling and resolving it to its canonical identity covers both without
-        // branching on the path shape; the variant then resolves against that identity.
-        let enum_name = try enum_namespace_name(
-            ir_bytes, function_name, receiver, bs, call_arg_type_cache
-        );
-        let enum_type = try compiled_type_resolver::resolve_type_indexed(
-            ir_lookup_index, ir_bytes, module_prefix, enum_name
-        );
-        let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
-            ir_lookup_index,
-            ir_bytes,
-            ir_bytes[0..0],
-            enum_type.canonical_identity,
-            variant_name
-        );
-        return compiled_mir::enum_tag_struct_field(field_index, tag);
+    if variant.found {
+        return compiled_mir::enum_tag_struct_field(field_index, variant.tag);
     }
     let receiver = try ir_contract::body_child_sequence_from(
         ir_bytes,

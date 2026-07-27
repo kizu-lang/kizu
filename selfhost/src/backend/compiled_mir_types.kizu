@@ -2316,6 +2316,104 @@ body-call-builtin beta::consume 5 10 language array-len -";
     return;
 }
 
+// NamespaceEnumVariant is the result of reading a namespace-mode field expression as an enum
+// variant path. found is false when the expression reads a value field, or when the path names
+// something other than an enum (a tagged-union variant, say), so the caller keeps its own handling
+// for those.
+pub struct NamespaceEnumVariant {
+    pub found: bool,
+    pub tag: i64,
+}
+
+// append_enum_namespace_name rebuilds the qualified spelling of a namespace-mode receiver chain
+// ('SourceKind' or 'source::SourceKind') so an enum path resolves the same way whether or not it is
+// module-qualified.
+fn append_enum_namespace_name(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    node_id: i64,
+    bs: i64
+) -> !void {
+    let kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, node_id, bs
+    );
+    if std::mem::equal_bytes(kind, "Var") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, node_id, bs
+        );
+        if std::mem::len(token) == 0 {
+            return error("compiled mir: enum namespace root token missing");
+        }
+        try out.append_bytes(token);
+        return;
+    }
+    if !std::mem::equal_bytes(kind, "FieldExpr") {
+        return error("compiled mir: enum namespace receiver must be a qualified name");
+    }
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, node_id, bs
+    );
+    if !std::mem::equal_bytes(mode, "namespace") {
+        return error("compiled mir: enum namespace receiver contains a value field");
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, node_id, "receiver", 0, bs
+    );
+    try append_enum_namespace_name(out, ir_bytes, function_name, receiver, bs);
+    try out.append_bytes("::");
+    let segment = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, node_id, "namespace", bs
+    );
+    try out.append_bytes(segment);
+    return;
+}
+
+// namespace_enum_variant reads '<Enum>::<Variant>' (bare or module-qualified) off a field
+// expression and resolves the variant tag. The enum is identified by resolving the rebuilt receiver
+// spelling to its canonical identity, so both spellings reach the same variant facts. An enum
+// variant is a constant, so every position that admits one -- struct field, call argument,
+// expression -- can share this reading instead of matching the path shape itself.
+pub fn namespace_enum_variant(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    expr_node: i64,
+    bs: i64,
+    cache: &var CallArgTypeCache
+) -> !NamespaceEnumVariant {
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, expr_node, bs
+    );
+    if !std::mem::equal_bytes(mode, "namespace") {
+        return NamespaceEnumVariant { found: false, tag: -1 };
+    }
+    let variant_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, expr_node, "namespace", bs
+    );
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr_node, "receiver", 0, bs
+    );
+    var spelling = std::string::String(std::mem::page_allocator());
+    try append_enum_namespace_name(
+        &var spelling, ir_bytes, function_name, receiver, bs
+    );
+    let enum_name = try cache.name_store.own(spelling);
+    let enum_type = try compiled_type_resolver::resolve_type_indexed(
+        index, ir_bytes, module_prefix, enum_name
+    );
+    if !compiled_fact_lookup::is_enum_type_indexed(
+        index, ir_bytes, ir_bytes[0..0], enum_type.canonical_identity
+    ) {
+        return NamespaceEnumVariant { found: false, tag: -1 };
+    }
+    let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix_indexed(
+        index, ir_bytes, ir_bytes[0..0], enum_type.canonical_identity, variant_name
+    );
+    return NamespaceEnumVariant { found: true, tag: tag };
+}
+
 // resolve_field_expr_indexed mirrors resolve_field_expr, routing its two kizu_type_to_llvm
 // lowerings and the struct-field lookup through the sorted index. The body-fact reads
 // (mode/field-name/receiver) stay on their per-function _from scans, and the receiver type
