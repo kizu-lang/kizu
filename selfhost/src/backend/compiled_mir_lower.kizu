@@ -10621,6 +10621,8 @@ pub fn lower_multi_statement_function(
                         temp_counter,
                         alias_counter,
                         stmt_index,
+                        0,
+                        stmt_index,
                         &var aliases,
                         &var stmts,
                         bs,
@@ -13778,7 +13780,21 @@ fn lower_multi_assign_statement(
         ir_bytes, function_name, statement, "value", 0, sf
     );
     if !(try node_kind_is(ir_bytes, function_name, value, "TryExpr", sf)) {
-        return error("compiled mir: top-level assignment value must be a try-call");
+        // Any other value is a plain expression, which the then-body reassignment lowering already
+        // binds through this same fresh-alias indirection. A top-level reassignment is that same
+        // operation in a different block, so it reuses it instead of restricting itself to calls.
+        let assigned = try lower_void_then_body_assign(
+            ir_bytes, function_name, module_prefix, locals_spec, statement,
+            string_counter, temp_counter, try_counter, alias_counter, aliases, stmts, bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+        return MultiAssignLowerResult {
+            locals_spec: locals_spec,
+            string_counter: assigned.string_counter,
+            temp_counter: assigned.temp_counter,
+            try_counter: assigned.try_counter,
+            alias_counter: assigned.alias_counter
+        };
     }
     let inner = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, value, "value", 0, sf
@@ -18039,25 +18055,27 @@ pub struct InductionInit {
     pub offset: i64,
 }
 // find_induction_init finds the 'var counter = <init>' initializer for the while at
-// while_stmt_index and returns its loop-head phi seed. Only top-level Let statements that
-// precede the while are considered, and the nearest preceding match wins, so two whiles
-// reusing the same counter name each resolve their own initializer rather than aliasing
-// the first one. Only an integer literal or a plain parameter/local name init is accepted;
+// scope_stmt_index of the block scope_node and returns its loop-head phi seed. Only Let statements
+// of that same block that precede the while are considered, and the nearest preceding match wins,
+// so two whiles reusing the same counter name each resolve their own initializer rather than
+// aliasing the first one -- and a loop nested in another loop's body reads the seed the enclosing
+// body binds rather than a same-named one at the function's top level. Only an integer literal or a plain parameter/local name init is accepted;
 // any other initializer shape is an explicit error so the restricted loop support never
 // silently lowers a computed seed.
 fn find_induction_init(
     ir_bytes: []u8,
     function_name: []u8,
     induction_var: []u8,
-    while_stmt_index: i64,
+    scope_node: i64,
+    scope_stmt_index: i64,
     bs: i64
 ) -> !InductionInit {
     var found = false;
     var init_value = -1;
     var index = 0;
-    while index < while_stmt_index {
+    while index < scope_stmt_index {
         let statement = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, 0, "statement", index, bs
+            ir_bytes, function_name, scope_node, "statement", index, bs
         );
         let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
         if std::mem::equal_bytes(kind, "Let") {
@@ -18132,7 +18150,8 @@ fn find_induction_init(
     return error(message_bytes);
 }
 // find_induction_init_value_node returns the value node of the nearest preceding 'var counter =
-// <value>' initializer for the while at while_stmt_index, without classifying the value. The
+// <value>' initializer for the while at scope_stmt_index of the block scope_node, without
+// classifying the value. The
 // continue-latch lowering uses it to detect a call-seeded init ('var cursor =
 // line_end_including_break(source, comment_end)') and lower the call into the preheader; a
 // non-call seed falls back to find_induction_init's literal/copy/offset classification (issue 1165
@@ -18141,15 +18160,16 @@ fn find_induction_init_value_node(
     ir_bytes: []u8,
     function_name: []u8,
     induction_var: []u8,
-    while_stmt_index: i64,
+    scope_node: i64,
+    scope_stmt_index: i64,
     bs: i64
 ) -> !i64 {
     var found = false;
     var init_value = -1;
     var index = 0;
-    while index < while_stmt_index {
+    while index < scope_stmt_index {
         let statement = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, 0, "statement", index, bs
+            ir_bytes, function_name, scope_node, "statement", index, bs
         );
         let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
         if std::mem::equal_bytes(kind, "Let") {
@@ -19078,7 +19098,7 @@ fn lower_multi_while_branch_merge_latch(
         ir_bytes, function_name, statement, bs
     );
     let induction_init = try find_induction_init(
-        ir_bytes, function_name, induction_var, loop_index, bs
+        ir_bytes, function_name, induction_var, 0, loop_index, bs
     );
     var induction_init_literal = induction_init.literal;
     var induction_init_var = induction_init.var_name;
@@ -19334,6 +19354,12 @@ fn lower_multi_while_statement(
     temp_counter: i64,
     alias_counter: i64,
     loop_index: i64,
+    // loop_index namespaces this loop's labels and carried-scalar names; scope_node /
+    // scope_stmt_index locate the loop inside its enclosing block so its induction seed resolves
+    // against the statements that actually precede it. A top-level loop passes the function body
+    // and its top-level statement index; a nested one passes the enclosing loop body.
+    scope_node: i64,
+    scope_stmt_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64,
@@ -19472,7 +19498,7 @@ fn lower_multi_while_statement(
                         locals_spec, carried_name, bs, call_arg_type_cache
                     );
                 let carried_init_node = try find_induction_init_value_node(
-                    ir_bytes, function_name, carried_name, loop_index, bs
+                    ir_bytes, function_name, carried_name, scope_node, scope_stmt_index, bs
                 );
                 let carried_init_kind = try ir_contract::body_node_kind_from(
                     ir_bytes, function_name, carried_init_node, bs
@@ -19481,13 +19507,18 @@ fn lower_multi_while_statement(
                 var carried_init_var = "";
                 var carried_init_offset = 0;
                 var carried_init_name = "";
-                if std::mem::equal_bytes(carried_init_kind, "Call") {
+                // The compact loop-head phi seed spells an i64 literal, copy, or base-plus-offset
+                // directly. A carried scalar seeded by a call result, or one of any other type --
+                // a bool flag such as 'var wildcard = false;' -- seeds the phi by name from the
+                // value bound before the loop instead, which is what the typed phi renders.
+                if std::mem::equal_bytes(carried_init_kind, "Call") or
+                    !std::mem::equal_bytes(carried_type, "i64") {
                     carried_init_name = try local_alias_current_name(
                         aliases, carried_name
                     );
                 } else {
                     let carried_init = try find_induction_init(
-                        ir_bytes, function_name, carried_name, loop_index, bs
+                        ir_bytes, function_name, carried_name, scope_node, scope_stmt_index, bs
                     );
                     carried_init_literal = carried_init.literal;
                     carried_init_var = carried_init.var_name;
@@ -19521,7 +19552,7 @@ fn lower_multi_while_statement(
     var cond_string_base = string_counter;
     var cond_temp_base = temp_counter;
     let init_node = try find_induction_init_value_node(
-        ir_bytes, function_name, induction_var, loop_index, bs
+        ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
     );
     let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
     if !std::mem::equal_bytes(init_kind, "Int") and
@@ -19543,7 +19574,7 @@ fn lower_multi_while_statement(
         cond_temp_base = temp_counter + init_insts.len();
     } else {
         let induction_init = try find_induction_init(
-            ir_bytes, function_name, induction_var, loop_index, bs
+            ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
         );
         induction_init_literal = induction_init.literal;
         induction_init_var = induction_init.var_name;
@@ -19851,6 +19882,34 @@ fn lower_multi_while_statement(
                         body_temp_counter =
                             body_temp_counter + value_temps;
                     } else {
+                    if std::mem::equal_bytes(body_kind, "While") {
+                        // A nested loop lowers through this same path. Its labels and
+                        // carried-scalar names take the body statement's own namespace -- the one
+                        // body ifs already use, in a separate label prefix -- and its induction
+                        // seed resolves against this body, where the 'var <counter> = <init>' that
+                        // precedes it lives.
+                        let nested_result = try lower_multi_while_statement(
+                            ir_bytes,
+                            function_name,
+                            module_prefix,
+                            llvm_return_type,
+                            locals_spec,
+                            body_stmt,
+                            body_string_counter,
+                            body_temp_counter,
+                            body_alias_counter,
+                            loop_index * 1000 + body_index + 1,
+                            body_node,
+                            body_index,
+                            &var body_aliases,
+                            &var body_stmts,
+                            bs,
+                            ir_lookup_index, canonical_facts, call_arg_type_cache
+                        );
+                        body_string_counter = nested_result.string_counter;
+                        body_temp_counter = nested_result.temp_counter;
+                        body_alias_counter = nested_result.alias_counter;
+                    } else {
                         var message =
                             std::string::String(std::mem::page_allocator());
                         try message.append_bytes(
@@ -19863,6 +19922,7 @@ fn lower_multi_while_statement(
                         try message.append_bytes(body_kind);
                         let message_bytes = message.as_bytes();
                         return error(message_bytes);
+                    }
                     }
                     }
                 }
@@ -20021,7 +20081,7 @@ fn lower_multi_while_statement(
             ir_bytes, function_name, secondary_stmt, secondary_var, bs
         );
         let secondary_init = try find_induction_init(
-            ir_bytes, function_name, secondary_var, loop_index, bs
+            ir_bytes, function_name, secondary_var, scope_node, scope_stmt_index, bs
         );
         try secondary_inductions.append(compiled_mir::secondary_induction(
             secondary_var,
@@ -20179,7 +20239,7 @@ fn append_leading_decrement_carried_scalar(
     if states.len() > 0 {
         return error("compiled mir: only one carried scalar per leading-decrement loop is supported");
     }
-    let init = try find_induction_init(ir_bytes, function_name, target_name, loop_index, bs);
+    let init = try find_induction_init(ir_bytes, function_name, target_name, 0, loop_index, bs);
     try states.append(CarriedScalarState {
         source_name: target_name,
         current_name: target_name,
@@ -20767,7 +20827,7 @@ fn lower_multi_while_leading_decrement(
     );
     let induction_var = try ir_contract::body_token_or_empty_from(ir_bytes, function_name, target, bs);
     let induction_init = try find_induction_init(
-        ir_bytes, function_name, induction_var, loop_index, bs
+        ir_bytes, function_name, induction_var, 0, loop_index, bs
     );
     // The loop-head comparison reads the pre-decrement counter, so its <var> read renames to the
     // reserved phi name.
@@ -21412,7 +21472,7 @@ fn lower_multi_while_continue_latch(
         induction_init_var = explicit_seed_var;
     } else {
         let init_node = try find_induction_init_value_node(
-            ir_bytes, function_name, induction_var, loop_index, bs
+            ir_bytes, function_name, induction_var, 0, loop_index, bs
         );
         let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
         if std::mem::equal_bytes(init_kind, "Call") {
@@ -21432,7 +21492,7 @@ fn lower_multi_while_continue_latch(
             body_temp_counter = temp_counter + init_insts.len();
         } else {
             let resolved_init = try find_induction_init(
-                ir_bytes, function_name, induction_var, loop_index, bs
+                ir_bytes, function_name, induction_var, 0, loop_index, bs
             );
             induction_init = resolved_init.literal;
             induction_init_var = resolved_init.var_name;
