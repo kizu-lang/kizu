@@ -1,5 +1,14 @@
 import selfhost::ir::builtin_contract;
 
+// MirNameStore owns the SSA/local names a lowering invents ('dispatch.payload.9.0') so the MIR can
+// carry them as plain byte views alongside the names it slices straight out of the IR text. Every
+// view own() hands back points into the String buffer the store keeps, so those names stay readable
+// for exactly as long as this store does.
+//
+// That lifetime outlives the lowering. A MirFunction is rendered by its caller, after the lowering
+// that built it has returned, so the store must not be torn down when the lowering's per-function
+// caches are -- freeing it there leaves the renderer reading freed buffers and emitting identifiers
+// made of heap garbage. Nothing releases the names today; they live until the process exits.
 pub struct MirNameStore {
     names: std::array::Array<std::string::String>,
     views: std::map::Map<[]u8, []u8>,
@@ -15,16 +24,6 @@ pub fn mir_name_store() -> MirNameStore {
 }
 
 impl MirNameStore {
-    fn deinit(self: MirNameStore) -> void {
-        self.views.deinit();
-        while self.names.len() > 0 {
-            let name = self.names.pop_or_panic();
-            name.deinit();
-        }
-        self.names.deinit();
-        return;
-    }
-
     fn own(
         self: &var MirNameStore,
         name: std::string::String

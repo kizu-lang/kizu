@@ -9718,12 +9718,49 @@ pub fn lower_multi_statement_function(
         }
         stmt_index = stmt_index + 1;
     }
+    // A body that produces no value may end without writing 'return;' -- a '-> void' deinit that
+    // just releases its fields is the common shape. The block still needs a terminator, so the
+    // implicit return the source omits is synthesized here, exactly as 'return;' would lower. Only
+    // an effect statement tail takes it: a trailing If, While, or Match ends in its own blocks,
+    // whose arms carry their own returns.
+    if try body_falls_off_a_value_free_end(
+        ir_bytes, function_name, llvm_return_type, statement_count, bs
+    ) {
+        try stmts.append(compiled_mir::return_void_success_stmt());
+    }
     return compiled_mir_function::multi_statement_function(
         llvm_symbol,
         llvm_return_type,
         params_spec,
         stmts
     );
+}
+
+// body_falls_off_a_value_free_end reports whether a void or error-union-void body ends on an
+// effect statement rather than a return, so the lowering owes it the return the source left out.
+fn body_falls_off_a_value_free_end(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_return_type: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if !std::mem::equal_bytes(llvm_return_type, "void") and
+        !std::mem::equal_bytes(llvm_return_type, "%kizu.error.void") {
+        return false;
+    }
+    if statement_count < 1 {
+        return false;
+    }
+    let last = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, 0, "statement", statement_count - 1, bs
+    );
+    let last_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, last, bs
+    );
+    return std::mem::equal_bytes(last_kind, "ExprStmt") or
+        std::mem::equal_bytes(last_kind, "Let") or
+        std::mem::equal_bytes(last_kind, "Assign");
 }
 
 fn compiled_mir_lower_is_parser_component(function_name: []u8) -> bool {
@@ -12176,7 +12213,7 @@ fn lower_try_call_args_with_local_aliases_cached(
                 call_arg_type_cache
             );
             string_idx = string_idx + try count_strings_in_insts_from(arg_insts, before);
-            try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+            try args.append(try call_arg_for_lowered_expr(arg_insts, arg_type, temp_id));
         } else {
             let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_canonical_with_aliases(
                 ir_bytes,
@@ -12358,7 +12395,7 @@ fn lower_call_args_hoisting_try_args_with_local_aliases_cached(
                 );
                 cur_string = cur_string + try count_strings_in_insts_from(arg_insts, before);
                 cur_temp = cur_temp + arg_insts.len() - before;
-                try out_args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+                try out_args.append(try call_arg_for_lowered_expr(arg_insts, arg_type, temp_id));
             } else {
                 let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_canonical_with_aliases(
                     ir_bytes,
@@ -12484,7 +12521,7 @@ fn lower_method_call_args_hoisting_try_args_with_local_aliases(
                 );
                 cur_string = cur_string + try count_strings_in_insts_from(arg_insts, before);
                 cur_temp = cur_temp + arg_insts.len() - before;
-                try out_args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+                try out_args.append(try call_arg_for_lowered_expr(arg_insts, arg_type, temp_id));
             } else {
                 let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_canonical_with_aliases(
                     ir_bytes,
@@ -16859,6 +16896,32 @@ fn validate_branch_merge_exit_assign(
     exit_insts.deinit();
     return;
 }
+// while_carries_body_scalar_var reports whether a body statement ahead of the latch reassigns
+// `name`. It matches the scan lower_multi_while_statement runs to collect the loop's carried
+// scalars, so the two agree on which names the loop-head phi owns.
+fn while_carries_body_scalar_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    body_boundary: i64,
+    name: []u8,
+    bs: i64
+) -> !bool {
+    var index = 0;
+    while index < body_boundary {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", index, bs
+        );
+        if try node_kind_is(ir_bytes, function_name, body_stmt, "Assign", bs) {
+            if try assign_targets_var(ir_bytes, function_name, body_stmt, name, bs) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 fn while_carries_induction_var(
     ir_bytes: []u8,
     function_name: []u8,
@@ -16940,6 +17003,15 @@ fn while_carries_induction_var(
     let latch_count = try while_trailing_increment_count(
         ir_bytes, function_name, body_node, body_count, bs
     );
+    // A scalar the body reassigns ahead of the latch is one of the loop's carried scalars, so the
+    // loop-head phi supplies its value on the preheader edge exactly as it does for the induction
+    // counter. Its 'var <name> = <init>' seed must be left off the emitted-let path too, or the
+    // let and the phi both define the same SSA name.
+    if try while_carries_body_scalar_var(
+        ir_bytes, function_name, body_node, body_count - latch_count, name, bs
+    ) {
+        return true;
+    }
     var index = body_count - latch_count;
     while index < body_count {
         let increment_stmt = try ir_contract::body_child_sequence_from(
@@ -21252,6 +21324,39 @@ fn arg_is_namespace_field_expr(
     return std::mem::equal_bytes(mode, "namespace");
 }
 
+// call_arg_for_lowered_expr turns a hoisted argument's lowered result into the call argument that
+// reads it. Var, bool, int, and enum-tag instructions render no definition -- every consumer prints
+// their value directly -- so naming one as '%t<id>' would reference an SSA value the renderer never
+// emits. Those fold back into the matching named or literal argument; any other result is a real
+// temp the renderer does define.
+fn call_arg_for_lowered_expr(
+    insts: &std::array::Array<compiled_mir::MirExprInst>,
+    arg_type: []u8,
+    temp_id: i64
+) -> !compiled_mir::MirCallArg {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if compiled_mir::expr_inst_id(inst) == temp_id {
+            match inst {
+                Var(payload) => return compiled_mir::var_call_arg(arg_type, payload.value);,
+                ConstBool(payload) => return compiled_mir::bool_call_arg(
+                    arg_type, payload.bool_value
+                );,
+                ConstInt(payload) => return compiled_mir::int_literal_call_arg(
+                    arg_type, payload.int_value
+                );,
+                ConstEnumTag(payload) => return compiled_mir::int_literal_call_arg(
+                    arg_type, payload.int_value
+                );,
+                _ => return compiled_mir::temp_call_arg(arg_type, temp_id);,
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled mir: hoisted call argument result not found");
+}
+
 fn call_arg_must_hoist(
     ir_bytes: []u8,
     function_name: []u8,
@@ -21447,7 +21552,7 @@ fn append_call_arg_into_exprs(
             ir_bytes, function_name, module_prefix, params_spec, arg_node,
             string_index, id_base, insts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
         );
-        try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+        try args.append(try call_arg_for_lowered_expr(insts, arg_type, temp_id));
         return try count_strings_in_insts_from(insts, before);
     }
     let arg = try compiled_mir_lower_call::lower_single_call_arg_canonical(
@@ -21604,7 +21709,7 @@ fn lower_expr_call_with_nested_args_with_local_aliases(
                 string_idx, id_base, insts, aliases, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             string_idx = string_idx + try count_strings_in_insts_from(insts, before);
-            try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+            try args.append(try call_arg_for_lowered_expr(insts, arg_type, temp_id));
         } else {
             let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_canonical_with_aliases(
                 ir_bytes,
@@ -21687,7 +21792,7 @@ fn lower_expr_method_call(
                 string_idx, id_base, insts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             string_idx = string_idx + try count_strings_in_insts_from(insts, before);
-            try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+            try args.append(try call_arg_for_lowered_expr(insts, arg_type, temp_id));
         } else {
             let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_canonical(
                 ir_bytes, function_name, module_prefix, params_spec, arg_type,
@@ -21796,7 +21901,7 @@ fn lower_expr_method_call_with_local_aliases(
                 string_idx, id_base, insts, aliases, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             string_idx = string_idx + try count_strings_in_insts_from(insts, before);
-            try args.append(compiled_mir::temp_call_arg(arg_type, temp_id));
+            try args.append(try call_arg_for_lowered_expr(insts, arg_type, temp_id));
         } else {
             let scalar_arg = try compiled_mir_lower_call::lower_single_call_arg_canonical_with_aliases(
                 ir_bytes,
