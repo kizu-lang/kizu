@@ -852,44 +852,6 @@ pub struct MirWhileStmt {
     pub branch_latch_advance_stmts: std::array::Array<MirStmt>,
 }
 
-// MirTraversalPayloadArg is the one traversal-specific argument setup that cannot be
-// expressed before the match arm has materialized its tagged-union payload. The lowerer
-// reserves temp_id in the arm's common expression namespace, the renderer extracts
-// field_index into %t<temp_id>, and the final call consumes that value through an ordinary
-// MirCallArg::Temp. It owns nothing.
-pub struct MirTraversalPayloadArg {
-    pub field_index: i64,
-    pub temp_id: i64,
-}
-
-// MirTraversalArm is one arm of the node_count match-over-AstData traversal (tracker 961).
-// A try-call arm ('Variant(bind) => try count_X(tree, bind.f, ...)') carries the discriminant
-// tag, the inline payload struct type, the count_* callee symbol, and the payload-field args;
-// the renderer extracts the payload, forwards the receiver + field args, calls count_X, and
-// returns its error union directly (the callee and node_count share the !i64 return type, so
-// the try is an identity tail return needing no ok/fail branch). A leaf arm ('Variant(_) => 1'
-// / 'Empty => 1') sets is_literal and returns the literal wrapped as the error-union success.
-// Parameter/literal/string/computed arguments use the same MirExprInst + MirCallArg path as
-// every other call. Only payload_args retains traversal-specific materialization metadata.
-// It owns all three Arrays.
-pub struct MirTraversalArm {
-    pub tag: i64,
-    pub is_literal: bool,
-    pub literal_value: i64,
-    pub literal_llvm: []u8,
-    pub payload_type: []u8,
-    pub callee_module: []u8,
-    pub callee_name: []u8,
-    pub is_plain_call: bool,
-    pub is_payload_value: bool,
-    pub is_expr_value: bool,
-    pub value_result_id: i64,
-    pub success_llvm: []u8,
-    pub arg_insts: std::array::Array<MirExprInst>,
-    pub call_args: std::array::Array<MirCallArg>,
-    pub payload_args: std::array::Array<MirTraversalPayloadArg>,
-}
-
 // MirCountRangeStmt backs count_range: 'var count = 0; var index = 0; while index <
 // range.len { let child = try tree.child_at(range, index); count = count + try
 // node_count(tree, child); index = index + 1; } return count;' (tracker 961). The renderer
@@ -1687,26 +1649,6 @@ pub struct MirOwnedDeinitStmt {
     pub receiver_name: []u8,
 }
 
-// MirMatchTraversalStmt backs a recursive tagged-union traversal accessor: 'let node =
-// tree.get(node_id); return match node.data { ... };'. The lowerer resolves the get callee,
-// returned node ABI, and exact union field ABI before constructing MIR; the renderer only
-// consumes these fields and emits an exhaustive icmp/br chain over the arms,
-// each arm returning a real value (no 'unreachable'). own_error_union is the node_count return
-// type the leaf arms wrap into. It owns the arm Array.
-pub struct MirMatchTraversalStmt {
-    pub get_module: []u8,
-    pub get_name: []u8,
-    pub node_type: []u8,
-    pub union_type: []u8,
-    pub receiver_type: []u8,
-    pub receiver_name: []u8,
-    pub index_type: []u8,
-    pub index_name: []u8,
-    pub data_field_index: i64,
-    pub own_error_union: []u8,
-    pub arms: std::array::Array<MirTraversalArm>,
-}
-
 // MirEnumDispatchArm is one arm of a non-bool enum-dispatch match statement (issue 1157
 // PR-PH / B3).
 // tag is the matched variant's discriminant; is_default marks the trailing '_' dispatch fallback
@@ -1812,7 +1754,6 @@ pub union MirStmt {
     LetArrayGet(MirLetArrayGetStmt),
     If(MirIfStmt),
     While(MirWhileStmt),
-    MatchTraversal(MirMatchTraversalStmt),
     EnumDispatch(MirEnumDispatchStmt),
 }
 
@@ -2348,22 +2289,6 @@ impl MirStringLiteralSpanStmt {
     }
 }
 
-impl MirTraversalArm {
-    fn deinit(self: MirTraversalArm) -> void {
-        self.arg_insts.deinit();
-        self.call_args.deinit();
-        self.payload_args.deinit();
-        return;
-    }
-}
-
-impl MirMatchTraversalStmt {
-    fn deinit(self: MirMatchTraversalStmt) -> void {
-        self.arms.deinit();
-        return;
-    }
-}
-
 impl MirEnumDispatchArm {
     fn deinit(self: MirEnumDispatchArm) -> void {
         self.arm_stmts.deinit();
@@ -2540,7 +2465,6 @@ impl MirStmt {
             LetArrayGet(payload) => payload.deinit(),
             If(payload) => payload.deinit(),
             While(payload) => payload.deinit(),
-            MatchTraversal(payload) => payload.deinit(),
             EnumDispatch(payload) => payload.deinit(),
         }
     }
@@ -5296,214 +5220,6 @@ pub fn string_literal_span_stmt(
         callee_module: callee_module,
         is_payload_name: is_payload_name,
         empty_name: empty_name
-    });
-}
-
-pub fn traversal_payload_arg(
-    field_index: i64,
-    temp_id: i64
-) -> MirTraversalPayloadArg {
-    return MirTraversalPayloadArg {
-        field_index: field_index,
-        temp_id: temp_id
-    };
-}
-
-pub fn traversal_try_arm(
-    tag: i64,
-    payload_type: []u8,
-    callee_module: []u8,
-    callee_name: []u8,
-    arg_insts: std::array::Array<MirExprInst>,
-    call_args: std::array::Array<MirCallArg>,
-    payload_args: std::array::Array<MirTraversalPayloadArg>
-) -> MirTraversalArm {
-    return MirTraversalArm {
-        tag: tag,
-        is_literal: false,
-        literal_value: 0,
-        literal_llvm: "",
-        payload_type: payload_type,
-        callee_module: callee_module,
-        callee_name: callee_name,
-        is_plain_call: false,
-        is_payload_value: false,
-        is_expr_value: false,
-        value_result_id: -1,
-        success_llvm: "",
-        arg_insts: arg_insts,
-        call_args: call_args,
-        payload_args: payload_args
-    };
-}
-
-// traversal_plain_call_arm backs an arm whose body is a non-try call. Error-union match
-// functions wrap the success_llvm result into the function's own error union; plain-return
-// match functions return the call result directly.
-pub fn traversal_plain_call_arm(
-    tag: i64,
-    payload_type: []u8,
-    callee_module: []u8,
-    callee_name: []u8,
-    success_llvm: []u8,
-    arg_insts: std::array::Array<MirExprInst>,
-    call_args: std::array::Array<MirCallArg>,
-    payload_args: std::array::Array<MirTraversalPayloadArg>
-) -> MirTraversalArm {
-    return MirTraversalArm {
-        tag: tag,
-        is_literal: false,
-        literal_value: 0,
-        literal_llvm: "",
-        payload_type: payload_type,
-        callee_module: callee_module,
-        callee_name: callee_name,
-        is_plain_call: true,
-        is_payload_value: false,
-        is_expr_value: false,
-        value_result_id: -1,
-        success_llvm: success_llvm,
-        arg_insts: arg_insts,
-        call_args: call_args,
-        payload_args: payload_args
-    };
-}
-
-pub fn traversal_literal_arm(
-    tag: i64,
-    literal_value: i64
-) -> MirTraversalArm {
-    return MirTraversalArm {
-        tag: tag,
-        is_literal: true,
-        literal_value: literal_value,
-        literal_llvm: "i64",
-        payload_type: "",
-        callee_module: "",
-        callee_name: "",
-        is_plain_call: false,
-        is_payload_value: false,
-        is_expr_value: false,
-        value_result_id: -1,
-        success_llvm: "",
-        arg_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        payload_args: std::array::Array<MirTraversalPayloadArg>(std::mem::page_allocator())
-    };
-}
-
-// traversal_bool_literal_arm backs a 'Variant => true' / '_ => false' predicate arm.
-pub fn traversal_bool_literal_arm(
-    tag: i64,
-    bool_value: bool
-) -> MirTraversalArm {
-    var literal_value = 0;
-    if bool_value {
-        literal_value = 1;
-    }
-    return MirTraversalArm {
-        tag: tag,
-        is_literal: true,
-        literal_value: literal_value,
-        literal_llvm: "i1",
-        payload_type: "",
-        callee_module: "",
-        callee_name: "",
-        is_plain_call: false,
-        is_payload_value: false,
-        is_expr_value: false,
-        value_result_id: -1,
-        success_llvm: "",
-        arg_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        payload_args: std::array::Array<MirTraversalPayloadArg>(std::mem::page_allocator())
-    };
-}
-
-// traversal_payload_value_arm backs a matched payload field returned directly from
-// an arm, such as `Block(block) => block.statements`. The field is materialized by
-// the same traversal payload extraction metadata used for call arguments.
-pub fn traversal_payload_value_arm(
-    tag: i64,
-    payload_type: []u8,
-    success_llvm: []u8,
-    field_index: i64,
-    temp_id: i64
-) -> !MirTraversalArm {
-    var payload_args =
-        std::array::Array<MirTraversalPayloadArg>(std::mem::page_allocator());
-    try payload_args.append(traversal_payload_arg(field_index, temp_id));
-    return MirTraversalArm {
-        tag: tag,
-        is_literal: false,
-        literal_value: 0,
-        literal_llvm: "",
-        payload_type: payload_type,
-        callee_module: "",
-        callee_name: "",
-        is_plain_call: false,
-        is_payload_value: true,
-        is_expr_value: false,
-        value_result_id: -1,
-        success_llvm: success_llvm,
-        arg_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        payload_args: payload_args
-    };
-}
-
-pub fn traversal_expr_value_arm(
-    tag: i64,
-    success_llvm: []u8,
-    value_result_id: i64,
-    value_insts: std::array::Array<MirExprInst>
-) -> MirTraversalArm {
-    return MirTraversalArm {
-        tag: tag,
-        is_literal: false,
-        literal_value: 0,
-        literal_llvm: "",
-        payload_type: "",
-        callee_module: "",
-        callee_name: "",
-        is_plain_call: false,
-        is_payload_value: false,
-        is_expr_value: true,
-        value_result_id: value_result_id,
-        success_llvm: success_llvm,
-        arg_insts: value_insts,
-        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
-        payload_args: std::array::Array<MirTraversalPayloadArg>(
-            std::mem::page_allocator()
-        )
-    };
-}
-
-pub fn match_traversal_stmt(
-    get_module: []u8,
-    get_name: []u8,
-    node_type: []u8,
-    union_type: []u8,
-    receiver_type: []u8,
-    receiver_name: []u8,
-    index_type: []u8,
-    index_name: []u8,
-    data_field_index: i64,
-    own_error_union: []u8,
-    arms: std::array::Array<MirTraversalArm>
-) -> MirStmt {
-    return MirStmt::MatchTraversal(MirMatchTraversalStmt {
-        get_module: get_module,
-        get_name: get_name,
-        node_type: node_type,
-        union_type: union_type,
-        receiver_type: receiver_type,
-        receiver_name: receiver_name,
-        index_type: index_type,
-        index_name: index_name,
-        data_field_index: data_field_index,
-        own_error_union: own_error_union,
-        arms: arms
     });
 }
 

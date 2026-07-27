@@ -264,13 +264,13 @@ func TestSelfhostMatchUnionConsumerCarriesResolvedABI(t *testing.T) {
 		"pub get_module: []u8", "pub get_name: []u8",
 		"pub node_type: []u8", "pub union_type: []u8",
 	} {
-		if strings.Count(mir, field) < 2 {
-			t.Fatalf("both match MIR consumers must carry %q", field)
+		if !strings.Contains(mir, field) {
+			t.Fatalf("the match MIR consumer must carry %q", field)
 		}
 	}
 
 	renderer := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_llvm.kizu")
-	for _, fn := range []string{"fn append_match_union_block(", "fn append_multi_match_traversal("} {
+	for _, fn := range []string{"fn append_match_union_block("} {
 		body := selfhostKizuFunctionBody(t, renderer, fn)
 		requireSourceFragments(t, fn, body, []string{
 			".node_type", ".union_type", ".get_module", ".get_name",
