@@ -3457,11 +3457,12 @@ pub fn prefix_not_expr_inst(id: i64, operand: i64) -> MirExprInst {
 }
 
 // binary_result_type classifies a binary operator by what it produces. The relational and logical
-// operators produce an i1; every arithmetic operator produces its operands' integer type. Deciding
-// by the bool-producing set and rejecting anything outside both sets keeps a newly lowered
-// arithmetic operator from silently taking i1: '(current / divisor) % 10' did, and rendered an i1
-// binary over an i64 srem.
-fn binary_result_type(op: []u8) -> ![]u8 {
+// operators produce an i1; every arithmetic operator produces its operands' own integer type, which
+// the caller reads off the lowered left operand -- 'byte - cast<u8>(48)' is an i8 subtraction, and
+// assuming i64 made the enclosing cast render a same-width copy over an i8. Deciding by the
+// bool-producing set and rejecting anything outside both sets keeps a newly lowered arithmetic
+// operator from silently taking i1, which is how '(current / divisor) % 10' rendered an i1 srem.
+fn binary_result_type(op: []u8, operand_llvm_type: []u8) -> ![]u8 {
     if std::mem::equal_bytes(op, "eq") or std::mem::equal_bytes(op, "not-eq") or
         std::mem::equal_bytes(op, "lt") or std::mem::equal_bytes(op, "lte") or
         std::mem::equal_bytes(op, "gt") or std::mem::equal_bytes(op, "gte") or
@@ -3471,7 +3472,10 @@ fn binary_result_type(op: []u8) -> ![]u8 {
     if std::mem::equal_bytes(op, "add") or std::mem::equal_bytes(op, "sub") or
         std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") or
         std::mem::equal_bytes(op, "mod") {
-        return "i64";
+        if std::mem::len(operand_llvm_type) == 0 {
+            return error("compiled mir: arithmetic operand has no LLVM type");
+        }
+        return operand_llvm_type;
     }
     var message = std::string::String(std::mem::page_allocator());
     try message.append_bytes("compiled mir: unsupported binary operator: ");
@@ -3480,8 +3484,10 @@ fn binary_result_type(op: []u8) -> ![]u8 {
     return error(message_bytes);
 }
 
-pub fn binary_expr_inst(id: i64, op: []u8, left: i64, right: i64) -> !MirExprInst {
-    let llvm_type = try binary_result_type(op);
+pub fn binary_expr_inst(
+    id: i64, op: []u8, left: i64, right: i64, operand_llvm_type: []u8
+) -> !MirExprInst {
+    let llvm_type = try binary_result_type(op, operand_llvm_type);
     return MirExprInst::Binary(MirBinaryExpr {
         id: id,
         llvm_type: llvm_type,
