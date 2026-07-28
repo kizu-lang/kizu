@@ -639,13 +639,20 @@ func requiredLLVMAstAccessorFragments() []string {
 // requiredLLVMAstChildAssemblyFragments locks the issue-1157 NEW-A child-array
 // mutator body primitives compiled into stage2: a field-receiver Array.append
 // and ChildRange { len: self.children.len() - start } without backend name-special-cases.
+// The append lowers through the shared runtime-method path, so the receiver is a
+// call-arg field extraction and the element is marshalled into the %kizu.slice.u8
+// byte view the builtin contract declares for the element parameter.
 func requiredLLVMAstChildAssemblyFragments() []string {
 	return []string{
 		"define i64 @kizu_kizu__ast_ast_begin_children",
 		"define %kizu.error.void @kizu_kizu__ast_ast_add_child",
-		"%append0_receiver = extractvalue %kizu.kizu.ast.ast %self, 1",
-		"%append0_call = call %kizu.error.void @kizu_rt_array_append(" +
-			"%kizu.owned %append0_receiver, %kizu.slice.u8 %append0_eslice)",
+		"%arg0_0_ex = extractvalue %kizu.kizu.ast.ast %self, 1",
+		"%arg0_1_byte_slot = alloca %kizu.kizu.ast.node_id",
+		"store %kizu.kizu.ast.node_id %child, ptr %arg0_1_byte_slot",
+		"%arg0_1_storage = insertvalue %kizu.slice.u8 %arg0_1_byte_base, " +
+			"i64 ptrtoint (ptr getelementptr (%kizu.kizu.ast.node_id, ptr null, i32 1) to i64), 1",
+		"%voidtry0_call = call %kizu.error.void @kizu_rt_array_append(" +
+			"%kizu.owned %arg0_0_ex, %kizu.slice.u8 %arg0_1_storage)",
 		"define %kizu.kizu.ast.child_range @kizu_kizu__ast_ast_finish_children",
 		"%fc0_1_receiver = extractvalue %kizu.kizu.ast.ast %self, 1",
 		"%fc0_1_left = call i64 @kizu_rt_array_len(%kizu.owned %fc0_1_receiver)",

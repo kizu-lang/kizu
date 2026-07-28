@@ -1030,7 +1030,6 @@ fn append_multi_stmt(
         ReturnNotTryCall(payload) => try append_multi_return_not_try_call(out, function, payload, local_prefix);,
         IfNotTryCallReturnBool(payload) => try append_multi_if_not_try_call_return_bool(out, function, payload, local_prefix);,
         StringTryAppend(payload) => try append_multi_string_try_append(out, function, payload, local_prefix);,
-        ArrayTryAppend(payload) => try append_multi_array_try_append(out, function, payload, local_prefix);,
         ArrayTrySet(payload) => try append_multi_array_try_set(out, function, payload, local_prefix);,
         ErrDefer(_) => return;,
         VoidCall(payload) => try append_multi_void_call(out, function, payload, local_prefix);,
@@ -1548,101 +1547,11 @@ fn append_multi_string_try_append(
     return;
 }
 
-// append_multi_array_try_append renders a mutating 'try <receiver>.append(<value>);' statement
-// on a std::array::Array<T> value. The single element argument is rendered through the shared
-// call-arg setup, stored into a statement-local slot, wrapped into the (pointer, element size)
-// %kizu.slice.u8 the element-size-generic @kizu_rt_array_append ABI takes, and the failure tail
-// propagates the runtime message as this function's own error union exactly like StringTryAppend.
-fn append_multi_array_try_append(
-    out: &var std::string::String,
-    function: &compiled_mir::MirFunction,
-    stmt: &compiled_mir::MirArrayTryAppendStmt,
-    local_prefix: i64
-) -> !void {
-    try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
-        out, function.name, &stmt.call_args, local_prefix
-    );
-    try out.append_bytes("  %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_slot = alloca ");
-    try append_ll_line(out, stmt.element_llvm);
-    try out.append_bytes("  store ");
-    try out.append_bytes(stmt.element_llvm);
-    try out.append_bytes(" ");
-    let element_args = &stmt.call_args;
-    let element_arg = try element_args.at(0);
-    try compiled_mir_llvm_call::append_call_arg_value_with_prefix(out, &element_arg, local_prefix, 0);
-    try out.append_bytes(", ptr %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try append_ll_line(out, "_slot");
-    try out.append_bytes("  %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_es0 = insertvalue %kizu.slice.u8 poison, ptr %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try append_ll_line(out, "_slot, 0");
-    try out.append_bytes("  %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_eslice = insertvalue %kizu.slice.u8 %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_es0, i64 ptrtoint (ptr getelementptr (");
-    try out.append_bytes(stmt.element_llvm);
-    try append_ll_line(out, ", ptr null, i32 1) to i64), 1");
-    if stmt.receiver_field_index >= 0 {
-        try out.append_bytes("  %append");
-        try std::fmt::append_i64(out, stmt.try_index);
-        try out.append_bytes("_receiver = extractvalue ");
-        try out.append_bytes(stmt.receiver_source_type);
-        try out.append_bytes(" %");
-        try out.append_bytes(stmt.receiver_name);
-        try out.append_bytes(", ");
-        try std::fmt::append_i64(out, stmt.receiver_field_index);
-        try out.append_byte(cast<u8>(10));
-    }
-    try out.append_bytes("  %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_call = call %kizu.error.void @kizu_rt_array_append(%kizu.owned %");
-    if stmt.receiver_field_index >= 0 {
-        try out.append_bytes("append");
-        try std::fmt::append_i64(out, stmt.try_index);
-        try out.append_bytes("_receiver");
-    } else {
-        try out.append_bytes(stmt.receiver_name);
-    }
-    try out.append_bytes(", %kizu.slice.u8 %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try append_ll_line(out, "_eslice)");
-    try out.append_bytes("  %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_ok = extractvalue %kizu.error.void %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try append_ll_line(out, "_call, 0");
-    try out.append_bytes("  br i1 %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_ok, label %try");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_cont, label %try");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try append_ll_line(out, "_fail");
-    try out.append_bytes("try");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try append_ll_line(out, "_fail:");
-    try out.append_bytes("  %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try out.append_bytes("_msg = extractvalue %kizu.error.void %append");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try append_ll_line(out, "_call, 1");
-    try append_error_void_try_fail_return(out, "%append", stmt.try_index, stmt.own_error_union);
-    try out.append_bytes("try");
-    try std::fmt::append_i64(out, stmt.try_index);
-    try append_ll_line(out, "_cont:");
-    return;
-}
-
 // append_multi_array_try_set renders a mutating 'try <receiver>.set(<index>, <value>);'
 // statement on a std::array::Array<T> value. call_args holds [index, value]: the index renders
 // as a plain i64 operand, the element is stored into a statement-local slot and wrapped into the
 // (pointer, element size) %kizu.slice.u8 the element-size-generic @kizu_rt_array_set ABI takes,
-// and the failure tail propagates the runtime message exactly like ArrayTryAppend.
+// and the failure tail propagates the runtime message as this function's own error union.
 fn append_multi_array_try_set(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -6660,7 +6569,6 @@ fn append_stmt_globals(
         ReturnNotTryCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         IfNotTryCallReturnBool(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         StringTryAppend(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
-        ArrayTryAppend(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ArrayTrySet(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         ErrDefer(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
         VoidCall(payload) => try compiled_mir_llvm_call::append_call_string_globals(out, llvm_symbol, &payload.call_args);,
