@@ -10464,6 +10464,24 @@ fn loop_carried_alias_name(
     return call_arg_type_cache.name_store.own(out);
 }
 
+// carried_scalar_seed_name spells the preheader binding a loop makes for a carried scalar whose
+// 'var <name> = <init>' seed is not emitted as a let. loop_index is unique per while in a scope,
+// so the name is too.
+fn carried_scalar_seed_name(
+    source_name: []u8,
+    loop_index: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> ![]u8 {
+    if loop_index < 0 {
+        return error("compiled mir: negative loop index");
+    }
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes(source_name);
+    try out.append_bytes(".loop.seed.");
+    try std::fmt::append_i64(&var out, loop_index);
+    return call_arg_type_cache.name_store.own(out);
+}
+
 fn carried_scalar_index(
     states: &std::array::Array<CarriedScalarState>,
     source_name: []u8
@@ -18676,6 +18694,10 @@ fn lower_multi_while_statement(
     var carried_scalar_states =
         std::array::Array<CarriedScalarState>(std::mem::page_allocator());
     defer carried_scalar_states.deinit();
+    // Materializing a carried scalar's seed into the enclosing block consumes string and temp
+    // slots ahead of the condition, so the scan carries its own counters forward.
+    var seed_string_counter = string_counter;
+    var seed_temp_counter = temp_counter;
     var carried_scan_index = 0;
     while carried_scan_index < body_boundary {
         let carried_statement = try ir_contract::body_child_sequence_from(
@@ -18725,6 +18747,41 @@ fn lower_multi_while_statement(
                     carried_init_name = try local_alias_current_name(
                         aliases, carried_name
                     );
+                    if std::mem::equal_bytes(carried_init_name, carried_name) {
+                        // Nothing in SSA carries this scalar into the loop: its 'var <name> =
+                        // <init>' seed is kept off the emitted-let path so it cannot redefine the
+                        // loop-head phi's name. Lower the initializer here instead, under a scoped
+                        // name, so the phi seeds from a value that exists rather than from itself.
+                        var seed_insts =
+                            std::array::Array<compiled_mir::MirExprInst>(
+                                std::mem::page_allocator()
+                            );
+                        let seed_result = try lower_expr_with_local_aliases(
+                            ir_bytes, function_name, module_prefix, locals_spec,
+                            carried_init_node, seed_string_counter,
+                            seed_temp_counter, &var seed_insts, aliases, bs,
+                            ir_lookup_index, canonical_facts, call_arg_type_cache
+                        );
+                        let seed_type = try expr_inst_llvm_type_by_id(
+                            &seed_insts, seed_result
+                        );
+                        if !std::mem::equal_bytes(seed_type, carried_type) {
+                            return error(
+                                "compiled mir: loop-carried scalar seed type mismatch"
+                            );
+                        }
+                        let seed_name = try carried_scalar_seed_name(
+                            carried_name, loop_index, call_arg_type_cache
+                        );
+                        let seed_strings = try count_strings_in_insts(&seed_insts);
+                        let seed_temps = seed_insts.len();
+                        try stmts.append(compiled_mir::let_expr_stmt(
+                            seed_name, seed_string_counter, seed_result, seed_insts
+                        ));
+                        seed_string_counter = seed_string_counter + seed_strings;
+                        seed_temp_counter = seed_temp_counter + seed_temps;
+                        carried_init_name = seed_name;
+                    }
                 } else {
                     let carried_init = try find_induction_init(
                         ir_bytes, function_name, carried_name, scope_node, scope_stmt_index, bs
@@ -18763,8 +18820,8 @@ fn lower_multi_while_statement(
     // path; an aliased induction variable seeds from that already-emitted SSA value.
     var init_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var init_result_id = -1;
-    var cond_string_base = string_counter;
-    var cond_temp_base = temp_counter;
+    var cond_string_base = seed_string_counter;
+    var cond_temp_base = seed_temp_counter;
     let init_node = try find_induction_init_value_node(
         ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
     );
@@ -18778,14 +18835,14 @@ fn lower_multi_while_statement(
             module_prefix,
             locals_spec,
             init_node,
-            string_counter,
-            temp_counter,
+            seed_string_counter,
+            seed_temp_counter,
             &var init_insts,
             bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
-        cond_string_base = string_counter + try count_strings_in_insts(&init_insts);
-        cond_temp_base = temp_counter + init_insts.len();
+        cond_string_base = seed_string_counter + try count_strings_in_insts(&init_insts);
+        cond_temp_base = seed_temp_counter + init_insts.len();
     } else {
         let induction_init = try find_induction_init(
             ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs

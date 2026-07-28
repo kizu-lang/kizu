@@ -88,3 +88,63 @@ fn append_line(out: &var std::string::String, text: []u8) -> !void {
     try out.append_byte(cast<u8>(10));
     return;
 }
+
+// The hosted compiler module links no storage module, so it carries its own copy of every runtime
+// helper it calls. append_hosted_map_runtime hands it the map family -- the one family the hosted
+// preamble does not hand-render -- by copying the marked sections straight out of the canonical
+// storage module, so the copy cannot drift from the definition it mirrors.
+pub fn append_hosted_map_runtime(
+    out: &var std::string::String,
+    io: Io
+) -> !void {
+    let module_bytes = try load_storage_module(io);
+    try append_marked_section(
+        out,
+        module_bytes,
+        "; kizu hosted map globals begin",
+        "; kizu hosted map globals end"
+    );
+    try append_marked_section(
+        out,
+        module_bytes,
+        "; kizu hosted map runtime begin",
+        "; kizu hosted map runtime end"
+    );
+    return;
+}
+
+// append_marked_section copies the bytes between a begin and end marker line, markers excluded.
+fn append_marked_section(
+    out: &var std::string::String,
+    bytes: []u8,
+    begin_marker: []u8,
+    end_marker: []u8
+) -> !void {
+    let begin = try find_bytes(bytes, begin_marker);
+    if begin < 0 {
+        return error("runtime storage module is missing a hosted section begin marker");
+    }
+    let start = begin + std::mem::len(begin_marker) + 1;
+    let end = try find_bytes(bytes, end_marker);
+    if end < start {
+        return error("runtime storage module is missing a hosted section end marker");
+    }
+    let section = try std::mem::slice(bytes, start, end);
+    try out.append_bytes(section);
+    return;
+}
+
+fn find_bytes(haystack: []u8, needle: []u8) -> !i64 {
+    let haystack_len = std::mem::len(haystack);
+    let needle_len = std::mem::len(needle);
+    let last_start = haystack_len - needle_len;
+    var index = 0;
+    while index <= last_start {
+        let window = try std::mem::slice(haystack, index, index + needle_len);
+        if std::mem::equal_bytes(window, needle) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
