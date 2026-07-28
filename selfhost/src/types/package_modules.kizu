@@ -650,10 +650,16 @@ fn module_matches_file(
 ) -> bool {
     let text = target_file.text[module.start..module.end];
     if file.kind == source::SourceKind::Std {
-        if !std::mem::starts_with(text, "std::") {
+        // The leading segment decides this, not a literal "std::" prefix: the module text is a
+        // source span and may carry spacing around its separators.
+        let separator = source::first_path_separator(text);
+        if separator < 0 {
             return false;
         }
-        return module_matches_path(text[5..std::mem::len(text)], source::module_path(file));
+        if !std::mem::equal_bytes(source::first_path_segment(text), "std") {
+            return false;
+        }
+        return module_matches_path_from(text, separator + 2, source::module_path(file));
     }
     if file.kind == source::SourceKind::Selfhost {
         if module.absolute {
@@ -671,12 +677,34 @@ fn module_matches_path(module: []u8, path: []u8) -> bool {
     return module_matches_path_at(module, path, 0, 0);
 }
 
+// module_matches_path_from takes the tail's start offset rather than a slice of module, because a
+// slice whose end bound is a call has no lowering as a source-function argument.
+fn module_matches_path_from(module: []u8, start: i64, path: []u8) -> bool {
+    return module_matches_path_at(module, path, start, 0);
+}
+
+fn module_path_byte_is_ascii_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or
+        byte == cast<u8>(9) or
+        byte == cast<u8>(10) or
+        byte == cast<u8>(13) or
+        byte == cast<u8>(11) or
+        byte == cast<u8>(12);
+}
+
 fn module_matches_path_at(
     module: []u8,
     path: []u8,
     module_index: i64,
     path_index: i64
 ) -> bool {
+    // The module text is a source span, so the spacing a path may carry around its '::'
+    // separators comes along with it. That spacing names nothing: skip it before matching, or
+    // 'std :: mem' fails against the std/mem directory that 'std::mem' matches.
+    if module_index < std::mem::len(module) and
+        module_path_byte_is_ascii_space(module[module_index]) {
+        return module_matches_path_at(module, path, module_index + 1, path_index);
+    }
     if module_index >= std::mem::len(module) or path_index >= std::mem::len(path) {
         return module_index == std::mem::len(module) and
             path_index == std::mem::len(path);

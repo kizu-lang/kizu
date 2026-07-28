@@ -995,6 +995,47 @@ pub fn should_skip_function_reference(name: []u8) -> bool {
     return expression_infer::should_skip_function_reference(name);
 }
 
+// append_compact_path_name appends a path with its ASCII whitespace removed. A path is a run of
+// identifiers separated by '::' and the separator's spacing carries no meaning, so the resolved
+// key this builds must not carry it either: declaration names never do, and a spaced key misses
+// every one of them. It appends into the caller's String rather than compacting into a local one,
+// because a slice borrowed from a local String cannot be handed to another function.
+pub fn append_compact_path_name(
+    out: &var std::string::String,
+    name: []u8
+) -> !void {
+    return append_compact_path_name_from(out, name, 0);
+}
+
+// append_compact_path_name_from takes the tail's start offset rather than a slice of name: a
+// slice whose end bound is a call ('name[start..std::mem::len(name)]') has no lowering as a
+// source-function argument, and the offset carries the same information.
+pub fn append_compact_path_name_from(
+    out: &var std::string::String,
+    name: []u8,
+    start: i64
+) -> !void {
+    let length = std::mem::len(name);
+    var index = start;
+    while index < length {
+        let byte = name[index];
+        if !path_byte_is_ascii_space(byte) {
+            try out.append_byte(byte);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn path_byte_is_ascii_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or
+        byte == cast<u8>(9) or
+        byte == cast<u8>(10) or
+        byte == cast<u8>(13) or
+        byte == cast<u8>(11) or
+        byte == cast<u8>(12);
+}
+
 pub fn append_resolved_function_name(
     out: &var std::string::String,
     file: &source::SourceFile,
@@ -1003,27 +1044,27 @@ pub fn append_resolved_function_name(
     import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !void {
     if source::is_absolute_name_for_file(file, name) {
-        try out.append_bytes(name);
+        try append_compact_path_name(out, name);
         return;
     }
     if is_qualified_name(name) {
         let first_end = first_qualified_segment_end(name);
-        let alias = name[0..first_end];
+        let alias = std::mem::trim_ascii(name[0..first_end]);
         if import_alias_starts.contains(alias) {
             let module_start = try import_alias_starts.get(alias);
             let module_end = try import_alias_ends.get(alias);
             try out.append_bytes(file.text[module_start..module_end]);
-            try out.append_bytes(name[first_end..std::mem::len(name)]);
+            try append_compact_path_name_from(out, name, first_end);
             return;
         }
         try source::append_package_prefix(out, file);
         try out.append_bytes("::");
-        try out.append_bytes(name);
+        try append_compact_path_name(out, name);
         return;
     }
     try source::append_qualified_module_name(out, file);
     try out.append_bytes("::");
-    try out.append_bytes(name);
+    try append_compact_path_name(out, name);
     return;
 }
 

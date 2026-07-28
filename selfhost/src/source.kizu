@@ -113,44 +113,59 @@ pub fn append_package_prefix(
     return;
 }
 
+// first_path_separator returns the offset of a qualified name's first '::', or -1 when the name
+// has a single segment. The separator's own spacing is insignificant -- 'std::testing::expect'
+// and 'std :: testing :: expect' name the same path -- so every prefix question below is asked
+// about the first segment rather than about a leading substring of the raw text.
+pub fn first_path_separator(name: []u8) -> i64 {
+    let length = std::mem::len(name);
+    var index = 0;
+    while index + 1 < length {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// first_path_segment returns a qualified name's leading segment without the whitespace that may
+// surround it.
+pub fn first_path_segment(name: []u8) -> []u8 borrows name {
+    let separator = first_path_separator(name);
+    if separator < 0 {
+        return std::mem::trim_ascii(name);
+    }
+    return std::mem::trim_ascii(name[0..separator]);
+}
+
 pub fn is_absolute_name_for_file(file: &SourceFile, name: []u8) -> bool {
-    return std::mem::starts_with(name, "std::") or
-        std::mem::starts_with(name, "selfhost::") or
-        starts_with_package_prefix(file, name);
+    if first_path_separator(name) >= 0 {
+        let head = first_path_segment(name);
+        if std::mem::equal_bytes(head, "std") or std::mem::equal_bytes(head, "selfhost") {
+            return true;
+        }
+    }
+    return starts_with_package_prefix(file, name);
 }
 
 pub fn starts_with_package_prefix(file: &SourceFile, name: []u8) -> bool {
     let package_name = file.package_name;
-    let package_len = std::mem::len(package_name);
-    if package_len < 1 {
+    if std::mem::len(package_name) < 1 {
         return false;
     }
-    let name_len = std::mem::len(name);
-    if name_len < package_len {
-        return false;
-    }
-    if !std::mem::equal_bytes(name[0..package_len], package_name) {
-        return false;
-    }
-    if name_len == package_len {
-        return true;
-    }
-    if name_len <= package_len + 2 {
-        return false;
-    }
-    return name[package_len] == cast<u8>(58) and name[package_len + 1] == cast<u8>(58);
+    return std::mem::equal_bytes(first_path_segment(name), package_name);
 }
 
 pub fn strip_package_prefix(file: &SourceFile, name: []u8) -> []u8 borrows name {
-    let package_name = file.package_name;
-    let package_len = std::mem::len(package_name);
-    if starts_with_package_prefix(file, name) {
-        if std::mem::len(name) == package_len {
-            return "";
-        }
-        return name[package_len + 2..std::mem::len(name)];
+    if !starts_with_package_prefix(file, name) {
+        return name;
     }
-    return name;
+    let separator = first_path_separator(name);
+    if separator < 0 {
+        return "";
+    }
+    return std::mem::trim_ascii(name[separator + 2..std::mem::len(name)]);
 }
 
 pub fn append_module_path_text(
