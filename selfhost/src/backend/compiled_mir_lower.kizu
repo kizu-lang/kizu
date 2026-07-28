@@ -18453,9 +18453,20 @@ fn lower_multi_while_statement(
     let latch_count = try while_trailing_increment_count(
         ir_bytes, function_name, body_node, body_count, bs
     );
-    let body_boundary = body_count - latch_count;
     let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
     let induction_alias = try local_alias_current_name(aliases, induction_var);
+    // A loop whose induction variable is also reassigned by the body ahead of the latch plays two
+    // roles at once: the body carries it as a scalar and the tail advances it. Modelling those
+    // separately would emit two loop-head phis for one name, so fold the tail into the carried run --
+    // every body statement including the advance lowers as a carried assign, and the loop-head phi
+    // reads the final carried alias on the latch edge through latch_copy_var (issue 1165 / 1162).
+    let induction_is_carried = try while_carries_body_scalar_var(
+        ir_bytes, function_name, body_node, body_count - latch_count, induction_var, bs
+    );
+    var body_boundary = body_count - latch_count;
+    if induction_is_carried {
+        body_boundary = body_count;
+    }
     var carried_scalar_states =
         std::array::Array<CarriedScalarState>(std::mem::page_allocator());
     defer carried_scalar_states.deinit();
@@ -18857,6 +18868,12 @@ fn lower_multi_while_statement(
                             target_name, output_name, state_llvm_type,
                             value_result, value_insts
                         ));
+                        // Statements after this assign read the value it just produced, not the
+                        // loop-head phi, so the body alias map has to follow the rename the way it
+                        // does for every other alias assignment (issue 1165 / 1162).
+                        try set_local_alias(
+                            &var body_aliases, target_name, output_name
+                        );
                         try carried_scalar_states.set(
                             state_index,
                             CarriedScalarState {
@@ -18922,134 +18939,150 @@ fn lower_multi_while_statement(
         }
         body_index = body_index + 1;
     }
-    let increment_stmt = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
-    );
-    let increment_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, increment_stmt, bs
-    );
-    if !std::mem::equal_bytes(increment_kind, "Assign") {
-        var message = std::string::String(std::mem::page_allocator());
-        try message.append_bytes(
-            "compiled mir: while body must end with the induction increment: "
-        );
-        try message.append_bytes(function_name);
-        try message.append_bytes(" last kind ");
-        try message.append_bytes(increment_kind);
-        let message_bytes = message.as_bytes();
-        return error(message_bytes);
-    }
-    // The induction latch is either a constant-step 'index = index + <int>' increment or a
-    // loop-carried 'index = try <callee>(.., index);' try-call update. The increment target
-    // must name the induction variable in both shapes (issue 1165).
-    let increment_target = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, increment_stmt, "target", 0, bs
-    );
-    let increment_target_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, increment_target, bs
-    );
-    if !std::mem::equal_bytes(increment_target_name, induction_var) {
-        return error("compiled mir: induction increment must assign to the induction variable");
-    }
-    let increment_value = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, increment_stmt, "value", 0, bs
-    );
-    let increment_value_kind = try ir_contract::body_node_kind_from(
-        ir_bytes, function_name, increment_value, bs
-    );
     var induction_op = "add";
     var step = 0;
     var latch_copy_var = "";
     var latch_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-    if std::mem::equal_bytes(increment_value_kind, "TryExpr") {
-        // 'index = try index_after_import(tokens, index);' advances the counter by a try-call
-        // whose i64 success value feeds the loop-head phi (%<var>_next) and whose failure
-        // propagates as this function's own error union. The latch try-call is given a try
-        // index past the body try-calls (body_try_counter) and a call-arg setup prefix past
-        // the body statement prefixes (loop_index * 1000 + body_count) so its SSA names never
-        // collide with the body (issue 1165).
-        let latch_stmt = try lower_while_latch_try_call(
-            ir_bytes,
-            function_name,
-            module_prefix,
-            llvm_return_type,
-            locals_spec,
-            induction_var,
-            increment_value,
-            body_string_counter,
-            body_try_counter,
-            bs,
-            ir_lookup_index, canonical_facts, call_arg_type_cache
+    if induction_is_carried {
+        // The tail advance already lowered as this loop's last carried assign, so the latch
+        // emits no add of its own: the loop-head phi reads that assign's alias on the latch
+        // edge, exactly as a copy-decrement latch does (issue 1165 / 1162).
+        let carried_index = try carried_scalar_index(
+            &carried_scalar_states, induction_var
         );
-        try latch_stmts.append(latch_stmt);
+        if carried_index < 0 {
+            return error(
+                "compiled mir: carried induction variable has no loop-carried state"
+            );
+        }
+        let carried_state = try carried_scalar_states.at(carried_index);
+        latch_copy_var = carried_state.current_name;
     } else {
-        if std::mem::equal_bytes(increment_value_kind, "Call") {
-            // 'token = synth_next_token(token);' advances the induction variable through a
-            // token-carried call result rather than a numeric add: the loop variable is
-            // reseated from a free function returning i64, whose result feeds the loop-head
-            // phi (%<var>_next). Unlike the try-call latch this call propagates no error, so
-            // it ends in loopN_latch with no fail/cont block (issue 1157 PR-P4).
-            let latch_stmt = try lower_while_latch_call(
+        let increment_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+        );
+        let increment_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, increment_stmt, bs
+        );
+        if !std::mem::equal_bytes(increment_kind, "Assign") {
+            var message = std::string::String(std::mem::page_allocator());
+            try message.append_bytes(
+                "compiled mir: while body must end with the induction increment: "
+            );
+            try message.append_bytes(function_name);
+            try message.append_bytes(" last kind ");
+            try message.append_bytes(increment_kind);
+            let message_bytes = message.as_bytes();
+            return error(message_bytes);
+        }
+        // The induction latch is either a constant-step 'index = index + <int>' increment or a
+        // loop-carried 'index = try <callee>(.., index);' try-call update. The increment target
+        // must name the induction variable in both shapes (issue 1165).
+        let increment_target = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, increment_stmt, "target", 0, bs
+        );
+        let increment_target_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, increment_target, bs
+        );
+        if !std::mem::equal_bytes(increment_target_name, induction_var) {
+            return error("compiled mir: induction increment must assign to the induction variable");
+        }
+        let increment_value = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, increment_stmt, "value", 0, bs
+        );
+        let increment_value_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, increment_value, bs
+        );
+        if std::mem::equal_bytes(increment_value_kind, "TryExpr") {
+            // 'index = try index_after_import(tokens, index);' advances the counter by a try-call
+            // whose i64 success value feeds the loop-head phi (%<var>_next) and whose failure
+            // propagates as this function's own error union. The latch try-call is given a try
+            // index past the body try-calls (body_try_counter) and a call-arg setup prefix past
+            // the body statement prefixes (loop_index * 1000 + body_count) so its SSA names never
+            // collide with the body (issue 1165).
+            let latch_stmt = try lower_while_latch_try_call(
                 ir_bytes,
                 function_name,
                 module_prefix,
+                llvm_return_type,
                 locals_spec,
                 induction_var,
                 increment_value,
                 body_string_counter,
+                body_try_counter,
                 bs,
                 ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             try latch_stmts.append(latch_stmt);
         } else {
-        if std::mem::equal_bytes(increment_value_kind, "FieldExpr") {
-            // 'token = declaration.next;' advances the induction variable from a struct field
-            // of a body-local (a field-access latch) rather than a numeric add or a call result.
-            // The loop body binds the struct earlier ('let declaration = ...;') and this reads its
-            // i64 field into the loop-head phi (%<var>_next). Like the plain-call latch it carries
-            // no control flow, so it ends in loopN_latch with no fail/cont block. This is the
-            // shape parse_program_with_declarations / parse_block_with_statements need (issue 1157
-            // PR-PF).
-            let latch_stmt = try lower_while_latch_field_access(
-                ir_bytes,
-                function_name,
-                module_prefix,
-                locals_spec,
-                induction_var,
-                increment_value,
-                body_string_counter,
-                bs,
-                ir_lookup_index,
-                canonical_facts,
-                call_arg_type_cache
-            );
-            try latch_stmts.append(latch_stmt);
-        } else {
-        if std::mem::equal_bytes(increment_value_kind, "Var") {
-            // 'index = previous' copies a body-local back into the induction variable. The local
-            // must be bound earlier in this loop body by 'let previous = index - <int>', a
-            // decrement of the induction variable, so the loop counts down and terminates against
-            // its 'index > 0' header. The local is kept in the body (it also feeds source[previous]),
-            // so the latch carries no add: the loop-head phi reads %previous directly on the latch
-            // edge (issue 1165 / 1162).
-            let latch_copy_source = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, increment_value, bs
-            );
-            try validate_copy_latch_source(
-                ir_bytes, function_name, body_node, body_boundary,
-                induction_var, latch_copy_source, bs
-            );
-            latch_copy_var = try local_alias_current_name(
-                &body_aliases, latch_copy_source
-            );
-        } else {
-            let update = try parse_induction_update(
-                ir_bytes, function_name, increment_stmt, induction_var, bs
-            );
-            induction_op = update.llvm_op;
-            step = update.operand;
-        }
-        }
+            if std::mem::equal_bytes(increment_value_kind, "Call") {
+                // 'token = synth_next_token(token);' advances the induction variable through a
+                // token-carried call result rather than a numeric add: the loop variable is
+                // reseated from a free function returning i64, whose result feeds the loop-head
+                // phi (%<var>_next). Unlike the try-call latch this call propagates no error, so
+                // it ends in loopN_latch with no fail/cont block (issue 1157 PR-P4).
+                let latch_stmt = try lower_while_latch_call(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    induction_var,
+                    increment_value,
+                    body_string_counter,
+                    bs,
+                    ir_lookup_index, canonical_facts, call_arg_type_cache
+                );
+                try latch_stmts.append(latch_stmt);
+            } else {
+            if std::mem::equal_bytes(increment_value_kind, "FieldExpr") {
+                // 'token = declaration.next;' advances the induction variable from a struct field
+                // of a body-local (a field-access latch) rather than a numeric add or a call result.
+                // The loop body binds the struct earlier ('let declaration = ...;') and this reads its
+                // i64 field into the loop-head phi (%<var>_next). Like the plain-call latch it carries
+                // no control flow, so it ends in loopN_latch with no fail/cont block. This is the
+                // shape parse_program_with_declarations / parse_block_with_statements need (issue 1157
+                // PR-PF).
+                let latch_stmt = try lower_while_latch_field_access(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    locals_spec,
+                    induction_var,
+                    increment_value,
+                    body_string_counter,
+                    bs,
+                    ir_lookup_index,
+                    canonical_facts,
+                    call_arg_type_cache
+                );
+                try latch_stmts.append(latch_stmt);
+            } else {
+            if std::mem::equal_bytes(increment_value_kind, "Var") {
+                // 'index = previous' copies a body-local back into the induction variable. The local
+                // must be bound earlier in this loop body by 'let previous = index - <int>', a
+                // decrement of the induction variable, so the loop counts down and terminates against
+                // its 'index > 0' header. The local is kept in the body (it also feeds source[previous]),
+                // so the latch carries no add: the loop-head phi reads %previous directly on the latch
+                // edge (issue 1165 / 1162).
+                let latch_copy_source = try ir_contract::body_token_or_empty_from(
+                    ir_bytes, function_name, increment_value, bs
+                );
+                try validate_copy_latch_source(
+                    ir_bytes, function_name, body_node, body_boundary,
+                    induction_var, latch_copy_source, bs
+                );
+                latch_copy_var = try local_alias_current_name(
+                    &body_aliases, latch_copy_source
+                );
+            } else {
+                let update = try parse_induction_update(
+                    ir_bytes, function_name, increment_stmt, induction_var, bs
+                );
+                induction_op = update.llvm_op;
+                step = update.operand;
+            }
+            }
+            }
         }
     }
     // The increments before the primary latch (body_boundary .. body_count - 2) are the
@@ -19084,8 +19117,12 @@ fn lower_multi_while_statement(
         ));
         secondary_index = secondary_index + 1;
     }
+    var carried_exclude = "";
+    if induction_is_carried {
+        carried_exclude = induction_var;
+    }
     let carried_scalars = try materialize_carried_scalars(
-        &carried_scalar_states
+        &carried_scalar_states, carried_exclude
     );
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
@@ -19279,22 +19316,29 @@ fn collect_leading_decrement_carried_scalars(
     return states;
 }
 
+// materialize_carried_scalars renders the collected carried-scalar states as loop-head phi
+// descriptors. exclude_name drops one state from the result: a name the loop already owns a
+// phi for -- the induction variable of a loop that also carries it in the body -- would
+// otherwise define the same SSA value twice at the loop head (issue 1165 / 1162).
 fn materialize_carried_scalars(
-    states: &std::array::Array<CarriedScalarState>
+    states: &std::array::Array<CarriedScalarState>,
+    exclude_name: []u8
 ) -> !std::array::Array<compiled_mir::MirCarriedScalar> {
     var carried = std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator());
     var index = 0;
     while index < states.len() {
         let state = try states.at(index);
-        try carried.append(compiled_mir::carried_scalar(
-            state.source_name,
-            state.llvm_type,
-            state.init_literal,
-            state.init_var,
-            state.init_offset,
-            state.init_name,
-            state.current_name
-        ));
+        if !std::mem::equal_bytes(state.source_name, exclude_name) {
+            try carried.append(compiled_mir::carried_scalar(
+                state.source_name,
+                state.llvm_type,
+                state.init_literal,
+                state.init_var,
+                state.init_offset,
+                state.init_name,
+                state.current_name
+            ));
+        }
         index = index + 1;
     }
     return carried;
@@ -20018,7 +20062,7 @@ fn lower_multi_while_leading_decrement(
         }
         body_index = body_index + 1;
     }
-    let carried_scalars = try materialize_carried_scalars(&carried_states);
+    let carried_scalars = try materialize_carried_scalars(&carried_states, "");
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
         head_var,
