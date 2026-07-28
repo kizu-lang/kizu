@@ -10144,6 +10144,36 @@ fn count_let_bindings_in_block(
 // the function body. A shadowed name cannot keep its source spelling as its SSA name: the inner
 // and outer bindings would define the same %name, which is invalid LLVM. The renamed binding is
 // redirected through the local-alias map so in-scope reads still resolve to it.
+// let_binding_is_local_to_branch reports whether every let/var binding of this name in the
+// function lives inside this if's arms. Such a binding is created and dies inside the arm, so the
+// enclosing scope holds no value of its own for it: merging one would seed the join slot from a
+// name that is only ever defined inside the branch.
+fn let_binding_is_local_to_branch(
+    ir_bytes: []u8,
+    function_name: []u8,
+    then_node: i64,
+    else_node: i64,
+    name: []u8,
+    bs: i64
+) -> !bool {
+    let total = try count_let_bindings_in_block(ir_bytes, function_name, name, 0, bs);
+    if total == 0 {
+        return false;
+    }
+    var inside = 0;
+    if then_node >= 0 {
+        inside = inside + try count_let_bindings_in_block(
+            ir_bytes, function_name, name, then_node, bs
+        );
+    }
+    if else_node >= 0 {
+        inside = inside + try count_let_bindings_in_block(
+            ir_bytes, function_name, name, else_node, bs
+        );
+    }
+    return inside == total;
+}
+
 fn let_binding_is_shadowed(
     ir_bytes: []u8,
     function_name: []u8,
@@ -15313,6 +15343,8 @@ fn append_void_if_else_merge_for_source(
     module_prefix: []u8,
     locals_spec: []u8,
     source_name: []u8,
+    then_node: i64,
+    else_node: i64,
     alias_counter: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     then_aliases: &std::array::Array<LocalAliasState>,
@@ -15325,6 +15357,13 @@ fn append_void_if_else_merge_for_source(
     // inside either arm is an independent value that dies at the arm's end, so its branch alias
     // must never merge into the enclosing scope's binding of the same name.
     if try let_binding_is_shadowed(ir_bytes, function_name, source_name, bs) {
+        return alias_counter;
+    }
+    // A name this if's arms declare and no enclosing statement does has no incoming value to seed
+    // the join slot with, so it takes no merge either.
+    if try let_binding_is_local_to_branch(
+        ir_bytes, function_name, then_node, else_node, source_name, bs
+    ) {
         return alias_counter;
     }
     let input_name = try local_alias_current_name(aliases, source_name);
@@ -15362,6 +15401,8 @@ fn append_void_if_else_merge_vars(
     function_name: []u8,
     module_prefix: []u8,
     locals_spec: []u8,
+    then_node: i64,
+    else_node: i64,
     alias_counter: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     then_aliases: &std::array::Array<LocalAliasState>,
@@ -15381,6 +15422,8 @@ fn append_void_if_else_merge_vars(
             module_prefix,
             locals_spec,
             state.source_name,
+            then_node,
+            else_node,
             merge_alias_counter,
             aliases,
             then_aliases,
@@ -15402,6 +15445,8 @@ fn append_void_if_else_merge_vars(
                 module_prefix,
                 locals_spec,
                 state.source_name,
+                then_node,
+                else_node,
                 merge_alias_counter,
                 aliases,
                 then_aliases,
@@ -15501,6 +15546,8 @@ fn lower_void_if_else_statement(
                 function_name,
                 module_prefix,
                 locals_spec,
+                then_node,
+                else_node,
                 else_body.alias_counter,
                 aliases,
                 &then_aliases,
