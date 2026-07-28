@@ -17486,6 +17486,42 @@ fn find_induction_init(
     let message_bytes = message.as_bytes();
     return error(message_bytes);
 }
+// induction_init_is_base_plus_offset reports whether a loop seed is the '<name> + <integer>' shape
+// find_induction_init renders as an init_var/init_offset pair, which the preheader spells as
+// %<var>_init. It must agree with find_induction_init's Binary branch: a seed this accepts and that
+// rejects would reach the compact path and fail there instead of lowering as an expression.
+fn induction_init_is_base_plus_offset(
+    ir_bytes: []u8,
+    function_name: []u8,
+    init_node: i64,
+    bs: i64
+) -> !bool {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
+    if !std::mem::equal_bytes(kind, "Binary") {
+        return false;
+    }
+    let op = try ir_contract::sequence_fact_value_from(
+        ir_bytes, "body-binary ", function_name, init_node, bs
+    );
+    if !std::mem::equal_bytes(op, "add") {
+        return false;
+    }
+    let base_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_node, "left", 0, bs
+    );
+    let base_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, base_node, bs);
+    if !std::mem::equal_bytes(base_kind, "Var") {
+        return false;
+    }
+    let offset_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, init_node, "right", 0, bs
+    );
+    let offset_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, offset_node, bs
+    );
+    return std::mem::equal_bytes(offset_kind, "Int");
+}
+
 // find_induction_init_value_node returns the value node of the nearest preceding 'var counter =
 // <value>' initializer for the while at scope_stmt_index of the block scope_node, without
 // classifying the value. The
@@ -19077,8 +19113,16 @@ fn lower_multi_while_statement(
         ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
     );
     let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
+    // A base-plus-offset seed ('var right_index = right + 1') has the same compact spelling the
+    // secondary counters and carried scalars already use, so the preheader binds it as
+    // %<var>_init. Lowering it as a general expression instead would leave the primary phi of a
+    // lockstep pair seeding from an anonymous temp while its partner seeds from a named value.
+    let init_is_base_plus_offset = try induction_init_is_base_plus_offset(
+        ir_bytes, function_name, init_node, bs
+    );
     if !std::mem::equal_bytes(init_kind, "Int") and
         !std::mem::equal_bytes(init_kind, "Var") and
+        !init_is_base_plus_offset and
         !induction_seeds_from_alias {
         init_result_id = try lower_expr_into(
             ir_bytes,
