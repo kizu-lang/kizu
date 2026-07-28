@@ -3916,9 +3916,29 @@ fn resolve_binary_kizu_type(
     let op = try ir_contract::sequence_fact_value_from(
         ir_bytes, "body-binary ", function_name, binary_node, bs
     );
+    // The relational and logical operators are the ones that produce a bool; every arithmetic
+    // operator produces its operands' integer type. Deciding by the bool-producing set and
+    // rejecting anything outside both sets keeps a newly lowered arithmetic operator from
+    // silently resolving to bool: 'let raw_digit = (current / divisor) % 10;' did, and rendered
+    // an i1 alias over an i64 srem.
+    if std::mem::equal_bytes(op, "eq") or std::mem::equal_bytes(op, "not-eq") or
+        std::mem::equal_bytes(op, "lt") or std::mem::equal_bytes(op, "lte") or
+        std::mem::equal_bytes(op, "gt") or std::mem::equal_bytes(op, "gte") or
+        std::mem::equal_bytes(op, "and") or std::mem::equal_bytes(op, "or") {
+        return "bool";
+    }
     if std::mem::equal_bytes(op, "add") or std::mem::equal_bytes(op, "sub") or
-        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") {
+        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") or
+        std::mem::equal_bytes(op, "mod") {
         return "i64";
     }
-    return "bool";
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled mir: unsupported binary operator: function ");
+    try message.append_bytes(function_name);
+    try message.append_bytes(" node ");
+    try std::fmt::append_i64(&var message, binary_node);
+    try message.append_bytes(" op ");
+    try message.append_bytes(op);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }

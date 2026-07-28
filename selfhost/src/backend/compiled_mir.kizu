@@ -3456,18 +3456,35 @@ pub fn prefix_not_expr_inst(id: i64, operand: i64) -> MirExprInst {
     });
 }
 
-fn binary_result_type(op: []u8) -> []u8 {
+// binary_result_type classifies a binary operator by what it produces. The relational and logical
+// operators produce an i1; every arithmetic operator produces its operands' integer type. Deciding
+// by the bool-producing set and rejecting anything outside both sets keeps a newly lowered
+// arithmetic operator from silently taking i1: '(current / divisor) % 10' did, and rendered an i1
+// binary over an i64 srem.
+fn binary_result_type(op: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(op, "eq") or std::mem::equal_bytes(op, "not-eq") or
+        std::mem::equal_bytes(op, "lt") or std::mem::equal_bytes(op, "lte") or
+        std::mem::equal_bytes(op, "gt") or std::mem::equal_bytes(op, "gte") or
+        std::mem::equal_bytes(op, "and") or std::mem::equal_bytes(op, "or") {
+        return "i1";
+    }
     if std::mem::equal_bytes(op, "add") or std::mem::equal_bytes(op, "sub") or
-        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") {
+        std::mem::equal_bytes(op, "mul") or std::mem::equal_bytes(op, "div") or
+        std::mem::equal_bytes(op, "mod") {
         return "i64";
     }
-    return "i1";
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled mir: unsupported binary operator: ");
+    try message.append_bytes(op);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }
 
-pub fn binary_expr_inst(id: i64, op: []u8, left: i64, right: i64) -> MirExprInst {
+pub fn binary_expr_inst(id: i64, op: []u8, left: i64, right: i64) -> !MirExprInst {
+    let llvm_type = try binary_result_type(op);
     return MirExprInst::Binary(MirBinaryExpr {
         id: id,
-        llvm_type: binary_result_type(op),
+        llvm_type: llvm_type,
         op: op,
         left: left,
         right: right

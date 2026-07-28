@@ -208,10 +208,23 @@ fn append_compiled_function_params_context_indexed(
             try compiled_mir_llvm::append_function(out, &multi_mir);
             return;
         }
-        let value = try ir_contract::body_child_sequence_from(
+        var value = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, statement, "value", 0, bs
         );
-        let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+        var value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+        // A struct whose ABI is a fixed runtime representation wraps that representation rather than
+        // declaring an aggregate of its own, so 'return Wrapper { field: <expr> };' returns <expr>.
+        // Rebinding the returned expression here lets every shape below lower the wrapped value the
+        // way a direct 'return <expr>;' does, instead of inserting it into a slot of itself.
+        if std::mem::equal_bytes(value_kind, "StructLiteralExpr") and
+            compiled_mir_lower_struct::struct_literal_is_transparent(llvm_return_type) {
+            value = try compiled_mir_lower_struct::transparent_struct_literal_value(
+                ir_bytes, function_name, value, bs
+            );
+            value_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, value, bs
+            );
+        }
         // A bare 'return;' carries no value expression to specialize on, so it lowers through the
         // shared multi-statement path, which emits the void success return for both a plain void
         // function and an error-union void function.

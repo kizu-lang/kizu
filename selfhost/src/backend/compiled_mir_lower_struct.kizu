@@ -1,3 +1,4 @@
+import selfhost::abi::fixed_abi_contract;
 import selfhost::backend::compiled_canonical_facts;
 import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_mir_lower_call;
@@ -9,6 +10,41 @@ import selfhost::backend::compiled_util;
 import selfhost::backend::ir_contract;
 import selfhost::backend::ir_index;
 import selfhost::ir::builtin_contract;
+
+// struct_literal_is_transparent reports whether a struct's ABI is a fixed runtime representation
+// (%kizu.owned, %kizu.slice.u8, %kizu.handle, ptr, a scalar) rather than an aggregate declared for
+// the struct itself. A type resolves that way only through an `abi-repr` fact, which hands the
+// representation to a runtime value the struct wraps -- std::string::String is %kizu.owned because
+// its single Array field is. Such a literal has no aggregate to build: its value is the wrapped
+// field's value, already in the representation the struct's own ABI names. Building an insertvalue
+// chain instead would insert a %kizu.owned into a %kizu.owned's ptr slot.
+pub fn struct_literal_is_transparent(llvm_type: []u8) -> bool {
+    return fixed_abi_contract::from_llvm(llvm_type).kind !=
+        fixed_abi_contract::FixedAbiKind::Missing;
+}
+
+// transparent_struct_literal_value returns the value node of the single field a transparent struct
+// literal wraps. A fixed runtime ABI carries exactly one value, so a literal with any other field
+// count cannot be represented by it.
+pub fn transparent_struct_literal_value(
+    ir_bytes: []u8,
+    function_name: []u8,
+    value_node: i64,
+    bs: i64
+) -> !i64 {
+    let field_count = try count_struct_fields(ir_bytes, function_name, value_node, bs);
+    if field_count != 1 {
+        return error(
+            "compiled mir: a runtime-represented struct literal must wrap exactly one field"
+        );
+    }
+    let field_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, value_node, "field", 0, bs
+    );
+    return try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, field_node, "value", 0, bs
+    );
+}
 
 pub fn lower_struct_fields(
     ir_bytes: []u8,
