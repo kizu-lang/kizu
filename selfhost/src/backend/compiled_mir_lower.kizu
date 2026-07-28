@@ -623,6 +623,76 @@ pub fn lower_call_return_function(
             llvm_symbol, llvm_return_type, params_spec, result_id, insts
         );
     }
+    // Runtime-owned container construction is answered by its runtime symbol, not by an emitted
+    // instance function: 'return std::array::Array<u8>(allocator);' -- and the wrapped field of a
+    // transparent wrapper such as std::string::String, which returns exactly that -- has no
+    // instance to call. The let lowering resolves the same descriptor.
+    let owned_constructor = try compiled_type_resolver::owned_constructor_indexed(
+        ir_lookup_index, ir_bytes, function_name, call_node
+    );
+    if owned_constructor.found {
+        let constructor_runtime = builtin_contract::owned_container_constructor_runtime(
+            owned_constructor.family
+        );
+        if !constructor_runtime.found {
+            return error("compiled mir: unsupported owned constructor runtime ABI");
+        }
+        if !std::mem::equal_bytes(owned_constructor.result_type.abi, llvm_return_type) {
+            return error("compiled mir: owned constructor return ABI mismatch");
+        }
+        let ctor_arg_count = try compiled_mir_types::count_call_args_cached(
+            ir_bytes, function_name, call_node, bs, &call_arg_type_cache
+        );
+        if ctor_arg_count != 1 {
+            return error("compiled mir: owned constructor takes exactly the allocator argument");
+        }
+        let alloc_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", 0, bs
+        );
+        let alloc_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, alloc_node, bs
+        );
+        if !std::mem::equal_bytes(alloc_kind, "Var") {
+            return error("compiled mir: owned constructor return allocator must be a value name");
+        }
+        let alloc_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, alloc_node, bs
+        );
+        let allocator_spelling =
+            try compiled_mir_types::resolve_value_kizu_type_indexed_cached(
+                ir_lookup_index, ir_bytes, function_name, module_prefix,
+                params_spec, alloc_name, bs, &var call_arg_type_cache
+            );
+        let allocator_type = try compiled_type_resolver::resolve_type_indexed(
+            ir_lookup_index, ir_bytes, module_prefix, allocator_spelling
+        );
+        if !std::mem::equal_bytes(allocator_type.canonical_identity, "Allocator") {
+            return error("compiled mir: owned constructor argument is not an Allocator");
+        }
+        var constructor_args = std::array::Array<compiled_mir::MirCallArg>(
+            std::mem::page_allocator()
+        );
+        try constructor_args.append(compiled_mir::var_call_arg(
+            allocator_type.abi, alloc_name
+        ));
+        if constructor_runtime.type_size_argument_slot >= 0 {
+            if !owned_constructor.type_arguments_concrete or
+                std::mem::len(owned_constructor.storage_type.abi) == 0 {
+                return error("compiled mir: owned constructor storage type is not concrete");
+            }
+            try constructor_args.append(try compiled_mir::type_size_call_arg(
+                owned_constructor.storage_type.abi
+            ));
+        }
+        return compiled_mir_function::single_call_return_function(
+            llvm_symbol,
+            owned_constructor.result_type.abi,
+            params_spec,
+            "",
+            constructor_runtime.symbol,
+            constructor_args
+        );
+    }
     let call_info = try compiled_mir_types::lower_call_info_for_instance_indexed(
         ir_lookup_index, canonical_facts, ir_bytes,
         function_name, module_prefix, call_node, bs, &call_arg_type_cache
@@ -887,9 +957,12 @@ fn lower_multi_let_ast_get(
         cur_try = hoist_result.try_counter;
         id_arg = compiled_mir::var_call_arg(index_type, hoist_name);
     } else {
-        id_arg = try compiled_mir_lower_call::lower_single_call_arg_canonical(
+        // The argument resolves through the local aliases, like the receiver above: a node id an
+        // earlier statement rebound ('let child = try ast.child_at(..);' shadowing an outer
+        // binding) must read the value that statement produced, not the shadowed name.
+        id_arg = try lower_single_call_arg_with_local_aliases_cached(
             ir_bytes, function_name, module_prefix, cur_locals,
-            index_type, arg_node, cur_string, bs,
+            index_type, arg_node, cur_string, aliases, bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
         if id_arg.kind == compiled_mir::MirCallArgKind::String {

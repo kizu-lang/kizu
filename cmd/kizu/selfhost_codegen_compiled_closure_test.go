@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -76,11 +77,12 @@ func TestSelfhostCodegenProgramSupportPredicatesSevered(t *testing.T) {
 }
 
 // TestSelfhostCodegenRunAstBuilderEmissionRemoved keeps the old RunAst builder
-// registrations out of stage2 while preserving the live parse_int_literal bridge
-// used by the tape lowering.
+// registrations out of stage2, along with the handwritten parse_int_literal bridge
+// the tape lowering used to need: selfhost::ir::codegen::parse_int_literal now
+// compiles from its own source, and emitting the bridge too would define the symbol
+// twice. The compiled definition is pinned by the backend artifact gate.
 func TestSelfhostCodegenRunAstBuilderEmissionRemoved(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
-	bridge := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_i64_codegen_llvm.kizu")
 
 	forbiddenRegistrations := []string{
 		`"selfhost::ir::codegen::i64_call_run_ast"`,
@@ -99,16 +101,15 @@ func TestSelfhostCodegenRunAstBuilderEmissionRemoved(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(cli, "try cli_run_i64_codegen_llvm::append_functions(out, ir_bytes);") {
-		t.Fatal("cli backend should delegate the live parse-int bridge to its owning module")
-	}
 	for _, fragment := range []string{
-		"try append_parse_int_literal_function(out);",
-		"fn append_parse_int_literal_function(",
-		"@kizu_selfhost__ir_codegen_parse_int_literal(",
+		"cli_run_i64_codegen_llvm",
+		"append_parse_int_literal_function",
 	} {
-		if !strings.Contains(bridge, fragment) {
-			t.Fatalf("live parse-int bridge owner missing %q", fragment)
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("handwritten parse-int bridge remains: %q", fragment)
 		}
+	}
+	if _, err := os.Stat("../../selfhost/src/backend/cli_run_i64_codegen_llvm.kizu"); !os.IsNotExist(err) {
+		t.Fatal("handwritten parse-int bridge module should be removed")
 	}
 }
