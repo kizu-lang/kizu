@@ -248,12 +248,15 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 }
 
 // countTextualLLVMValidationFailures applies the documented textual IR validation.
+// Every missing fragment is reported, not just the first: stopping at the first
+// one hides how much of the contract a run actually broke, which reads as "one
+// blocker left" when several pins are stale.
 func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaContent string) int {
 	t.Helper()
+	missing := []string{}
 	for _, fragment := range requiredLLVMFragments() {
 		if !strings.Contains(llContent, fragment) {
-			t.Errorf("LLVM artifact missing %q:\n%s", fragment, llContent)
-			return 1
+			missing = append(missing, fragment)
 		}
 	}
 	for _, fragment := range []string{
@@ -262,15 +265,20 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"selfhost/tests/cli/test_expect_failure.kizu",
 	} {
 		if strings.Contains(llContent, fragment) {
-			t.Errorf("LLVM artifact keeps fixed CLI fixture path %q:\n%s", fragment, llContent)
+			t.Errorf("LLVM artifact keeps fixed CLI fixture path %q", fragment)
 			return 1
 		}
 	}
 	for _, fragment := range forbiddenLLVMFragments() {
 		if strings.Contains(llContent, fragment) {
-			t.Errorf("LLVM artifact keeps source-shape gate %q:\n%s", fragment, llContent)
+			t.Errorf("LLVM artifact keeps source-shape gate %q", fragment)
 			return 1
 		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("LLVM artifact missing %d fragment(s):\n  %s",
+			len(missing), strings.Join(missing, "\n  "))
+		return 1
 	}
 	return countLLVMMetadataValidationFailures(t, metaContent)
 }
