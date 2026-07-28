@@ -12815,6 +12815,18 @@ fn lower_multi_let_try_call(
             };
         }
     }
+    // A hoisted 'try <receiver>.<method>(args)' binds through the same LetTryCall shape as a
+    // free call, but its receiver is not an arg edge: lowering it as a free call drops the
+    // receiver entirely and shifts every remaining operand into the wrong parameter slot. The
+    // receiver call arg and the runtime storage ABI come from the shared method machinery, so
+    // no method name or receiver spelling is inspected here.
+    if try callee_is_field_expr(ir_bytes, function_name, call_node, bs) {
+        return try lower_multi_let_method_try_call(
+            ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+            let_name, call_node, string_counter, temp_counter, try_counter, aliases,
+            stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+    }
     let cf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, call_node, bs);
     let call_info = try compiled_mir_types::lower_call_info_for_instance_indexed(
         ir_lookup_index, canonical_facts, ir_bytes,
@@ -12857,6 +12869,78 @@ fn lower_multi_let_try_call(
         string_counter: lowered_args.string_counter,
         temp_counter: lowered_args.temp_counter,
         try_counter: try_counter + 1
+    };
+}
+
+// lower_multi_let_method_try_call binds 'let <name> = try <receiver>.<method>(args);'. It is the
+// value-producing twin of lower_void_method_try_call_statement: the receiver resolves through the
+// shared method facts into the leading call arg, the explicit arguments take their semantic types
+// from the same ordered ABI table, and normalize_runtime_method_args applies the declared runtime
+// storage transport. A runtime builtin whose result is an erased byte view is handled by the
+// caller's ErrorByteView branch before this point, so the result here is a semantic value.
+fn lower_multi_let_method_try_call(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    let_name: []u8,
+    call_node: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiLowerResult {
+    let info = try method_call_info(
+        ir_bytes, function_name, module_prefix, locals_spec, call_node, bs,
+        ir_lookup_index, canonical_facts, call_arg_type_cache
+    );
+    let explicit_arg_count = try compiled_mir_types::count_call_args_cached(
+        ir_bytes, function_name, call_node, bs, call_arg_type_cache
+    );
+    var arg_types = try method_call_arg_types(
+        ir_bytes, function_name, module_prefix, &info, call_node, explicit_arg_count,
+        ir_lookup_index, canonical_facts, call_arg_type_cache
+    );
+    defer arg_types.deinit();
+    var arg_insts = std::array::Array<compiled_mir::MirExprInst>(
+        std::mem::page_allocator()
+    );
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    let lowered = try lower_method_call_args_hoisting_try_args_with_local_aliases(
+        ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
+        call_node, string_counter, temp_counter, try_counter, aliases,
+        &info, &arg_types, &var arg_insts, &var args, stmts, bs,
+        ir_lookup_index, canonical_facts, call_arg_type_cache
+    );
+    var normalized_args = try normalize_runtime_method_args(&arg_types, args);
+    let call_types = try parsed_call_type_for_node(
+        canonical_facts, ir_bytes, function_name, call_node, call_arg_type_cache
+    );
+    let success_id = try compiled_canonical_facts::parsed_canonical_error_success_child(
+        canonical_facts, call_types.result_id
+    );
+    let success_type = try compiled_canonical_facts::parsed_canonical_runtime_abi(
+        ir_lookup_index, canonical_facts, ir_bytes, success_id
+    );
+    let new_locals = try compiled_signature::extend_locals_spec(
+        ir_bytes, lowered.locals_spec, let_name, success_type
+    );
+    try stmts.append(compiled_mir::let_try_call_stmt(
+        let_name, info.return_llvm_type, success_type, llvm_return_type,
+        info.module_prefix, info.callee_name, string_counter, lowered.try_counter,
+        arg_insts, normalized_args
+    ));
+    return MultiLowerResult {
+        locals_spec: new_locals,
+        string_counter: lowered.string_counter,
+        temp_counter: lowered.temp_counter,
+        try_counter: lowered.try_counter + 1
     };
 }
 
