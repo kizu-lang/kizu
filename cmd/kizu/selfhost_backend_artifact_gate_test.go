@@ -229,7 +229,12 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 		t.Errorf("read host capability metadata: %v", err)
 		return 1
 	}
-	failures := countEveryEmittedBodyCallClassificationFailures(t, string(irBytes))
+	// The executed smoke runs first and unconditionally. It links the artifact and
+	// drives the hosted CLI, which is the only part of this gate that observes real
+	// behaviour; gating it behind the textual fragment checks meant a single stale
+	// pin silently disabled every behavioural check in the file.
+	failures := countHostedCompilerCLISmokeFailures(t)
+	failures += countEveryEmittedBodyCallClassificationFailures(t, string(irBytes))
 	failures += countTextualLLVMValidationFailures(t, string(llBytes), string(metaBytes))
 	failures += countRuntimeStorageValidationFailures(
 		t,
@@ -241,9 +246,6 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 		string(hostBytes),
 		string(hostMetaBytes),
 	)
-	if failures == 0 {
-		failures += countHostedCompilerCLISmokeFailures(t)
-	}
 	return failures
 }
 
