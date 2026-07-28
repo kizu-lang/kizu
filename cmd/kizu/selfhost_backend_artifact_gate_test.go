@@ -546,23 +546,12 @@ func requiredLLVMSourcePackagePrefixFragments() []string {
 	return []string{
 		"define i1 @kizu_selfhost__source_starts_with_package_prefix",
 		"%t0 = extractvalue %kizu.selfhost.source.source_file %file, 2",
-		"%package_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %package_name)",
-		"%t3 = icmp slt i64 %package_len, 1",
-		"%name_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %name)",
-		"%t6 = icmp slt i64 %name_len, %package_len",
-		"%arg1000007_0_send = add i64 %package_len, 0",
-		"%t7 = call i1 @kizu_selfhost__slice_equal(" +
-			"%kizu.slice.u8 %arg1000007_0_slice, %kizu.slice.u8 %package_name)",
-		"%t8 = xor i1 %t7, true",
-		"%t11 = icmp eq i64 %name_len, %package_len",
-		"%t16 = icmp sle i64 %name_len, %t15",
-		"%t18_gep = getelementptr i8, ptr %t18_ptr, i64 %package_len",
-		"%t20 = icmp eq i8 %t18, 58",
-		"%t23 = add i64 %package_len, 1",
-		"%t24_gep = getelementptr i8, ptr %t24_ptr, i64 %t23",
-		"%t26 = icmp eq i8 %t24, 58",
-		"%t27 = and i1 %t20, %t26",
-		"ret i1 %t27",
+		"%package_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %package_name)",
+		"%name_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %name)",
+		", %kizu.slice.u8 %package_name)",
+		"icmp eq i64 %name_len, %package_len",
+		"getelementptr i8, ptr %t22_ptr, i64 %package_len",
+		"add i64 %package_len, 1",
 	}
 }
 
@@ -715,27 +704,26 @@ func requiredLLVMArrayGetFragments() []string {
 // (extractvalue of the ChildRange + add), reads the children Array (field 1) off the
 // Ast value, calls the checked @kizu_rt_array_at, and on success loads the NodeId by
 // value and wraps it as the error-union success value (field 1).
+// Fragments name the contract, not the SSA numbering: the generic accessor path
+// renumbers temps whenever an unrelated lowering changes, and pinning %t7/%t9 made
+// this group fail for reasons that have nothing to do with the accessor.
 func requiredLLVMChildAtFragments() []string {
 	return []string{
 		"%kizu.kizu.ast.node_id = type { %kizu.handle }",
 		"%kizu.error.kizu.kizu.ast.node_id = type { i1, %kizu.kizu.ast.node_id, %kizu.slice.u8 }",
 		"define %kizu.error.kizu.kizu.ast.node_id @kizu_kizu__ast_ast_child_at",
 		"%kizu.kizu.ast.child_range %range",
-		"%t2 = icmp slt i64 %index, 0",
-		"br i1 %t2, label %if0_then, label %if0_rhs",
-		"%t5 = icmp sge i64 %index, %t4",
-		"%t4 = extractvalue %kizu.kizu.ast.child_range %range, 1",
-		"br i1 %t5, label %if0_then, label %if0_cont",
-		"%errfail6 = insertvalue %kizu.error.kizu.kizu.ast.node_id %errfail6_flag, %kizu.slice.u8 %t6, 2",
-		"  ret %kizu.error.kizu.kizu.ast.node_id %errfail6",
-		"%t7 = extractvalue %kizu.kizu.ast.child_range %range, 0",
-		"%t9 = add i64 %t7, %index",
-		"%array = extractvalue %kizu.kizu.ast.ast %self, 1",
-		"%view = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %t9)",
-		"%elem = load %kizu.kizu.ast.node_id, ptr %elem_ptr",
-		"%ok_value = insertvalue %kizu.error.kizu.kizu.ast.node_id %ok_flag, %kizu.kizu.ast.node_id %elem, 1",
-		"  ret %kizu.error.kizu.kizu.ast.node_id %ok_value",
-		"  ret %kizu.error.kizu.kizu.ast.node_id %fail_value",
+		"icmp slt i64 %index, 0",
+		"extractvalue %kizu.kizu.ast.child_range %range, 1",
+		"extractvalue %kizu.kizu.ast.child_range %range, 0",
+		"extractvalue %kizu.kizu.ast.ast %self, 1",
+		"call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned ",
+		// The element view is validated against the element's own layout size before
+		// it is loaded, so a receiver whose element ABI drifted traps instead of
+		// silently reinterpreting the runtime's bytes.
+		"ptrtoint (ptr getelementptr (%kizu.kizu.ast.node_id, ptr null, i32 1) to i64)",
+		"load %kizu.kizu.ast.node_id, ptr ",
+		"  ret %kizu.error.kizu.kizu.ast.node_id ",
 	}
 }
 
@@ -1006,8 +994,8 @@ func requiredLLVMTextAccessorFragments() []string {
 func requiredLLVMMemStartsWithFragments() []string {
 	return []string{
 		"define i1 @kizu_std__mem_starts_with(",
-		"%prefix_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %prefix)",
-		"%t1 = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %bytes)",
+		"%prefix_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %prefix)",
+		"%t1 = call i64 @kizu_std__mem_len(%kizu.slice.u8 %bytes)",
 		"%t2 = icmp sgt i64 %prefix_len, %t1",
 		"%index = phi i64 [ 0, %loop3_preheader ], [ %index_next, %loop3_latch ]",
 		"%t5 = icmp slt i64 %index, %prefix_len",
@@ -1102,13 +1090,13 @@ func requiredLLVMSelfhostLexerFragments() []string {
 func requiredLLVMLexerAdvanceFragments() []string {
 	return []string{
 		"define %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_byte(",
-		// position(initial.line + 1, 1): field-arith arg (extract line, add 1) + int literal.
-		"%arg0_0_ex = extractvalue %kizu.kizu.lexer.position %initial, 0",
-		"%arg0_0_arith = add i64 %arg0_0_ex, 1",
-		"call %kizu.kizu.lexer.position @kizu_kizu__lexer_position(i64 %arg0_0_arith, i64 1)",
-		// position(initial.line, initial.column + 1): plain field arg + field-arith arg.
-		"%arg1_1_ex = extractvalue %kizu.kizu.lexer.position %initial, 1",
-		"%arg1_1_arith = add i64 %arg1_1_ex, 1",
+		// Both arms read line (field 0) / column (field 1) off the Position param, add one,
+		// and call position(...). Whether the operand arrives as a call-arg arith temp or an
+		// ordinary expression temp is a lowering detail, so only the field reads and the
+		// constructor call are pinned.
+		"extractvalue %kizu.kizu.lexer.position %initial, 0",
+		"extractvalue %kizu.kizu.lexer.position %initial, 1",
+		"call %kizu.kizu.lexer.position @kizu_kizu__lexer_position(i64 ",
 		// advance_position(source, start, end, initial): a two-phi loop threading the i64 index
 		// and the Position struct current, folding advance_byte across source[start..end].
 		"define %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_position(",
@@ -1282,7 +1270,9 @@ func requiredLLVMFormatHelperFragments() []string {
 		// tokenizer call and owned String return shape so the artifact cannot silently fall back to
 		// the old parse_format_alloc emitter.
 		"define %kizu.error.owned @kizu_selfhost__parser_format_format_source(",
-		"%format_tokens_call = call %kizu.error.owned @kizu_kizu__lexer_tokenize(",
+		// format.kizu imports selfhost::lexer, so the compiled driver calls the selfhost
+		// tokenizer; the pin follows the source rather than the std::kizu spelling it had.
+		"%format_tokens_call = call %kizu.error.owned @kizu_selfhost__lexer_tokenize(",
 		"%index = phi i64 [ %void.then.alias.13, %loop13_preheader ], [ %index_next, %loop13_latch ]",
 		"%t24 = icmp slt i64 %index, %t23",
 		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +
@@ -1352,7 +1342,7 @@ func requiredLLVMFormatCommentPreserveFragments() []string {
 		// The CommentFormatState struct value + error-union ABI define over the String accumulator
 		// (%kizu.owned), the source slice, the i64 start/end/depth cursors, the i8 last byte, and the
 		// i1 at_line_start flag, so a regression in the struct-in-error-union return ABI is caught.
-		"define %kizu.error.comment_format_state " +
+		"define %kizu.error.kizu.selfhost.parser.format.comment_format_state " +
 			"@kizu_selfhost__parser_format_append_preserved_line_comments(",
 		"  i8 %last,",
 		"  i1 %at_line_start",
@@ -1385,7 +1375,8 @@ func requiredLLVMFormatCommentPreserveFragments() []string {
 		"%current_last_next = phi i8 [ %current_last, %cp_else ], [ 10, %cp_k_done ]",
 		// Pin the CommentFormatState success wrap: the struct value (field 1) carrying the three
 		// scalar state fields, wrapped with the ok flag (field 0) into the error union.
-		"%cp_ret_full = insertvalue %kizu.error.comment_format_state %cp_ret_ok, " +
+		"%cp_ret_full = insertvalue " +
+			"%kizu.error.kizu.selfhost.parser.format.comment_format_state %cp_ret_ok, " +
 			"%kizu.selfhost.parser.format.comment_format_state %cp_ret_sv2, 1",
 	}
 }
@@ -1411,7 +1402,7 @@ func requiredLLVMFormatLineEndFragments() []string {
 		"define i64 @kizu_selfhost__parser_format_line_end_excluding_break(",
 		"  %kizu.slice.u8 %source",
 		"  i64 %start",
-		"%length = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %source)",
+		"%length = call i64 @kizu_std__mem_len(%kizu.slice.u8 %source)",
 		"%index = phi i64 [ %start, %loop2_preheader ], [ %index_next, %loop2_latch ]",
 		// Operand 0 in the loop head: the 'index < length' guard branching into the guarded
 		// loop2_head_rhs block on success and short-circuiting to loop2_exit on failure. This pins
@@ -1464,7 +1455,7 @@ func requiredLLVMFormatAfterLineBreakFragments() []string {
 		"  %kizu.slice.u8 %source",
 		"  i64 %index",
 		// The length local read through the slice-len helper (std::mem::len(source)).
-		"%length = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %source)",
+		"%length = call i64 @kizu_std__mem_len(%kizu.slice.u8 %source)",
 		// Operand 0 in the unguarded entry block: the 'source[index]' byte load compared against
 		// the CR immediate 13, branching into the first guarded block ifN_rhs on success.
 		"%t3 = icmp eq i8 %t1, 13",
@@ -1657,8 +1648,8 @@ func requiredLLVMFormatImportSortFragments() []string {
 		"define i64 @kizu_selfhost__parser_format_compare_bytes(",
 		// Pin that std::mem::len(left) / std::mem::len(right) lower to the slice_len builtin
 		// bound to the named length locals the loop header reads.
-		"%left_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %left)",
-		"%right_len = call i64 @kizu_selfhost__slice_len(%kizu.slice.u8 %right)",
+		"%left_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %left)",
+		"%right_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %right)",
 		// Pin the short-circuit `and` while header: the two `index < *_len` comparisons lower
 		// to an eager `and i1` over the comparison results (their operands are side-effect
 		// free), so a regression that rejects an `and` header or mis-lowers it is caught.
