@@ -241,10 +241,10 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return err
 	case *ast.AssignStmt:
 		value, err := l.lowerExpr(s.Value)
-		if ident, ok := s.Target.(*ast.IdentExpr); ok {
-			l.env[ident.Name] = value
+		if err != nil {
+			return err
 		}
-		return err
+		return l.lowerAssignTarget(s.Target, value)
 	case *ast.ReturnStmt:
 		return l.lowerReturnStmt(s)
 	case *ast.DeferStmt, *ast.ErrDeferStmt:
@@ -270,6 +270,45 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return l.lowerComptimeIfStmt(s)
 	default:
 		return fmt.Errorf("ir error: unsupported statement %T", stmt)
+	}
+}
+
+// lowerAssignTarget writes value into an assignment target. An identifier
+// rebinds the SSA name. A field of a borrowed receiver stores through the
+// borrow, while a field of a value receiver rebuilds the receiver aggregate and
+// assigns that back through the same rule, so `a.b.c = v` reaches whichever of
+// `a` and `a.b` owns memory. An explicit dereference stores through the
+// borrowed pointer. Any other target is rejected: dropping the store would
+// silently compile the assignment away.
+func (l *lowerer) lowerAssignTarget(target ast.Expression, value Value) error {
+	switch t := target.(type) {
+	case *ast.IdentExpr:
+		l.env[t.Name] = value
+		return nil
+	case *ast.FieldExpr:
+		receiver, err := l.lowerExpr(t.Receiver)
+		if err != nil {
+			return err
+		}
+		if isReferenceType(receiver.Type) {
+			l.emit("field.ref.set."+t.Name, "void", []Value{receiver, value}, "")
+			return nil
+		}
+		updated := l.emit("field.set."+t.Name, receiver.Type, []Value{receiver, value}, "")
+		return l.lowerAssignTarget(t.Receiver, updated)
+	case *ast.DerefExpr:
+		receiver, err := l.lowerExpr(t.Receiver)
+		if err != nil {
+			return err
+		}
+		if !isReferenceType(receiver.Type) {
+			return fmt.Errorf("ir error: dereference assignment target `%s` is not a borrow",
+				target.String())
+		}
+		l.emit("ref.store", "void", []Value{receiver, value}, "")
+		return nil
+	default:
+		return fmt.Errorf("ir error: unsupported assignment target `%s`", target.String())
 	}
 }
 
