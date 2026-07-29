@@ -435,19 +435,72 @@ pub fn free_runtime_abi(canonical_identity: []u8) -> FreeRuntimeAbi {
             "kizu_rt_io_write_stderr", free_runtime_arg_schema_io_slice()
         );
     }
+    if std::mem::equal_bytes(canonical_identity, "std::io::write_stdout") or
+        std::mem::equal_bytes(canonical_identity, "std::builtin::io_write_stdout") {
+        return known_free_runtime_abi(
+            "kizu_rt_io_write_stdout", free_runtime_arg_schema_io_slice()
+        );
+    }
+    if std::mem::equal_bytes(canonical_identity, "std::io::blocking") or
+        std::mem::equal_bytes(canonical_identity, "std::builtin::io_blocking") {
+        return known_free_runtime_abi(
+            "kizu_rt_io_blocking", free_runtime_arg_schema_none()
+        );
+    }
+    // The remaining filesystem entries all take (Io, path) and answer through a runtime symbol
+    // the artifact already declares. They are here because a compiled source-loading root calls
+    // them, not because the table aims to be exhaustive: an identity earns an entry when some
+    // root reaches it.
+    if std::mem::equal_bytes(canonical_identity, "std::fs::exists") or
+        std::mem::equal_bytes(canonical_identity, "std::builtin::fs_exists") {
+        return known_free_runtime_abi(
+            "kizu_rt_fs_exists", free_runtime_arg_schema_io_slice()
+        );
+    }
+    if std::mem::equal_bytes(canonical_identity, "std::fs::metadata") or
+        std::mem::equal_bytes(canonical_identity, "std::builtin::fs_metadata") {
+        return known_free_runtime_abi(
+            "kizu_rt_fs_metadata", free_runtime_arg_schema_io_slice()
+        );
+    }
+    if std::mem::equal_bytes(canonical_identity, "std::fs::read_dir") or
+        std::mem::equal_bytes(canonical_identity, "std::builtin::fs_read_dir") {
+        return known_free_runtime_abi(
+            "kizu_rt_fs_read_dir", free_runtime_arg_schema_io_slice()
+        );
+    }
+    if std::mem::equal_bytes(canonical_identity, "std::fs::create_dir") or
+        std::mem::equal_bytes(canonical_identity, "std::builtin::fs_create_dir") {
+        return known_free_runtime_abi(
+            "kizu_rt_fs_create_dir", free_runtime_arg_schema_io_slice()
+        );
+    }
     return unknown_free_runtime_abi();
 }
 
 pub fn free_runtime_symbol(canonical_identity: []u8) -> ![]u8 {
     let abi = free_runtime_abi(canonical_identity);
-    if !abi.found { return error("builtin contract: free runtime symbol not found"); }
+    if !abi.found {
+        // Name the identity that failed to resolve. A bare "not found" leaves the reader
+        // grepping the whole compiled closure for whichever call reached here; the canonical
+        // identity points straight at the declaration that is missing above.
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("builtin contract: free runtime symbol not found: ");
+        try message.append_bytes(canonical_identity);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
+    }
     return abi.symbol;
 }
 
 pub fn free_runtime_arg_count(canonical_identity: []u8) -> !i64 {
     let abi = free_runtime_abi(canonical_identity);
     if !abi.found {
-        return error("builtin contract: free runtime argument ABI not found");
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("builtin contract: free runtime argument ABI not found: ");
+        try message.append_bytes(canonical_identity);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
     if abi.arg_schema == free_runtime_arg_schema_none() { return 0; }
     if abi.arg_schema == free_runtime_arg_schema_slice() { return 1; }
@@ -461,7 +514,11 @@ pub fn free_runtime_arg_type(
 ) -> ![]u8 {
     let abi = free_runtime_abi(canonical_identity);
     if !abi.found {
-        return error("builtin contract: free runtime argument ABI not found");
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("builtin contract: free runtime argument ABI not found: ");
+        try message.append_bytes(canonical_identity);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
     let arg_count = try free_runtime_arg_count(canonical_identity);
     if arg_index < 0 or arg_index >= arg_count {
@@ -643,6 +700,18 @@ pub fn runtime_method_abi(operation_id: i64) -> RuntimeMethodAbi {
                 0, RuntimeStorageClass::Semantic
             ), 0, no_runtime_type(), no_runtime_type(),
             RuntimeResultTransport::ByteView
+        );
+    }
+    // Array<T>.pop answers '!T', so it transports its result the way Array<T>.get does: an
+    // error-union byte view whose failure carries a real message. Its panicking twin above
+    // traps on an empty array and therefore needs no error channel; the two differ only in
+    // that transport, so both name the same receiver child slot.
+    if operation_id == operation_array_pop() {
+        return known_runtime_method_abi(
+            "kizu_rt_array_pop", receiver_child_runtime_type(
+                0, RuntimeStorageClass::Semantic
+            ), 0, no_runtime_type(), no_runtime_type(),
+            RuntimeResultTransport::ErrorByteView
         );
     }
     // Arena.add stores the element as a byte view and answers with the arena handle that names

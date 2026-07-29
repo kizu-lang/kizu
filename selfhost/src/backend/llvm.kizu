@@ -652,6 +652,14 @@ fn render_llvm_module(
     try out.append_bytes("array index out of bounds");
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
+    // The empty-array message global backs the @kizu_rt_array_pop failure path, the checked
+    // twin of pop_or_panic: draining a loop's Array is an ordinary '!T' failure, not a trap.
+    try out.append_bytes(
+        "@.kizu.rt.array_pop_empty = private unnamed_addr constant [20 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("pop from empty array");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
     try out.append_bytes(
         "@.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c");
     try out.append_byte(cast<u8>(34));
@@ -703,6 +711,63 @@ fn render_llvm_module(
         "  %message_ptr = getelementptr inbounds [25 x i8], ptr @.kizu.rt.array_index_out_of_bounds, i64 0, i64 0");
     try append_line(out, "  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0");
     try append_line(out, "  %message = insertvalue %kizu.slice.u8 %message_base, i64 25, 1");
+    try append_line(out, "  %invalid_ok = insertvalue %kizu.error.slice.u8 poison, i1 false, 0");
+    try append_line(out,
+        "  %invalid_value = insertvalue %kizu.error.slice.u8 %invalid_ok, %kizu.slice.u8 zeroinitializer, 1");
+    try append_line(out,
+        "  %invalid_result = insertvalue %kizu.error.slice.u8 %invalid_value, %kizu.slice.u8 %message, 2");
+    try append_line(out, "  ret %kizu.error.slice.u8 %invalid_result");
+    try append_line(out, "}");
+    try append_line(out, "");
+    // pop is the checked Array<T> drain accessor: it removes the final element and returns a
+    // borrowed view of it as a %kizu.error.slice.u8, so an empty or unset array answers with a
+    // real failure message instead of trapping. It backs Array<T>.pop -> !T, which is what a
+    // 'while <array>.len() > 0 { let value = try <array>.pop(); ... }' drain loop calls. Storage
+    // layout is the only thing this runtime owns; the semantic element type stays a
+    // compiled-call fact. The hosted compiler module carries its own copy, exactly as it does
+    // for array_at.
+    try append_line(out,
+        "define %kizu.error.slice.u8 @kizu_rt_array_pop(%kizu.owned %array) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %array, 0");
+    try append_line(out, "  %raw_ok = icmp ne ptr %raw, null");
+    try append_line(out, "  br i1 %raw_ok, label %inspect, label %invalid");
+    try append_line(out, "inspect:");
+    try append_line(out,
+        "  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1");
+    try append_line(out, "  %data = load ptr, ptr %data_field");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %len = load i64, ptr %len_field");
+    try append_line(out,
+        "  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4");
+    try append_line(out, "  %element_size = load i64, ptr %element_size_field");
+    try append_line(out, "  %data_ok = icmp ne ptr %data, null");
+    try append_line(out, "  %len_ok = icmp sgt i64 %len, 0");
+    try append_line(out, "  %size_ok = icmp sgt i64 %element_size, 0");
+    try append_line(out, "  %storage_ok = and i1 %data_ok, %size_ok");
+    try append_line(out, "  %ok = and i1 %len_ok, %storage_ok");
+    try append_line(out, "  br i1 %ok, label %valid, label %invalid");
+    try append_line(out, "valid:");
+    try append_line(out, "  %next_len = sub i64 %len, 1");
+    try append_line(out, "  %offset = mul i64 %next_len, %element_size");
+    try append_line(out, "  %element_ptr = getelementptr i8, ptr %data, i64 %offset");
+    try append_line(out, "  store i64 %next_len, ptr %len_field");
+    try append_line(out,
+        "  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %element_ptr, 0");
+    try append_line(out,
+        "  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %element_size, 1");
+    try append_line(out, "  %valid_ok = insertvalue %kizu.error.slice.u8 poison, i1 true, 0");
+    try append_line(out,
+        "  %valid_value = insertvalue %kizu.error.slice.u8 %valid_ok, %kizu.slice.u8 %slice, 1");
+    try append_line(out,
+        "  %valid_result = insertvalue %kizu.error.slice.u8 %valid_value, %kizu.slice.u8 zeroinitializer, 2");
+    try append_line(out, "  ret %kizu.error.slice.u8 %valid_result");
+    try append_line(out, "invalid:");
+    try append_line(out,
+        "  %message_ptr = getelementptr inbounds [20 x i8], ptr @.kizu.rt.array_pop_empty, i64 0, i64 0");
+    try append_line(out, "  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0");
+    try append_line(out, "  %message = insertvalue %kizu.slice.u8 %message_base, i64 20, 1");
     try append_line(out, "  %invalid_ok = insertvalue %kizu.error.slice.u8 poison, i1 false, 0");
     try append_line(out,
         "  %invalid_value = insertvalue %kizu.error.slice.u8 %invalid_ok, %kizu.slice.u8 zeroinitializer, 1");

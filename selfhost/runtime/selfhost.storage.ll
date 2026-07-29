@@ -24,6 +24,7 @@ source_filename = "target/selfhost/selfhost.storage"
 @.kizu.rt.invalid_box = private unnamed_addr constant [11 x i8] c"invalid box"
 @.kizu.rt.invalid_array_element = private unnamed_addr constant [21 x i8] c"invalid array element"
 @.kizu.rt.array_index_out_of_bounds = private unnamed_addr constant [25 x i8] c"array index out of bounds"
+@.kizu.rt.array_pop_empty = private unnamed_addr constant [20 x i8] c"pop from empty array"
 @.kizu.rt.array_smoke = private unnamed_addr constant [8 x i8] c"array-ok"
 @.kizu.rt.array_smoke_second = private unnamed_addr constant [8 x i8] c"payload2"
 @.kizu.rt.string_smoke = private unnamed_addr constant [3 x i8] c"kiz"
@@ -186,6 +187,45 @@ invalid:
   %message_ptr = getelementptr inbounds [25 x i8], ptr @.kizu.rt.array_index_out_of_bounds, i64 0, i64 0
   %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
   %message = insertvalue %kizu.slice.u8 %message_base, i64 25, 1
+  %invalid_ok = insertvalue %kizu.error.slice.u8 poison, i1 false, 0
+  %invalid_value = insertvalue %kizu.error.slice.u8 %invalid_ok, %kizu.slice.u8 zeroinitializer, 1
+  %invalid_result = insertvalue %kizu.error.slice.u8 %invalid_value, %kizu.slice.u8 %message, 2
+  ret %kizu.error.slice.u8 %invalid_result
+}
+
+define %kizu.error.slice.u8 @kizu_rt_array_pop(%kizu.owned %array) {
+entry:
+  %raw = extractvalue %kizu.owned %array, 0
+  %raw_ok = icmp ne ptr %raw, null
+  br i1 %raw_ok, label %inspect, label %invalid
+inspect:
+  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %data = load ptr, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2
+  %len = load i64, ptr %len_field
+  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4
+  %element_size = load i64, ptr %element_size_field
+  %data_ok = icmp ne ptr %data, null
+  %len_ok = icmp sgt i64 %len, 0
+  %size_ok = icmp sgt i64 %element_size, 0
+  %storage_ok = and i1 %data_ok, %size_ok
+  %ok = and i1 %len_ok, %storage_ok
+  br i1 %ok, label %valid, label %invalid
+valid:
+  %next_len = sub i64 %len, 1
+  %offset = mul i64 %next_len, %element_size
+  %element_ptr = getelementptr i8, ptr %data, i64 %offset
+  store i64 %next_len, ptr %len_field
+  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %element_ptr, 0
+  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %element_size, 1
+  %valid_ok = insertvalue %kizu.error.slice.u8 poison, i1 true, 0
+  %valid_value = insertvalue %kizu.error.slice.u8 %valid_ok, %kizu.slice.u8 %slice, 1
+  %valid_result = insertvalue %kizu.error.slice.u8 %valid_value, %kizu.slice.u8 zeroinitializer, 2
+  ret %kizu.error.slice.u8 %valid_result
+invalid:
+  %message_ptr = getelementptr inbounds [20 x i8], ptr @.kizu.rt.array_pop_empty, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 20, 1
   %invalid_ok = insertvalue %kizu.error.slice.u8 poison, i1 false, 0
   %invalid_value = insertvalue %kizu.error.slice.u8 %invalid_ok, %kizu.slice.u8 zeroinitializer, 1
   %invalid_result = insertvalue %kizu.error.slice.u8 %invalid_value, %kizu.slice.u8 %message, 2
