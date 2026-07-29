@@ -9981,6 +9981,11 @@ pub struct MultiMatchLowerResult {
 
 pub struct CarriedScalarState {
     pub source_name: []u8,
+    // head_name is the SSA name this loop's head binds for the scalar, and the key of its slot when
+    // the loop carries in memory. It is the source name unless an enclosing loop's head already
+    // took that name -- a loop nested inside one that carries the same variable -- in which case
+    // this loop takes a scoped name of its own, exactly as a nested induction counter does.
+    pub head_name: []u8,
     pub current_name: []u8,
     pub llvm_type: []u8,
     pub init_literal: i64,
@@ -10386,6 +10391,18 @@ fn rename_loop_cond_reads(
             try rename_induction_in_insts(insts, source_name, current_name);
         }
         index = index + 1;
+    }
+    // A carried scalar whose head name is scoped -- this loop is nested inside one carrying the
+    // same variable -- is read in the condition under that scoped name, the one this head binds.
+    var carried_index = 0;
+    while carried_index < states.len() {
+        let carried_state = try states.at(carried_index);
+        if !std::mem::equal_bytes(carried_state.source_name, carried_state.head_name) {
+            try rename_induction_in_insts(
+                insts, carried_state.source_name, carried_state.head_name
+            );
+        }
+        carried_index = carried_index + 1;
     }
     if !std::mem::equal_bytes(induction_phi, induction_var) {
         try rename_induction_in_insts(insts, induction_var, induction_phi);
@@ -15235,6 +15252,23 @@ fn lower_void_then_body(
             ir_bytes, function_name, statement, stmt_sf
         );
         if std::mem::equal_bytes(stmt_kind, "Let") {
+            // A 'var counter = <init>' a while in this arm advances is that loop's seed: the loop
+            // head supplies the value, through a phi or through a slot load, so emitting the let
+            // would define the same SSA name twice. The function-body walk and the loop-body walk
+            // already apply this rule; an arm is a statement list like either of them.
+            if try statement_is_induction_init(
+                ir_bytes,
+                function_name,
+                then_node,
+                statement,
+                try ir_contract::body_edge_count_from(
+                    ir_bytes, function_name, then_node, "statement", bs
+                ),
+                bs
+            ) {
+                body_index = body_index + 1;
+                continue;
+            }
             let let_result = try lower_multi_let_statement(
                 ir_bytes,
                 function_name,
@@ -17594,11 +17628,16 @@ fn while_carries_induction_var(
         }
     }
     // A loop with no trailing latch advances no counter, so no 'var <name> = <init>' ahead of it
-    // belongs to a loop-head phi -- its carried values are seeded from their own declarations and
-    // live in slots. Answering here also keeps the trailing-increment count below from erroring on
+    // seeds a counter phi. It still carries whatever its body reassigns, in slots rather than
+    // phis, and its head binds %<name> for each of those exactly as a phi would -- so the seed let
+    // has to stay off the emitted-let path here for the same reason, or the let and the head load
+    // define one SSA name twice. The slot takes its seed from the declaration's metadata instead.
+    // Answering before the trailing-increment count below also keeps that count from erroring on
     // the non-Assign tail such a loop ends with.
     if try while_has_no_trailing_latch(ir_bytes, function_name, while_node, bs) {
-        return false;
+        return try while_carries_body_scalar_var_deep(
+            ir_bytes, function_name, body_node, body_count, name, bs
+        );
     }
     let latch_count = try while_trailing_increment_count(
         ir_bytes, function_name, body_node, body_count, bs
@@ -18048,6 +18087,33 @@ fn collect_loop_assigned_var_names(
         );
         if else_node >= 0 {
             try collect_loop_assigned_var_names(ir_bytes, function_name, else_node, out, bs);
+        }
+        return;
+    }
+    // A scalar a nested loop advances is carried by this loop exactly like one its own body
+    // assigns: the nested loop leaves a value behind, and the next iteration has to read that
+    // rather than the one the preheader computed. Stopping at the nested while left the enclosing
+    // loop's condition reading its own seed forever, and let the nested loop's head define a name
+    // this loop's head had already defined.
+    if std::mem::equal_bytes(kind, "While") {
+        let nested_body = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, statement, "body", 0, bs
+        );
+        if nested_body < 0 {
+            return;
+        }
+        var nested_index = 0;
+        while true {
+            let nested_stmt = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, nested_body, "statement", nested_index, bs
+            );
+            if nested_stmt < 0 {
+                return;
+            }
+            try collect_loop_assigned_var_names(
+                ir_bytes, function_name, nested_stmt, out, bs
+            );
+            nested_index = nested_index + 1;
         }
         return;
     }
@@ -19456,7 +19522,13 @@ fn lower_multi_while_statement(
                 // seeds the phi by name from the value bound before the loop instead, which is
                 // what the typed phi renders.
                 var carried_init_is_compact = false;
-                if std::mem::equal_bytes(carried_type, "i64") {
+                // An enclosing loop that carries the same scalar re-enters this one on every one of
+                // its own iterations, so the value on this loop's preheader edge is whatever the
+                // enclosing loop holds by then -- not the 'var <name> = <init>' the compact seed
+                // resolves to, which would reset the scalar each time the outer loop came round.
+                let carried_is_claimed =
+                    std::mem::len(try local_alias_loop_phi_name(aliases, carried_name)) > 0;
+                if std::mem::equal_bytes(carried_type, "i64") and !carried_is_claimed {
                     if std::mem::equal_bytes(carried_init_kind, "Int") or
                         std::mem::equal_bytes(carried_init_kind, "Var") or
                         std::mem::equal_bytes(carried_init_kind, "Binary") {
@@ -19514,9 +19586,20 @@ fn lower_multi_while_statement(
                 if induction_phi_is_renamed and
                     std::mem::equal_bytes(carried_name, induction_var) {
                     carried_current_name = induction_phi;
+                } else {
+                    // An enclosing loop that carries this same scalar has already bound %<name> at
+                    // its own head, so this loop cannot bind it again. It takes a scoped name for
+                    // the same reason a nested induction counter does -- the reads inside this
+                    // body then resolve to it through the body alias map.
+                    if carried_is_claimed {
+                        carried_current_name = try loop_scoped_induction_phi_name(
+                            carried_name, loop_index, call_arg_type_cache
+                        );
+                    }
                 }
                 try carried_scalar_states.append(CarriedScalarState {
                     source_name: carried_name,
+                    head_name: carried_current_name,
                     current_name: carried_current_name,
                     llvm_type: carried_type,
                     init_literal: carried_init_literal,
@@ -19722,15 +19805,17 @@ fn lower_multi_while_statement(
     // head defines are then reseated onto their phis, which own the value in the body.
     var body_aliases = try copy_local_aliases(aliases);
     defer body_aliases.deinit();
+    // Claimed rather than merely set: the head has defined these names, so a nested loop in this
+    // body over the same variable must take a scoped phi name instead of redefining one of them.
     if std::mem::len(induction_var) > 0 {
-        try set_local_alias(&var body_aliases, induction_var, induction_phi);
+        try claim_local_alias_loop_phi(&var body_aliases, induction_var, induction_phi);
     }
     var carried_reset_index = 0;
     while carried_reset_index < carried_scalar_states.len() {
         let carried_reset_state = try carried_scalar_states.at(carried_reset_index);
         let carried_reset_source = carried_reset_state.source_name;
         let carried_reset_current = carried_reset_state.current_name;
-        try set_local_alias(
+        try claim_local_alias_loop_phi(
             &var body_aliases, carried_reset_source, carried_reset_current
         );
         carried_reset_index = carried_reset_index + 1;
@@ -19874,6 +19959,7 @@ fn lower_multi_while_statement(
                         }
                         let state = try carried_scalar_states.at(state_index);
                         let state_source_name = state.source_name;
+                        let state_head_name = state.head_name;
                         let state_llvm_type = state.llvm_type;
                         let state_init_literal = state.init_literal;
                         let state_init_var = state.init_var;
@@ -19915,8 +20001,10 @@ fn lower_multi_while_statement(
                         if memory_carried {
                             carry_index = loop_index;
                         }
+                        // The store this assignment makes is keyed by the loop's own head name for
+                        // the scalar, which is the slot's key.
                         try body_stmts.append(compiled_mir::carried_alias_assign_stmt(
-                            target_name, output_name, state_llvm_type,
+                            state_head_name, output_name, state_llvm_type,
                             value_result, value_insts, carry_index
                         ));
                         // Statements after this assign read the value it just produced, not the
@@ -19929,6 +20017,7 @@ fn lower_multi_while_statement(
                             state_index,
                             CarriedScalarState {
                                 source_name: state_source_name,
+                                head_name: state_head_name,
                                 current_name: output_name,
                                 llvm_type: state_llvm_type,
                                 init_literal: state_init_literal,
@@ -19969,6 +20058,47 @@ fn lower_multi_while_statement(
                         body_string_counter = nested_result.string_counter;
                         body_temp_counter = nested_result.temp_counter;
                         body_alias_counter = nested_result.alias_counter;
+                        // A value this loop carries in a slot is stored where it is assigned, so a
+                        // continue reaching the head still finds it. A nested loop updates it
+                        // without any assignment of its own -- it leaves the value under its own
+                        // exit name -- so the store it never made is made here instead.
+                        if memory_carried {
+                            var nested_carry_index = 0;
+                            while nested_carry_index < carried_scalar_states.len() {
+                                let nested_state =
+                                    try carried_scalar_states.at(nested_carry_index);
+                                let nested_source = nested_state.source_name;
+                                let nested_head = nested_state.head_name;
+                                let nested_before = nested_state.current_name;
+                                let nested_type = nested_state.llvm_type;
+                                let nested_init_literal = nested_state.init_literal;
+                                let nested_init_var = nested_state.init_var;
+                                let nested_init_offset = nested_state.init_offset;
+                                let nested_init_name = nested_state.init_name;
+                                let nested_after = try local_alias_current_name(
+                                    &body_aliases, nested_source
+                                );
+                                if !std::mem::equal_bytes(nested_after, nested_before) {
+                                    try body_stmts.append(compiled_mir::loop_carry_store_stmt(
+                                        loop_index, nested_head, nested_type, nested_after
+                                    ));
+                                    try carried_scalar_states.set(
+                                        nested_carry_index,
+                                        CarriedScalarState {
+                                            source_name: nested_source,
+                                            head_name: nested_head,
+                                            current_name: nested_after,
+                                            llvm_type: nested_type,
+                                            init_literal: nested_init_literal,
+                                            init_var: nested_init_var,
+                                            init_offset: nested_init_offset,
+                                            init_name: nested_init_name
+                                        }
+                                    );
+                                }
+                                nested_carry_index = nested_carry_index + 1;
+                            }
+                        }
                     } else {
                         var message =
                             std::string::String(std::mem::page_allocator());
@@ -19998,6 +20128,7 @@ fn lower_multi_while_statement(
     while carried_sync_index < carried_scalar_states.len() {
         let sync_state = try carried_scalar_states.at(carried_sync_index);
         let sync_source = sync_state.source_name;
+        let sync_head = sync_state.head_name;
         let sync_previous = sync_state.current_name;
         let sync_llvm_type = sync_state.llvm_type;
         let sync_init_literal = sync_state.init_literal;
@@ -20010,6 +20141,7 @@ fn lower_multi_while_statement(
                 carried_sync_index,
                 CarriedScalarState {
                     source_name: sync_source,
+                    head_name: sync_head,
                     current_name: sync_current,
                     llvm_type: sync_llvm_type,
                     init_literal: sync_init_literal,
@@ -20241,14 +20373,19 @@ fn lower_multi_while_statement(
             try set_local_alias(aliases, exit_secondary_name, secondary_exit_name);
             exit_secondary_index = exit_secondary_index + 1;
         }
+        // Keyed by the source name, valued by the exit reload of the head name: the two differ for
+        // a scalar this loop had to rename because an enclosing loop carries it too.
         var exit_carried_index = 0;
-        while exit_carried_index < carried_scalars.len() {
-            let exit_carried = try carried_scalars.at(exit_carried_index);
-            let exit_carried_name = exit_carried.var_name;
-            let carried_exit_name = try loop_exit_carried_name(
-                exit_carried_name, loop_index, call_arg_type_cache
-            );
-            try set_local_alias(aliases, exit_carried_name, carried_exit_name);
+        while exit_carried_index < carried_scalar_states.len() {
+            let exit_carried = try carried_scalar_states.at(exit_carried_index);
+            let exit_carried_source = exit_carried.source_name;
+            let exit_carried_head = exit_carried.head_name;
+            if !std::mem::equal_bytes(exit_carried_source, carried_exclude) {
+                let carried_exit_name = try loop_exit_carried_name(
+                    exit_carried_head, loop_index, call_arg_type_cache
+                );
+                try set_local_alias(aliases, exit_carried_source, carried_exit_name);
+            }
             exit_carried_index = exit_carried_index + 1;
         }
     }
@@ -20606,6 +20743,7 @@ fn append_leading_decrement_carried_scalar(
     let init = try find_induction_init(ir_bytes, function_name, target_name, 0, loop_index, bs);
     try states.append(CarriedScalarState {
         source_name: target_name,
+        head_name: target_name,
         current_name: target_name,
         llvm_type: "i64",
         init_literal: init.literal,
@@ -20665,7 +20803,7 @@ fn materialize_carried_scalars(
         let state = try states.at(index);
         if !std::mem::equal_bytes(state.source_name, exclude_name) {
             try carried.append(compiled_mir::carried_scalar(
-                state.source_name,
+                state.head_name,
                 state.llvm_type,
                 state.init_literal,
                 state.init_var,
@@ -20707,6 +20845,7 @@ fn lower_scalar_select_assign_from_if(
     }
     let state = try states.at(state_index);
     let state_source_name = state.source_name;
+    let state_head_name = state.head_name;
     let state_current_name = state.current_name;
     let state_llvm_type = state.llvm_type;
     let state_init_literal = state.init_literal;
@@ -20768,6 +20907,7 @@ fn lower_scalar_select_assign_from_if(
     ));
     try states.set(state_index, CarriedScalarState {
         source_name: state_source_name,
+        head_name: state_head_name,
         current_name: output_name,
         llvm_type: state_llvm_type,
         init_literal: state_init_literal,
