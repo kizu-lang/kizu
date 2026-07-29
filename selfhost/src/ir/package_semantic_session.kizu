@@ -1,0 +1,1257 @@
+import selfhost::ir::package_call_facts;
+import selfhost::ir::package_canonical_type_facts;
+import selfhost::ir::package_catalog;
+import selfhost::ir::package_dependency_graph;
+import selfhost::ir::package_function_identity;
+import selfhost::ir::package_type_resolution;
+
+struct StaticBinding {
+    kind: i64,
+    canonical_type_id: i64,
+    value_bits: i64,
+    function_component_id: i64,
+    function_id: i64,
+}
+
+// InstanceId is the dense identity assigned by the package-owned registry after
+// exact lookup by target plus every ordered tagged static binding.
+struct FunctionInstanceKey {
+    instance_id: i64,
+    target_component_id: i64,
+    target_function_id: i64,
+    binding_start: i64,
+    binding_len: i64,
+}
+
+struct CallEdge {
+    caller_instance_id: i64,
+    caller_component_id: i64,
+    caller_function_id: i64,
+    span_start: i64,
+    span_end: i64,
+    callee_instance_id: i64,
+}
+
+struct InstanceCallType {
+    caller_instance_id: i64,
+    span_start: i64,
+    span_end: i64,
+    receiver_type_id: i64,
+    result_type_id: i64,
+    runtime_start: i64,
+    runtime_len: i64,
+    actual_start: i64,
+    actual_len: i64,
+}
+
+// PackageSemanticSession is the package-owned specialization registry and work
+// queue. Each unique key is queued once when it becomes reachable.
+pub struct PackageSemanticSession {
+    instances: std::array::Array<FunctionInstanceKey>,
+    static_bindings: std::array::Array<StaticBinding>,
+    instance_param_starts: std::array::Array<i64>,
+    instance_param_lens: std::array::Array<i64>,
+    instance_param_type_ids: std::array::Array<i64>,
+    instance_result_type_ids: std::array::Array<i64>,
+    instance_body_required: std::array::Array<bool>,
+    pending_instance_indexes: std::array::Array<i64>,
+    call_edges: std::array::Array<CallEdge>,
+    instance_call_types: std::array::Array<InstanceCallType>,
+    instance_call_type_ids: std::array::Array<i64>,
+}
+
+pub fn init(allocator: Allocator) -> PackageSemanticSession {
+    return PackageSemanticSession {
+        instances: std::array::Array<FunctionInstanceKey>(allocator),
+        static_bindings: std::array::Array<StaticBinding>(allocator),
+        instance_param_starts: std::array::Array<i64>(allocator),
+        instance_param_lens: std::array::Array<i64>(allocator),
+        instance_param_type_ids: std::array::Array<i64>(allocator),
+        instance_result_type_ids: std::array::Array<i64>(allocator),
+        instance_body_required: std::array::Array<bool>(allocator),
+        pending_instance_indexes: std::array::Array<i64>(allocator),
+        call_edges: std::array::Array<CallEdge>(allocator),
+        instance_call_types: std::array::Array<InstanceCallType>(allocator),
+        instance_call_type_ids: std::array::Array<i64>(allocator)
+    };
+}
+
+pub fn instance_len(session: &PackageSemanticSession) -> i64 {
+    return session.instances.len();
+}
+
+pub fn pending_len(session: &PackageSemanticSession) -> i64 {
+    return session.pending_instance_indexes.len();
+}
+
+pub fn pending_instance_index(
+    session: &PackageSemanticSession,
+    queue_index: i64
+) -> !i64 {
+    return session.pending_instance_indexes.get(queue_index);
+}
+
+pub fn instance_target(
+    session: &PackageSemanticSession,
+    instance_index: i64
+) -> !package_function_identity::FunctionTarget {
+    let instances = &session.instances;
+    let key = try instances.at(instance_index);
+    return package_function_identity::FunctionTarget {
+        component: package_function_identity::ComponentId {
+            value: key.target_component_id
+        },
+        function: package_function_identity::FunctionId {
+            value: key.target_function_id
+        }
+    };
+}
+
+pub fn instance_id(
+    session: &PackageSemanticSession,
+    instance_index: i64
+) -> !i64 {
+    let instances = &session.instances;
+    let key = try instances.at(instance_index);
+    if key.instance_id != instance_index {
+        return error("function instance registry identity mismatch");
+    }
+    return key.instance_id;
+}
+
+pub fn instance_type_value_len(
+    session: &PackageSemanticSession,
+    instance_index: i64
+) -> !i64 {
+    let instances = &session.instances;
+    let key = try instances.at(instance_index);
+    var count = 0;
+    var binding = 0;
+    let bindings = &session.static_bindings;
+    while binding < key.binding_len {
+        let value = try bindings.at(key.binding_start + binding);
+        if value.kind == package_call_facts::static_binding_type_kind() {
+            count = count + 1;
+        }
+        binding = binding + 1;
+    }
+    return count;
+}
+
+pub fn instance_type_value(
+    session: &PackageSemanticSession,
+    instance_index: i64,
+    argument_index: i64
+) -> !i64 {
+    let instances = &session.instances;
+    let key = try instances.at(instance_index);
+    if argument_index < 0 {
+        return error("function instance type value index out of range");
+    }
+    var seen = 0;
+    var binding = 0;
+    let bindings = &session.static_bindings;
+    while binding < key.binding_len {
+        let value = try bindings.at(key.binding_start + binding);
+        if value.kind == package_call_facts::static_binding_type_kind() {
+            if seen == argument_index { return value.canonical_type_id; }
+            seen = seen + 1;
+        }
+        binding = binding + 1;
+    }
+    return error("function instance type value index out of range");
+}
+
+fn instance_static_binding_len(
+    session: &PackageSemanticSession,
+    instance_index: i64
+) -> !i64 {
+    let instances = &session.instances;
+    let key = try instances.at(instance_index);
+    return key.binding_len;
+}
+
+fn instance_static_binding(
+    session: &PackageSemanticSession,
+    instance_index: i64,
+    binding_index: i64
+) -> !StaticBinding {
+    let instances = &session.instances;
+    let key = try instances.at(instance_index);
+    if binding_index < 0 or binding_index >= key.binding_len {
+        return error("function instance static binding index out of range");
+    }
+    let bindings = &session.static_bindings;
+    let binding = try bindings.at(
+        key.binding_start + binding_index
+    );
+    return StaticBinding {
+        kind: binding.kind,
+        canonical_type_id: binding.canonical_type_id,
+        value_bits: binding.value_bits,
+        function_component_id: binding.function_component_id,
+        function_id: binding.function_id
+    };
+}
+
+pub fn instance_requires_body(
+    session: &PackageSemanticSession,
+    instance_index: i64
+) -> !bool {
+    return session.instance_body_required.get(instance_index);
+}
+
+pub fn instance_param_len(
+    session: &PackageSemanticSession,
+    instance_index: i64
+) -> !i64 {
+    return session.instance_param_lens.get(instance_index);
+}
+
+pub fn instance_param_type_id(
+    session: &PackageSemanticSession,
+    instance_index: i64,
+    param_index: i64
+) -> !i64 {
+    let len = try instance_param_len(session, instance_index);
+    if param_index < 0 or param_index >= len {
+        return error("function instance parameter index out of range");
+    }
+    return session.instance_param_type_ids.get(
+        try session.instance_param_starts.get(instance_index) + param_index
+    );
+}
+
+pub fn instance_result_type_id(
+    session: &PackageSemanticSession,
+    instance_index: i64
+) -> !i64 {
+    return session.instance_result_type_ids.get(instance_index);
+}
+
+fn canonical_type_is_concrete(
+    types: &package_type_resolution::CanonicalTypeFacts,
+    canonical_id: i64
+) -> !bool {
+    if canonical_id < 0 or canonical_id >= package_canonical_type_facts::len(types) {
+        return error("function instance canonical type identity out of range");
+    }
+    if try package_canonical_type_facts::kind(types, canonical_id) ==
+        package_type_resolution::type_kind_formal() {
+        return false;
+    }
+    let child_len = try package_canonical_type_facts::child_len(types, canonical_id);
+    var child_index = 0;
+    while child_index < child_len {
+        if !(try canonical_type_is_concrete(
+            types,
+            try package_canonical_type_facts::child(types, canonical_id, child_index)
+        )) {
+            return false;
+        }
+        child_index = child_index + 1;
+    }
+    return true;
+}
+
+fn key_matches(
+    session: &PackageSemanticSession,
+    key: &FunctionInstanceKey,
+    target: &package_function_identity::FunctionTarget,
+    bindings: &std::array::Array<package_call_facts::StaticBindingRecord>
+) -> !bool {
+    if key.target_component_id !=
+        package_function_identity::target_component_value(target) or
+        key.target_function_id !=
+        package_function_identity::target_function_value(target) or
+        key.binding_len != bindings.len() {
+        return false;
+    }
+    var binding_index = 0;
+    let stored_bindings = &session.static_bindings;
+    while binding_index < key.binding_len {
+        let stored = try stored_bindings.at(
+            key.binding_start + binding_index
+        );
+        let candidate = try bindings.at(binding_index);
+        if stored.kind != candidate.kind or
+            stored.canonical_type_id != candidate.canonical_type_id or
+            stored.value_bits != candidate.value_bits or
+            stored.function_component_id != candidate.function_component_id or
+            stored.function_id != candidate.function_id {
+            return false;
+        }
+        binding_index = binding_index + 1;
+    }
+    return true;
+}
+
+fn instance_matches(
+    session: &PackageSemanticSession,
+    instance_index: i64,
+    target: &package_function_identity::FunctionTarget,
+    bindings: &std::array::Array<package_call_facts::StaticBindingRecord>
+) -> !bool {
+    let instances = &session.instances;
+    let key = try instances.at(instance_index);
+    return key_matches(session, key, target, bindings);
+}
+
+fn register_instance(
+    session: &var PackageSemanticSession,
+    target: package_function_identity::FunctionTarget,
+    bindings: &std::array::Array<package_call_facts::StaticBindingRecord>,
+    param_type_ids: &std::array::Array<i64>,
+    result_type_id: i64,
+    requires_body: bool
+) -> !i64 {
+    var instance_index = 0;
+    while instance_index < session.instances.len() {
+        if try instance_matches(session, instance_index, &target, bindings) {
+            if try instance_param_len(session, instance_index) != param_type_ids.len() or
+                try instance_result_type_id(session, instance_index) != result_type_id {
+                return error("function instance ABI differs between equal instance keys");
+            }
+            var param = 0;
+            while param < param_type_ids.len() {
+                if try instance_param_type_id(session, instance_index, param) !=
+                    try param_type_ids.get(param) {
+                    return error("function instance ABI differs between equal instance keys");
+                }
+                param = param + 1;
+            }
+            if requires_body {
+                try session.instance_body_required.set(instance_index, true);
+            }
+            return instance_index;
+        }
+        instance_index = instance_index + 1;
+    }
+    try session.instances.reserve(1);
+    try session.static_bindings.reserve(bindings.len());
+    try session.instance_param_starts.reserve(1);
+    try session.instance_param_lens.reserve(1);
+    try session.instance_param_type_ids.reserve(param_type_ids.len());
+    try session.instance_result_type_ids.reserve(1);
+    try session.instance_body_required.reserve(1);
+    try session.pending_instance_indexes.reserve(1);
+    let binding_start = session.static_bindings.len();
+    var binding_index = 0;
+    while binding_index < bindings.len() {
+        let binding = try bindings.at(binding_index);
+        try session.static_bindings.append(StaticBinding {
+            kind: binding.kind,
+            canonical_type_id: binding.canonical_type_id,
+            value_bits: binding.value_bits,
+            function_component_id: binding.function_component_id,
+            function_id: binding.function_id
+        });
+        binding_index = binding_index + 1;
+    }
+    let new_index = session.instances.len();
+    let param_start = session.instance_param_type_ids.len();
+    var param = 0;
+    while param < param_type_ids.len() {
+        try session.instance_param_type_ids.append(try param_type_ids.get(param));
+        param = param + 1;
+    }
+    try session.instance_param_starts.append(param_start);
+    try session.instance_param_lens.append(param_type_ids.len());
+    try session.instance_result_type_ids.append(result_type_id);
+    try session.instances.append(FunctionInstanceKey {
+        instance_id: new_index,
+        target_component_id:
+            package_function_identity::target_component_value(&target),
+        target_function_id:
+            package_function_identity::target_function_value(&target),
+        binding_start: binding_start,
+        binding_len: bindings.len()
+    });
+    try session.instance_body_required.append(requires_body);
+    try session.pending_instance_indexes.append(new_index);
+    return new_index;
+}
+
+fn call_requires_instance_body(
+    calls: &package_call_facts::ResolvedCallTargets,
+    caller: &package_function_identity::FunctionTarget,
+    span_start: i64,
+    span_end: i64
+) -> !bool {
+    var owned_constructor_count = 0;
+    var index = 0;
+    while index < package_call_facts::owned_constructor_len(calls) {
+        let candidate_caller = try package_call_facts::owned_constructor_caller(
+            calls, index
+        );
+        if package_function_identity::same_target(
+            package_function_identity::copy_function_target(caller),
+            candidate_caller
+        ) and
+            try package_call_facts::owned_constructor_span_start(calls, index) ==
+                span_start and
+            try package_call_facts::owned_constructor_span_end(calls, index) ==
+                span_end {
+            owned_constructor_count = owned_constructor_count + 1;
+        }
+        index = index + 1;
+    }
+    if owned_constructor_count > 1 {
+        return error("duplicate owned constructor classification for function instance");
+    }
+    return owned_constructor_count == 0;
+}
+
+fn call_type_index(
+    calls: &package_call_facts::ResolvedCallTargets,
+    caller: &package_function_identity::FunctionTarget,
+    span_start: i64,
+    span_end: i64
+) -> !i64 {
+    var found = -1;
+    var index = 0;
+    while index < package_call_facts::call_type_len(calls) {
+        let candidate_caller = try package_call_facts::call_type_caller(calls, index);
+        if package_function_identity::same_target(
+            package_function_identity::copy_function_target(caller),
+            candidate_caller
+        ) and
+            try package_call_facts::call_type_span_start(calls, index) == span_start and
+            try package_call_facts::call_type_span_end(calls, index) == span_end {
+            if found >= 0 {
+                return error("duplicate function instance call type fact");
+            }
+            found = index;
+        }
+        index = index + 1;
+    }
+    if found < 0 { return error("function instance call type fact missing"); }
+    return found;
+}
+
+fn function_static_parameter_len(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    function_slot: i64
+) -> !i64 {
+    var result = package_catalog::function_type_parameter_len(
+        catalog, function_slot
+    );
+    var param = 0;
+    while param < package_catalog::function_param_len(catalog, function_slot) {
+        if try package_catalog::function_param_mode(
+            catalog, function_slot, param
+        ) == package_catalog::function_param_comptime_mode() {
+            result = result + 1;
+        }
+        param = param + 1;
+    }
+    return result;
+}
+
+// append_reachable_instances consumes the same exact resolved-call handoff and
+// body-emission selection as executable fact production. It therefore records
+// only generic calls in the selected package closure.
+pub fn append_reachable_instances(
+    session: &var PackageSemanticSession,
+    allocator: Allocator,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    calls: &package_call_facts::ResolvedCallTargets,
+    types: &package_type_resolution::CanonicalTypeFacts,
+    emitted: &package_dependency_graph::BodyEmissionRegistry
+) -> !void {
+    var call_index = 0;
+    while call_index < package_call_facts::resolved_call_len(calls) {
+        let record = try package_call_facts::resolved_call_record(calls, call_index);
+        let caller = package_function_identity::FunctionTarget {
+            component: package_function_identity::ComponentId {
+                value: record.caller_component_id
+            },
+            function: package_function_identity::FunctionId {
+                value: record.caller_function_id
+            }
+        };
+        if try package_dependency_graph::is_body_emitted(
+            emitted, catalog,
+            package_function_identity::copy_function_target(&caller)
+        ) {
+            let caller_slot = try package_catalog::target_slot(
+                catalog, package_function_identity::copy_function_target(&caller)
+            );
+            if try function_static_parameter_len(catalog, caller_slot) > 0 {
+                call_index = call_index + 1;
+                continue;
+            }
+            let target = package_function_identity::FunctionTarget {
+                component: package_function_identity::ComponentId {
+                    value: record.target_component_id
+                },
+                function: package_function_identity::FunctionId {
+                    value: record.target_function_id
+                }
+            };
+            let target_slot = try package_catalog::target_slot(
+                catalog, package_function_identity::copy_function_target(&target)
+            );
+            let expected = package_catalog::function_type_parameter_len(
+                catalog, target_slot
+            );
+            let comptime_param_count =
+                try function_static_parameter_len(catalog, target_slot) - expected;
+            if expected + comptime_param_count > 0 {
+                let type_call = try call_type_index(
+                    calls, &caller,
+                    try package_call_facts::resolved_call_span_start(calls, call_index),
+                    try package_call_facts::resolved_call_span_end(calls, call_index)
+                );
+                let actual_len = try package_call_facts::call_type_actual_len(
+                    calls, type_call
+                );
+                if actual_len != expected {
+                    return error(
+                        "generic function call requires exact static type arguments"
+                    );
+                }
+                let binding_len = try package_call_facts::call_static_binding_len(
+                    calls, type_call
+                );
+                if binding_len != expected + comptime_param_count {
+                    return error(
+                        "generic function call static binding layout mismatch"
+                    );
+                }
+                var bindings = std::array::Array<
+                    package_call_facts::StaticBindingRecord
+                >(allocator);
+                defer bindings.deinit();
+                var binding_index = 0;
+                while binding_index < binding_len {
+                    let binding = try package_call_facts::call_static_binding(
+                        calls, type_call, binding_index
+                    );
+                    if binding_index < expected and
+                        binding.kind != package_call_facts::static_binding_type_kind() {
+                        return error(
+                            "function type binding has invalid static kind"
+                        );
+                    }
+                    if binding_index >= expected and
+                        binding.kind == package_call_facts::static_binding_type_kind() {
+                        return error(
+                            "comptime parameter binding has invalid static kind"
+                        );
+                    }
+                    try bindings.append(binding);
+                    binding_index = binding_index + 1;
+                }
+                var type_values = std::array::Array<i64>(allocator);
+                defer type_values.deinit();
+                var argument = 0;
+                while argument < actual_len {
+                    let canonical_id = try package_call_facts::call_type_actual(
+                        calls, type_call, argument
+                    );
+                    if !(try canonical_type_is_concrete(types, canonical_id)) {
+                        return error(
+                            "generic function instance requires concrete canonical type values"
+                        );
+                    }
+                    let binding = try bindings.at(argument);
+                    if binding.canonical_type_id != canonical_id {
+                        return error(
+                            "function type actual and static binding differ"
+                        );
+                    }
+                    try type_values.append(canonical_id);
+                    argument = argument + 1;
+                }
+                var param_type_ids = std::array::Array<i64>(allocator);
+                defer param_type_ids.deinit();
+                let receiver_type_id = try package_call_facts::call_type_receiver(
+                    calls, type_call
+                );
+                if receiver_type_id >= 0 {
+                    try param_type_ids.append(receiver_type_id);
+                }
+                argument = 0;
+                while argument < try package_call_facts::call_type_explicit_len(
+                    calls, type_call
+                ) {
+                    try param_type_ids.append(
+                        try package_call_facts::call_type_explicit(
+                            calls, type_call, argument
+                        )
+                    );
+                    argument = argument + 1;
+                }
+                argument = 0;
+                while argument < param_type_ids.len() {
+                    if !(try canonical_type_is_concrete(
+                        types, try param_type_ids.get(argument)
+                    )) {
+                        return error(
+                            "function instance parameter ABI must be concrete"
+                        );
+                    }
+                    argument = argument + 1;
+                }
+                let result_type_id = try package_call_facts::call_type_result(
+                    calls, type_call
+                );
+                if !(try canonical_type_is_concrete(types, result_type_id)) {
+                    return error("function instance result ABI must be concrete");
+                }
+                let instance_index = try register_instance(
+                    session,
+                    target,
+                    &bindings,
+                    &param_type_ids,
+                    result_type_id,
+                    try call_requires_instance_body(
+                        calls,
+                        &caller,
+                        try package_call_facts::resolved_call_span_start(
+                            calls, call_index
+                        ),
+                        try package_call_facts::resolved_call_span_end(
+                            calls, call_index
+                        )
+                    )
+                );
+                let callee_id = try instance_id(session, instance_index);
+                try session.call_edges.append(CallEdge {
+                    caller_instance_id: -1,
+                    caller_component_id:
+                        package_function_identity::target_component_value(&caller),
+                    caller_function_id:
+                        package_function_identity::target_function_value(&caller),
+                    span_start: try package_call_facts::resolved_call_span_start(
+                        calls, call_index
+                    ),
+                    span_end: try package_call_facts::resolved_call_span_end(
+                        calls, call_index
+                    ),
+                    callee_instance_id: callee_id
+                });
+            }
+        }
+        call_index = call_index + 1;
+    }
+    var queue_index = 0;
+    while queue_index < pending_len(session) {
+        let caller_instance_index = try pending_instance_index(
+            session, queue_index
+        );
+        try append_instance_body_calls(
+            session,
+            allocator,
+            catalog,
+            calls,
+            types,
+            caller_instance_index
+        );
+        queue_index = queue_index + 1;
+    }
+    return;
+}
+
+fn append_instance_body_calls(
+    session: &var PackageSemanticSession,
+    allocator: Allocator,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    calls: &package_call_facts::ResolvedCallTargets,
+    types: &package_type_resolution::CanonicalTypeFacts,
+    caller_instance_index: i64
+) -> !void {
+    let caller = try instance_target(session, caller_instance_index);
+    let caller_slot = try package_catalog::target_slot(
+        catalog, package_function_identity::copy_function_target(&caller)
+    );
+    var caller_type_values = std::array::Array<i64>(allocator);
+    defer caller_type_values.deinit();
+    var type_value = 0;
+    while type_value < try instance_type_value_len(
+        session, caller_instance_index
+    ) {
+        try caller_type_values.append(
+            try instance_type_value(session, caller_instance_index, type_value)
+        );
+        type_value = type_value + 1;
+    }
+    var type_call = 0;
+    while type_call < package_call_facts::call_type_len(calls) {
+        let candidate_caller = try package_call_facts::call_type_caller(
+            calls, type_call
+        );
+        if package_function_identity::same_target(
+            package_function_identity::copy_function_target(&caller),
+            candidate_caller
+        ) {
+            try append_one_instance_body_call(
+                session,
+                allocator,
+                catalog,
+                calls,
+                types,
+                caller_instance_index,
+                caller_slot,
+                &caller_type_values,
+                type_call
+            );
+        }
+        type_call = type_call + 1;
+    }
+    return;
+}
+
+fn instantiate_for_instance(
+    types: &package_type_resolution::CanonicalTypeFacts,
+    template_id: i64,
+    caller_slot: i64,
+    caller_type_values: &std::array::Array<i64>
+) -> !i64 {
+    if template_id < 0 { return -1; }
+    return package_type_resolution::instantiate_canonical_template(
+        types, template_id, caller_slot, caller_type_values
+    );
+}
+
+fn append_one_instance_body_call(
+    session: &var PackageSemanticSession,
+    allocator: Allocator,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    calls: &package_call_facts::ResolvedCallTargets,
+    types: &package_type_resolution::CanonicalTypeFacts,
+    caller_instance_index: i64,
+    caller_slot: i64,
+    caller_type_values: &std::array::Array<i64>,
+    type_call: i64
+) -> !void {
+    let caller_target = try instance_target(session, caller_instance_index);
+    let caller_id = try instance_id(session, caller_instance_index);
+    let span_start = try package_call_facts::call_type_span_start(calls, type_call);
+    let span_end = try package_call_facts::call_type_span_end(calls, type_call);
+    let receiver = try instantiate_for_instance(
+        types,
+        try package_call_facts::call_type_receiver(calls, type_call),
+        caller_slot,
+        caller_type_values
+    );
+    let result = try instantiate_for_instance(
+        types,
+        try package_call_facts::call_type_result(calls, type_call),
+        caller_slot,
+        caller_type_values
+    );
+    if receiver >= 0 and !(try canonical_type_is_concrete(types, receiver)) {
+        return error("instance call receiver type is not concrete");
+    }
+    if !(try canonical_type_is_concrete(types, result)) {
+        return error("instance call result type is not concrete");
+    }
+    var runtime_ids = std::array::Array<i64>(allocator);
+    defer runtime_ids.deinit();
+    var index = 0;
+    while index < try package_call_facts::call_type_explicit_len(calls, type_call) {
+        try runtime_ids.append(try instantiate_for_instance(
+            types,
+            try package_call_facts::call_type_explicit(calls, type_call, index),
+            caller_slot,
+            caller_type_values
+        ));
+        if !(try canonical_type_is_concrete(
+            types, try runtime_ids.get(runtime_ids.len() - 1)
+        )) {
+            return error("instance call runtime argument type is not concrete");
+        }
+        index = index + 1;
+    }
+    var actual_ids = std::array::Array<i64>(allocator);
+    defer actual_ids.deinit();
+    index = 0;
+    while index < try package_call_facts::call_type_actual_len(calls, type_call) {
+        try actual_ids.append(try instantiate_for_instance(
+            types,
+            try package_call_facts::call_type_actual(calls, type_call, index),
+            caller_slot,
+            caller_type_values
+        ));
+        if !(try canonical_type_is_concrete(
+            types, try actual_ids.get(actual_ids.len() - 1)
+        )) {
+            return error("instance call type actual is not concrete");
+        }
+        index = index + 1;
+    }
+    try append_instance_call_type(
+        session,
+        caller_id,
+        span_start,
+        span_end,
+        receiver,
+        result,
+        &runtime_ids,
+        &actual_ids
+    );
+    let resolved_call = try resolved_call_index_at(
+        calls, &caller_target,
+        span_start, span_end
+    );
+    if resolved_call < 0 { return; }
+    let dependency = try package_call_facts::resolved_call_record(
+        calls, resolved_call
+    );
+    let target = package_function_identity::FunctionTarget {
+        component: package_function_identity::ComponentId {
+            value: dependency.target_component_id
+        },
+        function: package_function_identity::FunctionId {
+            value: dependency.target_function_id
+        }
+    };
+    let target_slot = try package_catalog::target_slot(
+        catalog, package_function_identity::copy_function_target(&target)
+    );
+    if try function_static_parameter_len(catalog, target_slot) == 0 { return; }
+    var bindings = std::array::Array<
+        package_call_facts::StaticBindingRecord
+    >(allocator);
+    defer bindings.deinit();
+    index = 0;
+    while index < try package_call_facts::call_static_binding_len(
+        calls, type_call
+    ) {
+        let template = try package_call_facts::call_static_binding(
+            calls, type_call, index
+        );
+        try bindings.append(package_call_facts::StaticBindingRecord {
+            kind: template.kind,
+            canonical_type_id: try instantiate_for_instance(
+                types,
+                template.canonical_type_id,
+                caller_slot,
+                caller_type_values
+            ),
+            value_bits: template.value_bits,
+            function_component_id: template.function_component_id,
+            function_id: template.function_id
+        });
+        let concrete_binding = try bindings.at(bindings.len() - 1);
+        if !(try canonical_type_is_concrete(
+            types, concrete_binding.canonical_type_id
+        )) {
+            return error("nested instance static binding type is not concrete");
+        }
+        index = index + 1;
+    }
+    var callee_type_values = std::array::Array<i64>(allocator);
+    defer callee_type_values.deinit();
+    let callee_type_len = package_catalog::function_type_parameter_len(
+        catalog, target_slot
+    );
+    index = 0;
+    while index < callee_type_len {
+        let binding = try bindings.at(index);
+        if binding.kind != package_call_facts::static_binding_type_kind() {
+            return error("nested function type binding kind mismatch");
+        }
+        try callee_type_values.append(binding.canonical_type_id);
+        index = index + 1;
+    }
+    var param_ids = std::array::Array<i64>(allocator);
+    defer param_ids.deinit();
+    if receiver >= 0 { try param_ids.append(receiver); }
+    index = 0;
+    while index < runtime_ids.len() {
+        try param_ids.append(try runtime_ids.get(index));
+        index = index + 1;
+    }
+    let callee_instance = try register_instance(
+        session,
+        target,
+        &bindings,
+        &param_ids,
+        result,
+        try call_requires_instance_body(
+            calls,
+            &caller_target,
+            span_start,
+            span_end
+        )
+    );
+    let callee_id = try instance_id(session, callee_instance);
+    try session.call_edges.append(CallEdge {
+        caller_instance_id: caller_id,
+        caller_component_id:
+            package_function_identity::target_component_value(
+                &caller_target
+            ),
+        caller_function_id:
+            package_function_identity::target_function_value(
+                &caller_target
+            ),
+        span_start: span_start,
+        span_end: span_end,
+        callee_instance_id: callee_id
+    });
+    return;
+}
+
+fn resolved_call_index_at(
+    calls: &package_call_facts::ResolvedCallTargets,
+    caller: &package_function_identity::FunctionTarget,
+    span_start: i64,
+    span_end: i64
+) -> !i64 {
+    var found = -1;
+    var index = 0;
+    while index < package_call_facts::resolved_call_len(calls) {
+        let record = try package_call_facts::resolved_call_record(calls, index);
+        if record.caller_component_id ==
+            package_function_identity::target_component_value(caller) and
+            record.caller_function_id ==
+                package_function_identity::target_function_value(caller) and
+            try package_call_facts::resolved_call_span_start(calls, index) ==
+                span_start and
+            try package_call_facts::resolved_call_span_end(calls, index) ==
+                span_end {
+            if found >= 0 {
+                return error("duplicate resolved call for instance body span");
+            }
+            found = index;
+        }
+        index = index + 1;
+    }
+    return found;
+}
+
+fn append_instance_call_type(
+    session: &var PackageSemanticSession,
+    caller_instance_id: i64,
+    span_start: i64,
+    span_end: i64,
+    receiver_type_id: i64,
+    result_type_id: i64,
+    runtime_ids: &std::array::Array<i64>,
+    actual_ids: &std::array::Array<i64>
+) -> !void {
+    if try instance_call_type_exists(
+        session, caller_instance_id, span_start, span_end
+    ) {
+        return error("duplicate concrete instance call type");
+    }
+    try session.instance_call_types.reserve(1);
+    try session.instance_call_type_ids.reserve(
+        runtime_ids.len() + actual_ids.len()
+    );
+    let runtime_start = session.instance_call_type_ids.len();
+    var index = 0;
+    while index < runtime_ids.len() {
+        try session.instance_call_type_ids.append(try runtime_ids.get(index));
+        index = index + 1;
+    }
+    let actual_start = session.instance_call_type_ids.len();
+    index = 0;
+    while index < actual_ids.len() {
+        try session.instance_call_type_ids.append(try actual_ids.get(index));
+        index = index + 1;
+    }
+    try session.instance_call_types.append(InstanceCallType {
+        caller_instance_id: caller_instance_id,
+        span_start: span_start,
+        span_end: span_end,
+        receiver_type_id: receiver_type_id,
+        result_type_id: result_type_id,
+        runtime_start: runtime_start,
+        runtime_len: runtime_ids.len(),
+        actual_start: actual_start,
+        actual_len: actual_ids.len()
+    });
+    return;
+}
+
+fn instance_call_type_exists(
+    session: &PackageSemanticSession,
+    caller_instance_id: i64,
+    span_start: i64,
+    span_end: i64
+) -> !bool {
+    let instance_calls = &session.instance_call_types;
+    var index = 0;
+    while index < instance_calls.len() {
+        let record = try instance_calls.at(index);
+        if record.caller_instance_id == caller_instance_id and
+            record.span_start == span_start and record.span_end == span_end {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+pub fn append_function_instance_facts(
+    out: &var std::string::String,
+    session: &PackageSemanticSession,
+    catalog: &package_catalog::PackageFunctionCatalog
+) -> !void {
+    var queue_index = 0;
+    while queue_index < pending_len(session) {
+        let instance_index = try pending_instance_index(session, queue_index);
+        let target = try instance_target(session, instance_index);
+        try out.append_bytes("function-instance ");
+        try std::fmt::append_i64(
+            out, package_function_identity::target_component_value(&target)
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(
+            out, package_function_identity::target_function_value(&target)
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, try instance_id(session, instance_index));
+        try out.append_byte(cast<u8>(32));
+        if try instance_requires_body(session, instance_index) {
+            try out.append_bytes("body");
+        } else {
+            try out.append_bytes("callsite");
+        }
+        let binding_count = try instance_static_binding_len(
+            session, instance_index
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, binding_count);
+        var binding_index = 0;
+        while binding_index < binding_count {
+            let binding = try instance_static_binding(
+                session, instance_index, binding_index
+            );
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(out, binding.kind);
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(out, binding.canonical_type_id);
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(out, binding.value_bits);
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(out, binding.function_component_id);
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(out, binding.function_id);
+            binding_index = binding_index + 1;
+        }
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("function-instance-symbol ");
+        try std::fmt::append_i64(
+            out, package_function_identity::target_component_value(&target)
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(
+            out, package_function_identity::target_function_value(&target)
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(
+            out, try instance_id(session, instance_index)
+        );
+        try out.append_byte(cast<u8>(32));
+        try append_instance_symbol(out, session, instance_index);
+        try out.append_byte(cast<u8>(10));
+        let id = try instance_id(session, instance_index);
+        var param = 0;
+        while param < try instance_param_len(session, instance_index) {
+            try out.append_bytes("function-instance-param ");
+            try std::fmt::append_i64(
+                out, package_function_identity::target_component_value(&target)
+            );
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(
+                out, package_function_identity::target_function_value(&target)
+            );
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(out, id);
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(out, param);
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(
+                out, try instance_param_type_id(session, instance_index, param)
+            );
+            try out.append_byte(cast<u8>(10));
+            param = param + 1;
+        }
+        try out.append_bytes("function-instance-result ");
+        try std::fmt::append_i64(
+            out, package_function_identity::target_component_value(&target)
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(
+            out, package_function_identity::target_function_value(&target)
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(
+            out, try instance_result_type_id(session, instance_index)
+        );
+        try out.append_byte(cast<u8>(10));
+        queue_index = queue_index + 1;
+    }
+    var concrete_call = 0;
+    let instance_calls = &session.instance_call_types;
+    while concrete_call < instance_calls.len() {
+        let call = try instance_calls.at(concrete_call);
+        try out.append_bytes("instance-call-type-ids ");
+        try std::fmt::append_i64(out, call.caller_instance_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, call.span_start);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, call.span_end);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, call.receiver_type_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, call.result_type_id);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, call.runtime_len);
+        var type_index = 0;
+        while type_index < call.runtime_len {
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(
+                out,
+                try session.instance_call_type_ids.get(
+                    call.runtime_start + type_index
+                )
+            );
+            type_index = type_index + 1;
+        }
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, call.actual_len);
+        type_index = 0;
+        while type_index < call.actual_len {
+            try out.append_byte(cast<u8>(32));
+            try std::fmt::append_i64(
+                out,
+                try session.instance_call_type_ids.get(
+                    call.actual_start + type_index
+                )
+            );
+            type_index = type_index + 1;
+        }
+        try out.append_byte(cast<u8>(10));
+        concrete_call = concrete_call + 1;
+    }
+    var call_index = 0;
+    let call_edges = &session.call_edges;
+    while call_index < call_edges.len() {
+        let edge = try call_edges.at(call_index);
+        let caller = package_function_identity::FunctionTarget {
+            component: package_function_identity::ComponentId {
+                value: edge.caller_component_id
+            },
+            function: package_function_identity::FunctionId {
+                value: edge.caller_function_id
+            }
+        };
+        if edge.caller_instance_id < 0 {
+            try out.append_bytes("body-call-instance ");
+            try package_dependency_graph::append_target_qualified_name(
+                out, catalog, caller
+            );
+        } else {
+            try out.append_bytes("instance-call-instance ");
+            try std::fmt::append_i64(out, edge.caller_instance_id);
+        }
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, edge.span_start);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, edge.span_end);
+        try out.append_byte(cast<u8>(32));
+        let instance_index = edge.callee_instance_id;
+        let target = try instance_target(session, instance_index);
+        try std::fmt::append_i64(
+            out, package_function_identity::target_component_value(&target)
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(
+            out, package_function_identity::target_function_value(&target)
+        );
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(
+            out, try instance_id(session, instance_index)
+        );
+        try out.append_byte(cast<u8>(32));
+        try append_instance_symbol(
+            out, session, instance_index
+        );
+        try out.append_byte(cast<u8>(10));
+        call_index = call_index + 1;
+    }
+    return;
+}
+
+fn append_instance_symbol(
+    out: &var std::string::String,
+    session: &PackageSemanticSession,
+    instance_index: i64
+) -> !void {
+    let target = try instance_target(session, instance_index);
+    try out.append_bytes("kizu_instance_");
+    try std::fmt::append_i64(
+        out, package_function_identity::target_component_value(&target)
+    );
+    try out.append_byte(cast<u8>(95));
+    try std::fmt::append_i64(
+        out, package_function_identity::target_function_value(&target)
+    );
+    var binding_index = 0;
+    while binding_index < try instance_static_binding_len(
+        session, instance_index
+    ) {
+        let binding = try instance_static_binding(
+            session, instance_index, binding_index
+        );
+        try out.append_byte(cast<u8>(95));
+        try std::fmt::append_i64(out, binding.kind);
+        try out.append_byte(cast<u8>(95));
+        try std::fmt::append_i64(out, binding.canonical_type_id);
+        if binding.kind == package_call_facts::static_binding_scalar_kind() {
+            try out.append_byte(cast<u8>(95));
+            try append_symbol_signed_i64(out, binding.value_bits);
+        } else {
+            if binding.kind ==
+                package_call_facts::static_binding_function_kind() {
+                try out.append_byte(cast<u8>(95));
+                try std::fmt::append_i64(out, binding.function_component_id);
+                try out.append_byte(cast<u8>(95));
+                try std::fmt::append_i64(out, binding.function_id);
+            }
+        }
+        binding_index = binding_index + 1;
+    }
+    return;
+}
+
+fn append_symbol_signed_i64(
+    out: &var std::string::String,
+    value: i64
+) -> !void {
+    if value < 0 {
+        try out.append_byte(cast<u8>(110));
+        if value == -9223372036854775807 - 1 {
+            return out.append_bytes("9223372036854775808");
+        }
+        return std::fmt::append_i64(out, 0 - value);
+    }
+    try out.append_byte(cast<u8>(112));
+    return std::fmt::append_i64(out, value);
+}
+
+impl PackageSemanticSession {
+    fn deinit(self: PackageSemanticSession) -> void {
+        self.instance_call_type_ids.deinit();
+        self.instance_call_types.deinit();
+        self.pending_instance_indexes.deinit();
+        self.call_edges.deinit();
+        self.instance_body_required.deinit();
+        self.instance_result_type_ids.deinit();
+        self.instance_param_type_ids.deinit();
+        self.instance_param_lens.deinit();
+        self.instance_param_starts.deinit();
+        self.static_bindings.deinit();
+        self.instances.deinit();
+        return;
+    }
+}

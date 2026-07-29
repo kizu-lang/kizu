@@ -3,6 +3,104 @@ import selfhost::backend::compiled_util;
 import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_mir_types;
 import selfhost::backend::compiled_type_lower;
+import selfhost::backend::compiled_type_resolver;
+import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::ir_index;
+import selfhost::abi::fixed_abi_contract;
+
+pub struct CommentStateAbi {
+    pub found: bool,
+    pub canonical_identity: []u8,
+    pub llvm_type: []u8,
+    pub last_index: i64,
+    pub at_line_start_index: i64,
+    pub after_comment_index: i64,
+}
+
+fn empty_comment_state_abi(ir_bytes: []u8) -> CommentStateAbi {
+    return CommentStateAbi {
+        found: false,
+        canonical_identity: ir_bytes[0..0],
+        llvm_type: ir_bytes[0..0],
+        last_index: -1,
+        at_line_start_index: -1,
+        after_comment_index: -1
+    };
+}
+
+// comment_state_abi_indexed recognises the comment driver's return payload by
+// exact canonical struct facts. The struct name and LLVM spelling are not part
+// of the contract; only the three scalar fields and their resolved ABIs are.
+pub fn comment_state_abi_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    state_type: &compiled_type_resolver::ResolvedType
+) -> !CommentStateAbi {
+    let last = try compiled_fact_lookup::lookup_struct_field_exact_indexed(
+        index, ir_bytes, state_type.canonical_identity, "last"
+    );
+    let at_line_start = try compiled_fact_lookup::lookup_struct_field_exact_indexed(
+        index, ir_bytes, state_type.canonical_identity, "at_line_start"
+    );
+    let after_comment = try compiled_fact_lookup::lookup_struct_field_exact_indexed(
+        index, ir_bytes, state_type.canonical_identity, "after_comment"
+    );
+    if !last.found or !at_line_start.found or !after_comment.found {
+        return empty_comment_state_abi(ir_bytes);
+    }
+    if last.index < 0 or last.index > 2 or
+        at_line_start.index < 0 or at_line_start.index > 2 or
+        after_comment.index < 0 or after_comment.index > 2 or
+        last.index == at_line_start.index or last.index == after_comment.index or
+        at_line_start.index == after_comment.index {
+        return empty_comment_state_abi(ir_bytes);
+    }
+    let last_type = try compiled_type_resolver::resolve_type_indexed(
+        index, ir_bytes, last.declaring_module, last.field_type
+    );
+    let at_line_start_type = try compiled_type_resolver::resolve_type_indexed(
+        index, ir_bytes, at_line_start.declaring_module, at_line_start.field_type
+    );
+    let after_comment_type = try compiled_type_resolver::resolve_type_indexed(
+        index, ir_bytes, after_comment.declaring_module, after_comment.field_type
+    );
+    let last_abi = fixed_abi_contract::from_llvm(last_type.abi);
+    let at_line_start_abi = fixed_abi_contract::from_llvm(at_line_start_type.abi);
+    let after_comment_abi = fixed_abi_contract::from_llvm(after_comment_type.abi);
+    if last_abi.kind != fixed_abi_contract::FixedAbiKind::Integer8 or
+        at_line_start_abi.kind != fixed_abi_contract::FixedAbiKind::Bool or
+        after_comment_abi.kind != fixed_abi_contract::FixedAbiKind::Bool {
+        return empty_comment_state_abi(ir_bytes);
+    }
+    return CommentStateAbi {
+        found: true,
+        canonical_identity: state_type.canonical_identity,
+        llvm_type: state_type.abi,
+        last_index: last.index,
+        at_line_start_index: at_line_start.index,
+        after_comment_index: after_comment.index
+    };
+}
+
+pub fn gate_custom_comment_state_abi() -> !void {
+    let facts = "type-llvm lib::format::State %test.comment.state
+struct-field lib::format::State 0 at_line_start bool
+struct-field lib::format::State 1 after_comment bool
+struct-field lib::format::State 2 last u8";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let state_type = try compiled_type_resolver::resolve_type_indexed(
+        &index, facts, "app::use::", "lib::format::State"
+    );
+    let abi = try comment_state_abi_indexed(&index, facts, &state_type);
+    print(abi.found);
+    print(abi.canonical_identity);
+    print(abi.llvm_type);
+    print(abi.last_index);
+    print(abi.at_line_start_index);
+    print(abi.after_comment_index);
+    return;
+}
 
 // compiled_struct_cf lowers a structured-control-flow formatter helper (an
 // insertion / scan-shift sort over a '&var std::array::Array<T>' parameter) onto the
@@ -119,6 +217,7 @@ fn cf_strip_ref_var(type_token: []u8) -> []u8 {
 // from the recorded parameter kizu type, so the element size is taken from <T> rather
 // than a hidden i64 special case.
 fn cf_array_element_llvm(
+    index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
@@ -138,7 +237,9 @@ fn cf_array_element_llvm(
         return error("compiled struct-cf: receiver is not a std::array::Array");
     }
     let element_kizu = lookup[prefix_len..lookup_len - 1];
-    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, element_kizu);
+    return try compiled_type_lower::kizu_type_to_llvm_indexed(
+        index, ir_bytes, module_prefix, element_kizu
+    );
 }
 
 fn cf_own_fail_msg_field(ret_type: []u8) -> i64 {
@@ -568,6 +669,7 @@ fn cf_emit_string_append_byte(
 // its declared <T> rather than a hidden i64 special case. The callee is the constructor type
 // (e.g. 'std::array::Array<i64>'); a callee that is not an Array<T> is an explicit error.
 fn cf_ctor_element_llvm(
+    index: &ir_index::IrIndex,
     ir_bytes: []u8,
     module_prefix: []u8,
     ctor_callee: []u8
@@ -576,7 +678,9 @@ fn cf_ctor_element_llvm(
     if std::mem::len(element_kizu) == 0 {
         return error("compiled struct-cf: array constructor is not a std::array::Array<T>");
     }
-    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, element_kizu);
+    return try compiled_type_lower::kizu_type_to_llvm_indexed(
+        index, ir_bytes, module_prefix, element_kizu
+    );
 }
 
 // cf_block_statement_count counts the "statement" children of a Block node.
@@ -1113,6 +1217,7 @@ fn cf_emit_cmp_call(
 // phis, the try-call comparator condition, and the Array<T>.get / Array<T>.set element
 // ABI. Any unsupported deviation is an explicit error.
 pub fn append_import_sort_function(
+    index: &ir_index::IrIndex,
     out: &var std::string::String,
     ir_bytes: []u8,
     function_name: []u8,
@@ -1152,7 +1257,7 @@ pub fn append_import_sort_function(
         return error("compiled struct-cf: array receiver must be a parameter");
     }
     let element_llvm = try cf_array_element_llvm(
-        ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
+        index, ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
     );
 
     let outer_body = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s1, "body", 0, bs);
@@ -1522,12 +1627,20 @@ fn cf_var_arg_type(
         return ptype;
     }
     if std::mem::equal_bytes(name, indices_var) {
-        return "%kizu.owned";
+        let owned = fixed_abi_contract::describe(
+            fixed_abi_contract::FixedAbiKind::Owned
+        );
+        return owned.llvm_name;
     }
     if std::mem::equal_bytes(name, index_var) {
         return "i64";
     }
     return error("compiled struct-cf: unresolved call-argument local");
+}
+
+fn is_owned_abi(llvm_name: []u8) -> bool {
+    let abi = fixed_abi_contract::from_llvm(llvm_name);
+    return abi.kind == fixed_abi_contract::FixedAbiKind::Owned;
 }
 
 // cf_emit_call_args emits a comma-separated '<type> %<name>' argument list off the AST. Each
@@ -1642,6 +1755,7 @@ fn cf_emit_void_try_call(
 // to the index-advance helper, a try-call to the in-place sort helper, and a '%kizu.error.owned'
 // success wrap returning the filled array. Any unsupported deviation is an explicit error.
 pub fn append_leading_import_function(
+    index: &ir_index::IrIndex,
     out: &var std::string::String,
     ir_bytes: []u8,
     function_name: []u8,
@@ -1662,7 +1776,9 @@ pub fn append_leading_import_function(
     try cf_expect(ir_bytes, function_name, s0_value, "Call",
         "compiled struct-cf: leading-import collector must open with the array constructor", bs);
     let ctor_callee = try ir_contract::body_call_callee_or_empty_from(ir_bytes, function_name, s0_value, bs);
-    let indices_element_llvm = try cf_ctor_element_llvm(ir_bytes, module_prefix, ctor_callee);
+    let indices_element_llvm = try cf_ctor_element_llvm(
+        index, ir_bytes, module_prefix, ctor_callee
+    );
     try cf_require_call_argc(ir_bytes, function_name, s0_value, 1,
         "compiled struct-cf: array constructor takes exactly the allocator argument", bs);
     let ctor_arg = try ir_contract::body_child_sequence_from(ir_bytes, function_name, s0_value, "arg", 0, bs);
@@ -1701,7 +1817,7 @@ pub fn append_leading_import_function(
         return error("compiled struct-cf: token array receiver must be a parameter");
     }
     let token_element_llvm = try cf_array_element_llvm(
-        ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
+        index, ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
     );
 
     // Scan body: a checked element read then the predicate if/else.
@@ -2024,7 +2140,7 @@ fn cf_emit_void_success_ret(
     return;
 }
 
-// cf_emit_comment_state_success builds the '%kizu.error.comment_format_state' success wrap for
+// cf_emit_comment_state_success builds the resolved error-union success wrap for
 // 'return CommentFormatState { last: <last>, at_line_start: <als>, after_comment: <ac> };' and
 // emits the 'ret'. The three scalar operands are SSA registers (the loop-head phi values that
 // exit the comment-preservation loop): last is the i8 byte, at_line_start / after_comment are the
@@ -2034,6 +2150,10 @@ fn cf_emit_void_success_ret(
 fn cf_emit_comment_state_success(
     out: &var std::string::String,
     ret_type: []u8,
+    state_type: []u8,
+    last_index: i64,
+    at_line_start_index: i64,
+    after_comment_index: i64,
     prefix: []u8,
     last_reg: []u8,
     als_reg: []u8,
@@ -2041,23 +2161,35 @@ fn cf_emit_comment_state_success(
 ) -> !void {
     try cf_w(out, "  %");
     try cf_w(out, prefix);
-    try cf_w(out, "_sv0 = insertvalue %kizu.selfhost.parser.format.comment_format_state poison, i8 %");
+    try cf_w(out, "_sv0 = insertvalue ");
+    try cf_w(out, state_type);
+    try cf_w(out, " poison, i8 %");
     try cf_w(out, last_reg);
-    try cf_l(out, ", 0");
+    try cf_w(out, ", ");
+    try std::fmt::append_i64(out, last_index);
+    try out.append_byte(cast<u8>(10));
     try cf_w(out, "  %");
     try cf_w(out, prefix);
-    try cf_w(out, "_sv1 = insertvalue %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, "_sv1 = insertvalue ");
+    try cf_w(out, state_type);
+    try cf_w(out, " %");
     try cf_w(out, prefix);
     try cf_w(out, "_sv0, i1 %");
     try cf_w(out, als_reg);
-    try cf_l(out, ", 1");
+    try cf_w(out, ", ");
+    try std::fmt::append_i64(out, at_line_start_index);
+    try out.append_byte(cast<u8>(10));
     try cf_w(out, "  %");
     try cf_w(out, prefix);
-    try cf_w(out, "_sv2 = insertvalue %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, "_sv2 = insertvalue ");
+    try cf_w(out, state_type);
+    try cf_w(out, " %");
     try cf_w(out, prefix);
     try cf_w(out, "_sv1, i1 %");
     try cf_w(out, ac_reg);
-    try cf_l(out, ", 2");
+    try cf_w(out, ", ");
+    try std::fmt::append_i64(out, after_comment_index);
+    try out.append_byte(cast<u8>(10));
     try cf_w(out, "  %");
     try cf_w(out, prefix);
     try cf_w(out, "_ok = insertvalue ");
@@ -2069,7 +2201,9 @@ fn cf_emit_comment_state_success(
     try cf_w(out, ret_type);
     try cf_w(out, " %");
     try cf_w(out, prefix);
-    try cf_w(out, "_ok, %kizu.selfhost.parser.format.comment_format_state %");
+    try cf_w(out, "_ok, ");
+    try cf_w(out, state_type);
+    try cf_w(out, " %");
     try cf_w(out, prefix);
     try cf_l(out, "_sv2, 1");
     try cf_w(out, "  ret ");
@@ -2168,6 +2302,7 @@ fn cf_emit_token_predicate(
 // private constants and materialized into %kizu.slice.u8 operands for the @kizu_rt_string_append_*
 // ABI. Any unsupported deviation is an explicit error.
 pub fn append_import_decl_function(
+    index: &ir_index::IrIndex,
     out: &var std::string::String,
     ir_bytes: []u8,
     function_name: []u8,
@@ -2184,7 +2319,7 @@ pub fn append_import_decl_function(
     if std::mem::len(out_name) == 0 {
         return error("compiled struct-cf: import emitter requires the out accumulator parameter");
     }
-    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, out_name), "%kizu.owned") {
+    if !is_owned_abi(cf_param_type_or_empty(params_spec, out_name)) {
         return error("compiled struct-cf: import emitter out accumulator must be a String handle");
     }
     let s0 = try ir_contract::body_child_sequence_from(ir_bytes, function_name, 0, "statement", 0, bs);
@@ -2232,7 +2367,7 @@ pub fn append_import_decl_function(
         return error("compiled struct-cf: token array receiver must be a parameter");
     }
     let token_element_llvm = try cf_array_element_llvm(
-        ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
+        index, ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
     );
 
     // Scan body: the token read, the token_text slice read, the early-return semicolon if, the
@@ -2493,6 +2628,7 @@ pub fn append_import_decl_function(
 // The append_import_decl callee symbol is AST-derived (no name dispatch); every operand is pinned
 // so any deviation is an explicit error.
 pub fn append_sorted_imports_function(
+    index: &ir_index::IrIndex,
     out: &var std::string::String,
     ir_bytes: []u8,
     function_name: []u8,
@@ -2509,7 +2645,7 @@ pub fn append_sorted_imports_function(
     if std::mem::len(out_name) == 0 {
         return error("compiled struct-cf: import cluster requires the out accumulator parameter");
     }
-    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, out_name), "%kizu.owned") {
+    if !is_owned_abi(cf_param_type_or_empty(params_spec, out_name)) {
         return error("compiled struct-cf: import cluster out accumulator must be a String handle");
     }
     let source_name = cf_nth_param_name(params_spec, 1);
@@ -2550,7 +2686,7 @@ pub fn append_sorted_imports_function(
         return error("compiled struct-cf: indices receiver must be a parameter");
     }
     let element_llvm = try cf_array_element_llvm(
-        ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
+        index, ir_bytes, function_name, module_prefix, params_spec, arr_name, bs
     );
 
     // Scan body: the index read, the append_import_decl try-call, the newline append, the increment.
@@ -2749,7 +2885,7 @@ pub fn append_append_indent_function(
     if std::mem::len(out_name) == 0 {
         return error("compiled struct-cf: indent emitter requires the out accumulator parameter");
     }
-    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, out_name), "%kizu.owned") {
+    if !is_owned_abi(cf_param_type_or_empty(params_spec, out_name)) {
         return error("compiled struct-cf: indent emitter out accumulator must be a String handle");
     }
     let depth_name = cf_nth_param_name(params_spec, 1);
@@ -3162,13 +3298,14 @@ fn cf_require_state_field(
 // '//' detection, a blank-before insertion guarded by out.len(), an indentation + comment-slice +
 // newline emit through the @kizu_rt_string_append_* ABI, and a blank-after insertion) and whose
 // else arm is a bare 'index = index + 1' advance, both re-merging at '%cp_latch', and a
-// 'return CommentFormatState { ... }' success wrap into the %kizu.error.comment_format_state error
+// 'return CommentFormatState { ... }' success wrap into its resolved error-union
 // union. The comment arm always exits with current_last = 10 / at_line_start = true /
 // after_comment = true, so the latch carries those constants; only at_line_start needs an in-arm
 // phi (read by the 'if !current_at_line_start' newline guard after the blank-before insertion).
-// Dispatched by its %kizu.error.comment_format_state return type. Any unsupported deviation is an
+// Dispatched by the exact three-field state payload facts. Any unsupported deviation is an
 // explicit error (issue 1165 / 1162).
 pub fn append_comment_preserve_function(
+    ir_lookup_index: &ir_index::IrIndex,
     out: &var std::string::String,
     ir_bytes: []u8,
     function_name: []u8,
@@ -3181,11 +3318,14 @@ pub fn append_comment_preserve_function(
 
     // ---- Parameters: out, source, start, end, depth, last, at_line_start ----
     let out_name = cf_nth_param_name(params_spec, 0);
-    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, out_name), "%kizu.owned") {
+    if !is_owned_abi(cf_param_type_or_empty(params_spec, out_name)) {
         return error("compiled struct-cf: comment driver out accumulator must be a String handle");
     }
     let source_name = cf_nth_param_name(params_spec, 1);
-    if !std::mem::equal_bytes(cf_param_type_or_empty(params_spec, source_name), "%kizu.slice.u8") {
+    let source_abi = fixed_abi_contract::from_llvm(
+        cf_param_type_or_empty(params_spec, source_name)
+    );
+    if source_abi.kind != fixed_abi_contract::FixedAbiKind::SliceU8 {
         return error("compiled struct-cf: comment driver source must be a '[]u8' slice");
     }
     let start_name = cf_nth_param_name(params_spec, 2);
@@ -3527,8 +3667,18 @@ pub fn append_comment_preserve_function(
     try cf_expect(ir_bytes, function_name, s5_value, "StructLiteralExpr",
         "compiled struct-cf: comment driver must return a CommentFormatState literal", bs);
     let s5_type = try ir_contract::sequence_fact_value_from(ir_bytes, "body-struct-literal ", function_name, s5_value, bs);
-    if !std::mem::equal_bytes(s5_type, "CommentFormatState") {
-        return error("compiled struct-cf: comment driver must return a CommentFormatState literal");
+    let state_type = try compiled_type_resolver::resolve_type_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, s5_type
+    );
+    let state_abi = try comment_state_abi_indexed(ir_lookup_index, ir_bytes, &state_type);
+    if !state_abi.found {
+        return error("compiled struct-cf: comment driver return payload has invalid state ABI");
+    }
+    let expected_return_type = try compiled_type_lower::error_union_inner_to_llvm_indexed(
+        ir_lookup_index, ir_bytes, module_prefix, s5_type
+    );
+    if !std::mem::equal_bytes(expected_return_type, llvm_return_type) {
+        return error("compiled struct-cf: comment driver error-union ABI mismatch");
     }
     if (try ir_contract::body_child_sequence_or_minus_one_from(ir_bytes, function_name, s5_value, "field", 3, bs)) >= 0 {
         return error("compiled struct-cf: CommentFormatState literal must have exactly three fields");
@@ -3678,7 +3828,12 @@ pub fn append_comment_preserve_function(
     try cf_l(out, "  br label %cp_head");
 
     try cf_l(out, "cp_exit:");
-    try cf_emit_comment_state_success(out, llvm_return_type, "cp_ret", cur_last_var, cur_als_var, cur_ac_var);
+    try cf_emit_comment_state_success(
+        out, llvm_return_type, state_abi.llvm_type,
+        state_abi.last_index, state_abi.at_line_start_index,
+        state_abi.after_comment_index,
+        "cp_ret", cur_last_var, cur_als_var, cur_ac_var
+    );
     try cf_l(out, "}");
     try out.append_byte(cast<u8>(10));
     return;

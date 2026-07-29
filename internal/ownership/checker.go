@@ -2513,7 +2513,8 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 		typ, err := c.checkArrayConstructor(typeArg, args, env)
 		return typ, true, err
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_pop", "std.builtin.array_get", "std.builtin.array_get_or_panic",
+		"std.builtin.array_pop", "std.builtin.array_pop_or_panic",
+		"std.builtin.array_get", "std.builtin.array_get_or_panic",
 		"std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env)
@@ -4683,8 +4684,12 @@ func (c *Checker) checkArrayMethod(
 	switch name {
 	case "append":
 		return c.checkArrayAppend(array, elem, args, env)
+	case "reserve":
+		return c.checkArrayCountMutation(array, name, args, env)
 	case "pop":
-		return c.checkArrayPop(array, elem, args)
+		return c.checkArrayPop(array, elem, name, args, true)
+	case "pop_or_panic":
+		return c.checkArrayPop(array, elem, name, args, false)
 	case "len", "capacity":
 		return c.checkArrayReadNoArgs(array, name, args)
 	case "get", "get_or_panic":
@@ -4725,7 +4730,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 		return "", errorf("array error: Array has no method `%s`", name)
 	}
 	switch name {
-	case "reserve", "truncate":
+	case "truncate":
 		return c.checkArrayCountMutation(array, name, args, env)
 	case "clear":
 		if array.hasAnyBorrow() {
@@ -4745,7 +4750,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 
 // isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
 func isStdArrayStorageMethod(name string) bool {
-	return name == "reserve" || name == "truncate" || name == "clear" || name == "as_bytes"
+	return name == "truncate" || name == "clear" || name == "as_bytes"
 }
 
 // checkArrayCountMutation validates one-count Array mutations.
@@ -4796,13 +4801,18 @@ func (c *Checker) checkArrayAppend(
 func (c *Checker) checkArrayPop(
 	array *binding,
 	elem string,
+	name string,
 	args []ast.Expression,
+	returnsError bool,
 ) (string, error) {
 	if array.hasAnyBorrow() {
-		return "", errorf("array error: `Array.pop` cannot run while array is borrowed")
+		return "", errorf("array error: `Array.%s` cannot run while array is borrowed", name)
 	}
 	if len(args) != 0 {
-		return "", errorf("array error: `Array.pop` expects 0 args, got %d", len(args))
+		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
+	}
+	if !returnsError {
+		return elem, nil
 	}
 	return "!" + elem, nil
 }

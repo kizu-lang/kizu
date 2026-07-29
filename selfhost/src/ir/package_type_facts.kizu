@@ -1,0 +1,460 @@
+import selfhost::parser;
+import selfhost::source;
+import selfhost::ir::intrinsic_type_contract;
+import selfhost::ir::package_catalog;
+import selfhost::ir::package_dependency_graph;
+import selfhost::ir::package_type_token;
+
+// This module is the package declaration -> canonical type fact boundary.
+// It intentionally owns no TypeIds and no LLVM layout policy: declarations
+// provide semantic identities and field/variant types; the backend resolves
+// those identities and computes demand-driven aggregate layouts.
+
+pub fn append_core_abi_representation_facts(out: &var std::string::String) -> !void {
+    var index = 0;
+    while index < intrinsic_type_contract::external_abi_len() {
+        let entry = try intrinsic_type_contract::external_abi_contract_at(index);
+        if entry.dependence != intrinsic_type_contract::ExternalAbiDependence::Fixed {
+            return error("core ABI facts: type-argument-dependent external ABI");
+        }
+        try append_abi_repr_fact(
+            out, entry.identity, entry.fixed_abi.llvm_name
+        );
+        if std::mem::len(entry.owned_family) > 0 {
+            try out.append_bytes("owned-container-family ");
+            try out.append_bytes(entry.identity);
+            try out.append_byte(cast<u8>(32));
+            try out.append_bytes(entry.owned_family);
+            try out.append_byte(cast<u8>(10));
+        }
+        if entry.nullable {
+            try append_nullable_abi_repr_fact(
+                out, entry.identity, entry.fixed_abi.llvm_name
+            );
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_nullable_abi_repr_fact(
+    out: &var std::string::String,
+    constructor: []u8,
+    abi: []u8
+) -> !void {
+    try out.append_bytes("nullable-abi-repr ");
+    try out.append_bytes(constructor);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(abi);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_abi_repr_fact(
+    out: &var std::string::String,
+    constructor: []u8,
+    abi: []u8
+) -> !void {
+    try out.append_bytes("abi-repr ");
+    try out.append_bytes(constructor);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(abi);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// Package-wide discovery is independent of function reachability. LLVM
+// declarations remain demand-driven from reachable type roots.
+pub fn append_package_component_type_facts(
+    out: &var std::string::String,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &parser::ParsedSourceFiles,
+    catalog: &package_catalog::PackageFunctionCatalog
+) -> !void {
+    var component = 0;
+    while component < package_catalog::component_len(catalog) {
+        let source_index = try parsed_files.source_indexes.get(component);
+        let file = try files.at(source_index);
+        let parsed_results = &parsed_files.parsed;
+        let parsed = try parsed_results.at(component);
+        var module_prefix = std::string::String(std::mem::page_allocator());
+        defer module_prefix.deinit();
+        try package_dependency_graph::append_component_prefix(
+            &var module_prefix, catalog, component
+        );
+        let module_prefix_bytes = module_prefix.as_bytes();
+        try append_component_declaration_type_facts(
+            out, file.text, parsed.ast, parsed.root, &module_prefix_bytes
+        );
+        component = component + 1;
+    }
+    return;
+}
+
+pub fn append_component_declaration_type_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    module_prefix: &[]u8
+) -> !void {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return append_declarations(
+            out, text, ast, program.declarations, module_prefix.*
+        );,
+        _ => return error("component type facts: root is not program");,
+    }
+    return error("component type facts: root is not program");
+}
+
+fn append_declarations(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    module_prefix: []u8
+) -> !void {
+    var names = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer names.deinit();
+    var index = 0;
+    while index < declarations.len {
+        let declaration = ast.get(try ast.child_at(declarations, index));
+        match declaration.data {
+            StructDecl(value) => try append_struct(
+                out, text, ast, module_prefix,
+                value.name, value.type_params, value.fields, &var names
+            );,
+            EnumDecl(value) => try append_enum(
+                out, text, ast, module_prefix, value.name, value.tags, &var names
+            );,
+            UnionDecl(value) => try append_union(
+                out, text, ast, module_prefix,
+                value.name, value.type_params, value.variants, &var names
+            );,
+            _ => index = index;,
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_struct(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    module_prefix: []u8,
+    name_node: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange,
+    fields: std::kizu::ast::ChildRange,
+    names: &var std::array::Array<[]u8>
+) -> !void {
+    let local_name = node_text(text, ast, name_node);
+    try claim_name(names, local_name);
+    if try intrinsic_type_contract::has_external_abi_declaration(
+        module_prefix, local_name
+    ) { return; }
+    var qualified = std::string::String(std::mem::page_allocator());
+    defer qualified.deinit();
+    try qualified.append_bytes(module_prefix);
+    try qualified.append_bytes(local_name);
+    let identity = qualified.as_bytes();
+    try append_declared_type_parameter_facts(
+        out, text, ast, &identity, type_params
+    );
+    return append_struct_name(out, text, ast, fields, &identity);
+}
+
+fn append_struct_name(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    fields: std::kizu::ast::ChildRange,
+    identity: &[]u8
+) -> !void {
+    try append_named_llvm_fact(out, "type-llvm ", identity);
+    var index = 0;
+    while index < fields.len {
+        let field = ast.get(try ast.child_at(fields, index));
+        match field.data {
+            Field(value) => try append_struct_field(
+                out, text, ast, identity, index, value.name, value.type_node
+            );,
+            _ => return error("component type facts: missing struct field");,
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_struct_field(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    identity: &[]u8,
+    index: i64,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId
+) -> !void {
+    try out.append_bytes("struct-field ");
+    try out.append_bytes(identity.*);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(node_text(text, ast, name));
+    try out.append_byte(cast<u8>(32));
+    try package_type_token::append_canonical(
+        out, node_text(text, ast, type_node)
+    );
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_enum(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    module_prefix: []u8,
+    name_node: std::kizu::ast::NodeId,
+    tags: std::kizu::ast::ChildRange,
+    names: &var std::array::Array<[]u8>
+) -> !void {
+    var qualified = try qualified_declaration_name(
+        text, ast, module_prefix, name_node, names
+    );
+    defer qualified.deinit();
+    let identity = qualified.as_bytes();
+    return append_enum_name(out, text, ast, tags, &identity);
+}
+
+fn append_enum_name(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    tags: std::kizu::ast::ChildRange,
+    identity: &[]u8
+) -> !void {
+    let value = identity.*;
+    try out.append_bytes("enum-type ");
+    try out.append_bytes(value);
+    try out.append_bytes(" i64");
+    try out.append_byte(cast<u8>(10));
+    var index = 0;
+    while index < tags.len {
+        try out.append_bytes("enum-variant ");
+        try out.append_bytes(value);
+        try out.append_byte(cast<u8>(32));
+        try out.append_bytes(node_text(text, ast, try ast.child_at(tags, index)));
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, index);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_union(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    module_prefix: []u8,
+    name_node: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange,
+    variants: std::kizu::ast::ChildRange,
+    names: &var std::array::Array<[]u8>
+) -> !void {
+    var qualified = try qualified_declaration_name(
+        text, ast, module_prefix, name_node, names
+    );
+    defer qualified.deinit();
+    let identity = qualified.as_bytes();
+    try append_declared_type_parameter_facts(
+        out, text, ast, &identity, type_params
+    );
+    return append_union_name(out, text, ast, variants, &identity);
+}
+
+fn append_declared_type_parameter_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    identity: &[]u8,
+    type_params: std::kizu::ast::ChildRange
+) -> !void {
+    var slot = 0;
+    while slot < type_params.len {
+        try out.append_bytes("declared-type-parameter ");
+        try out.append_bytes(identity.*);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, slot);
+        try out.append_byte(cast<u8>(32));
+        try out.append_bytes(node_text(
+            text, ast, try ast.child_at(type_params, slot)
+        ));
+        try out.append_byte(cast<u8>(10));
+        slot = slot + 1;
+    }
+    return;
+}
+
+fn append_union_name(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    variants: std::kizu::ast::ChildRange,
+    identity: &[]u8
+) -> !void {
+    try append_named_llvm_fact(out, "union-type ", identity);
+    var index = 0;
+    while index < variants.len {
+        let variant = ast.get(try ast.child_at(variants, index));
+        match variant.data {
+            UnionVariant(value) => try append_union_variant(
+                out, text, ast, identity, index, value.name, value.payload
+            );,
+            _ => return error("component type facts: missing union variant");,
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_union_variant(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    identity: &[]u8,
+    index: i64,
+    name: std::kizu::ast::NodeId,
+    payload_node: std::kizu::ast::NodeId
+) -> !void {
+    try out.append_bytes("union-variant ");
+    try out.append_bytes(identity.*);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(node_text(text, ast, name));
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    let payload = ast.get(payload_node);
+    match payload.data {
+        Empty => try out.append_bytes("void");,
+        _ => try package_type_token::append_canonical(
+            out, node_text(text, ast, payload_node)
+        );,
+    }
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn qualified_declaration_name(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    module_prefix: []u8,
+    name_node: std::kizu::ast::NodeId,
+    names: &var std::array::Array<[]u8>
+) -> !std::string::String {
+    let local_name = node_text(text, ast, name_node);
+    try claim_name(names, local_name);
+    var qualified = std::string::String(std::mem::page_allocator());
+    errdefer qualified.deinit();
+    try qualified.append_bytes(module_prefix);
+    try qualified.append_bytes(local_name);
+    return qualified;
+}
+
+fn claim_name(names: &var std::array::Array<[]u8>, name: []u8) -> !void {
+    var index = 0;
+    while index < names.len() {
+        if std::mem::equal_bytes(try names.get(index), name) {
+            return error("component type facts: duplicate declaration");
+        }
+        index = index + 1;
+    }
+    try names.append(name);
+    return;
+}
+
+fn append_named_llvm_fact(
+    out: &var std::string::String,
+    marker: []u8,
+    identity: &[]u8
+) -> !void {
+    try out.append_bytes(marker);
+    try out.append_bytes(identity.*);
+    try out.append_byte(cast<u8>(32));
+    try append_llvm_name(out, identity);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_llvm_name(out: &var std::string::String, identity: &[]u8) -> !void {
+    let value = identity.*;
+    try out.append_bytes("%kizu");
+    let len = std::mem::len(value);
+    let separator = last_separator(value);
+    if separator < 0 {
+        try out.append_byte(cast<u8>(46));
+        return append_camel_to_snake(out, value);
+    }
+    try append_module_segments(out, value[0..separator]);
+    try out.append_byte(cast<u8>(46));
+    return append_camel_to_snake(out, value[separator + 2..len]);
+}
+
+fn last_separator(value: []u8) -> i64 {
+    var index = std::mem::len(value) - 1;
+    while index >= 1 {
+        if value[index - 1] == cast<u8>(58) and value[index] == cast<u8>(58) {
+            return index - 1;
+        }
+        index = index - 1;
+    }
+    return -1;
+}
+
+fn append_module_segments(out: &var std::string::String, path: []u8) -> !void {
+    let len = std::mem::len(path);
+    var start = 0;
+    var first = true;
+    var index = 0;
+    while index <= len {
+        let at_end = index == len;
+        let separator = !at_end and index + 1 < len and
+            path[index] == cast<u8>(58) and path[index + 1] == cast<u8>(58);
+        if at_end or separator {
+            let segment = path[start..index];
+            if !(first and std::mem::equal_bytes(segment, "std")) {
+                try out.append_byte(cast<u8>(46));
+                try out.append_bytes(segment);
+            }
+            first = false;
+            if separator {
+                index = index + 2;
+                start = index;
+            } else { index = index + 1; }
+        } else { index = index + 1; }
+    }
+    return;
+}
+
+fn append_camel_to_snake(out: &var std::string::String, name: []u8) -> !void {
+    var index = 0;
+    while index < std::mem::len(name) {
+        let byte = name[index];
+        if byte >= cast<u8>(65) and byte <= cast<u8>(90) {
+            if index > 0 { try out.append_byte(cast<u8>(95)); }
+            try out.append_byte(byte + cast<u8>(32));
+        } else { try out.append_byte(byte); }
+        index = index + 1;
+    }
+    return;
+}
+
+fn node_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let span = ast.get(node_id).span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
+}

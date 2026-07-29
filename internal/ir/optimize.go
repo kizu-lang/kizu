@@ -108,6 +108,18 @@ func replaceArgs(instr *Instr, copies map[string]Value) {
 			instr.Incoming[idx].Value = replacement
 		}
 	}
+	for idx, field := range instr.Fields {
+		if replacement, ok := copies[field.Value.Name]; ok {
+			instr.Fields[idx].Value = replacement
+		}
+	}
+	for cleanupIdx, cleanup := range instr.Cleanups {
+		for argIdx, arg := range cleanup.Args {
+			if replacement, ok := copies[arg.Name]; ok {
+				instr.Cleanups[cleanupIdx].Args[argIdx] = replacement
+			}
+		}
+	}
 }
 
 // replaceTerminatorArgs applies copy propagation to terminators.
@@ -130,6 +142,14 @@ func usedValues(fn *Function) map[string]bool {
 			}
 			for _, incoming := range instr.Incoming {
 				used[incoming.Value.Name] = true
+			}
+			for _, field := range instr.Fields {
+				used[field.Value.Name] = true
+			}
+			for _, cleanup := range instr.Cleanups {
+				for _, arg := range cleanup.Args {
+					used[arg.Name] = true
+				}
 			}
 		}
 		used[block.Terminator.Value.Name] = true

@@ -391,8 +391,8 @@ func assignedNames(block *ast.BlockStmt) map[string]bool {
 func collectAssigned(stmt ast.Statement, names map[string]bool) {
 	switch s := stmt.(type) {
 	case *ast.AssignStmt:
-		if ident, ok := s.Target.(*ast.IdentExpr); ok {
-			names[ident.Name] = true
+		if name, ok := assignTargetRoot(s.Target); ok {
+			names[name] = true
 		}
 	case *ast.IfStmt:
 		collectBlockAssigned(s.Consequence, names)
@@ -416,6 +416,26 @@ func collectAssigned(stmt ast.Statement, names map[string]bool) {
 		}
 	case *ast.BlockStmt:
 		collectBlockAssigned(s, names)
+	}
+}
+
+// assignTargetRoot returns the binding an assignment target ultimately rebinds.
+// A field of a value receiver rebuilds the receiver aggregate up to its root
+// binding, so the root needs a loop header phi exactly like a direct assignment.
+// A field of a borrowed receiver stores through the borrow and leaves the root
+// SSA value alone; naming it here only adds a phi whose incoming values agree.
+func assignTargetRoot(target ast.Expression) (string, bool) {
+	for {
+		switch t := target.(type) {
+		case *ast.IdentExpr:
+			return t.Name, true
+		case *ast.FieldExpr:
+			target = t.Receiver
+		case *ast.DerefExpr:
+			target = t.Receiver
+		default:
+			return "", false
+		}
 	}
 }
 

@@ -81,6 +81,8 @@ func (e *emitter) writeArrayInstr(instr *ir.Instr) error {
 		return e.writeArrayReserve(instr)
 	case "array.pop":
 		return e.writeArrayPop(instr)
+	case "array.pop_or_panic":
+		return e.writeArrayPopOrPanic(instr)
 	case "array.get":
 		return e.writeArrayGet(instr)
 	case "array.get_or_panic":
@@ -176,6 +178,22 @@ func (e *emitter) writeArrayPop(instr *ir.Instr) error {
 	ptrName := localName(instr.Result.Name) + ".ptr"
 	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s)\n", ptrName, array.operand)
 	e.writeArrayOptionalLoadResult(instr, ptrName, arrayPopMessageGlobal, len(arrayPopMessage))
+	return nil
+}
+
+// writeArrayPopOrPanic moves the last element out or traps on an empty Array.
+func (e *emitter) writeArrayPopOrPanic(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: array.pop_or_panic expects Array<T> -> T")
+	}
+	array := e.value(instr.Args[0])
+	ptrName := localName(instr.Result.Name) + ".ptr"
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_pop(ptr %s)\n", ptrName, array.operand)
+	e.writeNullTrap(ptrName, "array.pop.panic")
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n",
+		resultName, e.llvmType(instr.Result.Type), ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 

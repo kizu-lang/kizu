@@ -1,0 +1,192 @@
+import selfhost::abi::fixed_abi_contract;
+import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::compiled_type_resolver;
+import selfhost::backend::compiled_util;
+import selfhost::backend::ir_index;
+
+// Layout is the closed, explicit value-layout result used by tagged-union
+// inline storage. Unsupported or recursive by-value shapes fail instead of
+// being guessed as pointers.
+pub struct Layout {
+    pub size: i64,
+    pub alignment: i64,
+}
+
+pub struct UnionVariants {
+    pub names: std::array::Array<[]u8>,
+    pub tags: std::array::Array<i64>,
+    pub types: std::array::Array<[]u8>,
+}
+
+impl UnionVariants {
+    fn deinit(self: UnionVariants) -> void {
+        self.types.deinit();
+        self.tags.deinit();
+        self.names.deinit();
+    }
+}
+
+pub fn collect_union_variants(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    identity: []u8
+) -> !UnionVariants {
+    let allocator = std::mem::page_allocator();
+    var variants = UnionVariants {
+        names: std::array::Array<[]u8>(allocator),
+        tags: std::array::Array<i64>(allocator),
+        types: std::array::Array<[]u8>(allocator)
+    };
+    errdefer variants.deinit();
+    // An empty lookup validates the complete owner once. Variant names cannot
+    // be empty, so a valid declaration returns a normal not-found result.
+    let validation = try compiled_type_resolver::resolve_union_variant_indexed(
+        index, facts, identity, facts[0..0]
+    );
+    let prefix = "union-variant ";
+    var entry = ir_index::first_matching_entry(index, facts, prefix, "", identity);
+    while ir_index::entry_matches_query(index, facts, entry, prefix, "", identity) {
+        let parsed = try compiled_type_resolver::parse_union_variant_entry(
+            index, facts, entry
+        );
+        try variants.names.append(parsed.name);
+        try variants.tags.append(parsed.tag);
+        try variants.types.append(parsed.payload_kizu);
+        entry = entry + 1;
+    }
+    return variants;
+}
+
+pub fn union_payload_capacity(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    identity: []u8
+) -> !i64 {
+    var visiting = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer visiting.deinit();
+    return try union_capacity(index, facts, identity, &var visiting);
+}
+
+fn layout_type(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    module_prefix: []u8,
+    spelling: []u8,
+    visiting: &var std::array::Array<[]u8>
+) -> !Layout {
+    if std::mem::len(spelling) == 0 or spelling[0] == cast<u8>(33) {
+        return error("compiled union layout: unsupported inline type");
+    }
+    let resolved = try compiled_type_resolver::resolve_type_indexed(
+        index, facts, module_prefix, spelling
+    );
+    let abi = resolved.abi;
+    let fixed_abi = fixed_abi_contract::from_llvm(abi);
+    if fixed_abi.kind != fixed_abi_contract::FixedAbiKind::Missing {
+        return layout(fixed_abi.size, fixed_abi.alignment);
+    }
+
+    let nominal = try compiled_type_resolver::exact_type_llvm_indexed(
+        index, facts, resolved.canonical_identity
+    );
+    let union_type = try compiled_type_resolver::exact_union_type_indexed(
+        index, facts, resolved.canonical_identity
+    );
+    if nominal.found and union_type.found {
+        return error("compiled union layout: conflicting aggregate owner");
+    }
+    if nominal.found {
+        return try struct_layout(
+            index, facts, resolved.canonical_identity, visiting
+        );
+    }
+    if union_type.found {
+        let capacity = try union_capacity(
+            index, facts, resolved.canonical_identity, visiting
+        );
+        return layout(round_up(8 + capacity, 8), 8);
+    }
+    return error("compiled union layout: unknown inline representation");
+}
+
+fn struct_layout(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    identity: []u8,
+    visiting: &var std::array::Array<[]u8>
+) -> !Layout {
+    try push_identity(visiting, identity);
+    let field_count = try compiled_fact_lookup::validate_struct_field_owner_indexed(
+        index, facts, identity
+    );
+    let prefix = "struct-field ";
+    var entry = ir_index::first_matching_entry(index, facts, prefix, "", identity);
+    var size = 0;
+    var alignment = 1;
+    var expected = 0;
+    while expected < field_count {
+        let field = try compiled_fact_lookup::parse_struct_field_entry(
+            index, facts, entry
+        );
+        let field_layout = try layout_type(
+            index, facts, compiled_util::module_prefix_of(identity),
+            field.field_type, visiting
+        );
+        size = round_up(size, field_layout.alignment) + field_layout.size;
+        if field_layout.alignment > alignment { alignment = field_layout.alignment; }
+        expected = expected + 1;
+        entry = entry + 1;
+    }
+    let ignored = try visiting.pop();
+    return layout(round_up(size, alignment), alignment);
+}
+
+fn union_capacity(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    identity: []u8,
+    visiting: &var std::array::Array<[]u8>
+) -> !i64 {
+    try push_identity(visiting, identity);
+    var variants = try collect_union_variants(index, facts, identity);
+    defer variants.deinit();
+    var capacity = 0;
+    var payload_index = 0;
+    while payload_index < variants.types.len() {
+        let payload = try variants.types.get(payload_index);
+        let payload_layout = try layout_type(
+            index, facts, compiled_util::module_prefix_of(identity), payload, visiting
+        );
+        if payload_layout.alignment > 8 {
+            return error("compiled union layout: payload alignment exceeds ABI");
+        }
+        if payload_layout.size > capacity { capacity = payload_layout.size; }
+        payload_index = payload_index + 1;
+    }
+    let ignored = try visiting.pop();
+    return capacity;
+}
+
+fn push_identity(
+    visiting: &var std::array::Array<[]u8>,
+    identity: []u8
+) -> !void {
+    var index = 0;
+    while index < visiting.len() {
+        if std::mem::equal_bytes(try visiting.get(index), identity) {
+            return error("compiled union layout: recursive by-value aggregate");
+        }
+        index = index + 1;
+    }
+    try visiting.append(identity);
+    return;
+}
+
+fn layout(size: i64, alignment: i64) -> Layout {
+    return Layout { size: size, alignment: alignment };
+}
+
+fn round_up(value: i64, alignment: i64) -> i64 {
+    if alignment <= 1 { return value; }
+    return ((value + alignment - 1) / alignment) * alignment;
+}

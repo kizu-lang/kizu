@@ -71,6 +71,59 @@ entry:
 	}
 }
 
+func TestOptimizeKeepsStructFieldAndCleanupOperandsLive(t *testing.T) {
+	module := &Module{Functions: []*Function{{Name: "main", Return: "Holder"}}}
+	fn := module.Functions[0]
+	block := &Block{Name: "entry"}
+	fn.Blocks = append(fn.Blocks, block)
+	owned := Value{Name: "%1", Type: "std::array::Array<u8>"}
+	copyValue := Value{Name: "%2", Type: "std::array::Array<u8>"}
+	holder := Value{Name: "%3", Type: "Holder"}
+	block.Instrs = []*Instr{
+		{Result: owned, Op: "array.new"},
+		{Result: copyValue, Op: "id", Args: []Value{owned}},
+		{
+			Result: holder,
+			Op:     "struct.new",
+			Fields: []FieldArg{{Name: "bytes", Value: copyValue}},
+			Cleanups: []Cleanup{{
+				Op:   "array.deinit",
+				Args: []Value{copyValue},
+			}},
+		},
+	}
+	block.Terminator = Terminator{Op: "return", Value: holder}
+
+	Optimize(module)
+
+	if len(block.Instrs) != 2 {
+		t.Fatalf("optimized instruction count = %d, want producer + struct", len(block.Instrs))
+	}
+	if got := block.Instrs[1].Fields[0].Value.Name; got != owned.Name {
+		t.Fatalf("struct field copy propagation = %q, want %q", got, owned.Name)
+	}
+	if got := block.Instrs[1].Cleanups[0].Args[0].Name; got != owned.Name {
+		t.Fatalf("cleanup copy propagation = %q, want %q", got, owned.Name)
+	}
+}
+
+// TestLowerArrayPopOrPanicPreservesMoveAndTrapOperation fixes the IR boundary.
+func TestLowerArrayPopOrPanicPreservesMoveAndTrapOperation(t *testing.T) {
+	module := lowerSource(t, `fn take(values: std::array::Array<i64>) -> i64 {
+    let value = values.pop_or_panic();
+    values.deinit();
+    return value;
+}
+fn main() {}`)
+	got := Dump(module)
+	if !strings.Contains(got, "array.pop_or_panic") {
+		t.Fatalf("lowered IR missing array.pop_or_panic:\n%s", got)
+	}
+	if strings.Contains(got, "array.pop:") {
+		t.Fatalf("trap variant collapsed to recoverable pop:\n%s", got)
+	}
+}
+
 // TestLowerNamespaceQualifiedFunctionCall keeps std-style namespace calls from
 // being lowered as field or method access on a local `std` value.
 func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {

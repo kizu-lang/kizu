@@ -113,6 +113,29 @@ fn main() -> void {
 	}
 }
 
+// TestRunForwardedMutableStructBorrow checks that forwarding an existing
+// mutable borrow preserves its owner instead of creating a reference chain.
+func TestRunForwardedMutableStructBorrow(t *testing.T) {
+	got := runSource(t, `struct State {
+    value: i64,
+}
+fn set(state: &var State) -> void {
+    state.value = 1;
+}
+fn forward(state: &var State) -> void {
+    set(state);
+}
+fn main() -> void {
+    var state = State { value: 0 };
+    forward(&var state);
+    print(state.value);
+}`)
+	want := "1\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunExplicitFieldBorrowProjection checks call-scoped field borrows at runtime.
 func TestRunExplicitFieldBorrowProjection(t *testing.T) {
 	got := runSource(t, `struct Pair {
@@ -423,6 +446,52 @@ fn main() -> !void {
 	want := "second\nsecond\nfirst\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestRunArrayPopOrPanicMovesAndDeinitDropsRemaining checks the non-error move path.
+func TestRunArrayPopOrPanicMovesAndDeinitDropsRemaining(t *testing.T) {
+	got := runSource(t, `struct Trace {
+    label: []u8,
+}
+impl Trace {
+    fn deinit(self: Trace) -> void {
+        print(self.label);
+    }
+}
+fn main() -> void {
+    let allocator = std::builtin::mem_page_allocator();
+    let traces = std::builtin::array<Trace>(allocator);
+    let first = Trace { label: "first" };
+    let second = Trace { label: "second" };
+    let first_result = std::builtin::array_append<Trace>(traces, first);
+    try first_result;
+    let second_result = std::builtin::array_append<Trace>(traces, second);
+    try second_result;
+    let last = std::builtin::array_pop_or_panic<Trace>(traces);
+    print(last.label);
+    last.deinit();
+    std::builtin::array_deinit<Trace>(traces);
+}`)
+	want := "second\nsecond\nfirst\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestRunArrayPopOrPanicTrapsOnEmpty fixes the invariant-failure contract.
+func TestRunArrayPopOrPanicTrapsOnEmpty(t *testing.T) {
+	_, err := parseAndRun(`fn main() -> void {
+    let allocator = std::builtin::mem_page_allocator();
+    let values = std::builtin::array<i64>(allocator);
+    let value = std::builtin::array_pop_or_panic<i64>(values);
+    print(value);
+}`)
+	if err == nil {
+		t.Fatal("expected empty pop trap")
+	}
+	if !strings.Contains(err.Error(), "Array.pop_or_panic empty array") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 

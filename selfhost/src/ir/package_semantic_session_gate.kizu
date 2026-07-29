@@ -1,0 +1,106 @@
+import selfhost::parser;
+import selfhost::source;
+import selfhost::ir::package_call_resolution;
+import selfhost::ir::package_catalog_collect;
+import selfhost::ir::package_dependency_graph;
+import selfhost::ir::package_exact_lookup;
+import selfhost::ir::package_function_identity;
+import selfhost::ir::package_semantic_session;
+
+fn gate_source_file(text: []u8) -> source::SourceFile {
+    return source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len("instance/gate"),
+        path: "instance/gate",
+        text: text
+    };
+}
+
+// This gate drives the production parser, package catalog, exact call resolver,
+// canonical type store, body selection, and semantic instance session.
+pub fn ordered_reachable_instance_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(gate_source_file(
+        "fn marker<A, B>() -> void {}
+fn root() -> void {
+    marker<i64, bool>();
+    marker<i64, bool>();
+    marker<bool, i64>();
+}"
+    ));
+    var parsed = try parser::parse_source_files(allocator, &files);
+    var catalog = try package_catalog_collect::collect_from_parsed_files(
+        allocator, &files, &parsed
+    );
+    defer catalog.deinit();
+    var resolved = try package_call_resolution::resolve_package_calls_with_types(
+        allocator, &files, &parsed, &catalog
+    );
+    defer resolved.deinit();
+    var emitted = try package_dependency_graph::body_emission_registry(
+        allocator, &catalog
+    );
+    defer emitted.deinit();
+    let root = try package_exact_lookup::resolve_call(
+        &catalog, "selfhost", "instance/gate", "root"
+    );
+    std::testing::expect(try package_dependency_graph::record_body_emission(
+        &var emitted, &catalog, &root
+    ));
+    var session = package_semantic_session::init(allocator);
+    defer session.deinit();
+    try package_semantic_session::append_reachable_instances(
+        &var session,
+        allocator,
+        &catalog,
+        &resolved.calls,
+        &resolved.canonical_types,
+        &emitted
+    );
+
+    std::testing::expect_equal<i64>(
+        2, package_semantic_session::instance_len(&session)
+    );
+    std::testing::expect_equal<i64>(
+        2, package_semantic_session::pending_len(&session)
+    );
+    let marker = try package_exact_lookup::resolve_call(
+        &catalog, "selfhost", "instance/gate", "marker"
+    );
+    let first_target = try package_semantic_session::instance_target(&session, 0);
+    let second_target = try package_semantic_session::instance_target(&session, 1);
+    std::testing::expect(package_function_identity::same_target(
+        package_function_identity::copy_function_target(&marker), first_target
+    ));
+    std::testing::expect(package_function_identity::same_target(
+        package_function_identity::copy_function_target(&marker), second_target
+    ));
+    std::testing::expect_equal<i64>(
+        2, try package_semantic_session::instance_type_value_len(&session, 0)
+    );
+    std::testing::expect_equal<i64>(
+        2, try package_semantic_session::instance_type_value_len(&session, 1)
+    );
+    let first_a = try package_semantic_session::instance_type_value(&session, 0, 0);
+    let first_b = try package_semantic_session::instance_type_value(&session, 0, 1);
+    let second_a = try package_semantic_session::instance_type_value(&session, 1, 0);
+    let second_b = try package_semantic_session::instance_type_value(&session, 1, 1);
+    std::testing::expect(first_a != first_b);
+    std::testing::expect_equal<i64>(first_a, second_b);
+    std::testing::expect_equal<i64>(first_b, second_a);
+
+    var facts = std::string::String(allocator);
+    defer facts.deinit();
+    try package_semantic_session::append_function_instance_facts(
+        &var facts, &session, &catalog
+    );
+    let fact_bytes = facts.as_bytes();
+    print(fact_bytes);
+    try parser::deinit_parsed_source_files(parsed);
+    return;
+}

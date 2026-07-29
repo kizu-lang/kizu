@@ -1,0 +1,404 @@
+import selfhost::ir::package_catalog;
+import selfhost::ir::package_function_identity;
+import selfhost::ir::package_type_token;
+
+pub struct DependencyGraph {
+    caller_component_ids: std::array::Array<i64>,
+    caller_function_ids: std::array::Array<i64>,
+    target_component_ids: std::array::Array<i64>,
+    target_function_ids: std::array::Array<i64>,
+    adjacency_starts: std::array::Array<i64>,
+    adjacency_lens: std::array::Array<i64>,
+}
+
+// ResolvedCallTargets is the checker/resolver-owned per-call-node handoff.
+// NodeId values are used only while their owning parsed AST remains alive.
+
+pub struct FunctionTargetQueue {
+    component_ids: std::array::Array<i64>,
+    function_ids: std::array::Array<i64>,
+    enqueued: std::array::Array<i64>,
+}
+
+// BodyEmissionRegistry is the exact package-function set whose executable body
+// facts were selected for this artifact. Reachability and body emission are
+// deliberately separate concepts: only this registry may gate per-body ABI
+// handoff facts.
+pub struct BodyEmissionRegistry {
+    slots: std::array::Array<i64>,
+}
+
+pub fn body_emission_registry(allocator: Allocator, catalog: &package_catalog::PackageFunctionCatalog) -> !BodyEmissionRegistry {
+    var emitted = BodyEmissionRegistry { slots: std::array::Array<i64>(allocator) };
+    errdefer emitted.deinit();
+    var index = 0;
+    while index < package_catalog::function_len(catalog) {
+        try emitted.slots.append(0);
+        index = index + 1;
+    }
+    return emitted;
+}
+
+pub fn record_body_emission(
+    emitted: &var BodyEmissionRegistry,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    target: &package_function_identity::FunctionTarget
+) -> !bool {
+    let slot = try package_catalog::target_slot(catalog, package_function_identity::copy_function_target(target));
+    if try emitted.slots.get(slot) != 0 { return false; }
+    try emitted.slots.set(slot, 1);
+    return true;
+}
+
+pub fn is_body_emitted(
+    emitted: &BodyEmissionRegistry,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    target: package_function_identity::FunctionTarget
+) -> !bool {
+    return try emitted.slots.get(try package_catalog::target_slot(catalog, target)) != 0;
+}
+
+
+pub fn function_target_queue(allocator: Allocator, catalog: &package_catalog::PackageFunctionCatalog) -> !FunctionTargetQueue {
+    var queue = FunctionTargetQueue {
+        component_ids: std::array::Array<i64>(allocator),
+        function_ids: std::array::Array<i64>(allocator),
+        enqueued: std::array::Array<i64>(allocator)
+    };
+    errdefer queue.deinit();
+    var index = 0;
+    while index < package_catalog::function_len(catalog) {
+        try queue.enqueued.append(0);
+        index = index + 1;
+    }
+    return queue;
+}
+
+pub fn queue_len(queue: &FunctionTargetQueue) -> i64 {
+    return queue.component_ids.len();
+}
+
+pub fn queue_target(queue: &FunctionTargetQueue, index: i64) -> !package_function_identity::FunctionTarget {
+    return package_function_identity::FunctionTarget {
+        component: package_function_identity::ComponentId { value: try queue.component_ids.get(index) },
+        function: package_function_identity::FunctionId { value: try queue.function_ids.get(index) }
+    };
+}
+
+pub fn queue_target_component_value(
+    queue: &FunctionTargetQueue,
+    index: i64
+) -> !i64 {
+    return queue.component_ids.get(index);
+}
+
+
+pub fn queue_append(queue: &var FunctionTargetQueue, catalog: &package_catalog::PackageFunctionCatalog, target: package_function_identity::FunctionTarget) -> !void {
+    let component_id = package_function_identity::target_component_value(&target);
+    let function_id = package_function_identity::target_function_value(&target);
+    let slot = try package_catalog::target_slot(catalog, target);
+    if try queue.enqueued.get(slot) == 0 {
+        try queue.component_ids.append(component_id);
+        try queue.function_ids.append(function_id);
+        try queue.enqueued.set(slot, 1);
+    }
+    return;
+}
+
+pub fn queue_append_dependencies(
+    queue: &var FunctionTargetQueue,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    graph: &DependencyGraph,
+    function: package_function_identity::FunctionTarget
+) -> !void {
+    return append_closure_targets(
+        function, graph, catalog, queue
+    );
+}
+
+pub fn append_target_qualified_name(
+    out: &var std::string::String,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    target: package_function_identity::FunctionTarget
+) -> !void {
+    let index = try package_catalog::target_slot(catalog, target);
+    let component = package_catalog::function_component_id_at(catalog, index);
+    try out.append_bytes(package_catalog::component_package_name_at(catalog, component));
+    try out.append_bytes("::");
+    let component_name = package_catalog::component_name_at(catalog, component);
+    var component_index = 0;
+    while component_index < std::mem::len(component_name) {
+        if component_name[component_index] == cast<u8>(47) {
+            try out.append_bytes("::");
+        } else {
+            try out.append_byte(component_name[component_index]);
+        }
+        component_index = component_index + 1;
+    }
+    try out.append_bytes("::");
+    let owner = package_catalog::function_owner_type_at(catalog, index);
+    if std::mem::len(owner) > 0 {
+        try package_type_token::append_function_owner_identity(out, owner);
+        try out.append_byte(cast<u8>(95));
+    }
+    try out.append_bytes(package_catalog::function_name_at(catalog, index));
+    return;
+}
+
+pub fn append_function_type_parameter_facts(
+    out: &var std::string::String,
+    catalog: &package_catalog::PackageFunctionCatalog
+) -> !void {
+    var function_index = 0;
+    while function_index < package_catalog::function_len(catalog) {
+        try append_entry_function_type_parameter_facts(
+            out, catalog, function_index
+        );
+        function_index = function_index + 1;
+    }
+    return;
+}
+
+fn append_entry_function_type_parameter_facts(
+    out: &var std::string::String,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    function_index: i64
+) -> !void {
+    let parameter_len = package_catalog::function_type_parameter_len(
+        catalog, function_index
+    );
+    if parameter_len == 0 { return; }
+    var qualified_name = std::string::String(std::mem::page_allocator());
+    defer qualified_name.deinit();
+    try append_target_qualified_name(
+        &var qualified_name, catalog,
+        try package_catalog::target_at_entry(catalog, function_index)
+    );
+    let qualified_name_bytes = qualified_name.as_bytes();
+    return append_function_type_parameter_rows(
+        out, catalog, function_index, &qualified_name_bytes
+    );
+}
+
+fn append_function_type_parameter_rows(
+    out: &var std::string::String,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    function_index: i64,
+    qualified_name: &[]u8
+) -> !void {
+    let parameter_len = package_catalog::function_type_parameter_len(
+        catalog, function_index
+    );
+    var parameter = 0;
+    while parameter < parameter_len {
+        try out.append_bytes("function-type-parameter ");
+        try out.append_bytes(qualified_name.*);
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, parameter);
+        try out.append_byte(cast<u8>(32));
+        try out.append_bytes(
+            try package_catalog::function_type_parameter_name(
+                catalog, function_index, parameter
+            )
+        );
+        try out.append_byte(cast<u8>(10));
+        parameter = parameter + 1;
+    }
+    return;
+}
+
+// append_function_owner_module_facts records the declaring component for every
+// function identity. Type lowering consumes this context instead of guessing a
+// module from the LLVM symbol spelling (which is ambiguous for impl methods).
+pub fn append_function_owner_module_facts(
+    out: &var std::string::String,
+    catalog: &package_catalog::PackageFunctionCatalog
+) -> !void {
+    var index = 0;
+    while index < package_catalog::function_len(catalog) {
+        let target = try package_catalog::target_at_entry(catalog, index);
+        let component = package_function_identity::target_component_value(&target);
+        try out.append_bytes("function-owner-module ");
+        try append_target_qualified_name(out, catalog, target);
+        try out.append_byte(cast<u8>(32));
+        try append_component_prefix(out, catalog, component);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    return;
+}
+
+// append_module_alias_facts records owner-scoped import aliases using canonical
+// component prefixes. register_import_path has already made (owner, alias)
+// unique, so consumers never need a handwritten alias table.
+pub fn append_module_alias_facts(
+    out: &var std::string::String,
+    catalog: &package_catalog::PackageFunctionCatalog
+) -> !void {
+    var index = 0;
+    while index < package_catalog::import_len(catalog) {
+        try out.append_bytes("module-alias ");
+        try append_component_prefix(
+            out, catalog, package_catalog::import_owner_component_at(catalog, index)
+        );
+        try out.append_bytes(package_catalog::import_alias_at(catalog, index));
+        try out.append_byte(cast<u8>(32));
+        try append_component_prefix(
+            out, catalog, package_catalog::import_target_component_at(catalog, index)
+        );
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    return;
+}
+
+pub fn append_package_root_facts(
+    out: &var std::string::String,
+    catalog: &package_catalog::PackageFunctionCatalog
+) -> !void {
+    var component = 0;
+    while component < package_catalog::component_len(catalog) {
+        let package_name = package_catalog::component_package_name_at(catalog, component);
+        var seen = false;
+        var earlier = 0;
+        while earlier < component {
+            if std::mem::equal_bytes(
+                package_catalog::component_package_name_at(catalog, earlier), package_name
+            ) { seen = true; }
+            earlier = earlier + 1;
+        }
+        if !seen {
+            try out.append_bytes("package-root ");
+            try out.append_bytes(package_name);
+            try out.append_bytes(" present");
+            try out.append_byte(cast<u8>(10));
+        }
+        component = component + 1;
+    }
+    return;
+}
+
+pub fn append_component_prefix(
+    out: &var std::string::String,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component: i64
+) -> !void {
+    if component < 0 or component >= package_catalog::component_len(catalog) {
+        return error("package component id out of range");
+    }
+    try out.append_bytes(package_catalog::component_package_name_at(catalog, component));
+    try out.append_bytes("::");
+    let component_name = package_catalog::component_name_at(catalog, component);
+    var cursor = 0;
+    while cursor < std::mem::len(component_name) {
+        if component_name[cursor] == cast<u8>(47) {
+            try out.append_bytes("::");
+        } else {
+            try out.append_byte(component_name[cursor]);
+        }
+        cursor = cursor + 1;
+    }
+    try out.append_bytes("::");
+    return;
+}
+
+pub fn dependency_graph(allocator: Allocator, catalog: &package_catalog::PackageFunctionCatalog) -> !DependencyGraph {
+    var graph = DependencyGraph {
+        caller_component_ids: std::array::Array<i64>(allocator),
+        caller_function_ids: std::array::Array<i64>(allocator),
+        target_component_ids: std::array::Array<i64>(allocator),
+        target_function_ids: std::array::Array<i64>(allocator),
+        adjacency_starts: std::array::Array<i64>(allocator),
+        adjacency_lens: std::array::Array<i64>(allocator)
+    };
+    errdefer graph.deinit();
+    var index = 0;
+    while index < package_catalog::function_len(catalog) {
+        try graph.adjacency_starts.append(-1);
+        try graph.adjacency_lens.append(0);
+        index = index + 1;
+    }
+    return graph;
+}
+
+pub fn append_dependency(graph: &var DependencyGraph, catalog: &package_catalog::PackageFunctionCatalog, record: package_function_identity::DependencyRecord) -> !void {
+    let edge_index = graph.caller_component_ids.len();
+    let slot = try package_catalog::target_slot(catalog, package_function_identity::FunctionTarget { component: package_function_identity::ComponentId { value: record.caller_component_id }, function: package_function_identity::FunctionId { value: record.caller_function_id } });
+    if try graph.adjacency_starts.get(slot) < 0 {
+        try graph.adjacency_starts.set(slot, edge_index);
+        try graph.adjacency_lens.set(slot, 1);
+    } else {
+        let range_len = try graph.adjacency_lens.get(slot);
+        if try graph.adjacency_starts.get(slot) + range_len != edge_index {
+            return error("dependency caller edges are not contiguous");
+        }
+        try graph.adjacency_lens.set(slot, range_len + 1);
+    }
+    try graph.caller_component_ids.append(record.caller_component_id);
+    try graph.caller_function_ids.append(record.caller_function_id);
+    try graph.target_component_ids.append(record.target_component_id);
+    try graph.target_function_ids.append(record.target_function_id);
+    return;
+}
+
+pub fn dependency_len(graph: &DependencyGraph) -> i64 { return graph.caller_component_ids.len(); }
+
+pub fn dependency_at(graph: &DependencyGraph, index: i64) -> !package_function_identity::DependencyRecord {
+    return package_function_identity::DependencyRecord {
+        caller_component_id: try graph.caller_component_ids.get(index),
+        caller_function_id: try graph.caller_function_ids.get(index),
+        target_component_id: try graph.target_component_ids.get(index),
+        target_function_id: try graph.target_function_ids.get(index)
+    };
+}
+
+
+pub fn append_closure_targets(
+    function: package_function_identity::FunctionTarget,
+    graph: &DependencyGraph,
+    catalog: &package_catalog::PackageFunctionCatalog,
+    queue: &var FunctionTargetQueue
+) -> !void {
+    let slot = try package_catalog::target_slot(catalog, function);
+    let start = try graph.adjacency_starts.get(slot);
+    if start < 0 { return; }
+    let len = try graph.adjacency_lens.get(slot);
+    var offset = 0;
+    while offset < len {
+        try queue_append(queue, catalog, package_function_identity::FunctionTarget {
+            component: package_function_identity::ComponentId { value: try graph.target_component_ids.get(start + offset) },
+            function: package_function_identity::FunctionId { value: try graph.target_function_ids.get(start + offset) }
+        });
+        offset = offset + 1;
+    }
+    return;
+}
+
+impl DependencyGraph {
+    fn deinit(self: DependencyGraph) -> void {
+        self.caller_component_ids.deinit();
+        self.caller_function_ids.deinit();
+        self.target_component_ids.deinit();
+        self.target_function_ids.deinit();
+        self.adjacency_starts.deinit();
+        self.adjacency_lens.deinit();
+        return;
+    }
+}
+
+
+impl FunctionTargetQueue {
+    fn deinit(self: FunctionTargetQueue) -> void {
+        self.component_ids.deinit();
+        self.function_ids.deinit();
+        self.enqueued.deinit();
+        return;
+    }
+}
+
+impl BodyEmissionRegistry {
+    fn deinit(self: BodyEmissionRegistry) -> void {
+        self.slots.deinit();
+        return;
+    }
+}

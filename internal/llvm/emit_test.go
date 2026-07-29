@@ -71,6 +71,30 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 	}
 }
 
+// TestEmitArrayPopOrPanicMovesAfterNullTrap fixes the native lowering sequence.
+func TestEmitArrayPopOrPanicMovesAfterNullTrap(t *testing.T) {
+	module := lowerSource(t, `fn take(values: std::array::Array<i64>) -> i64 {
+    let value = values.pop_or_panic();
+    values.deinit();
+    return value;
+}
+fn main() {}`)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, fragment := range []string{
+		"call ptr @kizu_array_pop(",
+		"icmp eq ptr",
+		"call void @llvm.trap()",
+		"load i64, ptr",
+	} {
+		if !strings.Contains(got, fragment) {
+			t.Errorf("LLVM missing %q:\n%s", fragment, got)
+		}
+	}
+}
+
 // TestEmitRejectsUnknownFieldInstruction checks malformed IR is not guessed.
 func TestEmitRejectsUnknownFieldInstruction(t *testing.T) {
 	module := &ir.Module{Functions: []*ir.Function{{

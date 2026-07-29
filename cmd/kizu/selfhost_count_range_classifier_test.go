@@ -5,26 +5,29 @@ import (
 	"testing"
 )
 
-// TestSelfhostCountRangeClassifierRequiresExactTarget guards the specialized
-// count_range lowerer with its exact function identity and two parameter ABI
-// types, without coupling selection to the parameter names.
-func TestSelfhostCountRangeClassifierRequiresExactTarget(t *testing.T) {
+// TestSelfhostCountRangeLoweringResolvesItsTypesAndCallees rejects the former
+// function-name/AST-ABI allowlist and pins the exact fact-driven boundary.
+func TestSelfhostCountRangeLoweringResolvesItsTypesAndCallees(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
 	classifier := selfhostKizuFunctionBody(t, source, "pub fn is_count_range_function(")
-	targetCheck := strings.Index(
-		classifier, "count_range_target_supported(function_name, params_spec)",
-	)
-	bodyInspection := strings.Index(classifier, "body_child_sequence_from(")
-	if targetCheck < 0 || bodyInspection < 0 || targetCheck > bodyInspection {
-		t.Fatal("count_range target identity/ABI check must precede body inspection")
+	for _, forbidden := range []string{
+		"selfhost::ast::count_range", "%kizu.kizu.ast.ast", "%kizu.kizu.ast.child_range",
+	} {
+		if strings.Contains(classifier, forbidden) {
+			t.Fatalf("count_range classifier retained type-specific gate %q", forbidden)
+		}
 	}
-
-	const entry = "selfhost::backend::compiled_mir_lower::count_range_param_shape_gate"
-	out, err := runSelfhostAbiParamsGate(t, entry)
-	if err != nil {
-		t.Fatalf("count_range param-shape gate failed: %v\n%s", err, out)
-	}
-	if out != "count-range-param-shape\n" {
-		t.Fatalf("count_range param-shape gate output = %q", out)
+	lower := selfhostKizuFunctionBody(t, source, "pub fn lower_count_range_function(")
+	for _, required := range []string{
+		"compiled_mir_types::resolve_value_kizu_type(",
+		"compiled_fact_lookup::lookup_struct_field_exact_indexed(",
+		"compiled_mir_types::lower_call_info_for_instance_indexed(",
+		"compiled_mir_types::call_info_error_success_llvm(",
+		"compiled_canonical_facts::parsed_call_runtime_type_id(",
+		"child_info.return_llvm_type",
+	} {
+		if !strings.Contains(lower, required) {
+			t.Fatalf("count_range lowerer missing fact-derived boundary %q", required)
+		}
 	}
 }

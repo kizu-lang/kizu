@@ -39,7 +39,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCall(instr)
 	case instr.Op == "cast":
 		return e.writeCast(instr)
-	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
+	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."),
+		instr.Op == "ref.store":
 		return e.writeUnsupportedOpaque(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
 		instr.Op == "arena.get" || instr.Op == "arena.deinit":

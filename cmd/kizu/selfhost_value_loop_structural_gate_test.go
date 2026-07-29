@@ -20,7 +20,7 @@ func TestSelfhostValueLoopStructuralGate(t *testing.T) {
 
 	assertValueLoopNoTokenizeDispatch(t, mir, lower, llvm, cliLLVM)
 	assertValueLoopExactShapeChecks(t, lower)
-	assertValueLoopExactArrayConstructorCallee(t, lower)
+	assertValueLoopOwnedConstructorDescriptor(t, lower)
 }
 
 // readBackendKizu reads a selfhost backend source file for source-structural gates.
@@ -69,9 +69,9 @@ func assertValueLoopExactShapeChecks(t *testing.T, lower string) {
 	requiredChecks := []string{
 		"value-loop while must follow the seed append",
 		"value-loop while must be the penultimate statement",
-		"value-loop array constructor let not found",
-		"value-loop array constructor takes exactly the allocator argument",
-		"value-loop array constructor argument must be the allocator",
+		"value-loop owned sequence constructor let not found",
+		"value-loop owned sequence constructor takes exactly the allocator argument",
+		"value-loop owned sequence constructor argument must be the allocator",
 		"value-loop seed takes exactly the source argument",
 		"value-loop seed argument must be the source",
 		"value-loop reassignment target must be a local",
@@ -91,20 +91,24 @@ func assertValueLoopExactShapeChecks(t *testing.T, lower string) {
 	}
 }
 
-// assertValueLoopExactArrayConstructorCallee pins exact Array constructor callee matching.
-func assertValueLoopExactArrayConstructorCallee(t *testing.T, lower string) {
+// assertValueLoopOwnedConstructorDescriptor pins semantic constructor classification.
+func assertValueLoopOwnedConstructorDescriptor(t *testing.T, lower string) {
 	t.Helper()
-	exactCalleeChecks := []string{
-		`std::mem::equal_bytes(callee, "std::array::Array")`,
-		`std::mem::starts_with(callee, "std::array::Array<")`,
+	body := selfhostKizuFunctionBody(t, lower, "fn value_loop_owned_constructor(")
+	required := []string{
+		"compiled_type_resolver::owned_constructor_indexed(",
+		"builtin_contract::owned_container_family_sequence()",
+		"constructor.result_type.abi",
+		"constructor.storage_type.abi",
 	}
-	for _, check := range exactCalleeChecks {
-		if !strings.Contains(lower, check) {
-			t.Errorf("value_loop_array_let_name missing exact callee match: %q", check)
+	for _, check := range required {
+		if !strings.Contains(body, check) {
+			t.Errorf("value_loop_owned_constructor missing descriptor use: %q", check)
 		}
 	}
-	if strings.Contains(lower, `std::mem::starts_with(callee, "std::array::Array")`) {
-		t.Errorf("value_loop_array_let_name uses a loose std::array::Array prefix test -- " +
-			"a near-miss like std::array::ArrayFoo would be mis-accepted as the array constructor")
+	for _, forbidden := range []string{"std::array::Array", "std::arena::Arena", "body_call_callee"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("value_loop_owned_constructor retained spelling classification %q", forbidden)
+		}
 	}
 }

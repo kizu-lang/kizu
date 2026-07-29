@@ -1,0 +1,107 @@
+import selfhost::ir::executable_functions;
+import selfhost::ownership::data;
+import selfhost::parser;
+import selfhost::source;
+
+fn gate_source_file(text: []u8) -> source::SourceFile {
+    return source::SourceFile {
+        id: 7,
+        kind: source::SourceKind::User,
+        package_name: "app",
+        module_start: 0,
+        module_end: 5,
+        path: "entry.kizu",
+        text: text
+    };
+}
+
+fn gate_checked_package(
+    diagnostics: i64,
+    source_id: i64,
+    path: []u8,
+    span_start: i64,
+    span_end: i64
+) -> data::CheckedPackage {
+    return data::CheckedPackage {
+        diagnostics: diagnostics,
+        resources: 0,
+        checked_nodes: 0,
+        borrows: 0,
+        module: data::CheckedModuleRef {
+            source_id: source_id,
+            kind: source::SourceKind::User,
+            module_start: 0,
+            module_end: 5,
+            path: path
+        },
+        entry_function: data::CheckedFunctionRef {
+            module: "entry",
+            name: "main",
+            span_start: span_start,
+            span_end: span_end
+        },
+        root_fact: data::OwnershipFact {
+            name: "app package",
+            kind: data::ResourceKind::Value,
+            state: data::OwnershipState::Available
+        },
+        summary: data::OwnershipSummary {
+            resources: 0,
+            checked_nodes: 0,
+            borrows: 0,
+            errors: diagnostics
+        }
+    };
+}
+
+pub fn arbitrary_source_root_facts_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let text = "fn main() -> void { helper(); }
+fn helper() -> void {}
+fn unrelated() -> void {}
+";
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(gate_source_file(text));
+    var parsed = try parser::parse_source_files(allocator, &files);
+    var roots = std::array::Array<executable_functions::SourceFunctionRoot>(
+        allocator
+    );
+    defer roots.deinit();
+    let checked = gate_checked_package(0, 7, "entry.kizu", 3, 7);
+    try roots.append(try executable_functions::checked_entry_root(
+        &files, &checked
+    ));
+    var out = std::string::String(allocator);
+    defer out.deinit();
+    let result = executable_functions::append_source_root_facts(
+        allocator, &var out, &files, &parsed, &roots
+    );
+    try parser::deinit_parsed_source_files(parsed);
+    try result;
+    let output = out.as_bytes();
+    print(output);
+    return;
+}
+
+pub fn checked_entry_diagnostic_failure_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(gate_source_file("fn main() -> void {}"));
+    let checked = gate_checked_package(1, 7, "entry.kizu", 3, 7);
+    let root = try executable_functions::checked_entry_root(&files, &checked);
+    print(root.source_id);
+    return;
+}
+
+pub fn checked_entry_source_mismatch_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(gate_source_file("fn main() -> void {}"));
+    let checked = gate_checked_package(0, 7, "other.kizu", 3, 7);
+    let root = try executable_functions::checked_entry_root(&files, &checked);
+    print(root.source_id);
+    return;
+}

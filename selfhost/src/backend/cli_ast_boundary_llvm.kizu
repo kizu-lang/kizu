@@ -2,106 +2,74 @@ pub fn append_globals(out: &var std::string::String) -> !void {
     return;
 }
 
-pub fn append_functions(out: &var std::string::String) -> !void {
-    try append_ast_new_function(out);
-    try append_unsupported_parse_result_function(out);
-    try append_parse_validated_ast_function(out);
-    try append_add_leaf_node_function(out);
+pub fn append_functions(
+    out: &var std::string::String,
+    source_file_abi: []u8,
+    parse_result_abi: []u8,
+    source_file_path_index: i64,
+    source_file_text_index: i64,
+    parse_result_error_abi: []u8
+) -> !void {
+    try append_parse_validated_ast_function(
+        out,
+        source_file_abi,
+        parse_result_abi,
+        source_file_path_index,
+        source_file_text_index,
+        parse_result_error_abi
+    );
     return;
 }
 
-fn append_ast_new_function(out: &var std::string::String) -> !void {
-    try append_line(out, "define %kizu.kizu.ast.ast @kizu_selfhost__cli_ast_new(");
+// The static CLI boundary only constructs SourceFile and delegates parsing to
+// the compiled parser. Validation normally prevents this error edge; if the
+// parser still rejects the input, fail explicitly instead of manufacturing an
+// AstData value that the parser never produced.
+fn append_parse_validated_ast_function(
+    out: &var std::string::String,
+    source_file_abi: []u8,
+    parse_result_abi: []u8,
+    source_file_path_index: i64,
+    source_file_text_index: i64,
+    parse_result_error_abi: []u8
+) -> !void {
+    try out.append_bytes("define ");
+    try out.append_bytes(parse_result_abi);
+    try append_line(out, " @kizu_selfhost__cli_parse_validated_ast(");
     try append_line(out, "  %kizu.owned %allocator,");
     try append_line(out, "  %kizu.slice.u8 %path,");
     try append_line(out, "  %kizu.slice.u8 %source");
     try append_line(out, ") {");
     try append_line(out, "entry:");
-    try append_line(out,
-        "  %nodes = call %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, i64 ptrtoint (ptr getelementptr (%kizu.kizu.ast.ast_node, ptr null, i32 1) to i64))");
-    try append_line(out,
-        "  %children = call %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, i64 ptrtoint (ptr getelementptr (%kizu.kizu.ast.node_id, ptr null, i32 1) to i64))");
-    try append_line(out,
-        "  %file0 = insertvalue %kizu.kizu.ast.source_file poison, %kizu.slice.u8 %path, 0");
-    try append_line(out,
-        "  %file = insertvalue %kizu.kizu.ast.source_file %file0, %kizu.slice.u8 %source, 1");
-    try append_line(out, "  %ast0 = insertvalue %kizu.kizu.ast.ast poison, %kizu.owned %nodes, 0");
-    try append_line(out, "  %ast1 = insertvalue %kizu.kizu.ast.ast %ast0, %kizu.owned %children, 1");
-    try append_line(out,
-        "  %ast = insertvalue %kizu.kizu.ast.ast %ast1, %kizu.kizu.ast.source_file %file, 2");
-    try append_line(out, "  ret %kizu.kizu.ast.ast %ast");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
-fn append_unsupported_parse_result_function(out: &var std::string::String) -> !void {
-    try append_line(out, "define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_unsupported_parse_result(");
-    try append_line(out, "  %kizu.owned %allocator,");
-    try append_line(out, "  %kizu.slice.u8 %path,");
-    try append_line(out, "  %kizu.slice.u8 %source");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_line(out,
-        "  %ast = call %kizu.kizu.ast.ast @kizu_selfhost__cli_ast_new(%kizu.owned %allocator, %kizu.slice.u8 %path, %kizu.slice.u8 %source)");
-    try append_line(out,
-        "  %root = call %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(%kizu.kizu.ast.ast %ast, i64 0, i64 0, i64 44)");
-    try append_line(out,
-        "  %parsed = call %kizu.kizu.ast.parse_result @kizu_kizu__ast_parse_result(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.node_id %root)");
-    try append_line(out, "  ret %kizu.kizu.ast.parse_result %parsed");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
-fn append_parse_validated_ast_function(out: &var std::string::String) -> !void {
-    // issue 1157: cli_parse_validated_ast is now a thin glue over the compiled parser. It builds a
-    // SourceFile {path, text} and calls the lowered std::kizu::parser::parse_program
-    // (@kizu_kizu__parser_parse_program, seeded into the parser closure), then unwraps the
-    // error-union result {i1 ok, parse_result value, msg}. The file is already diagnostic-validated
-    // before this is reached, so the ok path is the norm; the error edge falls back to
-    // unsupported_parse_result. The hand-written tokenize/parse_decl loop that previously lived here
-    // (and its cli_* AST-mutator/token helpers) is retired now that the real parser lowers natively.
-    try append_line(out, "define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast(");
-    try append_line(out, "  %kizu.owned %allocator,");
-    try append_line(out, "  %kizu.slice.u8 %path,");
-    try append_line(out, "  %kizu.slice.u8 %source");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_line(out,
-        "  %file0 = insertvalue %kizu.kizu.ast.source_file poison, %kizu.slice.u8 %path, 0");
-    try append_line(out,
-        "  %file = insertvalue %kizu.kizu.ast.source_file %file0, %kizu.slice.u8 %source, 1");
-    try append_line(out,
-        "  %parsed_eu = call %kizu.error.parse_result @kizu_kizu__parser_parse_program(%kizu.owned %allocator, %kizu.kizu.ast.source_file %file)");
-    try append_line(out, "  %parse_ok = extractvalue %kizu.error.parse_result %parsed_eu, 0");
-    try append_line(out, "  br i1 %parse_ok, label %ok, label %unsupported");
+    try out.append_bytes("  %file0 = insertvalue ");
+    try out.append_bytes(source_file_abi);
+    try out.append_bytes(" poison, %kizu.slice.u8 %path, ");
+    try std::fmt::append_i64(out, source_file_path_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %file = insertvalue ");
+    try out.append_bytes(source_file_abi);
+    try out.append_bytes(" %file0, %kizu.slice.u8 %source, ");
+    try std::fmt::append_i64(out, source_file_text_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %parsed_eu = call ");
+    try out.append_bytes(parse_result_error_abi);
+    try out.append_bytes(" @kizu_kizu__parser_parse_program(%kizu.owned %allocator, ");
+    try out.append_bytes(source_file_abi);
+    try append_line(out, " %file)");
+    try out.append_bytes("  %parse_ok = extractvalue ");
+    try out.append_bytes(parse_result_error_abi);
+    try append_line(out, " %parsed_eu, 0");
+    try append_line(out, "  br i1 %parse_ok, label %ok, label %parse_error");
     try append_line(out, "ok:");
-    try append_line(out, "  %parsed = extractvalue %kizu.error.parse_result %parsed_eu, 1");
-    try append_line(out, "  ret %kizu.kizu.ast.parse_result %parsed");
-    try append_line(out, "unsupported:");
-    try append_line(out,
-        "  %fallback = call %kizu.kizu.ast.parse_result @kizu_selfhost__cli_unsupported_parse_result(%kizu.owned %allocator, %kizu.slice.u8 %path, %kizu.slice.u8 %source)");
-    try append_line(out, "  ret %kizu.kizu.ast.parse_result %fallback");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
-fn append_add_leaf_node_function(out: &var std::string::String) -> !void {
-    try append_line(out, "define %kizu.kizu.ast.node_id @kizu_selfhost__cli_add_leaf_node(");
-    try append_line(out, "  %kizu.kizu.ast.ast %ast,");
-    try append_line(out, "  i64 %start,");
-    try append_line(out, "  i64 %end,");
-    try append_line(out, "  i64 %tag");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_line(out, "  %span0 = insertvalue %kizu.kizu.ast.span poison, i64 %start, 0");
-    try append_line(out, "  %span = insertvalue %kizu.kizu.ast.span %span0, i64 %end, 1");
-    try append_line(out, "  %data = insertvalue %kizu.kizu.ast.ast_data zeroinitializer, i64 %tag, 0");
-    try append_line(out,
-        "  %node = call %kizu.kizu.ast.node_id @kizu_kizu__ast_ast_add_node(%kizu.kizu.ast.ast %ast, %kizu.kizu.ast.span %span, %kizu.kizu.ast.ast_data %data)");
-    try append_line(out, "  ret %kizu.kizu.ast.node_id %node");
+    try out.append_bytes("  %parsed = extractvalue ");
+    try out.append_bytes(parse_result_error_abi);
+    try append_line(out, " %parsed_eu, 1");
+    try out.append_bytes("  ret ");
+    try out.append_bytes(parse_result_abi);
+    try append_line(out, " %parsed");
+    try append_line(out, "parse_error:");
+    try append_line(out, "  call void @kizu_rt_process_exit(i64 1)");
+    try append_line(out, "  unreachable");
     try append_line(out, "}");
     try append_line(out, "");
     return;

@@ -1723,7 +1723,8 @@ func (c *Checker) defineSpecialLetInitializer(
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParam(stmt.Name, typ, true, mutable)
+		source := c.singleBorrowSource(borrow.Right, env, unsafe)
+		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, source)
 	}
 	typ, mutable, ok, err := c.checkArrayBorrowInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
@@ -1926,7 +1927,7 @@ func (c *Checker) checkAssignableCall(
 func checkAssignableIdent(expr *ast.IdentExpr, env *scope) (Type, error) {
 	want, ok := env.lookup(expr.Name)
 	if !ok {
-		return "", errorf("type error: undefined variable `%s`", expr.Name)
+		return "", errorAt(expr.Span, "type error: undefined variable `%s`", expr.Name)
 	}
 	if !env.isMutable(expr.Name) {
 		return "", errorf("type error: cannot assign to immutable binding `%s`", expr.Name)
@@ -2127,14 +2128,17 @@ func (c *Checker) exprBorrowSources(
 
 // identBorrowSources derives a local value's borrow provenance from its binding.
 func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
-	sources := map[string]bool{name: true}
-	if source, ok := env.lookupBorrowSource(name); ok {
-		sources[source] = true
+	source := name
+	seen := map[string]bool{}
+	for !seen[source] {
+		seen[source] = true
+		next, ok := env.lookupBorrowSource(source)
+		if !ok || next == source {
+			return map[string]bool{source: true}
+		}
+		source = next
 	}
-	if typ, ok := env.lookup(name); ok && isBorrowedViewReturnType(typ) {
-		sources[name] = true
-	}
-	return sources
+	return map[string]bool{}
 }
 
 // callBorrowSources maps returned borrow provenance back to call arguments.
@@ -2183,6 +2187,33 @@ func (c *Checker) methodBorrowSources(
 	field, ok := expr.Callee.(*ast.FieldExpr)
 	if !ok || field.Namespace {
 		return nil, false, nil
+	}
+	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
+	if err != nil {
+		return nil, true, err
+	}
+	if method := c.implMethod(string(receiver), field.Name); method != nil {
+		if method.returnBorrow == "" {
+			return map[string]bool{}, true, nil
+		}
+		idx := borrowReturnParamIndex(method)
+		if idx < 0 {
+			return map[string]bool{}, true, errorf(
+				"type error: `%s` borrows unknown source `%s`",
+				method.name, method.returnBorrow)
+		}
+		if idx == 0 {
+			sources, err := c.exprBorrowSources(field.Receiver, env, unsafe)
+			return sources, true, err
+		}
+		arg := idx - 1
+		if arg >= len(expr.Args) {
+			return map[string]bool{}, true, errorf(
+				"type error: `%s` borrowed return has no source argument",
+				method.name)
+		}
+		sources, err := c.exprBorrowSources(expr.Args[arg], env, unsafe)
+		return sources, true, err
 	}
 	switch field.Name {
 	case "as_bytes", "borrow", "borrow_mut", "at", "at_mut":
@@ -2539,8 +2570,9 @@ func (c *Checker) checkMatchArms(
 		allReturn = allReturn && returns
 	}
 	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
-		return false, errorf("type error: match on `%s` is not exhaustive",
-			matchTypeName(enumType, unionType))
+		return false, errorf("type error: match on `%s` is not exhaustive: missing %s",
+			matchTypeName(enumType, unionType),
+			strings.Join(missingMatchVariants(enumType, unionType, seen), ", "))
 	}
 	return allReturn, nil
 }
@@ -2593,6 +2625,32 @@ func matchVariantCount(enumType *enumType, unionType *unionType) int {
 		return len(enumType.tags)
 	}
 	return len(unionType.variants)
+}
+
+// missingMatchVariants lists the variants a match does not cover, sorted so the message is
+// stable. Match arms carry no source position, so the type name alone left the reader searching
+// every match on that type; naming what is missing points at the arm to add instead.
+func missingMatchVariants(
+	enumType *enumType,
+	unionType *unionType,
+	seen map[string]bool,
+) []string {
+	var missing []string
+	if enumType != nil {
+		for tag := range enumType.tags {
+			if !seen[tag] {
+				missing = append(missing, tag)
+			}
+		}
+	} else {
+		for variant := range unionType.variants {
+			if !seen[variant] {
+				missing = append(missing, variant)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // checkExpr computes the static type of an expression.
@@ -2780,8 +2838,9 @@ func (c *Checker) checkMatchExprArms(
 		}
 	}
 	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
-		return "", errorf("type error: match on `%s` is not exhaustive",
-			matchTypeName(enumType, unionType))
+		return "", errorf("type error: match on `%s` is not exhaustive: missing %s",
+			matchTypeName(enumType, unionType),
+			strings.Join(missingMatchVariants(enumType, unionType, seen), ", "))
 	}
 	return result, nil
 }
@@ -2960,9 +3019,9 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 		return typeType, nil
 	}
 	if expr.Name == "void" {
-		return "", errorf("type error: void is not a value")
+		return "", errorAt(expr.Span, "type error: void is not a value")
 	}
-	return "", errorf("type error: undefined variable `%s`", expr.Name)
+	return "", errorAt(expr.Span, "type error: undefined variable `%s`", expr.Name)
 }
 
 // checkPrefixExpr validates unary operators.
@@ -4123,7 +4182,8 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_pop", "std.builtin.array_get", "std.builtin.array_get_or_panic",
+		"std.builtin.array_pop", "std.builtin.array_pop_or_panic",
+		"std.builtin.array_get", "std.builtin.array_get_or_panic",
 		"std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
@@ -4248,6 +4308,11 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "", errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
 		}
 		return Type("!" + string(elem)), nil
+	case "pop_or_panic":
+		if len(args) != 0 {
+			return "", errorf("type error: `Array.pop_or_panic` expects 0 args, got %d", len(args))
+		}
+		return elem, nil
 	case "at":
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
@@ -5598,11 +5663,21 @@ func (c *Checker) checkArrayMethod(
 	switch name {
 	case "append":
 		return c.checkArrayAppendArg(elem, args, env, unsafe)
+	case "reserve":
+		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "!void", nil
 	case "pop":
 		if len(args) != 0 {
 			return "", errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
 		}
 		return Type("!" + string(elem)), nil
+	case "pop_or_panic":
+		if len(args) != 0 {
+			return "", errorf("type error: `Array.pop_or_panic` expects 0 args, got %d", len(args))
+		}
+		return elem, nil
 	case "len", "capacity":
 		if len(args) != 0 {
 			return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
@@ -5637,7 +5712,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 		return "", errorf("type error: Array has no method `%s`", name)
 	}
 	switch name {
-	case "reserve", "truncate":
+	case "truncate":
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
@@ -5654,7 +5729,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 
 // isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
 func isStdArrayStorageMethod(name string) bool {
-	return name == "reserve" || name == "truncate" || name == "clear" || name == "as_bytes"
+	return name == "truncate" || name == "clear" || name == "as_bytes"
 }
 
 // checkArrayAppendArg validates append's single element argument.

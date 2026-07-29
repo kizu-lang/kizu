@@ -1,5 +1,10 @@
 import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_instance_context;
+import selfhost::backend::compiled_type_lower;
+import selfhost::backend::compiled_type_resolver;
 import selfhost::backend::compiled_mir_lower;
+import selfhost::backend::compiled_mir_lower_struct;
+import selfhost::backend::compiled_canonical_facts;
 import selfhost::backend::compiled_mir_llvm;
 import selfhost::backend::compiled_struct_cf;
 import selfhost::backend::ir_contract;
@@ -49,8 +54,13 @@ pub fn append_compiled_function_params(
 ) -> !void {
     var lookup_index = try ir_index::build(ir_bytes);
     defer lookup_index.deinit();
+    var canonical_facts = try compiled_canonical_facts::parse_and_validate(
+        &lookup_index, ir_bytes
+    );
+    defer canonical_facts.deinit();
     try append_compiled_function_params_indexed(
         &lookup_index,
+        &canonical_facts,
         out,
         ir_bytes,
         function_name,
@@ -63,6 +73,27 @@ pub fn append_compiled_function_params(
 
 pub fn append_compiled_function_params_indexed(
     ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8
+) -> !void {
+    var context = compiled_instance_context::empty(std::mem::page_allocator());
+    defer context.deinit();
+    try append_compiled_function_params_context_indexed(
+        ir_lookup_index, canonical_facts, &context, out, ir_bytes,
+        function_name, llvm_symbol, llvm_return_type, params_spec
+    );
+    return;
+}
+
+fn append_compiled_function_params_context_indexed(
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    instance_context: &compiled_instance_context::InstanceContext,
     out: &var std::string::String,
     ir_bytes: []u8,
     function_name: []u8,
@@ -74,13 +105,36 @@ pub fn append_compiled_function_params_indexed(
     let statement_count = try ir_contract::body_edge_count_from(
         ir_bytes, function_name, 0, "statement", bs
     );
+    // Every concrete generic body uses the same instance-aware statement lowerer regardless of
+    // source shape. This keeps caller-instance call symbols, canonical call types, and comptime
+    // argument elision attached to one CallArgTypeCache instead of dropping the instance context
+    // through a single-return or parser-specific lowering path.
+    if instance_context.found and
+        compiled_instance_context::actual_len(instance_context) > 0 {
+        let instance_mir = try compiled_mir_lower::lower_multi_statement_function(
+            ir_lookup_index,
+            canonical_facts,
+            instance_context,
+            ir_bytes,
+            function_name,
+            llvm_symbol,
+            llvm_return_type,
+            params_spec,
+            statement_count,
+            bs
+        );
+        defer instance_mir.deinit();
+        try compiled_mir_llvm::append_function(out, &instance_mir);
+        return;
+    }
     // first_token / next_token are the tokenizer entry points: thin wrappers whose nested call
     // arguments (position(...) feeding token_at / advance_position) the generic call-arg lowering
     // does not model. first_token is a single 'return token_at(...)' so it must be intercepted
     // ahead of the single-statement dispatch (tracker 961, scope 4 prerequisite).
     if std::mem::equal_bytes(function_name, "std::kizu::lexer::first_token") {
         let first_mir = try compiled_mir_lower::lower_first_token_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol,
+            llvm_return_type, params_spec, bs
         );
         defer first_mir.deinit();
         try compiled_mir_llvm::append_function(out, &first_mir);
@@ -88,7 +142,8 @@ pub fn append_compiled_function_params_indexed(
     }
     if std::mem::equal_bytes(function_name, "std::kizu::lexer::next_token") {
         let next_mir = try compiled_mir_lower::lower_next_token_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol,
+            llvm_return_type, params_spec, bs
         );
         defer next_mir.deinit();
         try compiled_mir_llvm::append_function(out, &next_mir);
@@ -122,6 +177,8 @@ pub fn append_compiled_function_params_indexed(
         if std::mem::equal_bytes(kind, "Match") {
             let match_mir = try compiled_mir_lower::lower_single_match_statement_function(
                 ir_lookup_index,
+                canonical_facts,
+                instance_context,
                 ir_bytes,
                 function_name,
                 llvm_symbol,
@@ -135,16 +192,59 @@ pub fn append_compiled_function_params_indexed(
             return;
         }
         if !std::mem::equal_bytes(kind, "Return") {
-            var message = std::string::String(std::mem::page_allocator());
-            try message.append_bytes("compiled function: single statement must be return: ");
-            try message.append_bytes(function_name);
-            let message_bytes = message.as_bytes();
-            return error(message_bytes);
+            let multi_mir = try compiled_mir_lower::lower_multi_statement_function(
+                ir_lookup_index,
+                canonical_facts,
+                instance_context,
+                ir_bytes,
+                function_name,
+                llvm_symbol,
+                llvm_return_type,
+                params_spec,
+                statement_count,
+                bs
+            );
+            defer multi_mir.deinit();
+            try compiled_mir_llvm::append_function(out, &multi_mir);
+            return;
         }
-        let value = try ir_contract::body_child_sequence_from(
+        var value = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, statement, "value", 0, bs
         );
-        let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+        var value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+        // A struct whose ABI is a fixed runtime representation wraps that representation rather than
+        // declaring an aggregate of its own, so 'return Wrapper { field: <expr> };' returns <expr>.
+        // Rebinding the returned expression here lets every shape below lower the wrapped value the
+        // way a direct 'return <expr>;' does, instead of inserting it into a slot of itself.
+        if std::mem::equal_bytes(value_kind, "StructLiteralExpr") and
+            compiled_mir_lower_struct::struct_literal_is_transparent(llvm_return_type) {
+            value = try compiled_mir_lower_struct::transparent_struct_literal_value(
+                ir_bytes, function_name, value, bs
+            );
+            value_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, value, bs
+            );
+        }
+        // A bare 'return;' carries no value expression to specialize on, so it lowers through the
+        // shared multi-statement path, which emits the void success return for both a plain void
+        // function and an error-union void function.
+        if std::mem::equal_bytes(value_kind, "Empty") {
+            let void_return_mir = try compiled_mir_lower::lower_multi_statement_function(
+                ir_lookup_index,
+                canonical_facts,
+                instance_context,
+                ir_bytes,
+                function_name,
+                llvm_symbol,
+                llvm_return_type,
+                params_spec,
+                statement_count,
+                bs
+            );
+            defer void_return_mir.deinit();
+            try compiled_mir_llvm::append_function(out, &void_return_mir);
+            return;
+        }
         // 'return match token.kind { <Variant> => true, _ => false };' is a parser single-variant
         // token predicate (e.g. is_left_brace_token): a match over an enum field returning bool,
         // which the generic expression path does not model (tracker 961, scope 4 prerequisite).
@@ -158,6 +258,23 @@ pub fn append_compiled_function_params_indexed(
             );
             defer predicate_mir.deinit();
             try compiled_mir_llvm::append_function(out, &predicate_mir);
+            return;
+        }
+        if std::mem::equal_bytes(value_kind, "Match") {
+            let match_value_mir = try compiled_mir_lower::lower_multi_statement_function(
+                ir_lookup_index,
+                canonical_facts,
+                instance_context,
+                ir_bytes,
+                function_name,
+                llvm_symbol,
+                llvm_return_type,
+                params_spec,
+                statement_count,
+                bs
+            );
+            defer match_value_mir.deinit();
+            try compiled_mir_llvm::append_function(out, &match_value_mir);
             return;
         }
         if std::mem::equal_bytes(value_kind, "String") {
@@ -188,13 +305,23 @@ pub fn append_compiled_function_params_indexed(
             if std::mem::len(llvm_return_type) == 0 {
                 return error("compiled function: struct literal requires llvm_return_type");
             }
-            let mir = try compiled_mir_lower::lower_struct_return_function(
-                ir_bytes, function_name, llvm_symbol,
-                llvm_return_type, params_spec, value, bs
-            );
-            defer mir.deinit();
-            try compiled_mir_llvm::append_function(out, &mir);
-            return;
+            // A literal carrying an expression-valued field needs an instruction stream to build
+            // in; the dedicated struct-return function body owns none, so it lowers through the
+            // generic expression return below instead.
+            let needs_expr_value =
+                try compiled_mir_lower_struct::struct_literal_needs_expr_value(
+                    ir_bytes, function_name, value, bs
+                );
+            if !needs_expr_value {
+                let mir = try compiled_mir_lower::lower_struct_return_function(
+                    ir_lookup_index, canonical_facts, instance_context,
+                    ir_bytes, function_name, llvm_symbol,
+                    llvm_return_type, params_spec, value, bs
+                );
+                defer mir.deinit();
+                try compiled_mir_llvm::append_function(out, &mir);
+                return;
+            }
         }
         if std::mem::equal_bytes(value_kind, "Call") {
             // A Call whose callee is a FieldExpr is a method call (receiver.method()).
@@ -226,7 +353,9 @@ pub fn append_compiled_function_params_indexed(
                 ir_bytes, function_name, value, bs
             )) {
                 let mir = try compiled_mir_lower::lower_call_return_function(
-                    ir_bytes, function_name, llvm_symbol, params_spec, value, bs
+                    ir_lookup_index, canonical_facts, instance_context,
+                    ir_bytes, function_name, llvm_symbol, llvm_return_type,
+                    params_spec, value, bs
                 );
                 defer mir.deinit();
                 try compiled_mir_llvm::append_function(out, &mir);
@@ -240,6 +369,7 @@ pub fn append_compiled_function_params_indexed(
             ir_bytes, function_name, value, bs
         ) {
             let try_mir = try compiled_mir_lower::lower_return_try_binary_function(
+                ir_lookup_index, canonical_facts, instance_context,
                 ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, value, bs
             );
             defer try_mir.deinit();
@@ -251,6 +381,7 @@ pub fn append_compiled_function_params_indexed(
         ) {
             let or_mir = try compiled_mir_lower::lower_short_circuit_or_return_function(
                 ir_lookup_index,
+                canonical_facts,
                 ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, value, bs
             );
             defer or_mir.deinit();
@@ -262,6 +393,7 @@ pub fn append_compiled_function_params_indexed(
         }
         let mir = try compiled_mir_lower::lower_expr_return_function(
             ir_lookup_index,
+            canonical_facts,
             ir_bytes, function_name, llvm_symbol,
             llvm_return_type, params_spec, value, bs
         );
@@ -401,51 +533,21 @@ pub fn append_compiled_function_params_indexed(
         try compiled_mir_llvm::append_function(out, &postfix_mir);
         return;
     }
-    // 'let node = self.get(index); return match node.data { ... };' is the first
-    // match-over-AstData-union read-only AST accessor compiled into stage2 (tracker 961).
-    if try compiled_mir_lower::is_match_union_function(
-        ir_bytes, function_name, statement_count, bs
-    ) {
-        if std::mem::len(llvm_return_type) == 0 {
-            return error("compiled function: match-union accessor requires llvm_return_type");
-        }
-        // A single matched variant + '_' default arm whose variant body is a payload
-        // field chain is the narrow declaration_count shape (tracker 961). Every other
-        // match -- exhaustive node_count traversals and default-arm matches whose arms
-        // call helpers (the run codegen tape descent) -- lowers through the generalized
-        // traversal path, whose arms forward parameters and payload fields explicitly.
-        if try compiled_mir_lower::match_union_has_default_arm(ir_bytes, function_name, bs) {
-            if try compiled_mir_lower::match_union_is_field_chain_accessor(
-                ir_bytes, function_name, bs
-            ) {
-                let match_mir = try compiled_mir_lower::lower_match_union_return_function(
-                    ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-                );
-                defer match_mir.deinit();
-                try compiled_mir_llvm::append_function(out, &match_mir);
-                return;
-            }
-        }
-        let traversal_mir = try compiled_mir_lower::lower_traversal_match_function(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
-        );
-        defer traversal_mir.deinit();
-        try compiled_mir_llvm::append_function(out, &traversal_mir);
-        return;
-    }
     // count_range is the recursive AST-traversal accumulator loop ('var count = 0; var
     // index = 0; while index < range.len { let child = try tree.child_at(range, index);
     // count = count + try node_count(tree, child); index = index + 1; } return count;'),
     // lowered to a two-phi loop with try-propagation rather than the general while machinery
     // (tracker 961).
     if try compiled_mir_lower::is_count_range_function(
-        ir_bytes, function_name, statement_count, params_spec, bs
+        ir_bytes, function_name, params_spec, statement_count, bs
     ) {
         if std::mem::len(llvm_return_type) == 0 {
             return error("compiled function: count_range requires llvm_return_type");
         }
         let range_mir = try compiled_mir_lower::lower_count_range_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_lookup_index, canonical_facts, instance_context,
+            ir_bytes, function_name, llvm_symbol,
+            llvm_return_type, params_spec, bs
         );
         defer range_mir.deinit();
         try compiled_mir_llvm::append_function(out, &range_mir);
@@ -465,7 +567,7 @@ pub fn append_compiled_function_params_indexed(
     }
     if std::mem::equal_bytes(function_name, "selfhost::ir::codegen::ast_node_text") {
         let text_mir = try compiled_mir_lower::lower_ast_node_text_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
         defer text_mir.deinit();
         try compiled_mir_llvm::append_function(out, &text_mir);
@@ -476,7 +578,7 @@ pub fn append_compiled_function_params_indexed(
     // is dispatched by name like the other AST-union accessors.
     if std::mem::equal_bytes(function_name, "selfhost::ir::codegen::string_literal_span") {
         let span_mir = try compiled_mir_lower::lower_string_literal_span_function(
-            ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
         );
         defer span_mir.deinit();
         try compiled_mir_llvm::append_function(out, &span_mir);
@@ -484,18 +586,37 @@ pub fn append_compiled_function_params_indexed(
     }
     if compiled_function_is_format_component(function_name) {
         // The comment-preservation driver append_preserved_line_comments returns its loop-carried
-        // scalar state as a 'CommentFormatState' struct in an error union, so its return type is the
-        // '%kizu.error.comment_format_state' shape. That is the type-derived signal that selects the
+        // scalar state as a three-field struct in an error union. The exact canonical payload facts
+        // (last: u8, at_line_start: bool, after_comment: bool) select the
         // structured-control-flow comment emitter: a forward scan loop carrying four loop-head phis,
         // an if/else comment arm that mutates a '&var std::string::String' through the
         // @kizu_rt_string_append_* ABI, and a 'return CommentFormatState { ... }' success wrap. No
         // other compiled member returns this error union, so dispatching on the return type keeps the
         // selection shape/type-driven rather than name-based (issue 1165 / 1162).
-        if std::mem::equal_bytes(llvm_return_type, "%kizu.error.comment_format_state") {
-            try compiled_struct_cf::append_comment_preserve_function(
-                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+        let owner_module = try compiled_type_resolver::function_owner_module_indexed(
+            ir_lookup_index, ir_bytes, function_name
+        );
+        let resolved_function = try compiled_type_resolver::resolve_function_indexed(
+            ir_lookup_index, ir_bytes, owner_module, function_name
+        );
+        if resolved_function.returns_error {
+            let comment_state = try compiled_struct_cf::comment_state_abi_indexed(
+                ir_lookup_index, ir_bytes, &resolved_function.return_type
             );
-            return;
+            if comment_state.found {
+                let expected_return_type = try compiled_type_lower::kizu_type_to_llvm_indexed(
+                    ir_lookup_index, ir_bytes, owner_module,
+                    resolved_function.return_spelling
+                );
+                if !std::mem::equal_bytes(llvm_return_type, expected_return_type) {
+                    return error("compiled function: comment state return ABI mismatch");
+                }
+                try compiled_struct_cf::append_comment_preserve_function(
+                    ir_lookup_index, out, ir_bytes, function_name, llvm_symbol,
+                    llvm_return_type, params_spec, bs
+                );
+                return;
+            }
         }
         // A scan-shift sort over a '&var std::array::Array<T>' parameter (an outer counter
         // loop, a nested cursor/flag scan loop, an if/else that re-merges into the loop, a
@@ -505,7 +626,8 @@ pub fn append_compiled_function_params_indexed(
         // (issue 1165 / 1162). sort_import_indices is its first consumer.
         if try compiled_struct_cf::is_import_sort_shape(ir_bytes, function_name, statement_count, bs) {
             try compiled_struct_cf::append_import_sort_function(
-                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                ir_lookup_index, out, ir_bytes, function_name, llvm_symbol,
+                llvm_return_type, params_spec, bs
             );
             return;
         }
@@ -519,7 +641,8 @@ pub fn append_compiled_function_params_indexed(
         // leading_import_indices is its first consumer.
         if try compiled_struct_cf::is_leading_import_shape(ir_bytes, function_name, statement_count, bs) {
             try compiled_struct_cf::append_leading_import_function(
-                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                ir_lookup_index, out, ir_bytes, function_name, llvm_symbol,
+                llvm_return_type, params_spec, bs
             );
             return;
         }
@@ -532,7 +655,8 @@ pub fn append_compiled_function_params_indexed(
         // (issue 1165 / 1162). append_import_decl is its first consumer.
         if try compiled_struct_cf::is_import_decl_shape(ir_bytes, function_name, statement_count, bs) {
             try compiled_struct_cf::append_import_decl_function(
-                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                ir_lookup_index, out, ir_bytes, function_name, llvm_symbol,
+                llvm_return_type, params_spec, bs
             );
             return;
         }
@@ -559,13 +683,16 @@ pub fn append_compiled_function_params_indexed(
         // consumer.
         if try compiled_struct_cf::is_sorted_imports_shape(ir_bytes, function_name, statement_count, bs) {
             try compiled_struct_cf::append_sorted_imports_function(
-                out, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                ir_lookup_index, out, ir_bytes, function_name, llvm_symbol,
+                llvm_return_type, params_spec, bs
             );
             return;
         }
     }
     let mir = try compiled_mir_lower::lower_multi_statement_function(
         ir_lookup_index,
+        canonical_facts,
+        instance_context,
         ir_bytes,
         function_name,
         llvm_symbol,
@@ -600,29 +727,9 @@ pub fn append_compiled_function_auto(
     return;
 }
 
-// append_stdlib_struct_constructor_indexed emits the definition of an owned-container struct
-// constructor the frontend records as a stdlib callee (stdlib-return + struct-field facts, no body
-// facts). The body is synthesized from the struct-field facts through
-// lower_stdlib_struct_constructor_function, so callers supply only the qualified name, its
-// stdlib-symbol, and the params_spec; the field set and return type come from the IR facts.
-pub fn append_stdlib_struct_constructor_indexed(
-    ir_lookup_index: &ir_index::IrIndex,
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    params_spec: []u8
-) -> !void {
-    let mir = try compiled_mir_lower::lower_stdlib_struct_constructor_function(
-        ir_lookup_index, ir_bytes, function_name, llvm_symbol, params_spec
-    );
-    defer mir.deinit();
-    try compiled_mir_llvm::append_function(out, &mir);
-    return;
-}
-
 pub fn append_compiled_function_auto_indexed(
     ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
     out: &var std::string::String,
     ir_bytes: []u8,
     function_name: []u8,
@@ -636,6 +743,7 @@ pub fn append_compiled_function_auto_indexed(
     let params_spec_value = params_spec.*;
     try append_compiled_function_params_indexed(
         ir_lookup_index,
+        canonical_facts,
         out,
         ir_bytes,
         function_name,
@@ -648,6 +756,7 @@ pub fn append_compiled_function_auto_indexed(
 
 pub fn append_compiled_function_auto_return_indexed(
     ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
     out: &var std::string::String,
     ir_bytes: []u8,
     function_name: []u8,
@@ -659,6 +768,34 @@ pub fn append_compiled_function_auto_return_indexed(
     let params_spec_value = params_spec.*;
     try append_compiled_function_params_indexed(
         ir_lookup_index,
+        canonical_facts,
+        out,
+        ir_bytes,
+        function_name,
+        llvm_symbol_value,
+        llvm_return_type,
+        params_spec_value
+    );
+    return;
+}
+
+pub fn append_compiled_function_auto_return_instance_indexed(
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    instance_context: &compiled_instance_context::InstanceContext,
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: &[]u8,
+    llvm_return_type: []u8,
+    params_spec: &[]u8
+) -> !void {
+    let llvm_symbol_value = llvm_symbol.*;
+    let params_spec_value = params_spec.*;
+    try append_compiled_function_params_context_indexed(
+        ir_lookup_index,
+        canonical_facts,
+        instance_context,
         out,
         ir_bytes,
         function_name,

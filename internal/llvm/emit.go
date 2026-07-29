@@ -612,6 +612,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeStructNew(instr)
 	case strings.HasPrefix(instr.Op, "field."):
 		return e.writeFieldInstr(instr)
+	case instr.Op == "ref.store":
+		return e.writeRefStore(instr)
 	default:
 		return e.writeRuntimeInstr(instr)
 	}
@@ -639,12 +641,19 @@ func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
 	}
 }
 
-// writeFieldInstr dispatches struct field reads.
+// writeFieldInstr dispatches struct field reads and writes. The borrowed-write
+// prefix is checked before the borrowed-read one because it extends it.
 func (e *emitter) writeFieldInstr(instr *ir.Instr) error {
-	if strings.HasPrefix(instr.Op, "field.ref.") {
+	switch {
+	case strings.HasPrefix(instr.Op, "field.ref.set."):
+		return e.writeFieldRefSet(instr)
+	case strings.HasPrefix(instr.Op, "field.ref."):
 		return e.writeFieldRef(instr)
+	case strings.HasPrefix(instr.Op, "field.set."):
+		return e.writeFieldSet(instr)
+	default:
+		return e.writeField(instr)
 	}
-	return e.writeField(instr)
 }
 
 // writeErrorInstr dispatches recoverable-result operations.
@@ -1163,6 +1172,117 @@ func (e *emitter) writeFieldRef(instr *ir.Instr) error {
 		ptrName, e.llvmType(structType), value.operand, index)
 	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", name, e.llvmType(instr.Result.Type), ptrName)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeFieldSet lowers a struct field write on a value receiver to an LLVM
+// aggregate insertion. The receiver is SSA, so the write produces a new struct
+// value that the lowerer has already bound in place of the old one.
+func (e *emitter) writeFieldSet(instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: field write expects 2 args")
+	}
+	receiver := instr.Args[0]
+	st, ok := e.module.Structs[receiver.Type]
+	if !ok {
+		return fmt.Errorf("llvm error: unknown struct type `%s`", receiver.Type)
+	}
+	fieldName := strings.TrimPrefix(instr.Op, "field.set.")
+	index, ok := structFieldIndex(st, fieldName)
+	if !ok {
+		return fmt.Errorf("llvm error: unknown struct field `%s.%s`", st.Name, fieldName)
+	}
+	if instr.Args[1].Type != st.Fields[index].Type {
+		return fmt.Errorf(
+			"llvm error: field `%s.%s` accepts %s, got %s",
+			st.Name,
+			fieldName,
+			st.Fields[index].Type,
+			instr.Args[1].Type,
+		)
+	}
+	if instr.Result.Type != receiver.Type {
+		return fmt.Errorf(
+			"llvm error: field write on `%s` returns %s, got %s",
+			st.Name,
+			receiver.Type,
+			instr.Result.Type,
+		)
+	}
+	value := e.value(instr.Args[1])
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, %d\n",
+		name,
+		e.llvmType(receiver.Type),
+		e.value(receiver).operand,
+		e.llvmType(instr.Args[1].Type),
+		value.operand,
+		index,
+	)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeFieldRefSet lowers a struct field write through a borrowed struct
+// pointer to an addressed store, so the write lands in the borrowed storage
+// rather than in a copy of it.
+func (e *emitter) writeFieldRefSet(instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: borrowed field write expects 2 args")
+	}
+	receiver := instr.Args[0]
+	structType := derefLLVMType(receiver.Type)
+	st, ok := e.module.Structs[structType]
+	if !ok {
+		return fmt.Errorf("llvm error: unknown borrowed struct type `%s`", receiver.Type)
+	}
+	fieldName := strings.TrimPrefix(instr.Op, "field.ref.set.")
+	index, ok := structFieldIndex(st, fieldName)
+	if !ok {
+		return fmt.Errorf("llvm error: unknown struct field `%s.%s`", st.Name, fieldName)
+	}
+	if instr.Args[1].Type != st.Fields[index].Type {
+		return fmt.Errorf(
+			"llvm error: borrowed field `%s.%s` accepts %s, got %s",
+			st.Name,
+			fieldName,
+			st.Fields[index].Type,
+			instr.Args[1].Type,
+		)
+	}
+	if instr.Result.Type != "void" {
+		return fmt.Errorf("llvm error: borrowed field write returns void, got %s",
+			instr.Result.Type)
+	}
+	ptrName := localName(instr.Result.Name) + ".ptr"
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
+		ptrName, e.llvmType(structType), e.value(receiver).operand, index)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+		e.llvmType(instr.Args[1].Type), e.value(instr.Args[1]).operand, ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
+	return nil
+}
+
+// writeRefStore lowers `receiver.* = value` to a store through the borrow.
+func (e *emitter) writeRefStore(instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: dereference write expects 2 args")
+	}
+	receiver := instr.Args[0]
+	if want := derefLLVMType(receiver.Type); want != instr.Args[1].Type {
+		return fmt.Errorf("llvm error: dereference write on `%s` accepts %s, got %s",
+			receiver.Type, want, instr.Args[1].Type)
+	}
+	if instr.Result.Type != "void" {
+		return fmt.Errorf("llvm error: dereference write returns void, got %s",
+			instr.Result.Type)
+	}
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+		e.llvmType(instr.Args[1].Type),
+		e.value(instr.Args[1]).operand,
+		e.value(receiver).operand,
+	)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "void"}
 	return nil
 }
 

@@ -1,20 +1,19 @@
-import selfhost::parser;
 import selfhost::ir::executable_functions;
 import selfhost::backend::compiled_abi_params;
 import selfhost::backend::compiled_signature;
-import selfhost::backend::cli_llvm;
+import selfhost::backend::compiled_program_llvm;
 import selfhost::backend::compiled_llvm;
+import selfhost::backend::compiled_canonical_facts;
 import selfhost::backend::ir_index;
 import selfhost::backend::llvm;
-import selfhost::source;
+import selfhost::source::loader;
 
 // run_tape_lowering_gate drives the production compiled LLVM lowering over the
 // run codegen IR v1 tape cluster (selfhost::ir::codegen::lower_code_expr and its
 // record builders) and reports success only after the compiled MIR lowerer and
 // LLVM renderer cross the real recursive expression descent. It emits the full
-// production codegen component facts (append_codegen_function_facts) plus the
-// std::kizu::ast facts the component resolves its AST accessor calls against
-// (append_ast_function_facts), round-trips them through a file the same way the
+// production package graph and numeric closure facts, round-trips them through
+// a file the same way the
 // production backend reads target/selfhost/selfhost.ir back, then lowers every
 // tape cluster member through compiled_llvm::append_compiled_function_auto --
 // the production single-member lowering driver. While a measured blocker
@@ -27,40 +26,9 @@ pub fn run_tape_lowering_gate() -> !void {
     var facts = std::string::String(allocator);
     defer facts.deinit();
 
-    let ast_path = "std/src/kizu/ast.kizu";
-    let ast_text = try std::fs::read_file(io, ast_path);
-    let ast_file = gate_source_file(
-        0,
-        source::SourceKind::Std,
-        ast_path,
-        ast_text,
-        13
-    );
-    try executable_functions::append_ast_function_facts(allocator, &var facts, &ast_file);
-
-    let codegen_path = "selfhost/src/ir/codegen.kizu";
-    let codegen_text = try std::fs::read_file(io, codegen_path);
-    let codegen_file = gate_source_file(
-        1,
-        source::SourceKind::Selfhost,
-        codegen_path,
-        codegen_text,
-        13
-    );
-    try executable_functions::append_codegen_function_facts(allocator, &var facts, &codegen_file);
-
-    let selfhost_ast_path = "selfhost/src/ast.kizu";
-    let selfhost_ast_text = try std::fs::read_file(io, selfhost_ast_path);
-    let selfhost_ast_file = gate_source_file(
-        2,
-        source::SourceKind::Selfhost,
-        selfhost_ast_path,
-        selfhost_ast_text,
-        13
-    );
-    try executable_functions::append_selfhost_ast_function_facts(
-        allocator, &var facts, &selfhost_ast_file
-    );
+    var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
+    defer files.deinit();
+    try executable_functions::append_facts(allocator, &var facts, &files);
 
     // Round-trip the facts through a file so ir_bytes is a freshly-read owned []u8
     // with external provenance, exactly like the production backend which reads
@@ -77,15 +45,20 @@ pub fn run_tape_lowering_gate() -> !void {
     let ir_bytes = try std::fs::read_file(io, &facts_path);
     var lookup_index = try ir_index::build(ir_bytes);
     defer lookup_index.deinit();
+    var canonical_facts = try compiled_canonical_facts::parse_and_validate(
+        &lookup_index, ir_bytes
+    );
+    defer canonical_facts.deinit();
 
-    // Drive the production codegen closure BFS (the same walk stage2 uses), so
-    // every tape member reachable from lower_code_module lowers exactly as the
-    // hosted artifact compiles it.
+    // Drive the production package-definition consumer. The external ABI
+    // manifest roots lower_code_module and the dependency graph owns its whole
+    // tape closure.
     var registry = std::string::String(allocator);
     defer registry.deinit();
-    try cli_llvm::append_codegen_reachable_compiled_functions(
-        &var registry, &lookup_index, ir_bytes
+    let emitted = try compiled_program_llvm::append_reachable_functions(
+        &var registry, &lookup_index, &canonical_facts, ir_bytes
     );
+    if emitted < 1 { return error("run tape gate: package definitions missing"); }
     // The generalized traversal lowering also serves the node_count cluster and the
     // narrow declaration_count accessor; lowering them here guards the legacy arms.
     try run_tape_lower(allocator, ir_bytes, "selfhost::ast::node_count");
@@ -151,25 +124,4 @@ fn run_tape_lower(
         &var out, ir_bytes, function_name, &llvm_symbol_bytes, &params_spec_bytes
     );
     return;
-}
-
-// gate_source_file builds the SourceFile record the production fact emitters
-// take, pointing the module span at the path segment after the source root
-// prefix (std/src/ or selfhost/src/) and before the .kizu suffix.
-fn gate_source_file(
-    id: i64,
-    kind: source::SourceKind,
-    path: []u8,
-    text: []u8,
-    module_start: i64
-) -> source::SourceFile {
-    return source::SourceFile {
-        id: id,
-        kind: kind,
-        package_name: "selfhost",
-        module_start: module_start,
-        module_end: std::mem::len(path) - 5,
-        path: path,
-        text: text
-    };
 }

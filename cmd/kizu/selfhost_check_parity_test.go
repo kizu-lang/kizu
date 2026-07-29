@@ -229,8 +229,15 @@ func checkParityGuardCases() []checkParityGuardCase {
 			stderr:   selfhostUsageStderr(),
 		},
 		{
+			// A production selfhost module, not a hand-sized fixture: nothing else here
+			// proves the artifact survives a real one. The fixture cannot be
+			// selfhost/src/main.kizu, though -- `check <file>` loads that file plus the
+			// std it references and never the sibling modules of its package, so
+			// main.kizu's `parser::ParseError` resolves to nothing and the frontend
+			// reports an unknown type. Pinning ok there would assert a package-context
+			// capability `check <file>` has never had.
 			name:     "real_source_target",
-			args:     []string{"check", "selfhost/src/main.kizu"},
+			args:     []string{"check", "selfhost/src/backend/ir_contract.kizu"},
 			exitCode: 0,
 			stdout:   "check: ok\n",
 		},

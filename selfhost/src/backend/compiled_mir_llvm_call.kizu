@@ -2,6 +2,54 @@ import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_util;
 
+pub fn storage_codec_gate() -> !void {
+    var args = std::array::Array<compiled_mir::MirCallArg>(
+        std::mem::page_allocator()
+    );
+    defer args.deinit();
+    let var_arg = compiled_mir::var_call_arg("i1", "flag");
+    try args.append(try compiled_mir::storage_call_arg(
+        &var_arg, "i64", compiled_mir::MirStorageCodec::BoolI64
+    ));
+    let bool_arg = compiled_mir::bool_call_arg("i1", true);
+    try args.append(try compiled_mir::storage_call_arg(
+        &bool_arg, "i64", compiled_mir::MirStorageCodec::BoolI64
+    ));
+    let int_arg = compiled_mir::int_literal_call_arg("i32", -7);
+    try args.append(try compiled_mir::storage_call_arg(
+        &int_arg, "i64", compiled_mir::MirStorageCodec::SignedNarrowI64
+    ));
+    var nested_args = std::array::Array<compiled_mir::MirCallArg>(
+        std::mem::page_allocator()
+    );
+    let nested_arg = compiled_mir::call_call_arg(
+        "i1", "", "predicate", nested_args
+    );
+    try args.append(try compiled_mir::storage_call_arg(
+        &nested_arg, "i64", compiled_mir::MirStorageCodec::BoolI64
+    ));
+    let byte_bool = compiled_mir::var_call_arg("i1", "flag");
+    try args.append(try compiled_mir::storage_call_arg(
+        &byte_bool, "%kizu.slice.u8", compiled_mir::MirStorageCodec::ByteView
+    ));
+    let byte_slice = compiled_mir::var_call_arg("%kizu.slice.u8", "text");
+    try args.append(try compiled_mir::storage_call_arg(
+        &byte_slice, "%kizu.slice.u8", compiled_mir::MirStorageCodec::ByteView
+    ));
+    let byte_aggregate = compiled_mir::var_call_arg("%app.pair", "pair");
+    try args.append(try compiled_mir::storage_call_arg(
+        &byte_aggregate, "%kizu.slice.u8", compiled_mir::MirStorageCodec::ByteView
+    ));
+    try args.append(try compiled_mir::type_size_call_arg("%app.pair"));
+    var out = std::string::String(std::mem::page_allocator());
+    defer out.deinit();
+    try append_call_arg_setup(&var out, "codec", &args);
+    try append_call_args(&var out, &args);
+    let bytes = out.as_bytes();
+    print(bytes);
+    return;
+}
+
 pub fn append_call_return(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -234,7 +282,7 @@ fn append_call_arg_setup_scoped(
                             try out.append_bytes("  ");
                             try append_arg_local_name(out, scope, index);
                             try out.append_bytes("_call = call ");
-                            try out.append_bytes(arg.ty);
+                            try out.append_bytes(arg.semantic_type);
                             try out.append_bytes(" @");
                             try append_callee_symbol(
                                 out, arg.call_module_prefix, arg.call_callee_name
@@ -248,8 +296,84 @@ fn append_call_arg_setup_scoped(
                 }
             }
         }
+        if arg.storage_codec == compiled_mir::MirStorageCodec::BoolI64 or
+            arg.storage_codec == compiled_mir::MirStorageCodec::UnsignedNarrowI64 or
+            arg.storage_codec == compiled_mir::MirStorageCodec::SignedNarrowI64 {
+            try out.append_bytes("  ");
+            try append_arg_local_name(out, scope, index);
+            try out.append_bytes("_storage = ");
+            if arg.storage_codec == compiled_mir::MirStorageCodec::BoolI64 or
+                arg.storage_codec == compiled_mir::MirStorageCodec::UnsignedNarrowI64 {
+                try out.append_bytes("zext ");
+            } else {
+                try out.append_bytes("sext ");
+            }
+            try out.append_bytes(arg.semantic_type);
+            try out.append_byte(cast<u8>(32));
+            try append_call_arg_semantic_value_scoped(out, &arg, scope, index);
+            try out.append_bytes(" to i64");
+            try out.append_byte(cast<u8>(10));
+        }
+        if arg.storage_codec == compiled_mir::MirStorageCodec::ByteView {
+            try append_byte_view_arg_setup(out, &arg, scope, index);
+        }
         index = index + 1;
     }
+    return;
+}
+
+// append_type_size_constant emits a target-layout-derived byte width for any
+// concrete LLVM type. Both constructor TypeSize arguments and ByteView storage
+// use this single expression, so neither path carries per-type constants.
+pub fn append_type_size_constant(
+    out: &var std::string::String, llvm_type: []u8
+) -> !void {
+    if std::mem::len(llvm_type) == 0 {
+        return error("compiled mir llvm: type-size LLVM type missing");
+    }
+    try out.append_bytes("ptrtoint (ptr getelementptr (");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(", ptr null, i32 1) to i64)");
+    return;
+}
+
+// append_byte_view_arg_setup materializes one semantic value in addressable
+// storage and exposes exactly its bytes as %kizu.slice.u8. The call keeps the
+// semantic LLVM type in MirCallArg.semantic_type and changes only its physical
+// runtime transport type.
+fn append_byte_view_arg_setup(
+    out: &var std::string::String,
+    arg: &compiled_mir::MirCallArg,
+    scope: &CallArgNameScope,
+    index: i64
+) -> !void {
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, scope, index);
+    try out.append_bytes("_byte_slot = alloca ");
+    try out.append_bytes(arg.semantic_type);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  store ");
+    try out.append_bytes(arg.semantic_type);
+    try out.append_byte(cast<u8>(32));
+    try append_call_arg_semantic_value_scoped(out, arg, scope, index);
+    try out.append_bytes(", ptr ");
+    try append_arg_local_name(out, scope, index);
+    try out.append_bytes("_byte_slot");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, scope, index);
+    try out.append_bytes("_byte_base = insertvalue %kizu.slice.u8 poison, ptr ");
+    try append_arg_local_name(out, scope, index);
+    try out.append_bytes("_byte_slot, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ");
+    try append_arg_local_name(out, scope, index);
+    try out.append_bytes("_storage = insertvalue %kizu.slice.u8 ");
+    try append_arg_local_name(out, scope, index);
+    try out.append_bytes("_byte_base, i64 ");
+    try append_type_size_constant(out, arg.semantic_type);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
     return;
 }
 
@@ -602,6 +726,23 @@ fn append_call_arg_value_scoped(
     scope: &CallArgNameScope,
     index: i64
 ) -> !void {
+    if arg.storage_codec == compiled_mir::MirStorageCodec::BoolI64 or
+        arg.storage_codec == compiled_mir::MirStorageCodec::UnsignedNarrowI64 or
+        arg.storage_codec == compiled_mir::MirStorageCodec::SignedNarrowI64 or
+        arg.storage_codec == compiled_mir::MirStorageCodec::ByteView {
+        try append_arg_local_name(out, scope, index);
+        try out.append_bytes("_storage");
+        return;
+    }
+    return append_call_arg_semantic_value_scoped(out, arg, scope, index);
+}
+
+fn append_call_arg_semantic_value_scoped(
+    out: &var std::string::String,
+    arg: &compiled_mir::MirCallArg,
+    scope: &CallArgNameScope,
+    index: i64
+) -> !void {
     if arg.kind == compiled_mir::MirCallArgKind::Var {
             try out.append_bytes("%");
             try out.append_bytes(arg.value);
@@ -635,6 +776,9 @@ fn append_call_arg_value_scoped(
                                 if arg.kind == compiled_mir::MirCallArgKind::IntLiteral {
                                     try std::fmt::append_i64(out, arg.int_value);
                                 } else {
+                                if arg.kind == compiled_mir::MirCallArgKind::TypeSize {
+                                    try append_type_size_constant(out, arg.value);
+                                } else {
                                     if arg.kind == compiled_mir::MirCallArgKind::Arith {
                                         try append_arg_local_name(out, scope, index);
                                         try out.append_bytes("_arith");
@@ -653,6 +797,7 @@ fn append_call_arg_value_scoped(
                                             }
                                         }
                                     }
+                                }
                                 }
                             }
                         }

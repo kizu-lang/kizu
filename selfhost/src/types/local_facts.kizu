@@ -1,5 +1,6 @@
 import selfhost::source;
 import selfhost::types::ast_text;
+import selfhost::types::expression_facts;
 import selfhost::types::expression_infer;
 
 pub fn collect_function_statement_locals(
@@ -10,12 +11,27 @@ pub fn collect_function_statement_locals(
     body: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
+    try expression_infer::collect_declared_expression_type_facts(
+        allocator,
+        file,
+        ast,
+        body,
+        function_returns
+    );
     var index = 0;
     while index < params.len {
         let child = try ast.child_at(params, index);
-        try collect_param_local(file, ast, child, local_types, local_mutability);
+        try collect_param_local(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            local_mutability,
+            function_returns
+        );
         index = index + 1;
     }
     let local_count = try collect_statement_locals_from_node(
@@ -29,38 +45,53 @@ pub fn collect_function_statement_locals(
     );
     return params.len + local_count;
 }
+
 fn collect_param_local(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
-    local_mutability: &var std::map::Map<[]u8, bool>
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !void {
     let node = ast.get(node_id);
     match node.data {
         Param(param_node) => return collect_param_node_local(
+            allocator,
             file,
             ast,
+            node_id,
             param_node.name,
-            param_node.type_node,
             local_types,
-            local_mutability
+            local_mutability,
+            function_returns
         );,
         _ => return;,
     }
 }
 
 fn collect_param_node_local(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    param_node: std::kizu::ast::NodeId,
     name_id: std::kizu::ast::NodeId,
-    type_node: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
-    local_mutability: &var std::map::Map<[]u8, bool>
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !void {
     let name = ast_text::ast_node_text(file, ast, name_id);
     if !local_types.contains(name) {
-        try local_types.insert(name, ast_text::ast_return_type_text(file, ast, type_node));
+        var key = std::string::String(allocator);
+        defer key.deinit();
+        try expression_infer::append_param_type_key(key, file, &ast, param_node);
+        let key_bytes = key.as_bytes();
+        if !function_returns.contains_source(&key_bytes) {
+            return error("canonical parameter type fact missing");
+        }
+        let canonical_type = try function_returns.get_source(&key_bytes);
+        try local_types.insert(name, canonical_type);
         try local_mutability.insert(name, false);
     }
     return;
@@ -73,7 +104,7 @@ fn collect_statement_locals_from_range(
     statements: std::kizu::ast::ChildRange,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
     var count = 0;
     var index = 0;
@@ -100,7 +131,7 @@ fn collect_statement_locals_from_node(
     node_id: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
     let node = ast.get(node_id);
     match node.data {
@@ -231,7 +262,7 @@ fn collect_match_arm_locals(
     body: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
     var count = 0;
     let binding_name = ast_text::ast_node_text(file, ast, binding);
@@ -327,7 +358,7 @@ fn collect_expression_locals_from_node(
     node_id: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
     let node = ast.get(node_id);
     match node.data {
@@ -371,7 +402,7 @@ fn collect_match_expression_locals(
     arms: std::kizu::ast::ChildRange,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
     let value_count = try collect_expression_locals_from_node(
         allocator,
@@ -402,7 +433,7 @@ fn collect_statement_locals_from_two_nodes(
     second: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
     let first_count = try collect_statement_locals_from_node(
         allocator,
@@ -434,7 +465,7 @@ fn collect_let_statement_local_with_expression(
     value: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
     let local_count = try collect_let_statement_local(
         allocator,
@@ -468,7 +499,7 @@ fn collect_let_statement_local(
     value: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !i64 {
     let name = ast_text::ast_node_text(file, ast, name_id);
     if local_types.contains(name) {
@@ -493,7 +524,7 @@ pub fn function_statement_return_type(
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
     return_type: std::kizu::ast::NodeId,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
     var qualified = std::string::String(allocator);
     try ast_text::append_module_name(qualified, file);
@@ -501,8 +532,8 @@ pub fn function_statement_return_type(
     try qualified.append_bytes(ast_text::ast_node_text(file, ast, name));
     let key = qualified.as_bytes();
     var expected = ast_text::ast_return_type_text(file, ast, return_type);
-    if function_returns.contains(key) {
-        expected = try function_returns.get(key);
+    if function_returns.contains_source(&key) {
+        expected = try function_returns.get_source(&key);
     }
     qualified.deinit();
     return expected;

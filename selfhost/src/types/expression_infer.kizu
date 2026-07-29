@@ -1,6 +1,8 @@
+import selfhost::types::expression_facts;
 import selfhost::source;
+import selfhost::type_constructor;
+import selfhost::type_spelling;
 import selfhost::types::ast_text;
-import selfhost::types::function_calls;
 
 pub fn infer_expression_type(
     allocator: Allocator,
@@ -8,7 +10,7 @@ pub fn infer_expression_type(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
     let node = ast.get(node_id);
     match node.data {
@@ -28,7 +30,7 @@ pub fn infer_expression_type(
             local_types,
             function_returns
         );,
-        TryExpr(try_expr_node) => return success_type_of(try infer_expression_type(
+        TryExpr(try_expr_node) => return try success_type_of(try infer_expression_type(
             allocator,
             file,
             ast,
@@ -55,7 +57,13 @@ pub fn infer_expression_type(
             local_types,
             function_returns
         );,
-        TypeApplyExpr(type_apply) => return ast_text::ast_node_text(file, ast, node_id);,
+        TypeApplyExpr(type_apply) => return declared_expression_type_fact(
+            allocator,
+            file,
+            ast,
+            node_id,
+            function_returns
+        );,
         IndexExpr(index_expr) => return index_expression_type(
             allocator,
             file,
@@ -111,7 +119,7 @@ fn infer_match_expression_type(
     ast: std::kizu::ast::Ast,
     arms: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
     var result = "unknown";
     var index = 0;
@@ -143,7 +151,7 @@ fn infer_match_arm_expression_type(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
     let node = ast.get(node_id);
     match node.data {
@@ -165,7 +173,7 @@ fn infer_match_arm_body_expression_type(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
     let node = ast.get(node_id);
     match node.data {
@@ -182,16 +190,10 @@ fn infer_match_arm_body_expression_type(
     }
 }
 
-fn success_type_of(value_type: []u8) -> []u8 {
-    if std::mem::starts_with(value_type, "!") {
-        return value_type[1..std::mem::len(value_type)];
-    }
-    var index = 0;
-    while index < std::mem::len(value_type) {
-        if value_type[index] == cast<u8>(33) {
-            return value_type[index + 1..std::mem::len(value_type)];
-        }
-        index = index + 1;
+fn success_type_of(value_type: []u8) -> ![]u8 borrows value_type {
+    let layer = try type_spelling::parse(value_type);
+    if layer.kind == type_spelling::layer_error_union() {
+        return try type_spelling::second_child(&layer, value_type);
     }
     return value_type;
 }
@@ -204,12 +206,14 @@ fn field_expression_type(
     namespace: bool,
     name: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
     if namespace {
         let receiver_text = ast_text::ast_node_text(file, ast, receiver);
         if last_segment_starts_with_uppercase(receiver_text) {
-            return receiver_text;
+            return resolved_declared_nominal_type(
+                allocator, file, receiver_text, function_returns
+            );
         }
     }
     let receiver_type = try infer_expression_type(
@@ -221,40 +225,83 @@ fn field_expression_type(
         function_returns
     );
     let field = ast_text::ast_node_text(file, ast, name);
-    let typed_field = typed_field_name_type(receiver_type, field);
-    if !std::mem::equal_bytes(typed_field, "unknown") {
-        return typed_field;
-    }
+    let lookup_receiver_type = try field_receiver_value_type(receiver_type);
     let struct_field = try struct_field_declared_type(
         allocator,
-        receiver_type,
+        file,
+        lookup_receiver_type,
         field,
         function_returns
     );
     if !std::mem::equal_bytes(struct_field, "unknown") {
         return struct_field;
     }
-    return field_name_type(field);
+    let typed_field = typed_field_name_type(lookup_receiver_type, field);
+    if !std::mem::equal_bytes(typed_field, "unknown") {
+        return typed_field;
+    }
+    return "unknown";
+}
+
+// Namespace enum/union values carry the exact declared nominal owner. Source
+// aliases are only spellings; returning one as a type would make an imported
+// `module::Enum::Tag` differ from the canonical type stored on struct fields.
+pub fn resolved_declared_nominal_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    type_name: []u8,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> ![]u8 {
+    var declared_key = std::string::String(allocator);
+    try declared_key.append_bytes("tn ");
+    try append_resolved_nominal_type(
+        declared_key, allocator, file, type_name, function_returns
+    );
+    let declared_key_bytes = declared_key.as_bytes();
+    var result = type_name;
+    if function_returns.contains_source(&declared_key_bytes) {
+        result = try function_returns.get_source(&declared_key_bytes);
+    }
+    declared_key.deinit();
+    return result;
+}
+
+// Field access auto-dereferences shared and mutable borrows. Normalize that
+// receiver shape once so typed compiler structs and declared user structs use
+// the same lookup identity.
+fn field_receiver_value_type(
+    receiver_type: []u8
+) -> ![]u8 borrows receiver_type {
+    let value_type = std::mem::trim_ascii(receiver_type);
+    let layer = try type_spelling::parse(value_type);
+    if layer.kind != type_spelling::layer_borrow() and
+        layer.kind != type_spelling::layer_borrow_var() {
+        return value_type;
+    }
+    let child = try type_spelling::first_child(&layer, value_type);
+    return field_receiver_value_type(child);
 }
 
 // Resolve a field access against a user-declared struct's real field type.
 // Struct field facts are collected into function_returns under keys built by
-// append_struct_field_key (see checker.kizu collect_struct_field_types_*).
-// This runs after typed_field_name_type (compiler self-AST special cases) but
-// before the name-based field_name_type fallback, so user structs get their
-// declared field type instead of a name-keyed guess.
+// append_struct_field_key (see checker.kizu collect_struct_resolution_facts_*).
+// Exact declared fields run before compiler builtin and field-name inference,
+// so a declared owner can never be reclassified by a same-spelled field.
 fn struct_field_declared_type(
     allocator: Allocator,
+    file: &source::SourceFile,
     receiver_type: []u8,
     field: []u8,
-    function_returns: &std::map::Map<[]u8, []u8>
-) -> ![]u8 {
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> ![]u8 borrows function_returns {
     var key = std::string::String(allocator);
     defer key.deinit();
-    try append_struct_field_key(key, receiver_type, field);
+    try append_struct_field_key(
+        key, allocator, file, receiver_type, field, function_returns
+    );
     let key_bytes = key.as_bytes();
-    if function_returns.contains(key_bytes) {
-        return try function_returns.get(key_bytes);
+    if function_returns.contains_field(&key_bytes) {
+        return try function_returns.get_field(&key_bytes);
     }
     return "unknown";
 }
@@ -264,14 +311,551 @@ fn struct_field_declared_type(
 // keys are module::name with no spaces), so the two key spaces never collide.
 pub fn append_struct_field_key(
     key: &var std::string::String,
+    allocator: Allocator,
+    file: &source::SourceFile,
     struct_name: []u8,
-    field: []u8
+    field: []u8,
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !void {
     try key.append_bytes("sf ");
-    try key.append_bytes(struct_name);
+    try append_resolved_nominal_type(
+        key, allocator, file, struct_name, function_returns
+    );
     try key.append_bytes(" ");
     try key.append_bytes(field);
     return;
+}
+
+pub fn append_resolved_nominal_type(
+    out: &var std::string::String,
+    allocator: Allocator,
+    file: &source::SourceFile,
+    type_name: []u8,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    if source::is_absolute_name_for_file(file, type_name) {
+        try out.append_bytes(type_name);
+        return;
+    }
+    if ast_text::is_qualified_name(type_name) {
+        let alias_end = first_qualified_segment_end(type_name);
+        let alias = type_name[0..alias_end];
+        var alias_key = std::string::String(allocator);
+        defer alias_key.deinit();
+        try append_struct_import_alias_key(alias_key, file, alias);
+        let alias_key_bytes = alias_key.as_bytes();
+        if facts.contains_source(&alias_key_bytes) {
+            try out.append_bytes(try facts.get_source(&alias_key_bytes));
+            try out.append_bytes(type_name[alias_end..std::mem::len(type_name)]);
+            return;
+        }
+        try source::append_package_prefix(out, file);
+        try out.append_bytes("::");
+        try out.append_bytes(type_name);
+        return;
+    }
+    try source::append_qualified_module_name(out, file);
+    try out.append_bytes("::");
+    try out.append_bytes(type_name);
+    return;
+}
+
+pub fn build_canonical_type_spelling(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    spelling: []u8,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    errdefer out.deinit();
+    try append_canonical_type_spelling(
+        &var out, allocator, file, std::mem::trim_ascii(spelling), facts
+    );
+    return out;
+}
+
+fn append_canonical_type_spelling(
+    out: &var std::string::String,
+    allocator: Allocator,
+    file: &source::SourceFile,
+    spelling: []u8,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    let type_name = std::mem::trim_ascii(spelling);
+    let layer = try type_spelling::parse(type_name);
+    if layer.kind == type_spelling::layer_named() {
+        return append_canonical_named_type(
+            out, allocator, file, type_name, &layer, facts
+        );
+    }
+    if layer.kind == type_spelling::layer_error_union() {
+        let error_type = try type_spelling::first_child(&layer, type_name);
+        let success_type = try type_spelling::second_child(&layer, type_name);
+        if std::mem::len(error_type) > 0 {
+            try append_canonical_type_spelling(
+                out, allocator, file, error_type, facts
+            );
+        }
+        try out.append_bytes("!");
+        return append_canonical_type_spelling(
+            out, allocator, file, success_type, facts
+        );
+    }
+    try append_type_wrapper(out, layer.kind);
+    return append_canonical_type_spelling(
+        out,
+        allocator,
+        file,
+        try type_spelling::first_child(&layer, type_name),
+        facts
+    );
+}
+
+fn append_canonical_named_type(
+    out: &var std::string::String,
+    allocator: Allocator,
+    file: &source::SourceFile,
+    spelling: []u8,
+    layer: &type_spelling::TypeLayer,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    try append_declared_nominal_if_known(
+        out,
+        allocator,
+        file,
+        try type_spelling::constructor(layer, spelling),
+        facts
+    );
+    if !layer.has_arguments { return; }
+    try out.append_bytes("<");
+    let arguments = try type_spelling::arguments(layer, spelling);
+    var start = 0;
+    while start < std::mem::len(arguments) {
+        if start > 0 { try out.append_bytes(", "); }
+        try append_canonical_type_spelling(
+            out,
+            allocator,
+            file,
+            try type_spelling::next_argument(arguments, start),
+            facts
+        );
+        start = try type_spelling::next_argument_start(arguments, start);
+    }
+    try out.append_bytes(">");
+    return;
+}
+
+fn append_declared_nominal_if_known(
+    out: &var std::string::String,
+    allocator: Allocator,
+    file: &source::SourceFile,
+    type_name: []u8,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    var resolved = std::string::String(allocator);
+    defer resolved.deinit();
+    try append_resolved_nominal_type(
+        resolved, allocator, file, type_name, facts
+    );
+    var type_key = std::string::String(allocator);
+    defer type_key.deinit();
+    try type_key.append_bytes("tn ");
+    let resolved_bytes = resolved.as_bytes();
+    try type_key.append_bytes(resolved_bytes);
+    let type_key_bytes = type_key.as_bytes();
+    if facts.contains_source(&type_key_bytes) {
+        try out.append_bytes(resolved_bytes);
+        return;
+    }
+    try out.append_bytes(type_name);
+    return;
+}
+
+fn append_type_wrapper(
+    out: &var std::string::String,
+    kind: i64
+) -> !void {
+    if kind == type_spelling::layer_borrow() {
+        try out.append_bytes("&");
+        return;
+    }
+    if kind == type_spelling::layer_borrow_var() {
+        try out.append_bytes("&var ");
+        return;
+    }
+    if kind == type_spelling::layer_slice() {
+        try out.append_bytes("[]");
+        return;
+    }
+    if kind == type_spelling::layer_nullable() {
+        try out.append_bytes("?");
+        return;
+    }
+    if kind == type_spelling::layer_dynamic() {
+        try out.append_bytes("dyn ");
+        return;
+    }
+    if kind == type_spelling::layer_const() {
+        try out.append_bytes("const ");
+        return;
+    }
+    return error("unknown type spelling wrapper");
+}
+
+pub fn append_struct_import_alias_key(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    alias: []u8
+) -> !void {
+    try out.append_bytes("sa ");
+    try source::append_qualified_module_name(out, file);
+    try out.append_bytes(" ");
+    try out.append_bytes(alias);
+    return;
+}
+
+pub fn append_param_type_key(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    param_node: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(param_node);
+    try out.append_bytes("pt ");
+    try source::append_qualified_module_name(out, file);
+    try out.append_bytes(" ");
+    try std::fmt::append_i64(out, node.span.start);
+    try out.append_bytes(" ");
+    try std::fmt::append_i64(out, node.span.end);
+    return;
+}
+
+pub fn collect_declared_expression_type_facts(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(value) => return collect_declared_expression_type_range(
+            allocator, file, ast, value.declarations, facts
+        );,
+        ImportDecl(value) => return;,
+        StructDecl(value) => return collect_declared_expression_type_ranges(
+            allocator, file, ast, value.type_params, value.fields, facts
+        );,
+        EnumDecl(value) => return collect_declared_expression_type_range(
+            allocator, file, ast, value.tags, facts
+        );,
+        UnionDecl(value) => return collect_declared_expression_type_ranges(
+            allocator, file, ast, value.type_params, value.variants, facts
+        );,
+        ImplDecl(value) => return collect_declared_expression_type_one_range(
+            allocator, file, ast, value.type_name, value.methods, facts
+        );,
+        UnionVariant(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.payload, facts
+        );,
+        FnDecl(value) => return collect_declared_expression_type_fn(
+            allocator,
+            file,
+            ast,
+            value.type_params,
+            value.params,
+            value.body,
+            facts
+        );,
+        Param(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.type_node, facts
+        );,
+        Field(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.type_node, facts
+        );,
+        Block(value) => return collect_declared_expression_type_range(
+            allocator, file, ast, value.statements, facts
+        );,
+        Let(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.value, facts
+        );,
+        Assign(value) => return collect_declared_expression_type_two(
+            allocator, file, ast, value.target, value.value, facts
+        );,
+        Return(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.value, facts
+        );,
+        Defer(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.expr, facts
+        );,
+        ErrDefer(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.expr, facts
+        );,
+        ExprStmt(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.expr, facts
+        );,
+        If(value) => return collect_declared_expression_type_three(
+            allocator,
+            file,
+            ast,
+            value.condition,
+            value.then_block,
+            value.else_block,
+            facts
+        );,
+        While(value) => return collect_declared_expression_type_two(
+            allocator, file, ast, value.condition, value.body, facts
+        );,
+        For(value) => return collect_declared_expression_type_three(
+            allocator, file, ast, value.start, value.end, value.body, facts
+        );,
+        Break(value) => return;,
+        Continue(value) => return;,
+        Match(value) => return collect_declared_expression_type_one_range(
+            allocator, file, ast, value.value, value.arms, facts
+        );,
+        MatchArm(value) => return collect_declared_expression_type_three(
+            allocator, file, ast, value.pattern, value.binding, value.body, facts
+        );,
+        Unsafe(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.body, facts
+        );,
+        ComptimeIf(value) => return collect_declared_expression_type_three(
+            allocator,
+            file,
+            ast,
+            value.condition,
+            value.then_block,
+            value.else_block,
+            facts
+        );,
+        Prefix(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.right, facts
+        );,
+        Binary(value) => return collect_declared_expression_type_two(
+            allocator, file, ast, value.left, value.right, facts
+        );,
+        FieldExpr(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.receiver, facts
+        );,
+        DerefExpr(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.receiver, facts
+        );,
+        Call(value) => return collect_declared_expression_type_one_range(
+            allocator, file, ast, value.callee, value.args, facts
+        );,
+        TypeApplyExpr(value) => return collect_type_apply_expression_fact(
+            allocator,
+            file,
+            ast,
+            node_id,
+            value.callee,
+            value.type_args,
+            facts
+        );,
+        CastExpr(value) => return collect_declared_expression_type_two(
+            allocator, file, ast, value.type_node, value.value, facts
+        );,
+        IndexExpr(value) => return collect_declared_expression_type_three(
+            allocator, file, ast, value.target, value.start, value.end, facts
+        );,
+        StructLiteralExpr(value) => return collect_declared_expression_type_one_range(
+            allocator, file, ast, value.type_name, value.fields, facts
+        );,
+        StructFieldInit(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.value, facts
+        );,
+        ArenaNewExpr(value) => return collect_declared_expression_type_two(
+            allocator, file, ast, value.type_node, value.allocator, facts
+        );,
+        TryExpr(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.value, facts
+        );,
+        ComptimeExpr(value) => return collect_declared_expression_type_facts(
+            allocator, file, ast, value.value, facts
+        );,
+        TypeName(value) => return;,
+        Var(value) => return;,
+        Int(value) => return;,
+        String(value) => return;,
+        Bool(value) => return;,
+        Empty => return;,
+    }
+}
+
+fn collect_type_apply_expression_fact(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    type_args: std::kizu::ast::ChildRange,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try append_expression_type_key(key, file, &ast, node_id);
+    let key_bytes = key.as_bytes();
+    if !facts.contains_source(&key_bytes) {
+        var canonical_type = try build_canonical_type_spelling(
+            allocator,
+            file,
+            ast_text::ast_node_text(file, ast, node_id),
+            facts
+        );
+        defer canonical_type.deinit();
+        try facts.insert_source_owned(&key_bytes, &canonical_type);
+    }
+    return collect_declared_expression_type_one_range(
+        allocator, file, ast, callee, type_args, facts
+    );
+}
+
+fn declared_expression_type_fact(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> ![]u8 borrows facts {
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try append_expression_type_key(key, file, &ast, node_id);
+    let key_bytes = key.as_bytes();
+    if !facts.contains_source(&key_bytes) {
+        return error("canonical expression type fact missing");
+    }
+    return try facts.get_source(&key_bytes);
+}
+
+fn append_expression_type_key(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(node_id);
+    try out.append_bytes("et ");
+    try source::append_qualified_module_name(out, file);
+    try out.append_bytes(" ");
+    try std::fmt::append_i64(out, node.span.start);
+    try out.append_bytes(" ");
+    try std::fmt::append_i64(out, node.span.end);
+    return;
+}
+
+fn collect_declared_expression_type_fn(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    try collect_declared_expression_type_range(
+        allocator, file, ast, type_params, facts
+    );
+    try collect_declared_expression_type_range(
+        allocator, file, ast, params, facts
+    );
+    return collect_declared_expression_type_facts(
+        allocator, file, ast, body, facts
+    );
+}
+
+fn collect_declared_expression_type_ranges(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::ChildRange,
+    second: std::kizu::ast::ChildRange,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    try collect_declared_expression_type_range(
+        allocator, file, ast, first, facts
+    );
+    return collect_declared_expression_type_range(
+        allocator, file, ast, second, facts
+    );
+}
+
+fn collect_declared_expression_type_one_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    try collect_declared_expression_type_facts(
+        allocator, file, ast, node_id, facts
+    );
+    return collect_declared_expression_type_range(
+        allocator, file, ast, range, facts
+    );
+}
+
+fn collect_declared_expression_type_two(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    try collect_declared_expression_type_facts(
+        allocator, file, ast, first, facts
+    );
+    return collect_declared_expression_type_facts(
+        allocator, file, ast, second, facts
+    );
+}
+
+fn collect_declared_expression_type_three(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    try collect_declared_expression_type_two(
+        allocator, file, ast, first, second, facts
+    );
+    return collect_declared_expression_type_facts(
+        allocator, file, ast, third, facts
+    );
+}
+
+fn collect_declared_expression_type_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        try collect_declared_expression_type_facts(
+            allocator, file, ast, child, facts
+        );
+        index = index + 1;
+    }
+    return;
+}
+
+fn first_qualified_segment_end(name: []u8) -> i64 {
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return std::mem::len(name);
 }
 
 fn typed_field_name_type(receiver_type: []u8, field: []u8) -> []u8 {
@@ -517,11 +1101,17 @@ fn call_expression_type(
     ast: std::kizu::ast::Ast,
     callee: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
     let callee_text = ast_text::ast_node_text(file, ast, callee);
-    if is_generic_constructor_text(callee_text) {
-        return callee_text;
+    if try is_generic_constructor_text(callee_text) {
+        return declared_expression_type_fact(
+            allocator,
+            file,
+            ast,
+            callee,
+            function_returns
+        );
     }
     let method_type = try method_call_text_type(callee_text, local_types);
     if !std::mem::equal_bytes(method_type, "unknown") {
@@ -537,7 +1127,7 @@ fn index_expression_type(
     target: std::kizu::ast::NodeId,
     slice: bool,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
     let target_type = try infer_expression_type(
         allocator,
@@ -574,55 +1164,6 @@ fn arena_expression_type(
     return "unknown";
 }
 
-fn field_name_type(field: []u8) -> []u8 {
-    if std::mem::equal_bytes(field, "start") or
-        std::mem::equal_bytes(field, "end") or
-        std::mem::equal_bytes(field, "line") or
-        std::mem::equal_bytes(field, "column") or
-        std::mem::equal_bytes(field, "raw") or
-        std::mem::equal_bytes(field, "len") or
-        std::mem::equal_bytes(field, "source_id") or
-        std::mem::equal_bytes(field, "byte_start") or
-        std::mem::equal_bytes(field, "byte_end") or
-        std::mem::equal_bytes(field, "span_start") or
-        std::mem::equal_bytes(field, "span_end") {
-        return "i64";
-    }
-    if std::mem::equal_bytes(field, "modules") or
-        std::mem::equal_bytes(field, "symbols") or
-        std::mem::equal_bytes(field, "functions") or
-        std::mem::equal_bytes(field, "typed_nodes") or
-        std::mem::equal_bytes(field, "diagnostics") or
-        std::mem::equal_bytes(field, "params") or
-        std::mem::equal_bytes(field, "tokens") or
-        std::mem::equal_bytes(field, "bytes") or
-        std::mem::equal_bytes(field, "declarations") or
-        std::mem::equal_bytes(field, "nodes") {
-        return "i64";
-    }
-    if std::mem::equal_bytes(field, "public") or
-        std::mem::equal_bytes(field, "requires_unsafe") or
-        std::mem::equal_bytes(field, "comptime_param") or
-        std::mem::equal_bytes(field, "mutable") or
-        std::mem::equal_bytes(field, "slice") or
-        std::mem::equal_bytes(field, "namespace") or
-        std::mem::equal_bytes(field, "value") or
-        std::mem::equal_bytes(field, "diagnostic") or
-        std::mem::equal_bytes(field, "is_dir") {
-        return "bool";
-    }
-    if std::mem::equal_bytes(field, "path") or
-        std::mem::equal_bytes(field, "text") or
-        std::mem::equal_bytes(field, "module") or
-        std::mem::equal_bytes(field, "message") or
-        std::mem::equal_bytes(field, "name") or
-        std::mem::equal_bytes(field, "return_type") or
-        std::mem::equal_bytes(field, "param_source") {
-        return "[]u8";
-    }
-    return "unknown";
-}
-
 fn method_call_text_type(
     callee: []u8,
     local_types: &std::map::Map<[]u8, []u8>
@@ -643,7 +1184,7 @@ fn method_call_text_type(
             receiver_type = try local_types.get(receiver);
         }
     }
-    return method_return_type(method, receiver_type);
+    return try method_return_type(method, receiver_type);
 }
 
 fn last_field_segment(text: []u8) -> []u8 {
@@ -658,7 +1199,7 @@ fn last_field_segment(text: []u8) -> []u8 {
     return text[start..std::mem::len(text)];
 }
 
-fn method_return_type(method: []u8, receiver_type: []u8) -> []u8 {
+fn method_return_type(method: []u8, receiver_type: []u8) -> ![]u8 borrows receiver_type {
     if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "capacity") {
         return "i64";
     }
@@ -686,80 +1227,45 @@ fn method_return_type(method: []u8, receiver_type: []u8) -> []u8 {
     return "unknown";
 }
 
-fn container_element_type(type_name: []u8) -> []u8 {
+fn container_element_type(type_name: []u8) -> ![]u8 borrows type_name {
     if std::mem::starts_with(type_name, "std::array::Array<") {
-        return first_generic_argument(type_name);
+        return try generic_argument(type_name, 0);
     }
     if std::mem::starts_with(type_name, "std::map::Map<") {
-        return second_generic_argument(type_name);
+        return try generic_argument(type_name, 1);
     }
     return "unknown";
 }
 
-fn first_generic_argument(type_name: []u8) -> []u8 {
+pub fn gate_qualified_generic_method_result() -> !void {
+    print(try method_return_type(
+        "get", "std::map::Map<[]u8, resolver::BindingKind>"
+    ));
+    return;
+}
+
+fn generic_argument(
+    type_name: []u8,
+    wanted_index: i64
+) -> ![]u8 borrows type_name {
+    let layer = try type_spelling::parse(type_name);
+    if layer.kind != type_spelling::layer_named() or !layer.has_arguments {
+        return error("container type arguments missing");
+    }
+    let arguments = try type_spelling::arguments(&layer, type_name);
+    var start = 0;
     var index = 0;
-    while index < std::mem::len(type_name) and type_name[index] != cast<u8>(60) {
+    while start < std::mem::len(arguments) {
+        let argument = try type_spelling::next_argument(arguments, start);
+        if index == wanted_index { return argument; }
+        start = try type_spelling::next_argument_start(arguments, start);
         index = index + 1;
     }
-    if index >= std::mem::len(type_name) {
-        return "unknown";
-    }
-    let start = index + 1;
-    index = start;
-    var depth = 1;
-    while index < std::mem::len(type_name) and depth > 0 {
-        let byte = type_name[index];
-        if byte == cast<u8>(60) {
-            depth = depth + 1;
-        } else {
-            if byte == cast<u8>(62) {
-                depth = depth - 1;
-                if depth == 0 {
-                    return std::mem::trim_ascii(type_name[start..index]);
-                }
-            } else {
-                if depth == 1 and byte == cast<u8>(44) {
-                    return std::mem::trim_ascii(type_name[start..index]);
-                }
-            }
-        }
-        index = index + 1;
-    }
-    return "unknown";
+    return error("container type argument missing");
 }
 
-fn second_generic_argument(type_name: []u8) -> []u8 {
-    var index = 0;
-    var depth = 0;
-    var start = -1;
-    while index < std::mem::len(type_name) {
-        let byte = type_name[index];
-        if byte == cast<u8>(60) {
-            depth = depth + 1;
-        } else {
-            if byte == cast<u8>(62) {
-                if depth == 1 and start >= 0 {
-                    return std::mem::trim_ascii(type_name[start..index]);
-                }
-                depth = depth - 1;
-            } else {
-                if byte == cast<u8>(44) and depth == 1 {
-                    start = index + 1;
-                }
-            }
-        }
-        index = index + 1;
-    }
-    return "unknown";
-}
-
-pub fn is_generic_constructor_text(text: []u8) -> bool {
-    return std::mem::starts_with(text, "std::array::Array<") or
-        std::mem::starts_with(text, "std::map::Map<") or
-        std::mem::starts_with(text, "std::mem::Box<") or
-        std::mem::starts_with(text, "std::arena::Arena<") or
-        std::mem::starts_with(text, "std::arena::Handle<") or
-        std::mem::starts_with(text, "std::atomic::Atomic<");
+pub fn is_generic_constructor_text(text: []u8) -> !bool {
+    return try type_constructor::is_builtin_application(text);
 }
 
 fn append_resolved_function_name(
@@ -803,20 +1309,33 @@ fn resolved_function_return_type(
     allocator: Allocator,
     file: &source::SourceFile,
     name: []u8,
-    function_returns: &std::map::Map<[]u8, []u8>
+    function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> ![]u8 {
-    if function_calls::should_skip_function_reference(name) {
+    if should_skip_function_reference(name) {
         return "unknown";
     }
     var resolved = std::string::String(allocator);
     try append_resolved_function_name(resolved, file, name);
     let key = resolved.as_bytes();
     var result = "unknown";
-    if function_returns.contains(key) {
-        result = try function_returns.get(key);
+    if function_returns.contains_source(&key) {
+        result = try function_returns.get_source(&key);
     }
     resolved.deinit();
     return result;
+}
+
+pub fn should_skip_function_reference(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "print") or
+        std::mem::equal_bytes(name, "error") or
+        std::mem::equal_bytes(name, "cast") or
+        std::mem::equal_bytes(name, "return") or
+        std::mem::equal_bytes(name, "or") or
+        std::mem::equal_bytes(name, "and") or
+        std::mem::equal_bytes(name, "if") or
+        std::mem::equal_bytes(name, "while") or
+        std::mem::equal_bytes(name, "for") or
+        std::mem::equal_bytes(name, "match");
 }
 
 fn infer_var_expression_type(

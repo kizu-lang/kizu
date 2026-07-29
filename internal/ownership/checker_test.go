@@ -1041,6 +1041,53 @@ fn main() {}`
 	}
 }
 
+// TestCheckArrayPopOrPanicMovesNonCopyElement combines pop moves with explicit trapping.
+func TestCheckArrayPopOrPanicMovesNonCopyElement(t *testing.T) {
+	source := `struct Parsed { values: std::array::Array<i64> }
+impl Parsed {
+    fn deinit(self: Parsed) -> void {
+        self.values.deinit();
+    }
+}
+fn check(values: std::array::Array<Parsed>) -> void {
+    let value = values.pop_or_panic();
+    value.deinit();
+    print(values.len());
+    values.deinit();
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckArrayPopOrPanicRejectsActiveElementBorrow keeps mutation alias-safe.
+func TestCheckArrayPopOrPanicRejectsActiveElementBorrow(t *testing.T) {
+	source := `struct Parsed { values: std::array::Array<i64> }
+impl Parsed {
+    fn deinit(self: Parsed) -> void {
+        self.values.deinit();
+    }
+}
+fn observe(value: &Parsed) -> void {}
+fn check(values: std::array::Array<Parsed>) -> !void {
+    let first = try values.at(0);
+    let value = values.pop_or_panic();
+    observe(first);
+    value.deinit();
+    values.deinit();
+    return;
+}
+fn main() {}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected active borrow error")
+	}
+	if !strings.Contains(err.Error(), "`Array.pop_or_panic` cannot run while array is borrowed") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckArrayAcceptsNestedResourceElement checks Array owns element cleanup.
 func TestCheckArrayAcceptsNestedResourceElement(t *testing.T) {
 	source := `struct User { name: []u8 }

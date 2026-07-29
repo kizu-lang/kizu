@@ -1,226 +1,12 @@
+import selfhost::backend::compiled_type_resolver;
+import selfhost::backend::compiled_canonical_facts;
+import selfhost::backend::compiled_instance_context;
 import selfhost::backend::compiled_util;
 import selfhost::backend::ir_index;
 
-// kizu_type_to_abi maps a single Kizu parameter type spelling to its LLVM ABI
-// type. This is the strict ABI mapper (Agent B, tracker 1069): unlike
-// compiled_type_lower::kizu_type_to_llvm it never falls back to a fact lookup,
-// so an unsupported type is an explicit error rather than a silently-resolved
-// guess. Callers that derive a compiled params_spec from a function signature
-// route every parameter type through here.
-pub fn kizu_type_to_abi(kizu_type: []u8) -> ![]u8 {
-    let type_len = std::mem::len(kizu_type);
-    if type_len == 0 {
-        return error("abi mapper: empty parameter type");
-    }
-    // A leading '&' borrow marker carries no ABI difference from its pointee:
-    // borrowed values are passed by the same representation, so strip it and map
-    // the underlying type.
-    if kizu_type[0] == cast<u8>(38) {
-        return try kizu_type_to_abi(kizu_type[1..type_len]);
-    }
-    // A '&var' mutable borrow marker records the 'var' keyword after the '&'. The
-    // recorded type token lowers source spaces to underscores, so '&var Array<T>'
-    // arrives as '&var_Array<T>'; once the leading '&' is stripped above, the 'var_'
-    // marker reaches here. A mutable borrow shares its pointee representation, so strip
-    // it and map the underlying type (the formatter's indices: &var
-    // std::array::Array<i64>, issue 1165).
-    if std::mem::starts_with(kizu_type, "var_") {
-        return try kizu_type_to_abi(kizu_type[4..type_len]);
-    }
-    if std::mem::equal_bytes(kizu_type, "u8") {
-        return "i8";
-    }
-    // usize and i64 share the native word ABI.
-    if std::mem::equal_bytes(kizu_type, "usize") {
-        return "i64";
-    }
-    if std::mem::equal_bytes(kizu_type, "i64") {
-        return "i64";
-    }
-    // bool lowers to the i1 ABI.
-    if std::mem::equal_bytes(kizu_type, "bool") {
-        return "i1";
-    }
-    if std::mem::equal_bytes(kizu_type, "[]u8") {
-        return "%kizu.slice.u8";
-    }
-    if std::mem::equal_bytes(kizu_type, "TokenKind") {
-        return "i64";
-    }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::lexer::TokenKind") {
-        return "i64";
-    }
-    // SourceKind is a selfhost enum, so it shares the native i64 ABI. The
-    // selfhost::source closures live inside the source module, so they spell it
-    // bare as 'SourceKind'; the loader closures spell it as 'source::SourceKind'
-    // through their 'import selfhost::source' alias; the fully qualified form is
-    // accepted too so a resolved spelling maps identically.
-    if std::mem::equal_bytes(kizu_type, "SourceKind") {
-        return "i64";
-    }
-    if std::mem::equal_bytes(kizu_type, "source::SourceKind") {
-        return "i64";
-    }
-    if std::mem::equal_bytes(kizu_type, "selfhost::source::SourceKind") {
-        return "i64";
-    }
-    // SourceFile is the selfhost::source record struct. Its closures take it by
-    // borrow, and the leading borrow marker is stripped above. Bare, imported,
-    // and fully qualified spellings share the same source-file value ABI.
-    if std::mem::equal_bytes(kizu_type, "SourceFile") or
-        std::mem::equal_bytes(kizu_type, "source::SourceFile") or
-        std::mem::equal_bytes(kizu_type, "selfhost::source::SourceFile") {
-        return "%kizu.selfhost.source.source_file";
-    }
-    if std::mem::equal_bytes(kizu_type, "Position") {
-        return "%kizu.kizu.lexer.position";
-    }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::lexer::Position") {
-        return "%kizu.kizu.lexer.position";
-    }
-    if std::mem::equal_bytes(kizu_type, "Token") {
-        return "%kizu.kizu.lexer.token";
-    }
-    if std::mem::equal_bytes(kizu_type, "std::kizu::lexer::Token") {
-        return "%kizu.kizu.lexer.token";
-    }
-    // Ast, NodeId, and ChildRange are the std::kizu::ast value types the
-    // selfhost::ast node-count traversal closure passes by value. The closure
-    // members spell them fully qualified, so the resolved facts carry the
-    // std::kizu::ast:: path; each maps to its existing stage2 LLVM value type so the
-    // closure derives its params_spec from signature facts without a handwritten
-    // table.
-    if std::mem::equal_bytes(kizu_type, "Ast") or
-        std::mem::equal_bytes(kizu_type, "std::kizu::ast::Ast") {
-        return "%kizu.kizu.ast.ast";
-    }
-    if std::mem::equal_bytes(kizu_type, "NodeId") or
-        std::mem::equal_bytes(kizu_type, "std::kizu::ast::NodeId") {
-        return "%kizu.kizu.ast.node_id";
-    }
-    if std::mem::equal_bytes(kizu_type, "ChildRange") or
-        std::mem::equal_bytes(kizu_type, "std::kizu::ast::ChildRange") {
-        return "%kizu.kizu.ast.child_range";
-    }
-    // ConstructorFacts is the numeric package collector's source-defined state.
-    // Its five Array<i64> fields are emitted as struct facts from the collector
-    // root and share the corresponding five-%kizu.owned LLVM value layout.
-    if std::mem::equal_bytes(kizu_type, "ConstructorFacts") or
-        std::mem::equal_bytes(kizu_type, "constructor_facts::ConstructorFacts") or
-        std::mem::equal_bytes(
-            kizu_type, "selfhost::types::constructor_facts::ConstructorFacts"
-        ) {
-        return "%kizu.selfhost.types.constructor_facts.constructor_facts";
-    }
-    // TypeRecord is the primitive classifier's compile-time value record. The
-    // numeric package closure emits its struct facts, so every exact spelling
-    // shares that single LLVM value layout. This is one record ABI rule, not a
-    // scalar-specific mapping.
-    if std::mem::equal_bytes(kizu_type, "TypeRecord") or
-        std::mem::equal_bytes(kizu_type, "primitive_type::TypeRecord") or
-        std::mem::equal_bytes(
-            kizu_type, "selfhost::types::primitive_type::TypeRecord"
-        ) {
-        return "%kizu.selfhost.types.primitive_type.type_record";
-    }
-    // SourceFile is the std::kizu::ast source record { path: []u8, text: []u8 }
-    // the full std::kizu::parser::parse_program takes by value as its 'source'
-    // parameter (issue 1157). It is two []u8 slices, so it reuses the existing
-    // %kizu.kizu.ast.source_file value type (two %kizu.slice.u8 fields) the run
-    // pipeline already declares; no new runtime ABI is invented. The closure
-    // members spell it fully qualified, so the resolved fact carries the
-    // std::kizu::ast:: path.
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::SourceFile") {
-        return "%kizu.kizu.ast.source_file";
-    }
-    // BinaryOp is the std::kizu::ast operator enum the run codegen tape lowering
-    // passes by value (lower_code_binary / code_binary_kind); like every enum it
-    // shares the native i64 ABI.
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::BinaryOp") {
-        return "i64";
-    }
-    // PrefixOp is the std::kizu::ast prefix-operator enum the run codegen tape
-    // lowering passes by value (lower_code_prefix); enums share the i64 ABI.
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::PrefixOp") {
-        return "i64";
-    }
-    // Span is the std::kizu::ast value type the std::kizu::parser span helpers
-    // borrow ('&std::kizu::ast::Span'); the leading '&' is stripped above, so the
-    // fully qualified spelling reaches here and maps to its stage2 LLVM value type.
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::Span") {
-        return "%kizu.kizu.ast.span";
-    }
-    // ParseResult is the std::kizu::ast parse output (ast + root) the run pipeline
-    // entry render_run_artifact takes by value; it maps to the same stage2 LLVM
-    // value type the hand-written run CLI already passes to the codegen lowerings.
-    if std::mem::equal_bytes(kizu_type, "std::kizu::ast::ParseResult") {
-        return "%kizu.kizu.ast.parse_result";
-    }
-    // ParseNode is the std::kizu::parser cursor record the postfix predicates pass
-    // by value. It is referenced bare inside the parser module, so the resolved
-    // fact carries the unqualified 'ParseNode' spelling; it maps to its existing
-    // stage2 LLVM value type so the parser closure derives its params_spec from
-    // signature facts without a handwritten table.
-    if std::mem::equal_bytes(kizu_type, "ParseNode") {
-        return "%kizu.kizu.parser.parse_node";
-    }
-    if std::mem::equal_bytes(kizu_type, "ParseRange") {
-        return "%kizu.kizu.parser.parse_range";
-    }
-    // Value and Program are the selfhost::ir::codegen record structs the backend
-    // program builder / metadata / value-helper closure passes by value or borrow.
-    // The closure members reference them bare inside the codegen module, so the
-    // resolved facts carry the unqualified spelling (Program arrives as &Program and
-    // the leading '&' is stripped above); each maps to its existing stage2 LLVM value
-    // type so the closure derives its params_spec from signature facts without a
-    // handwritten table.
-    if std::mem::equal_bytes(kizu_type, "Value") {
-        return "%kizu.selfhost.codegen.value";
-    }
-    if std::mem::equal_bytes(kizu_type, "Program") {
-        return "%kizu.selfhost.codegen.program";
-    }
-    // std::array::Array<T> is the runtime-owned dynamic-array handle, like
-    // std::string::String; its ABI is the %kizu.owned handle regardless of the element
-    // type T, so a single prefix rule covers every Array<T> param (the formatter's
-    // tokens: &std::array::Array<Token>, issue 1165). The leading '&' borrow marker is
-    // already stripped above, and borrowed values share the same representation.
-    if std::mem::starts_with(kizu_type, "std::array::Array<") {
-        return "%kizu.owned";
-    }
-    // Allocator is the runtime allocator handle, passed by the %kizu.owned representation
-    // like every other runtime-owned handle. The leading-import collector takes it to build
-    // its Array<i64> through @kizu_rt_array_new (the formatter's allocator: Allocator,
-    // issue 1165). It is referenced bare through the 'Allocator' runtime alias, so the
-    // resolved fact carries the unqualified spelling.
-    if std::mem::equal_bytes(kizu_type, "Allocator") {
-        return "%kizu.owned";
-    }
-    // std::string::String is the runtime-owned byte-buffer handle, like std::array::Array<T>;
-    // its ABI is the %kizu.owned handle, mutated through the @kizu_rt_string_* ABI. The import
-    // output helpers take the formatter's accumulator by mutable borrow ('out: &var
-    // std::string::String', issue 1165); the leading '&' and 'var_' markers are stripped above,
-    // so the bare spelling reaches here.
-    if std::mem::equal_bytes(kizu_type, "std::string::String") {
-        return "%kizu.owned";
-    }
-    if std::mem::equal_bytes(kizu_type, "String") {
-        return "%kizu.owned";
-    }
-    var message = std::string::String(std::mem::page_allocator());
-    try message.append_bytes("abi mapper: unsupported parameter type: ");
-    try message.append_bytes(kizu_type);
-    let message_bytes = message.as_bytes();
-    return error(message_bytes);
-}
-
-// append_params_spec derives the compiled params_spec string for one function
-// from its 'function-signature-param' facts and appends it to 'out'. The facts
-// are emitted in parameter order, so walking them top-to-bottom preserves the
-// signature order. Each entry is rendered as '<abi-type> <name>' joined by ';',
-// matching the layout consumed by compiled_signature::find_param_type. Any
-// parameter whose Kizu type is unsupported makes the whole derivation an
-// explicit error (no fallback).
+// append_params_spec derives the compiled params_spec from signature facts.
+// Every parameter is resolved by the same fact-driven type resolver used by
+// MIR values; this module owns no nominal or runtime-handle type table.
 pub fn append_params_spec(
     out: &var std::string::String,
     ir_bytes: []u8,
@@ -243,13 +29,19 @@ pub fn append_params_spec_indexed(
     let space = cast<u8>(32);
     let colon = cast<u8>(58);
     let semicolon = cast<u8>(59);
-    var entry_index = ir_index::first_matching_entry(index, ir_bytes, prefix, "", function_name);
+    let module_prefix = try compiled_type_resolver::function_owner_module_indexed(
+        index, ir_bytes, function_name
+    );
+    var entry_index = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, "", function_name
+    );
     var emitted = 0;
-    while ir_index::entry_matches_query(index, ir_bytes, entry_index, prefix, "", function_name) {
+    while ir_index::entry_matches_query(
+        index, ir_bytes, entry_index, prefix, "", function_name
+    ) {
         let name_end = ir_index::entry_key_end(index, entry_index);
         let line_end_pos = ir_index::entry_line_end(index, entry_index);
         if name_end < byte_len and ir_bytes[name_end] == space {
-            // entry == ' <index> <name>:runtime:<type>'
             let entry = ir_bytes[name_end..line_end_pos];
             let entry_len = std::mem::len(entry);
             let space1 = compiled_util::find_byte(entry, space, 1);
@@ -260,10 +52,10 @@ pub fn append_params_spec_indexed(
             }
             let param_name = entry[space1 + 1..colon1];
             let kizu_type = entry[colon2 + 1..entry_len];
-            let abi_type = try kizu_type_to_abi(kizu_type);
-            if emitted > 0 {
-                try out.append_byte(semicolon);
-            }
+            let abi_type = try compiled_type_resolver::resolve_indexed(
+                index, ir_bytes, module_prefix, kizu_type
+            );
+            if emitted > 0 { try out.append_byte(semicolon); }
             try out.append_bytes(abi_type);
             try out.append_byte(space);
             try out.append_bytes(param_name);
@@ -274,152 +66,210 @@ pub fn append_params_spec_indexed(
     return;
 }
 
-// gate is the compiled_abi_params behavior gate (Agent B, tracker 1069). It
-// feeds fake 'function-signature-param' facts through append_params_spec and
-// asserts the derived compiled params_spec matches the layout the backend
-// consumes: '<abi-type> <name>' entries joined by ';'. Every supported Kizu
-// parameter type is exercised (u8, usize, i64, []u8, lexer Position/Token) plus
-// a leading-'&' borrow marker, which is stripped before mapping. Facts for an
-// unrelated function and a non-param line are interleaved to confirm the parser
-// only consumes the requested signature's parameters in order. The facts are an
-// owned multi-line string literal (newlines embedded directly) so the parsed
-// param-name slices can be copied into 'out' without a borrow escape; the
-// trailing 'function-body' line keeps the final param inside the parser's loop
-// bound.
+pub fn append_params_spec_instance_indexed(
+    index: &ir_index::IrIndex,
+    canonical: &compiled_canonical_facts::CanonicalFactTable,
+    context: &compiled_instance_context::InstanceContext,
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8
+) -> !void {
+    let prefix = "function-signature-param ";
+    let space = cast<u8>(32);
+    let colon = cast<u8>(58);
+    let semicolon = cast<u8>(59);
+    var entry = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, "", function_name
+    );
+    var emitted = 0;
+    var param_index = 0;
+    while ir_index::entry_matches_query(
+        index, ir_bytes, entry, prefix, "", function_name
+    ) {
+        let name_end = ir_index::entry_key_end(index, entry);
+        let line_end = ir_index::entry_line_end(index, entry);
+        let value = ir_bytes[name_end..line_end];
+        let first_space = compiled_util::find_byte(value, space, 1);
+        let first_colon = compiled_util::find_byte(value, colon, 0);
+        let second_colon = compiled_util::find_byte(
+            value, colon, first_colon + 1
+        );
+        if first_space >= first_colon or second_colon >= std::mem::len(value) {
+            return error("abi mapper: invalid signature param fact");
+        }
+        let param_name = value[first_space + 1..first_colon];
+        let mode = value[first_colon + 1..second_colon];
+        let canonical_id = try compiled_instance_context::param_type_id(
+            context, param_index
+        );
+        if std::mem::equal_bytes(mode, "runtime") {
+            let abi_type = try compiled_canonical_facts::parsed_canonical_runtime_abi(
+                index, canonical, ir_bytes, canonical_id
+            );
+            if emitted > 0 { try out.append_byte(semicolon); }
+            try out.append_bytes(abi_type);
+            try out.append_byte(space);
+            try out.append_bytes(param_name);
+            emitted = emitted + 1;
+        } else {
+            if !std::mem::equal_bytes(mode, "comptime") {
+                return error("abi mapper: invalid parameter mode");
+            }
+        }
+        param_index = param_index + 1;
+        entry = entry + 1;
+    }
+    if param_index != compiled_instance_context::param_len(context) {
+        return error("compiled instance signature parameter coverage mismatch");
+    }
+    return;
+}
+
+// gate pins exact canonical, module-local, import-alias, generic owned-handle,
+// and nominal struct resolution through one ABI parameter path.
 pub fn gate() -> !void {
     let allocator = std::mem::page_allocator();
-
-    let facts = "function-signature demo
-function-signature-param other 0 ignored:runtime:u8
-function-signature-param demo 0 byte:runtime:u8
-function-signature-param demo 1 count:runtime:usize
-function-signature-param demo 2 offset:runtime:i64
-function-signature-param demo 3 source:runtime:[]u8
-function-signature-param demo 4 pos:runtime:std::kizu::lexer::Position
-function-signature-param demo 5 tok:runtime:std::kizu::lexer::Token
-function-signature-param demo 6 ref:runtime:&u8
-function-signature-param demo 7 file:runtime:&source::SourceFile
-function-signature-param demo 8 facts:runtime:&var_constructor_facts::ConstructorFacts
-function-body demo";
+    let facts = "abi-repr Allocator %kizu.owned
+abi-repr Io %kizu.owned
+abi-repr []u8 %kizu.slice.u8
+abi-repr std::array::Array %kizu.owned
+abi-repr std::map::Map %kizu.owned
+abi-repr std::atomic::Atomic ptr
+abi-repr std::channel::Channel ptr
+abi-repr std::string::String %kizu.owned
+module-alias selfhost::source::loader::source selfhost::source::
+module-alias selfhost::source::loader::std selfhost::wrong::
+package-root std present
+package-root selfhost present
+function-owner-module selfhost::source::loader::demo selfhost::source::loader::
+type-llvm std::kizu::lexer::Position %kizu.kizu.lexer.position
+type-llvm std::kizu::lexer::Token %kizu.kizu.lexer.token
+type-llvm selfhost::source::SourceFile %kizu.selfhost.source.source_file
+type-llvm selfhost::source::loader::LocalRecord %kizu.selfhost.source.loader.local_record
+type-llvm LocalRecord %wrong.global.local_record
+function-signature-param selfhost::source::loader::demo 0 byte:runtime:u8
+function-signature-param selfhost::source::loader::demo 1 count:runtime:usize
+function-signature-param selfhost::source::loader::demo 2 source:runtime:[]u8
+function-signature-param selfhost::source::loader::demo 3 pos:runtime:std::kizu::lexer::Position
+function-signature-param selfhost::source::loader::demo 4 tok:runtime:std::kizu::lexer::Token
+function-signature-param selfhost::source::loader::demo 5 file:runtime:&source::SourceFile
+function-signature-param selfhost::source::loader::demo 6 local:runtime:LocalRecord
+function-signature-param selfhost::source::loader::demo 7 values:runtime:&var_std::array::Array<LocalRecord>
+function-signature-param selfhost::source::loader::demo 8 table:runtime:std::map::Map<[]u8, LocalRecord>
+function-body selfhost::source::loader::demo";
 
     var spec = std::string::String(allocator);
-    try append_params_spec(spec, facts, "demo");
-    var indexed_facts = try ir_index::build(facts);
-    defer indexed_facts.deinit();
-    var indexed_spec = std::string::String(allocator);
-    try append_params_spec_indexed(&indexed_facts, indexed_spec, facts, "demo");
-
-    let expected = "i8 byte;i64 count;i64 offset;%kizu.slice.u8 source;%kizu.kizu.lexer.position pos;%kizu.kizu.lexer.token tok;i8 ref;%kizu.selfhost.source.source_file file;%kizu.selfhost.types.constructor_facts.constructor_facts facts";
+    try append_params_spec(&var spec, facts, "selfhost::source::loader::demo");
+    let expected = "i8 byte;i64 count;%kizu.slice.u8 source;%kizu.kizu.lexer.position pos;%kizu.kizu.lexer.token tok;%kizu.selfhost.source.source_file file;%kizu.selfhost.source.loader.local_record local;%kizu.owned values;%kizu.owned table";
     let spec_bytes = spec.as_bytes();
-    let indexed_spec_bytes = indexed_spec.as_bytes();
     std::testing::expect_equal<[]u8>(expected, spec_bytes);
-    std::testing::expect_equal<[]u8>(expected, indexed_spec_bytes);
 
-    // Spot-check the scalar mapper directly, including a borrowed slice.
-    std::testing::expect_equal<[]u8>("i8", try kizu_type_to_abi("u8"));
-    std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("usize"));
-    std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("i64"));
-    std::testing::expect_equal<[]u8>("%kizu.slice.u8", try kizu_type_to_abi("[]u8"));
-    std::testing::expect_equal<[]u8>("%kizu.slice.u8", try kizu_type_to_abi("&[]u8"));
-    std::testing::expect_equal<[]u8>("%kizu.kizu.ast.ast", try kizu_type_to_abi("Ast"));
-    std::testing::expect_equal<[]u8>("%kizu.kizu.ast.node_id", try kizu_type_to_abi("NodeId"));
-    std::testing::expect_equal<[]u8>("%kizu.kizu.ast.child_range", try kizu_type_to_abi("ChildRange"));
+    var lookup = try ir_index::build(facts);
+    defer lookup.deinit();
     std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.source.source_file", try kizu_type_to_abi("SourceFile")
+        "%kizu.kizu.lexer.token",
+        try compiled_type_resolver::resolve_indexed(
+            &lookup, facts, "selfhost::source::loader::", "std::kizu::lexer::Token"
+        )
     );
     std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.source.source_file", try kizu_type_to_abi("source::SourceFile")
+        "%kizu.selfhost.source.loader.local_record",
+        try compiled_type_resolver::resolve_indexed(
+            &lookup, facts, "selfhost::source::loader::", "LocalRecord"
+        )
     );
     std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.source.source_file",
-        try kizu_type_to_abi("selfhost::source::SourceFile")
+        "ptr",
+        try compiled_type_resolver::resolve_indexed(
+            &lookup, facts, "selfhost::source::loader::", "std::atomic::Atomic<i64>"
+        )
     );
     std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.types.constructor_facts.constructor_facts",
-        try kizu_type_to_abi("ConstructorFacts")
+        "ptr",
+        try compiled_type_resolver::resolve_indexed(
+            &lookup, facts, "selfhost::source::loader::", "std::channel::Channel<[]u8>"
+        )
     );
-    std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.types.constructor_facts.constructor_facts",
-        try kizu_type_to_abi("constructor_facts::ConstructorFacts")
-    );
-    std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.types.constructor_facts.constructor_facts",
-        try kizu_type_to_abi("selfhost::types::constructor_facts::ConstructorFacts")
-    );
-    std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.types.primitive_type.type_record",
-        try kizu_type_to_abi("TypeRecord")
-    );
-    std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.types.primitive_type.type_record",
-        try kizu_type_to_abi("primitive_type::TypeRecord")
-    );
-    std::testing::expect_equal<[]u8>(
-        "%kizu.selfhost.types.primitive_type.type_record",
-        try kizu_type_to_abi("selfhost::types::primitive_type::TypeRecord")
-    );
-
-    // The loader 'source_file' closure mixes a SourceKind enum (i64 ABI) with
-    // scalar and slice params, so derive its compiled params_spec end-to-end to
-    // confirm the loader closures no longer need a handwritten table. SourceKind
-    // appears via the 'import selfhost::source' alias spelling.
-    let loader_facts = "function-signature-param source_file 0 id:runtime:i64
-function-signature-param source_file 1 kind:runtime:source::SourceKind
-function-signature-param source_file 2 package_name:runtime:[]u8
-function-signature-param source_file 3 module_start:runtime:i64
-function-signature-param source_file 4 module_end:runtime:i64
-function-signature-param source_file 5 path:runtime:[]u8
-function-signature-param source_file 6 text:runtime:[]u8
-function-body source_file";
-
-    var loader_spec = std::string::String(allocator);
-    try append_params_spec(loader_spec, loader_facts, "source_file");
-    var indexed_loader_facts = try ir_index::build(loader_facts);
-    defer indexed_loader_facts.deinit();
-    var indexed_loader_spec = std::string::String(allocator);
-    try append_params_spec_indexed(
-        &indexed_loader_facts, indexed_loader_spec, loader_facts, "source_file"
-    );
-
-    let loader_expected = "i64 id;i64 kind;%kizu.slice.u8 package_name;i64 module_start;i64 module_end;%kizu.slice.u8 path;%kizu.slice.u8 text";
-    let loader_spec_bytes = loader_spec.as_bytes();
-    let indexed_loader_spec_bytes = indexed_loader_spec.as_bytes();
-    std::testing::expect_equal<[]u8>(loader_expected, loader_spec_bytes);
-    std::testing::expect_equal<[]u8>(loader_expected, indexed_loader_spec_bytes);
-
-    // Both SourceKind spellings (aliased and fully qualified) share the i64 ABI.
-    std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("source::SourceKind"));
-    std::testing::expect_equal<[]u8>("i64", try kizu_type_to_abi("selfhost::source::SourceKind"));
-
-    // std::string::String is the runtime-owned %kizu.owned handle, both bare and through a
-    // '&var' mutable borrow (the import output helpers' 'out: &var std::string::String',
-    // issue 1165). The '&' and 'var_' markers are stripped before mapping.
-    std::testing::expect_equal<[]u8>("%kizu.owned", try kizu_type_to_abi("std::string::String"));
-    std::testing::expect_equal<[]u8>(
-        "%kizu.owned",
-        try kizu_type_to_abi("&var_std::string::String")
-    );
-
-    spec.deinit();
-    indexed_spec.deinit();
-    loader_spec.deinit();
-    indexed_loader_spec.deinit();
-
     print("abi-params-spec");
     print(expected);
     print("abi-params-count");
     print(9);
-    print("abi-params-loader-spec");
-    print(loader_expected);
+    spec.deinit();
     return;
 }
 
-// gate_unsupported_type asserts that an unknown Kizu parameter type is an
-// explicit error rather than a silently-resolved guess (no fact-lookup
-// fallback). The 'try' propagates the mapper's error so RunEntry surfaces it as
-// a runtime error to the Go gate.
 pub fn gate_unsupported_type() -> !void {
-    let abi = try kizu_type_to_abi("f32");
+    let facts = "abi-repr Allocator %kizu.owned";
+    var lookup = try ir_index::build(facts);
+    defer lookup.deinit();
+    let abi = try compiled_type_resolver::resolve_indexed(
+        &lookup, facts, "selfhost::backend::", "Unregistered"
+    );
     print(abi);
+    return;
+}
+
+pub fn gate_duplicate_type_fact() -> !void {
+    let facts = "type-llvm demo::Record %demo.record
+type-llvm demo::Record %demo.record";
+    var lookup = try ir_index::build(facts);
+    defer lookup.deinit();
+    let abi = try compiled_type_resolver::resolve_indexed(
+        &lookup, facts, "demo::", "demo::Record"
+    );
+    print(abi);
+    return;
+}
+
+pub fn gate_conflicting_type_fact() -> !void {
+    let facts = "type-llvm demo::Record %demo.record
+type-llvm demo::Record %demo.other";
+    var lookup = try ir_index::build(facts);
+    defer lookup.deinit();
+    let abi = try compiled_type_resolver::resolve_indexed(
+        &lookup, facts, "demo::", "demo::Record"
+    );
+    print(abi);
+    return;
+}
+
+pub fn gate_invalid_enum_representation() -> !void {
+    let facts = "enum-type demo::State i8";
+    var lookup = try ir_index::build(facts);
+    defer lookup.deinit();
+    let abi = try compiled_type_resolver::resolve_indexed(
+        &lookup, facts, "demo::", "State"
+    );
+    print(abi);
+    return;
+}
+
+pub fn gate_variant_only_enum() -> !void {
+    let facts = "enum-variant demo::State Ready 0";
+    var lookup = try ir_index::build(facts);
+    defer lookup.deinit();
+    let abi = try compiled_type_resolver::resolve_indexed(
+        &lookup, facts, "demo::", "State"
+    );
+    print(abi);
+    return;
+}
+
+// gate_local_union_abi pins a bare local union spelling resolved through its
+// function-owner module and exact union facts. No opaque nominal-name special
+// case participates.
+pub fn gate_local_union_abi() -> !void {
+    let allocator = std::mem::page_allocator();
+    let facts = "union-type std::kizu::ast::AstData %kizu.kizu.ast.ast_data
+union-variant std::kizu::ast::AstData Empty 0 void
+function-owner-module std::kizu::ast::ast_add_node std::kizu::ast::
+function-signature-param std::kizu::ast::ast_add_node 0 data:runtime:AstData";
+    var spec = std::string::String(allocator);
+    defer spec.deinit();
+    try append_params_spec(
+        &var spec, facts, "std::kizu::ast::ast_add_node"
+    );
+    let bytes = spec.as_bytes();
+    print(bytes);
     return;
 }

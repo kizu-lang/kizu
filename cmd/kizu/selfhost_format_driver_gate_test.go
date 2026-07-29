@@ -54,10 +54,6 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     resolver) and the sibling component helpers (leading_import_indices, ...) now resolve their
 //     return types from the emitted function-signature-return facts -- the gate emits every local
 //     component signature, the same set the production IR carries.
-//   - "compiled function: stdlib return not found": the std::string::String value constructor
-//     ('var out = std::string::String(allocator)') now resolves through the shared stdlib-symbol
-//     preamble (executable_functions::append_runtime_stdlib_symbol_preamble), the single source of
-//     truth the production IR fact emission and this gate both supply.
 //   - "compiled mir: unsupported call arg kind": the '&format_tokens' borrow argument at the
 //     leading_import_indices call now lowers through the borrow-prefix call-arg path
 //     (compiled_mir_lower_call::lower_single_call_arg) -- a borrow shares its pointee's ABI
@@ -196,7 +192,6 @@ func runSelfhostFormatDriverFactsGate(t *testing.T) (string, error) {
 //     advance-arm aliases (issue 1231).
 var formatDriverCrossedLoweringBlockers = []string{
 	"compiled signature: call return type not found",
-	"compiled function: stdlib return not found",
 	"compiled mir: unsupported call arg kind",
 	"compiled mir: unsupported then block",
 	"compiled mir: local type not found",

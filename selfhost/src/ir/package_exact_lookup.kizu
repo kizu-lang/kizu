@@ -1,0 +1,637 @@
+import selfhost::ir::package_catalog;
+import selfhost::ir::package_function_identity;
+import selfhost::source;
+
+fn receiver_type_without_borrow(value: []u8) -> []u8 {
+    let trimmed = std::mem::trim_ascii(value);
+    if std::mem::starts_with(trimmed, "&var ") {
+        return std::mem::trim_ascii(trimmed[5..std::mem::len(trimmed)]);
+    }
+    if std::mem::starts_with(trimmed, "&") {
+        return std::mem::trim_ascii(trimmed[1..std::mem::len(trimmed)]);
+    }
+    return trimmed;
+}
+
+// exact_qualified_function_target resolves only a canonical package-qualified
+// function identity. It is used by body emitters after selection; imports,
+// suffixes, and caller-relative lookup are intentionally not accepted here.
+pub fn exact_qualified_function_target(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    qualified_name: []u8
+) -> !package_function_identity::FunctionTarget {
+    var component = 0;
+    while component < package_catalog::component_len(catalog) {
+        let package_name = package_catalog::component_package_name_at(catalog, component);
+        let component_name = package_catalog::component_name_at(catalog, component);
+        if qualified_has_component_prefix(
+            qualified_name, package_name, component_name
+        ) {
+            let name_start = qualified_component_prefix_len(
+                package_name, component_name
+            );
+            let index = try package_catalog::exact_top_level_function_entry(
+                catalog, component,
+                qualified_name[name_start..std::mem::len(qualified_name)]
+            );
+            if index >= 0 {
+                return package_catalog::target_at_entry(catalog, index);
+            }
+        }
+        component = component + 1;
+    }
+    return error("body emission registry: function not found");
+}
+
+
+pub fn component_for_source(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    file: &source::SourceFile
+) -> i64 {
+    return package_catalog::component_by_name(catalog, package_prefix(file), source::module_path(file));
+}
+
+pub fn function_entry_by_name_span(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    start: i64,
+    end: i64
+) -> i64 {
+    return find_function_by_span(catalog, component_id, start, end);
+}
+
+pub fn local_function_entry(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    name: []u8
+) -> !i64 {
+    return package_catalog::exact_top_level_function_entry(
+        catalog, component_id, name
+    );
+}
+
+pub fn qualified_function_entry(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    component_id: i64,
+    name: []u8
+) -> !i64 {
+    return find_qualified_function(catalog, component_id, name);
+}
+
+pub fn declared_impl_method_entry(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    declaration_index: i64,
+    method: []u8
+) -> !i64 {
+    if declaration_index < 0 or
+        declaration_index >= package_catalog::declared_type_len(catalog) {
+        return error("declared impl method owner out of range");
+    }
+    return try package_catalog::exact_declared_impl_method_entry(
+        catalog, declaration_index, method
+    );
+}
+
+
+pub struct DeclaredTypeIdentity {
+    pub found: bool,
+    pub declaration_index: i64,
+    pub component_id: i64,
+    pub local_name: []u8,
+}
+
+
+pub fn declared_type_identity(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    spelling_component: i64,
+    type_name: []u8
+) -> !DeclaredTypeIdentity {
+    let constructor = type_constructor_name(type_name);
+    if !contains_double_colon(constructor) {
+        return exact_local_type_identity(
+            catalog, spelling_component, constructor
+        );
+    }
+    let canonical = try exact_canonical_type_identity(catalog, constructor);
+    if canonical.found { return canonical; }
+    return exact_imported_type_identity(
+        catalog, spelling_component, constructor
+    );
+}
+
+pub fn exact_union_variant_in_component(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    declaration_component: i64,
+    declaration_name: []u8,
+    variant_name: []u8
+) -> !bool {
+    if declaration_component < 0 or
+        declaration_component >= package_catalog::component_len(catalog) {
+        return false;
+    }
+    var declaration_index = -1;
+    var type_index = package_catalog::component_declared_type_start_at(
+        catalog, declaration_component
+    );
+    let type_end = package_catalog::component_declared_type_end_at(catalog, declaration_component);
+    while type_index < type_end {
+        if std::mem::equal_bytes(
+            package_catalog::declared_type_name_at(catalog, type_index), declaration_name
+        ) {
+            if declaration_index >= 0 {
+                return error("duplicate package union declaration");
+            }
+            declaration_index = type_index;
+        }
+        type_index = type_index + 1;
+    }
+    if declaration_index < 0 or
+        package_catalog::declared_type_kind_at(catalog, declaration_index) !=
+            package_catalog::declared_type_union_kind() {
+        return false;
+    }
+    let start = package_catalog::declared_union_variant_start(catalog, declaration_index);
+    let len = package_catalog::declared_union_variant_len(catalog, declaration_index);
+    var index = start;
+    while index < start + len {
+        if std::mem::equal_bytes(
+            package_catalog::union_variant_name_at(catalog, index), variant_name
+        ) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+
+pub fn exact_union_variant(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    owner_component: i64,
+    type_name: []u8,
+    variant_name: []u8
+) -> !bool {
+    let identity = try declared_type_identity(
+        catalog, owner_component, type_name
+    );
+    if !identity.found { return false; }
+    return exact_union_variant_in_component(
+        catalog, identity.component_id, identity.local_name, variant_name
+    );
+}
+
+fn qualified_has_component_prefix(value: []u8, package_name: []u8, component_name: []u8) -> bool {
+    let package_len = std::mem::len(package_name);
+    if std::mem::len(value) <= package_len + 2 or
+        !std::mem::equal_bytes(value[0..package_len], package_name) or
+        !std::mem::equal_bytes(value[package_len..package_len + 2], "::") { return false; }
+    var value_index = package_len + 2;
+    var component_index = 0;
+    while component_index < std::mem::len(component_name) {
+        if std::mem::equal_bytes(component_name[component_index..component_index + 1], "/") {
+            if value_index + 2 > std::mem::len(value) or
+                !std::mem::equal_bytes(value[value_index..value_index + 2], "::") { return false; }
+            value_index = value_index + 2;
+        } else {
+            if value_index >= std::mem::len(value) or
+                !std::mem::equal_bytes(value[value_index..value_index + 1], component_name[component_index..component_index + 1]) { return false; }
+            value_index = value_index + 1;
+        }
+        component_index = component_index + 1;
+    }
+    return value_index + 2 < std::mem::len(value) and
+        std::mem::equal_bytes(value[value_index..value_index + 2], "::");
+}
+
+fn find_qualified_function(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    owner_component: i64,
+    qualified: []u8
+) -> !i64 {
+    var separator = 0;
+    while separator + 1 < std::mem::len(qualified) {
+        if qualified[separator] == cast<u8>(58) and qualified[separator + 1] == cast<u8>(58) { break; }
+        separator = separator + 1;
+    }
+    if separator + 2 >= std::mem::len(qualified) { return -1; }
+    var second_separator = separator + 2;
+    while second_separator + 1 < std::mem::len(qualified) {
+        if qualified[second_separator] == cast<u8>(58) and
+            qualified[second_separator + 1] == cast<u8>(58) { break; }
+        second_separator = second_separator + 1;
+    }
+    if second_separator + 1 >= std::mem::len(qualified) {
+        let alias = qualified[0..separator];
+        let function_name = qualified[separator + 2..std::mem::len(qualified)];
+        if owner_component < 0 or
+            owner_component >= package_catalog::component_len(catalog) {
+            return -1;
+        }
+        var import_index = package_catalog::component_import_start_at(
+            catalog, owner_component
+        );
+        let import_end = package_catalog::component_import_end_at(
+            catalog, owner_component
+        );
+        while import_index < import_end {
+            if std::mem::equal_bytes(
+                package_catalog::import_alias_at(catalog, import_index), alias
+            ) {
+                let target_component = package_catalog::import_target_component_at(
+                    catalog, import_index
+                );
+                return try package_catalog::exact_top_level_function_entry(
+                    catalog, target_component, function_name
+                );
+            }
+            import_index = import_index + 1;
+        }
+        return -1;
+    }
+    var component = 0;
+    while component < package_catalog::component_len(catalog) {
+        let package_name = package_catalog::component_package_name_at(catalog, component);
+        let component_name = package_catalog::component_name_at(catalog, component);
+        if qualified_has_component_prefix(qualified, package_name, component_name) {
+            let name_start = qualified_component_prefix_len(
+                package_name, component_name
+            );
+            let entry = try package_catalog::exact_top_level_function_entry(
+                catalog, component,
+                qualified[name_start..std::mem::len(qualified)]
+            );
+            if entry >= 0 { return entry; }
+        }
+        component = component + 1;
+    }
+    return -1;
+}
+
+fn qualified_matches(value: []u8, package_name: []u8, component_name: []u8, function_name: []u8) -> bool {
+    var component_len = 0;
+    var component_index = 0;
+    while component_index < std::mem::len(component_name) {
+        if std::mem::equal_bytes(component_name[component_index..component_index + 1], "/") { component_len = component_len + 2; }
+        else { component_len = component_len + 1; }
+        component_index = component_index + 1;
+    }
+    let expected_len = std::mem::len(package_name) + 2 + component_len + 2 + std::mem::len(function_name);
+    if std::mem::len(value) != expected_len { return false; }
+    if !qualified_has_component_prefix(value, package_name, component_name) { return false; }
+    return std::mem::equal_bytes(
+        value[expected_len - std::mem::len(function_name)..expected_len], function_name
+    );
+}
+
+fn qualified_component_prefix_len(
+    package_name: []u8,
+    component_name: []u8
+) -> i64 {
+    var component_len = 0;
+    var component_index = 0;
+    while component_index < std::mem::len(component_name) {
+        if component_name[component_index] == cast<u8>(47) {
+            component_len = component_len + 2;
+        } else {
+            component_len = component_len + 1;
+        }
+        component_index = component_index + 1;
+    }
+    return std::mem::len(package_name) + 2 + component_len + 2;
+}
+
+fn exact_canonical_type_identity(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    constructor: []u8
+) -> !DeclaredTypeIdentity {
+    var found = no_declared_type_identity();
+    var component = 0;
+    while component < package_catalog::component_len(catalog) {
+        let package_name = package_catalog::component_package_name_at(catalog, component);
+        let component_name = package_catalog::component_name_at(catalog, component);
+        if qualified_has_component_prefix(
+            constructor, package_name, component_name
+        ) {
+            var index = package_catalog::component_declared_type_start_at(catalog, component);
+            let end = package_catalog::component_declared_type_end_at(catalog, component);
+            while index < end {
+                if qualified_matches(
+                    constructor, package_name, component_name,
+                    package_catalog::declared_type_name_at(catalog, index)
+                ) {
+                    if found.found {
+                        return error("ambiguous canonical package type");
+                    }
+                    found = declared_type_identity_at(catalog, index);
+                }
+                index = index + 1;
+            }
+        }
+        component = component + 1;
+    }
+    return found;
+}
+
+fn exact_imported_type_identity(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    spelling_component: i64,
+    constructor: []u8
+) -> !DeclaredTypeIdentity {
+    var found = no_declared_type_identity();
+    if spelling_component < 0 or
+        spelling_component >= package_catalog::component_len(catalog) {
+        return no_declared_type_identity();
+    }
+    var import_index = package_catalog::component_import_start_at(catalog, spelling_component);
+    let import_end = package_catalog::component_import_end_at(catalog, spelling_component);
+    while import_index < import_end {
+            let alias = package_catalog::import_alias_at(catalog, import_index);
+            let target_component = package_catalog::import_target_component_at(catalog, import_index);
+            var component = 0;
+            while component < package_catalog::component_len(catalog) {
+                if component_is_import_target_or_descendant(
+                    catalog, target_component, component
+                ) and imported_value_targets_component(
+                    catalog, constructor, alias,
+                    target_component, component
+                ) {
+                    var type_index = package_catalog::component_declared_type_start_at(
+                        catalog, component
+                    );
+                    let type_end = package_catalog::component_declared_type_end_at(catalog, component);
+                    while type_index < type_end {
+                        if imported_type_matches(
+                            catalog, constructor, alias,
+                            target_component, type_index
+                        ) {
+                            if found.found {
+                                return error("ambiguous imported package type");
+                            }
+                            found = declared_type_identity_at(catalog, type_index);
+                        }
+                        type_index = type_index + 1;
+                    }
+                }
+                component = component + 1;
+            }
+        import_index = import_index + 1;
+    }
+    return found;
+}
+
+fn exact_local_type_identity(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    spelling_component: i64,
+    constructor: []u8
+) -> !DeclaredTypeIdentity {
+    if contains_double_colon(constructor) { return no_declared_type_identity(); }
+    if spelling_component < 0 or
+        spelling_component >= package_catalog::component_len(catalog) {
+        return no_declared_type_identity();
+    }
+    var found = no_declared_type_identity();
+    var index = package_catalog::component_declared_type_start_at(catalog, spelling_component);
+    let end = package_catalog::component_declared_type_end_at(catalog, spelling_component);
+    while index < end {
+        if std::mem::equal_bytes(
+            package_catalog::declared_type_name_at(catalog, index), constructor
+        ) {
+            if found.found { return error("ambiguous local package type"); }
+            found = declared_type_identity_at(catalog, index);
+        }
+        index = index + 1;
+    }
+    return found;
+}
+
+fn component_is_import_target_or_descendant(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    target_component: i64,
+    candidate_component: i64
+) -> bool {
+    if candidate_component == target_component { return true; }
+    if !std::mem::equal_bytes(
+        package_catalog::component_package_name_at(catalog, candidate_component),
+        package_catalog::component_package_name_at(catalog, target_component)
+    ) { return false; }
+    let target_name = package_catalog::component_name_at(catalog, target_component);
+    let candidate_name = package_catalog::component_name_at(catalog, candidate_component);
+    return std::mem::len(candidate_name) > std::mem::len(target_name) and
+        std::mem::starts_with(candidate_name, target_name) and
+        candidate_name[std::mem::len(target_name)] == cast<u8>(47);
+}
+
+fn imported_value_targets_component(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    value: []u8,
+    alias: []u8,
+    target_component: i64,
+    candidate_component: i64
+) -> bool {
+    let prefix_len = std::mem::len(alias) + 2;
+    if std::mem::len(value) <= prefix_len or
+        !std::mem::starts_with(value, alias) or
+        !std::mem::equal_bytes(
+            value[std::mem::len(alias)..prefix_len], "::"
+        ) { return false; }
+    let rest = value[prefix_len..std::mem::len(value)];
+    var last_separator = -1;
+    var index = 0;
+    while index + 1 < std::mem::len(rest) {
+        if rest[index] == cast<u8>(58) and
+            rest[index + 1] == cast<u8>(58) {
+            last_separator = index;
+            index = index + 1;
+        }
+        index = index + 1;
+    }
+    if candidate_component == target_component {
+        return last_separator < 0;
+    }
+    if last_separator < 0 { return false; }
+    let target_name = package_catalog::component_name_at(catalog, target_component);
+    let candidate_name = package_catalog::component_name_at(catalog, candidate_component);
+    return namespace_component_path_matches(
+        rest[0..last_separator],
+        candidate_name[std::mem::len(target_name) + 1..std::mem::len(candidate_name)]
+    );
+}
+
+fn no_declared_type_identity() -> DeclaredTypeIdentity {
+    return DeclaredTypeIdentity {
+        found: false,
+        declaration_index: -1,
+        component_id: -1,
+        local_name: ""
+    };
+}
+
+fn declared_type_identity_at(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    index: i64
+) -> DeclaredTypeIdentity {
+    return DeclaredTypeIdentity {
+        found: true,
+        declaration_index: index,
+        component_id: package_catalog::declared_type_component_at(catalog, index),
+        local_name: package_catalog::declared_type_name_at(catalog, index)
+    };
+}
+
+fn alias_type_matches(value: []u8, alias: []u8, type_name: []u8) -> bool {
+    let expected_len = std::mem::len(alias) + 2 + std::mem::len(type_name);
+    if std::mem::len(value) != expected_len { return false; }
+    return std::mem::equal_bytes(value[0..std::mem::len(alias)], alias) and
+        std::mem::equal_bytes(
+            value[std::mem::len(alias)..std::mem::len(alias) + 2], "::"
+        ) and std::mem::equal_bytes(
+            value[std::mem::len(alias) + 2..expected_len], type_name
+        );
+}
+
+// imported_type_matches resolves both an imported component itself
+// (`alias::Type`) and an exact descendant component
+// (`alias::child::Type`). Component paths use `/` in the catalog while source
+// namespaces use `::`; namespace_component_path_matches is the sole structural
+// conversion boundary and never guesses by suffix.
+fn imported_type_matches(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    value: []u8,
+    alias: []u8,
+    target_component: i64,
+    type_index: i64
+) -> bool {
+    let declaration_component = package_catalog::declared_type_component_at(catalog, type_index);
+    let type_name = package_catalog::declared_type_name_at(catalog, type_index);
+    if declaration_component == target_component {
+        return alias_type_matches(value, alias, type_name);
+    }
+    if !std::mem::equal_bytes(
+        package_catalog::component_package_name_at(catalog, declaration_component),
+        package_catalog::component_package_name_at(catalog, target_component)
+    ) {
+        return false;
+    }
+    let target_name = package_catalog::component_name_at(catalog, target_component);
+    let declaration_name = package_catalog::component_name_at(catalog, declaration_component);
+    if std::mem::len(declaration_name) <= std::mem::len(target_name) or
+        !std::mem::starts_with(declaration_name, target_name) or
+        declaration_name[std::mem::len(target_name)] != cast<u8>(47) {
+        return false;
+    }
+    let alias_prefix_len = std::mem::len(alias) + 2;
+    let type_suffix_len = 2 + std::mem::len(type_name);
+    if std::mem::len(value) <= alias_prefix_len + type_suffix_len or
+        !std::mem::starts_with(value, alias) or
+        !std::mem::equal_bytes(
+            value[std::mem::len(alias)..alias_prefix_len], "::"
+        ) {
+        return false;
+    }
+    let namespace_end = std::mem::len(value) - type_suffix_len;
+    if !std::mem::equal_bytes(value[namespace_end..namespace_end + 2], "::") or
+        !std::mem::equal_bytes(
+            value[namespace_end + 2..std::mem::len(value)], type_name
+        ) {
+        return false;
+    }
+    return namespace_component_path_matches(
+        value[alias_prefix_len..namespace_end],
+        declaration_name[std::mem::len(target_name) + 1..std::mem::len(declaration_name)]
+    );
+}
+
+fn namespace_component_path_matches(namespace: []u8, component_path: []u8) -> bool {
+    var namespace_index = 0;
+    var component_index = 0;
+    while namespace_index < std::mem::len(namespace) and
+        component_index < std::mem::len(component_path) {
+        if namespace_index + 1 < std::mem::len(namespace) and
+            namespace[namespace_index] == cast<u8>(58) and
+            namespace[namespace_index + 1] == cast<u8>(58) {
+            if component_path[component_index] != cast<u8>(47) { return false; }
+            namespace_index = namespace_index + 2;
+            component_index = component_index + 1;
+        } else {
+            if namespace[namespace_index] != component_path[component_index] { return false; }
+            namespace_index = namespace_index + 1;
+            component_index = component_index + 1;
+        }
+    }
+    return namespace_index == std::mem::len(namespace) and
+        component_index == std::mem::len(component_path);
+}
+
+fn contains_double_colon(value: []u8) -> bool {
+    var index = 0;
+    while index + 1 < std::mem::len(value) {
+        if value[index] == cast<u8>(58) and value[index + 1] == cast<u8>(58) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn type_constructor_name(type_name: []u8) -> []u8 {
+    var value = std::mem::trim_ascii(type_name);
+    if std::mem::starts_with(value, "!") {
+        value = std::mem::trim_ascii(value[1..std::mem::len(value)]);
+    }
+    value = receiver_type_without_borrow(value);
+    if std::mem::starts_with(value, "var ") {
+        value = std::mem::trim_ascii(value[4..std::mem::len(value)]);
+    }
+    var index = 0;
+    while index < std::mem::len(value) {
+        if value[index] == cast<u8>(60) { return value[0..index]; }
+        index = index + 1;
+    }
+    return value;
+}
+
+pub fn resolve_call(
+    catalog: &package_catalog::PackageFunctionCatalog,
+    package_name: []u8,
+    component_name: []u8,
+    local_name: []u8
+) -> !package_function_identity::FunctionTarget {
+    let component_value = package_catalog::component_by_name(catalog, package_name, component_name);
+    if component_value < 0 {
+        return error("unresolved call target component");
+    }
+    let entry_index = try package_catalog::exact_top_level_function_entry(
+        catalog, component_value, local_name
+    );
+    if entry_index < 0 {
+        return error("unresolved call target function");
+    }
+    return package_catalog::target_at_entry(catalog, entry_index);
+}
+
+fn find_function_by_span(catalog: &package_catalog::PackageFunctionCatalog, component_value: i64, start: i64, end: i64) -> i64 {
+    if component_value < 0 or component_value >= package_catalog::component_len(catalog) {
+        return -1;
+    }
+    var lower = package_catalog::component_function_start_at(catalog, component_value);
+    let function_end = package_catalog::component_function_end_at(catalog, component_value);
+    var upper = function_end;
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        if package_catalog::function_name_start_at(catalog, middle) < start {
+            lower = middle + 1;
+        } else {
+            upper = middle;
+        }
+    }
+    if lower >= function_end or
+        package_catalog::function_name_start_at(catalog, lower) != start or
+        package_catalog::function_name_end_at(catalog, lower) != end {
+        return -1;
+    }
+    return lower;
+}
+
+fn package_prefix(file: &source::SourceFile) -> []u8 borrows file {
+    if file.kind == source::SourceKind::Std { return "std"; }
+    if std::mem::len(file.package_name) > 0 { return file.package_name; }
+    return "selfhost";
+}

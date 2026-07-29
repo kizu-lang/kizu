@@ -1,0 +1,119 @@
+pub struct FactRange {
+    pub start: i64,
+    pub end: i64,
+}
+
+pub struct ExpressionTypeFacts {
+    source_indexes: std::map::Map<[]u8, i64>,
+    field_indexes: std::map::Map<[]u8, i64>,
+    ranges: std::array::Array<FactRange>,
+    spelling_storage: std::string::String,
+}
+
+pub fn init(allocator: Allocator) -> ExpressionTypeFacts {
+    return ExpressionTypeFacts {
+        source_indexes: std::map::Map<[]u8, i64>(allocator),
+        field_indexes: std::map::Map<[]u8, i64>(allocator),
+        ranges: std::array::Array<FactRange>(allocator),
+        spelling_storage: std::string::String(allocator)
+    };
+}
+
+impl ExpressionTypeFacts {
+    fn deinit(self: ExpressionTypeFacts) -> void {
+        self.source_indexes.deinit();
+        self.field_indexes.deinit();
+        self.ranges.deinit();
+        self.spelling_storage.deinit();
+        return;
+    }
+
+    fn contains_source(self: &ExpressionTypeFacts, key: &[]u8) -> bool {
+        return self.source_indexes.contains(key);
+    }
+
+    fn get_source(
+        self: &ExpressionTypeFacts,
+        key: &[]u8
+    ) -> ![]u8 borrows self {
+        let index = try self.source_indexes.get(key);
+        return try self.spelling_at(index);
+    }
+
+    fn insert_source(
+        self: &var ExpressionTypeFacts,
+        key: &[]u8,
+        spelling: []u8
+    ) -> !void {
+        let start = self.spelling_storage.len();
+        try self.spelling_storage.append_bytes(spelling);
+        let end = self.spelling_storage.len();
+        try self.publish_spelling(&var self.source_indexes, key, start, end);
+        return;
+    }
+
+    fn insert_source_owned(
+        self: &var ExpressionTypeFacts,
+        key: &[]u8,
+        spelling: &std::string::String
+    ) -> !void {
+        let start = self.spelling_storage.len();
+        let spelling_bytes = spelling.as_bytes();
+        try self.spelling_storage.append_bytes(spelling_bytes);
+        let end = self.spelling_storage.len();
+        try self.publish_spelling(&var self.source_indexes, key, start, end);
+        return;
+    }
+
+    fn contains_field(self: &ExpressionTypeFacts, key: &[]u8) -> bool {
+        return self.field_indexes.contains(key);
+    }
+
+    fn get_field(
+        self: &ExpressionTypeFacts,
+        key: &[]u8
+    ) -> ![]u8 borrows self {
+        let index = try self.field_indexes.get(key);
+        return try self.spelling_at(index);
+    }
+
+    fn insert_field(
+        self: &var ExpressionTypeFacts,
+        key: &[]u8,
+        spelling: &std::string::String
+    ) -> !void {
+        let start = self.spelling_storage.len();
+        let spelling_bytes = spelling.as_bytes();
+        try self.spelling_storage.append_bytes(spelling_bytes);
+        let end = self.spelling_storage.len();
+        try self.publish_spelling(&var self.field_indexes, key, start, end);
+        return;
+    }
+
+    fn publish_spelling(
+        self: &var ExpressionTypeFacts,
+        indexes: &var std::map::Map<[]u8, i64>,
+        key: &[]u8,
+        start: i64,
+        end: i64
+    ) -> !void {
+        // Publish the index last. An allocation failure may leave owned,
+        // unreachable storage in this soon-to-be-deinitialized builder, but it
+        // can never leave a visible index pointing at a missing range.
+        let index = self.ranges.len();
+        try self.ranges.append(FactRange { start: start, end: end });
+        try indexes.insert(key, index);
+        return;
+    }
+
+    fn spelling_at(
+        self: &ExpressionTypeFacts,
+        index: i64
+    ) -> ![]u8 borrows self {
+        let ranges = &self.ranges;
+        let fact_range = try ranges.at(index);
+        let storage = &self.spelling_storage;
+        let bytes = storage.as_bytes();
+        return bytes[fact_range.start..fact_range.end];
+    }
+}

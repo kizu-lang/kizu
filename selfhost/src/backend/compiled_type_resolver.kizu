@@ -1,0 +1,1900 @@
+import selfhost::backend::compiled_util;
+import selfhost::abi::fixed_abi_contract;
+import selfhost::backend::ir_contract;
+import selfhost::backend::ir_index;
+import selfhost::ir::builtin_contract;
+import selfhost::type_spelling;
+
+pub struct ResolvedType {
+    // full_spelling preserves generic arguments. canonical_identity names the
+    // declaration/ABI constructor and intentionally does not contain them.
+    pub full_spelling: []u8,
+    pub canonical_identity: []u8,
+    pub abi: []u8,
+    pub declaring_module: []u8,
+    // spelling_module is where full_spelling appeared. Generic arguments that
+    // are bare names are resolved relative to this module, not to the generic
+    // constructor's declaring_module.
+    pub spelling_module: []u8,
+}
+
+pub struct ResolvedFunction {
+    pub canonical_identity: []u8,
+    pub owner_module: []u8,
+    pub return_spelling: []u8,
+    // For !T, return_type is T. The caller keeps return_spelling to derive the
+    // exact error-union ABI while sharing the same nominal identity/context.
+    pub return_type: ResolvedType,
+    pub returns_error: bool,
+}
+
+pub struct ResolvedCallTarget {
+    pub found: bool,
+    pub canonical_identity: []u8,
+}
+
+pub fn call_instance_symbol_indexed(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    function_name: []u8,
+    call_node: i64
+) -> !ResolvedCallTarget {
+    let span = try body_call_span_indexed(index, facts, function_name, call_node);
+    let prefix = "body-call-instance ";
+    var entry = ir_index::first_entry_for_fn_token(
+        index, facts, prefix, function_name, span.start
+    );
+    var found = facts[0..0];
+    while ir_index::entry_is_fn_token(
+        index, facts, entry, prefix, function_name, span.start
+    ) {
+        let line_end = ir_index::entry_line_end(index, entry);
+        var cursor = skip_ascii_spaces(
+            facts, ir_index::entry_key_end(index, entry), line_end
+        );
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        cursor = skip_ascii_spaces(facts, cursor, line_end);
+        let end_start = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let fact_span_end = try parse_decimal_i64_range(
+            facts, end_start, cursor
+        );
+        if fact_span_end == span.end {
+            if std::mem::len(found) > 0 {
+                return error("compiled type resolver: duplicate body call instance");
+            }
+            cursor = skip_ascii_spaces(facts, cursor, line_end);
+            let component_start = cursor;
+            cursor = skip_ascii_token(facts, cursor, line_end);
+            let component = try parse_decimal_i64_range(
+                facts, component_start, cursor
+            );
+            cursor = skip_ascii_spaces(facts, cursor, line_end);
+            let function_start = cursor;
+            cursor = skip_ascii_token(facts, cursor, line_end);
+            let function = try parse_decimal_i64_range(
+                facts, function_start, cursor
+            );
+            cursor = skip_ascii_spaces(facts, cursor, line_end);
+            let ordinal_start = cursor;
+            cursor = skip_ascii_token(facts, cursor, line_end);
+            let ordinal = try parse_decimal_i64_range(
+                facts, ordinal_start, cursor
+            );
+            cursor = skip_ascii_spaces(facts, cursor, line_end);
+            if cursor >= line_end {
+                return error("compiled type resolver: empty body call instance symbol");
+            }
+            let candidate = facts[cursor..line_end];
+            let symbol_prefix = "function-instance-symbol ";
+            var symbol_entry = ir_index::first_entry_with_fact_prefix(
+                index, facts, symbol_prefix
+            );
+            var owner_matches = 0;
+            while symbol_entry >= 0 and ir_index::entry_key_starts_with(
+                index, facts, symbol_entry, symbol_prefix
+            ) {
+                let symbol_end = ir_index::entry_line_end(index, symbol_entry);
+                var symbol_cursor = ir_index::entry_line_start(index, symbol_entry) +
+                    std::mem::len(symbol_prefix);
+                let symbol_component_start = symbol_cursor;
+                symbol_cursor = skip_ascii_token(facts, symbol_cursor, symbol_end);
+                let symbol_component = try parse_decimal_i64_range(
+                    facts, symbol_component_start, symbol_cursor
+                );
+                symbol_cursor = skip_ascii_spaces(facts, symbol_cursor, symbol_end);
+                let symbol_function_start = symbol_cursor;
+                symbol_cursor = skip_ascii_token(facts, symbol_cursor, symbol_end);
+                let symbol_function = try parse_decimal_i64_range(
+                    facts, symbol_function_start, symbol_cursor
+                );
+                symbol_cursor = skip_ascii_spaces(facts, symbol_cursor, symbol_end);
+                let symbol_ordinal_start = symbol_cursor;
+                symbol_cursor = skip_ascii_token(facts, symbol_cursor, symbol_end);
+                let symbol_ordinal = try parse_decimal_i64_range(
+                    facts, symbol_ordinal_start, symbol_cursor
+                );
+                symbol_cursor = skip_ascii_spaces(facts, symbol_cursor, symbol_end);
+                if std::mem::equal_bytes(
+                    facts[symbol_cursor..symbol_end], candidate
+                ) and
+                    (symbol_component != component or
+                        symbol_function != function or
+                        symbol_ordinal != ordinal) {
+                    return error(
+                        "compiled type resolver: function instance symbol has multiple owners"
+                    );
+                }
+                if symbol_component == component and symbol_function == function and
+                    symbol_ordinal == ordinal {
+                    if !std::mem::equal_bytes(
+                        facts[symbol_cursor..symbol_end], candidate
+                    ) {
+                        return error("compiled type resolver: body call instance symbol mismatch");
+                    }
+                    owner_matches = owner_matches + 1;
+                }
+                symbol_entry = symbol_entry + 1;
+            }
+            if owner_matches != 1 {
+                return error("compiled type resolver: body call instance symbol owner invalid");
+            }
+            let call_target = try call_target_for_span_indexed(
+                index, facts, function_name, span.start, span.end
+            );
+            if !call_target.found {
+                return error("compiled type resolver: body call instance target missing");
+            }
+            let name_prefix = "package-definition-name ";
+            var name_entry = ir_index::first_entry_with_fact_prefix(
+                index, facts, name_prefix
+            );
+            var target_matches = 0;
+            while name_entry >= 0 and ir_index::entry_key_starts_with(
+                index, facts, name_entry, name_prefix
+            ) {
+                let name_end = ir_index::entry_line_end(index, name_entry);
+                var name_cursor = ir_index::entry_line_start(index, name_entry) +
+                    std::mem::len(name_prefix);
+                let name_component_start = name_cursor;
+                name_cursor = skip_ascii_token(facts, name_cursor, name_end);
+                let name_component = try parse_decimal_i64_range(
+                    facts, name_component_start, name_cursor
+                );
+                name_cursor = skip_ascii_spaces(facts, name_cursor, name_end);
+                let name_function_start = name_cursor;
+                name_cursor = skip_ascii_token(facts, name_cursor, name_end);
+                let name_function = try parse_decimal_i64_range(
+                    facts, name_function_start, name_cursor
+                );
+                name_cursor = skip_ascii_spaces(facts, name_cursor, name_end);
+                if name_component == component and name_function == function {
+                    if !std::mem::equal_bytes(
+                        facts[name_cursor..name_end],
+                        call_target.canonical_identity
+                    ) {
+                        return error("compiled type resolver: body call instance target mismatch");
+                    }
+                    target_matches = target_matches + 1;
+                }
+                name_entry = name_entry + 1;
+            }
+            if target_matches != 1 {
+                return error("compiled type resolver: body call instance numeric owner invalid");
+            }
+            found = candidate;
+        }
+        entry = entry + 1;
+    }
+    return ResolvedCallTarget {
+        found: std::mem::len(found) > 0,
+        canonical_identity: found
+    };
+}
+
+pub fn call_instance_symbol_for_instance_indexed(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    caller_instance_id: i64,
+    function_name: []u8,
+    call_node: i64
+) -> !ResolvedCallTarget {
+    if caller_instance_id < 0 {
+        return call_instance_symbol_indexed(
+            index, facts, function_name, call_node
+        );
+    }
+    let span = try body_call_span_indexed(
+        index, facts, function_name, call_node
+    );
+    let prefix = "instance-call-instance ";
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, prefix);
+    var found = facts[0..0];
+    while entry >= 0 and ir_index::entry_key_starts_with(
+        index, facts, entry, prefix
+    ) {
+        let line_start = ir_index::entry_line_start(index, entry);
+        let line_end = ir_index::entry_line_end(index, entry);
+        var cursor = line_start + std::mem::len(prefix);
+        let caller_start = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let fact_caller = try parse_decimal_i64_range(
+            facts, caller_start, cursor
+        );
+        cursor = skip_ascii_spaces(facts, cursor, line_end);
+        let span_start_token = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let fact_span_start = try parse_decimal_i64_range(
+            facts, span_start_token, cursor
+        );
+        cursor = skip_ascii_spaces(facts, cursor, line_end);
+        let span_end_token = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let fact_span_end = try parse_decimal_i64_range(
+            facts, span_end_token, cursor
+        );
+        if fact_caller == caller_instance_id and
+            fact_span_start == span.start and fact_span_end == span.end {
+            if std::mem::len(found) > 0 {
+                return error(
+                    "compiled type resolver: duplicate instance-scoped call edge"
+                );
+            }
+            cursor = skip_ascii_spaces(facts, cursor, line_end);
+            let component_start = cursor;
+            cursor = skip_ascii_token(facts, cursor, line_end);
+            let component = try parse_decimal_i64_range(
+                facts, component_start, cursor
+            );
+            cursor = skip_ascii_spaces(facts, cursor, line_end);
+            let function_start = cursor;
+            cursor = skip_ascii_token(facts, cursor, line_end);
+            let function = try parse_decimal_i64_range(
+                facts, function_start, cursor
+            );
+            cursor = skip_ascii_spaces(facts, cursor, line_end);
+            let instance_start = cursor;
+            cursor = skip_ascii_token(facts, cursor, line_end);
+            let callee_instance_id = try parse_decimal_i64_range(
+                facts, instance_start, cursor
+            );
+            cursor = skip_ascii_spaces(facts, cursor, line_end);
+            if cursor >= line_end {
+                return error(
+                    "compiled type resolver: empty instance-scoped call symbol"
+                );
+            }
+            let candidate = facts[cursor..line_end];
+            try validate_instance_symbol_owner(
+                index, facts, component, function, callee_instance_id, candidate
+            );
+            try validate_instance_numeric_call_target(
+                index, facts, function_name, span.start, span.end,
+                component, function
+            );
+            found = candidate;
+        }
+        entry = entry + 1;
+    }
+    return ResolvedCallTarget {
+        found: std::mem::len(found) > 0,
+        canonical_identity: found
+    };
+}
+
+fn validate_instance_symbol_owner(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    component: i64,
+    function: i64,
+    instance_id: i64,
+    candidate: []u8
+) -> !void {
+    let prefix = "function-instance-symbol ";
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, prefix);
+    var owner_matches = 0;
+    while entry >= 0 and ir_index::entry_key_starts_with(
+        index, facts, entry, prefix
+    ) {
+        let line_end = ir_index::entry_line_end(index, entry);
+        var cursor = ir_index::entry_line_start(index, entry) +
+            std::mem::len(prefix);
+        let component_start = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let symbol_component = try parse_decimal_i64_range(
+            facts, component_start, cursor
+        );
+        cursor = skip_ascii_spaces(facts, cursor, line_end);
+        let function_start = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let symbol_function = try parse_decimal_i64_range(
+            facts, function_start, cursor
+        );
+        cursor = skip_ascii_spaces(facts, cursor, line_end);
+        let instance_start = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let symbol_instance_id = try parse_decimal_i64_range(
+            facts, instance_start, cursor
+        );
+        cursor = skip_ascii_spaces(facts, cursor, line_end);
+        let same_symbol = std::mem::equal_bytes(
+            facts[cursor..line_end], candidate
+        );
+        if same_symbol and (symbol_component != component or
+            symbol_function != function or
+            symbol_instance_id != instance_id) {
+            return error(
+                "compiled type resolver: function instance symbol has multiple owners"
+            );
+        }
+        if symbol_component == component and symbol_function == function and
+            symbol_instance_id == instance_id {
+            if !same_symbol {
+                return error(
+                    "compiled type resolver: instance-scoped call symbol mismatch"
+                );
+            }
+            owner_matches = owner_matches + 1;
+        }
+        entry = entry + 1;
+    }
+    if owner_matches != 1 {
+        return error(
+            "compiled type resolver: instance-scoped call symbol owner invalid"
+        );
+    }
+    return;
+}
+
+fn validate_instance_numeric_call_target(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    function_name: []u8,
+    span_start: i64,
+    span_end: i64,
+    component: i64,
+    function: i64
+) -> !void {
+    let call_target = try call_target_for_span_indexed(
+        index, facts, function_name, span_start, span_end
+    );
+    if !call_target.found {
+        return error("compiled type resolver: instance call target missing");
+    }
+    let prefix = "package-definition-name ";
+    var entry = ir_index::first_entry_with_fact_prefix(index, facts, prefix);
+    var matches = 0;
+    while entry >= 0 and ir_index::entry_key_starts_with(
+        index, facts, entry, prefix
+    ) {
+        let line_end = ir_index::entry_line_end(index, entry);
+        var cursor = ir_index::entry_line_start(index, entry) +
+            std::mem::len(prefix);
+        let component_start = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let candidate_component = try parse_decimal_i64_range(
+            facts, component_start, cursor
+        );
+        cursor = skip_ascii_spaces(facts, cursor, line_end);
+        let function_start = cursor;
+        cursor = skip_ascii_token(facts, cursor, line_end);
+        let candidate_function = try parse_decimal_i64_range(
+            facts, function_start, cursor
+        );
+        cursor = skip_ascii_spaces(facts, cursor, line_end);
+        if candidate_component == component and candidate_function == function {
+            if !std::mem::equal_bytes(
+                facts[cursor..line_end], call_target.canonical_identity
+            ) {
+                return error(
+                    "compiled type resolver: instance call target mismatch"
+                );
+            }
+            matches = matches + 1;
+        }
+        entry = entry + 1;
+    }
+    if matches != 1 {
+        return error(
+            "compiled type resolver: instance call numeric owner invalid"
+        );
+    }
+    return;
+}
+
+pub struct ResolvedCallBuiltin {
+    pub found: bool,
+    pub kind: []u8,
+    pub operation: []u8,
+    pub canonical_identity: []u8,
+}
+
+pub struct ResolvedOwnedConstructor {
+    pub found: bool,
+    pub family: i64,
+    pub result_type: ResolvedType,
+    pub type_argument_count: i64,
+    // Generic definitions may be deferred only for instantiated call sites.
+    // This is derived recursively from the ordered source TypeId spellings.
+    pub type_arguments_concrete: bool,
+    // Runtime storage width is selected by the constructor descriptor's
+    // ordered type-argument slot (Array<T>: 0, Map<K,V>: 1).
+    pub storage_type: ResolvedType,
+}
+
+pub fn owned_constructor_result_type(
+    constructor: &ResolvedOwnedConstructor
+) -> ResolvedType {
+    return ResolvedType {
+        full_spelling: constructor.result_type.full_spelling,
+        canonical_identity: constructor.result_type.canonical_identity,
+        abi: constructor.result_type.abi,
+        declaring_module: constructor.result_type.declaring_module,
+        spelling_module: constructor.result_type.spelling_module
+    };
+}
+
+pub struct ParsedUnionVariant {
+    pub name: []u8,
+    pub tag: i64,
+    pub payload_kizu: []u8,
+}
+
+struct ParsedFunctionTypeParameter {
+    sequence: i64,
+    name: []u8,
+}
+
+// is_function_type_parameter_indexed is the canonical scope check for an
+// uninstantiated function type parameter. The producer derives these facts
+// from PackageFunctionCatalog, so declaration traversal never needs to infer
+// generic names from spelling conventions or constructor-specific rules.
+pub fn is_function_type_parameter_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    type_name: []u8
+) -> !bool {
+    let prefix = "function-type-parameter ";
+    let first = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, "", function_name
+    );
+    var entry = first;
+    var expected_sequence = 0;
+    var found = false;
+    while ir_index::entry_matches_query(
+        index, ir_bytes, entry, prefix, "", function_name
+    ) {
+        let parsed = try parse_function_type_parameter_entry(index, ir_bytes, entry);
+        if parsed.sequence != expected_sequence {
+            return error("compiled type resolver: function type parameters must be ordered from zero");
+        }
+        var previous = first;
+        while previous < entry {
+            let prior = try parse_function_type_parameter_entry(index, ir_bytes, previous);
+            if std::mem::equal_bytes(prior.name, parsed.name) {
+                return error("compiled type resolver: duplicate function type parameter name");
+            }
+            previous = previous + 1;
+        }
+        if std::mem::equal_bytes(parsed.name, type_name) {
+            found = true;
+        }
+        expected_sequence = expected_sequence + 1;
+        entry = entry + 1;
+    }
+    return found;
+}
+
+pub fn function_type_parameter_slot_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    type_name: []u8
+) -> !i64 {
+    let prefix = "function-type-parameter ";
+    var entry = ir_index::first_matching_entry(
+        index, ir_bytes, prefix, "", function_name
+    );
+    var expected_sequence = 0;
+    var found = -1;
+    while ir_index::entry_matches_query(
+        index, ir_bytes, entry, prefix, "", function_name
+    ) {
+        let parsed = try parse_function_type_parameter_entry(
+            index, ir_bytes, entry
+        );
+        if parsed.sequence != expected_sequence {
+            return error(
+                "compiled type resolver: function type parameters must be ordered from zero"
+            );
+        }
+        if std::mem::equal_bytes(parsed.name, type_name) {
+            if found >= 0 {
+                return error(
+                    "compiled type resolver: duplicate function type parameter name"
+                );
+            }
+            found = parsed.sequence;
+        }
+        expected_sequence = expected_sequence + 1;
+        entry = entry + 1;
+    }
+    return found;
+}
+
+// type_spelling_contains_function_formal_indexed recursively checks the parsed
+// type spelling. A top-level `Array<T>` check is insufficient because a formal
+// may occur below another generic constructor or wrapper.
+pub fn type_spelling_contains_function_formal_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    type_spelling: []u8
+) -> !bool {
+    let layer = try type_spelling::parse(type_spelling);
+    if layer.kind == type_spelling::layer_named() {
+        let constructor = try type_spelling::constructor(&layer, type_spelling);
+        if try is_function_type_parameter_indexed(
+            index, ir_bytes, function_name, constructor
+        ) { return true; }
+        if !layer.has_arguments { return false; }
+        let arguments = try type_spelling::arguments(&layer, type_spelling);
+        var argument_start = 0;
+        while argument_start < std::mem::len(arguments) {
+            if try type_spelling_contains_function_formal_indexed(
+                index,
+                ir_bytes,
+                function_name,
+                try type_spelling::next_argument(
+                    arguments, argument_start
+                )
+            ) { return true; }
+            argument_start = try type_spelling::next_argument_start(
+                arguments, argument_start
+            );
+        }
+        return false;
+    }
+    let first_child = try type_spelling::first_child(&layer, type_spelling);
+    let second_child = try type_spelling::second_child(&layer, type_spelling);
+    if std::mem::len(first_child) > 0 and
+        try type_spelling_contains_function_formal_indexed(
+            index, ir_bytes, function_name, first_child
+        ) { return true; }
+    if std::mem::len(second_child) > 0 and
+        try type_spelling_contains_function_formal_indexed(
+            index, ir_bytes, function_name, second_child
+        ) { return true; }
+    return false;
+}
+
+fn parse_function_type_parameter_entry(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    entry: i64
+) -> !ParsedFunctionTypeParameter {
+    let line_end = ir_index::entry_line_end(index, entry);
+    var cursor = skip_ascii_spaces(
+        ir_bytes, ir_index::entry_key_end(index, entry), line_end
+    );
+    let sequence_start = cursor;
+    cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+    let sequence = try parse_decimal_i64_range(
+        ir_bytes, sequence_start, cursor
+    );
+    cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+    let name_start = cursor;
+    cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+    if name_start >= cursor or cursor != line_end {
+        return error("compiled type resolver: malformed function type parameter fact");
+    }
+    return ParsedFunctionTypeParameter {
+        sequence: sequence,
+        name: ir_bytes[name_start..cursor]
+    };
+}
+
+pub struct ResolvedUnionVariant {
+    pub found: bool,
+    pub tag: i64,
+    pub payload_kizu: []u8,
+}
+
+pub fn resolve_union_variant_indexed(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    identity: []u8,
+    name: []u8
+) -> !ResolvedUnionVariant {
+    let prefix = "union-variant ";
+    let first = ir_index::first_matching_entry(index, facts, prefix, "", identity);
+    var entry = first;
+    var expected_tag = 0;
+    var result = ResolvedUnionVariant {
+        found: false, tag: -1, payload_kizu: name[0..0]
+    };
+    while ir_index::entry_matches_query(index, facts, entry, prefix, "", identity) {
+        let parsed = try parse_union_variant_entry(index, facts, entry);
+        var previous = first;
+        while previous < entry {
+            let prior = try parse_union_variant_entry(index, facts, previous);
+            if std::mem::equal_bytes(prior.name, parsed.name) {
+                return error("compiled union facts: duplicate variant name");
+            }
+            if prior.tag == parsed.tag {
+                return error("compiled union facts: duplicate variant tag");
+            }
+            previous = previous + 1;
+        }
+        if parsed.tag != expected_tag {
+            return error("compiled union facts: variant tags must be ordered from zero");
+        }
+        if std::mem::equal_bytes(parsed.name, name) {
+            result = ResolvedUnionVariant {
+                found: true,
+                tag: parsed.tag,
+                payload_kizu: parsed.payload_kizu
+            };
+        }
+        expected_tag = expected_tag + 1;
+        entry = entry + 1;
+    }
+    if expected_tag == 0 { return error("compiled union facts: union has no variants"); }
+    return result;
+}
+
+pub fn parse_union_variant_entry(
+    index: &ir_index::IrIndex,
+    facts: []u8,
+    entry: i64
+) -> !ParsedUnionVariant {
+    let line_end = ir_index::entry_line_end(index, entry);
+    var cursor = skip_ascii_spaces(facts, ir_index::entry_key_end(index, entry), line_end);
+    let name_start = cursor;
+    cursor = skip_ascii_token(facts, cursor, line_end);
+    if name_start >= cursor { return error("compiled union facts: empty variant name"); }
+    let name = facts[name_start..cursor];
+    cursor = skip_ascii_spaces(facts, cursor, line_end);
+    let tag_start = cursor;
+    cursor = skip_ascii_token(facts, cursor, line_end);
+    if tag_start >= cursor { return error("compiled union facts: empty index"); }
+    var tag = 0;
+    var tag_cursor = tag_start;
+    while tag_cursor < cursor {
+        let byte = facts[tag_cursor];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("compiled union facts: invalid index");
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        if tag > 922337203685477580 or
+            (tag == 922337203685477580 and digit > 7) {
+            return error("compiled union facts: index overflow");
+        }
+        tag = tag * 10 + digit;
+        tag_cursor = tag_cursor + 1;
+    }
+    cursor = skip_ascii_spaces(facts, cursor, line_end);
+    if cursor >= line_end or skip_ascii_token(facts, cursor, line_end) != line_end {
+        return error("compiled union facts: malformed variant fact");
+    }
+    return ParsedUnionVariant {
+        name: name,
+        tag: tag,
+        payload_kizu: facts[cursor..line_end]
+    };
+}
+
+pub fn has_generic_constructor_abi(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    spelling: []u8
+) -> !bool {
+    let constructor = type_constructor(spelling);
+    if std::mem::equal_bytes(constructor, spelling) {
+        return false;
+    }
+    let abi = try resolve_fact_value_indexed(
+        index, ir_bytes, "abi-repr ", ir_bytes[0..0], constructor
+    );
+    return abi.found;
+}
+
+struct BodyCallSpan {
+    start: i64,
+    end: i64,
+}
+
+// resolve_indexed is the single compiled ABI resolver for parameters, returns,
+// locals, and fields. Source-defined identities come from facts; this function
+// only owns representation rules that are structural in the type syntax.
+pub fn resolve_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    kizu_type: []u8
+) -> ![]u8 {
+    let resolved = try resolve_type_indexed(index, ir_bytes, module_prefix, kizu_type);
+    return resolved.abi;
+}
+
+// resolve_type_indexed keeps nominal identity and declaration context attached to
+// the ABI decision. Consumers such as struct-field lowering must not reinterpret a
+// bare type spelling in the module that happens to use the value.
+pub fn resolve_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    kizu_type: []u8
+) -> !ResolvedType {
+    let type_len = std::mem::len(kizu_type);
+    if type_len == 0 {
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled type resolver: empty type in module ");
+        try message.append_bytes(module_prefix);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
+    }
+    if kizu_type[0] == cast<u8>(38) {
+        return try resolve_type_indexed(
+            index, ir_bytes, module_prefix, kizu_type[1..type_len]
+        );
+    }
+    if std::mem::starts_with(kizu_type, "var_") {
+        return try resolve_type_indexed(
+            index, ir_bytes, module_prefix, kizu_type[4..type_len]
+        );
+    }
+    let layer = try type_spelling::parse(kizu_type);
+    if layer.kind == type_spelling::layer_nullable() {
+        let first_child = try type_spelling::first_child(&layer, kizu_type);
+        let child = try resolve_type_indexed(
+            index, ir_bytes, module_prefix, first_child
+        );
+        let capability = try resolve_fact_value_indexed(
+            index, ir_bytes, "nullable-abi-repr ", module_prefix,
+            child.canonical_identity
+        );
+        if !capability.found {
+            return error("compiled type resolver: type has no nullable ABI contract");
+        }
+        if !std::mem::equal_bytes(capability.value, child.abi) {
+            return error("compiled type resolver: nullable ABI contract mismatch");
+        }
+        return ResolvedType {
+            full_spelling: kizu_type,
+            canonical_identity: child.canonical_identity,
+            abi: child.abi,
+            declaring_module: child.declaring_module,
+            spelling_module: module_prefix
+        };
+    }
+    let primitive = primitive_llvm_or_empty(kizu_type);
+    if std::mem::len(primitive) > 0 {
+        return ResolvedType {
+            full_spelling: kizu_type,
+            canonical_identity: kizu_type,
+            abi: primitive,
+            declaring_module: ir_bytes[0..0],
+            spelling_module: module_prefix
+        };
+    }
+    let constructor = type_constructor(kizu_type);
+    let owned = try resolve_fact_value_indexed(
+        index, ir_bytes, "abi-repr ", module_prefix, constructor
+    );
+    let enum_type = try resolve_fact_value_indexed(
+        index, ir_bytes, "enum-type ", module_prefix, kizu_type
+    );
+    let nominal = try resolve_fact_value_indexed(
+        index, ir_bytes, "type-llvm ", module_prefix, kizu_type
+    );
+    let union_type = try resolve_fact_value_indexed(
+        index, ir_bytes, "union-type ", module_prefix, kizu_type
+    );
+    let constructor_enum = try resolve_fact_value_indexed(
+        index, ir_bytes, "enum-type ", module_prefix, constructor
+    );
+    let constructor_nominal = try resolve_fact_value_indexed(
+        index, ir_bytes, "type-llvm ", module_prefix, constructor
+    );
+    let constructor_union = try resolve_fact_value_indexed(
+        index, ir_bytes, "union-type ", module_prefix, constructor
+    );
+
+    // A canonical source identity has one representation owner. Looking up all
+    // kinds before selecting the ABI prevents precedence from hiding debt even
+    // when two kinds happen to spell the same ABI.
+    try reject_canonical_kind_conflict(&owned, &enum_type);
+    try reject_canonical_kind_conflict(&owned, &nominal);
+    try reject_canonical_kind_conflict(&owned, &union_type);
+    try reject_canonical_kind_conflict(&enum_type, &nominal);
+    try reject_canonical_kind_conflict(&enum_type, &union_type);
+    try reject_canonical_kind_conflict(&nominal, &union_type);
+    // Generic ABI facts are keyed by their constructor, while the full
+    // spelling carries arguments. Inspect the constructor key as well so
+    // `abi-repr Array` cannot hide a conflicting `type-llvm Array` behind
+    // resolution of `Array<T>`.
+    try reject_canonical_kind_conflict(&owned, &constructor_enum);
+    try reject_canonical_kind_conflict(&owned, &constructor_nominal);
+    try reject_canonical_kind_conflict(&owned, &constructor_union);
+    try reject_canonical_kind_conflict(&constructor_enum, &constructor_nominal);
+    try reject_canonical_kind_conflict(&constructor_enum, &constructor_union);
+    try reject_canonical_kind_conflict(&constructor_nominal, &constructor_union);
+
+    if owned.found {
+        if fixed_abi_contract::from_llvm(owned.value).kind ==
+            fixed_abi_contract::FixedAbiKind::Missing {
+            return error("compiled type resolver: unknown abi-repr");
+        }
+        return resolved_type_from_fact(owned, kizu_type, module_prefix);
+    }
+    if enum_type.found {
+        if !std::mem::equal_bytes(enum_type.value, "i64") {
+            return error("compiled type resolver: invalid enum representation");
+        }
+        return resolved_type_from_fact(enum_type, kizu_type, module_prefix);
+    }
+    if nominal.found {
+        return resolved_type_from_fact(nominal, kizu_type, module_prefix);
+    }
+    if union_type.found {
+        return resolved_type_from_fact(union_type, kizu_type, module_prefix);
+    }
+    return type_facts_not_found(module_prefix, kizu_type);
+}
+
+fn type_facts_not_found(module_prefix: []u8, kizu_type: []u8) -> !ResolvedType {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled type resolver: type facts not found; module=");
+    try message.append_bytes(module_prefix);
+    try message.append_bytes("; type=");
+    try message.append_bytes(kizu_type);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
+}
+
+pub fn function_owner_module_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8
+) -> ![]u8 {
+    let owner = try exact_unique_fact_value_indexed(
+        index, ir_bytes, "function-owner-module ", "", function_name
+    );
+    if !owner.found {
+        return error("compiled type resolver: function owner module not found");
+    }
+    let owner_len = std::mem::len(owner.value);
+    let function_len = std::mem::len(function_name);
+    if owner_len == 0 or owner_len >= function_len or
+        !std::mem::starts_with(function_name, owner.value) {
+        return error("compiled type resolver: invalid function owner module");
+    }
+    return owner.value;
+}
+
+// resolve_function_indexed resolves a call spelling to one exact source function.
+// Bare names are local to caller_module; qualified canonical identities win before
+// the first segment is interpreted as a module alias. No suffix/first-match lookup
+// participates, and both signature and owner facts reject duplicates.
+pub fn resolve_function_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    caller_module: []u8,
+    callee_name: []u8
+) -> !ResolvedFunction {
+    let signature = try resolve_fact_value_indexed(
+        index, ir_bytes, "function-signature-return ", caller_module, callee_name
+    );
+    if !signature.found {
+        return error("compiled type resolver: function signature not found");
+    }
+    let owner = try function_owner_module_indexed(
+        index, ir_bytes, signature.canonical_identity
+    );
+    let return_len = std::mem::len(signature.value);
+    var returns_error = false;
+    var payload_spelling = signature.value;
+    if return_len > 0 and signature.value[0] == cast<u8>(33) {
+        returns_error = true;
+        payload_spelling = signature.value[1..return_len];
+        if std::mem::len(payload_spelling) == 0 {
+            return error("compiled type resolver: empty function error payload");
+        }
+    }
+    let return_type = try resolve_type_indexed(
+        index, ir_bytes, owner, payload_spelling
+    );
+    return ResolvedFunction {
+        canonical_identity: signature.canonical_identity,
+        owner_module: owner,
+        return_spelling: signature.value,
+        return_type: return_type,
+        returns_error: returns_error
+    };
+}
+
+// has_source_function_indexed uses the same exact identity rules as
+// resolve_function_indexed. Runtime stdlib symbols have no source signature and
+// therefore remain on the runtime-symbol path; duplicate signature facts are an
+// error rather than an arbitrary first match.
+pub fn has_source_function_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    caller_module: []u8,
+    callee_name: []u8
+) -> !bool {
+    let signature = try resolve_fact_value_indexed(
+        index, ir_bytes, "function-signature-return ", caller_module, callee_name
+    );
+    return signature.found;
+}
+
+pub fn function_return_type(function: &ResolvedFunction) -> ResolvedType {
+    return ResolvedType {
+        full_spelling: function.return_type.full_spelling,
+        canonical_identity: function.return_type.canonical_identity,
+        abi: function.return_type.abi,
+        declaring_module: function.return_type.declaring_module,
+        spelling_module: function.return_type.spelling_module
+    };
+}
+
+pub fn call_target_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64
+) -> !ResolvedCallTarget {
+    let call_span = try body_call_span_indexed(
+        index, ir_bytes, function_name, call_node
+    );
+    return try call_target_for_span_indexed(
+        index, ir_bytes, function_name, call_span.start, call_span.end
+    );
+}
+
+fn call_target_for_span_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    span_start: i64,
+    span_end: i64
+) -> !ResolvedCallTarget {
+    var entry = ir_index::first_entry_for_fn_token(
+        index, ir_bytes, "body-call-target ", function_name, span_start
+    );
+    if entry < 0 {
+        return ResolvedCallTarget {
+            found: false,
+            canonical_identity: ir_bytes[0..0]
+        };
+    }
+    var found = false;
+    var target = ir_bytes[0..0];
+    while ir_index::entry_is_fn_token(
+        index, ir_bytes, entry, "body-call-target ", function_name, span_start
+    ) {
+        let key_end = ir_index::entry_key_end(index, entry);
+        let line_end = ir_index::entry_line_end(index, entry);
+        var cursor = skip_ascii_spaces(ir_bytes, key_end, line_end);
+        cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+        cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+        let fact_span_end_start = cursor;
+        cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+        let fact_span_end = try parse_decimal_i64_range(
+            ir_bytes, fact_span_end_start, cursor
+        );
+        if fact_span_end == span_end {
+            if found {
+                return error("compiled type resolver: duplicate body call target");
+            }
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            if cursor >= line_end {
+                return error("compiled type resolver: empty body call target");
+            }
+            target = ir_bytes[cursor..line_end];
+            found = true;
+        }
+        entry = entry + 1;
+    }
+    if !found {
+        return ResolvedCallTarget {
+            found: false,
+            canonical_identity: ir_bytes[0..0]
+        };
+    }
+    let builtin = try builtin_call_for_span_indexed(
+        index, ir_bytes, function_name, span_start, span_end
+    );
+    if builtin.found {
+        return error("compiled type resolver: overlapping source and builtin call");
+    }
+    return ResolvedCallTarget {
+        found: true,
+        canonical_identity: target
+    };
+}
+
+fn body_call_span_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64
+) -> !BodyCallSpan {
+    let node_entry = ir_index::first_entry_for_fn_token(
+        index, ir_bytes, "body-node ", function_name, call_node
+    );
+    if node_entry < 0 {
+        return error("compiled type resolver: call body node not found");
+    }
+    let node_line_start = ir_index::entry_line_start(index, node_entry);
+    let node_line_end = ir_index::entry_line_end(index, node_entry);
+    let span_end_start = previous_token_start(
+        ir_bytes, node_line_start, node_line_end
+    );
+    let span_start_start = previous_token_start(
+        ir_bytes, node_line_start, span_end_start - 1
+    );
+    let span_start = try parse_decimal_i64_range(
+        ir_bytes, span_start_start, span_end_start - 1
+    );
+    let span_end = try parse_decimal_i64_range(
+        ir_bytes, span_end_start, node_line_end
+    );
+    return BodyCallSpan { start: span_start, end: span_end };
+}
+
+pub fn call_builtin_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64
+) -> !ResolvedCallBuiltin {
+    let call_span = try body_call_span_indexed(
+        index, ir_bytes, function_name, call_node
+    );
+    let builtin = try builtin_call_for_span_indexed(
+        index, ir_bytes, function_name, call_span.start, call_span.end
+    );
+    if builtin.found {
+        let target = try call_target_indexed(
+            index, ir_bytes, function_name, call_node
+        );
+        if target.found {
+            return error("compiled type resolver: overlapping source and builtin call");
+        }
+    }
+    return builtin;
+}
+
+pub fn owned_constructor_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64
+) -> !ResolvedOwnedConstructor {
+    let call_span = try body_call_span_indexed(
+        index, ir_bytes, function_name, call_node
+    );
+    return try owned_constructor_for_span_indexed(
+        index, ir_bytes, function_name, call_span.start, call_span.end
+    );
+}
+
+// owned_constructor_for_span_indexed is the single strict descriptor parser
+// shared by MIR lowering and generic-definition deferral. Callers with only a
+// body-call-target span must not independently reinterpret fact tokens.
+pub fn owned_constructor_for_span_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    span_start: i64,
+    span_end: i64
+) -> !ResolvedOwnedConstructor {
+    let call_span = BodyCallSpan { start: span_start, end: span_end };
+    let prefix = "body-call-owned-constructor ";
+    var entry = ir_index::first_entry_for_fn_token(
+        index, ir_bytes, prefix, function_name, call_span.start
+    );
+    var found = false;
+    var family = ir_bytes[0..0];
+    var constructor_action = builtin_contract::owned_container_action_none();
+    var result_constructor = ir_bytes[0..0];
+    var result_spelling = ir_bytes[0..0];
+    var type_argument_count = 0;
+    var type_size_argument_slot = -1;
+    var storage_type_argument_spelling = ir_bytes[0..0];
+    var storage_type_concrete = false;
+    var type_arguments_concrete = true;
+    while ir_index::entry_is_fn_token(
+        index, ir_bytes, entry, prefix, function_name, call_span.start
+    ) {
+        let key_end = ir_index::entry_key_end(index, entry);
+        let line_end = ir_index::entry_line_end(index, entry);
+        var cursor = skip_ascii_spaces(ir_bytes, key_end, line_end);
+        cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+        cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+        let span_end_start = cursor;
+        cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+        let span_end = try parse_decimal_i64_range(
+            ir_bytes, span_end_start, cursor
+        );
+        if span_end == call_span.end {
+            if found {
+                return error("compiled type resolver: duplicate owned constructor fact");
+            }
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            let family_start = cursor;
+            cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+            family = ir_bytes[family_start..cursor];
+            let family_id = builtin_contract::owned_container_family_from_name(family);
+            if family_id == builtin_contract::owned_container_family_none() {
+                return error("compiled type resolver: invalid owned constructor family");
+            }
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            let action_start = cursor;
+            cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+            let action_name = ir_bytes[action_start..cursor];
+            constructor_action = builtin_contract::owned_container_action_from_name(
+                action_name
+            );
+            if constructor_action == builtin_contract::owned_container_action_none() {
+                return error("compiled type resolver: invalid owned constructor action");
+            }
+            let constructor_descriptor = builtin_contract::owned_container_constructor(
+                family_id
+            );
+            if !constructor_descriptor.found {
+                return error("compiled type resolver: owned constructor descriptor missing");
+            }
+            if constructor_descriptor.action != constructor_action {
+                return error("compiled type resolver: owned constructor action mismatch");
+            }
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            let constructor_start = cursor;
+            cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+            result_constructor = ir_bytes[constructor_start..cursor];
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            let result_start = cursor;
+            cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+            result_spelling = ir_bytes[result_start..cursor];
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            let argument_count_start = cursor;
+            cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+            type_argument_count = try parse_decimal_i64_range(
+                ir_bytes, argument_count_start, cursor
+            );
+            if std::mem::len(result_constructor) == 0 {
+                return error("compiled type resolver: malformed owned constructor fact");
+            }
+            if std::mem::len(result_spelling) == 0 {
+                return error("compiled type resolver: malformed owned constructor fact");
+            }
+            if type_argument_count <= 0 {
+                return error("compiled type resolver: owned constructor type arguments missing");
+            }
+            let runtime_descriptor = builtin_contract::owned_container_constructor_runtime(
+                family_id
+            );
+            if runtime_descriptor.found {
+                type_size_argument_slot = runtime_descriptor.type_size_argument_slot;
+                if type_size_argument_slot >= type_argument_count {
+                    return error("compiled type resolver: owned constructor storage type slot out of range");
+                }
+            }
+            let result_layer = try type_spelling::parse(result_spelling);
+            if !result_layer.has_arguments {
+                return error("compiled type resolver: owned constructor result arguments missing");
+            }
+            let result_arguments = try type_spelling::arguments(
+                &result_layer, result_spelling
+            );
+            var result_argument_start = 0;
+            var type_argument_index = 0;
+            while type_argument_index < type_argument_count {
+                cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+                let argument_start = cursor;
+                cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+                if argument_start == cursor {
+                    return error("compiled type resolver: owned constructor type argument missing");
+                }
+                let argument_spelling = ir_bytes[argument_start..cursor];
+                let argument_is_formal = try type_spelling_contains_function_formal_indexed(
+                    index, ir_bytes, function_name, argument_spelling
+                );
+                if argument_is_formal {
+                    type_arguments_concrete = false;
+                }
+                if type_argument_index == type_size_argument_slot {
+                    storage_type_argument_spelling = argument_spelling;
+                    storage_type_concrete = !argument_is_formal;
+                }
+                if result_argument_start >= std::mem::len(result_arguments) or
+                    !std::mem::equal_bytes(
+                        try type_spelling::next_argument(
+                            result_arguments, result_argument_start
+                        ),
+                        argument_spelling
+                    ) {
+                    return error("compiled type resolver: owned constructor type argument mismatch");
+                }
+                result_argument_start = try type_spelling::next_argument_start(
+                    result_arguments, result_argument_start
+                );
+                type_argument_index = type_argument_index + 1;
+            }
+            if result_argument_start != std::mem::len(result_arguments) {
+                return error("compiled type resolver: owned constructor type argument count mismatch");
+            }
+            if type_size_argument_slot >= 0 and
+                std::mem::len(storage_type_argument_spelling) == 0 {
+                return error("compiled type resolver: owned constructor storage type missing");
+            }
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            if cursor != line_end {
+                return error("compiled type resolver: malformed owned constructor fact");
+            }
+            found = true;
+        }
+        entry = entry + 1;
+    }
+    if !found { return empty_owned_constructor(ir_bytes); }
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let result_type = try resolve_type_indexed(
+        index, ir_bytes, module_prefix, result_spelling
+    );
+    if !std::mem::equal_bytes(result_type.canonical_identity, result_constructor) {
+        return error("compiled type resolver: owned constructor result identity mismatch");
+    }
+    let family_fact = try exact_unique_fact_value_indexed(
+        index,
+        ir_bytes,
+        "owned-container-family ",
+        "",
+        result_type.canonical_identity
+    );
+    if !family_fact.found {
+        return error("compiled type resolver: owned constructor canonical family not found");
+    }
+    let canonical_family = builtin_contract::owned_container_family_from_name(
+        family_fact.value
+    );
+    if canonical_family == builtin_contract::owned_container_family_none() {
+        return error("compiled type resolver: invalid canonical owned constructor family");
+    }
+    if canonical_family != builtin_contract::owned_container_family_from_name(family) {
+        return error("compiled type resolver: owned constructor canonical family mismatch");
+    }
+    let result_abi = fixed_abi_contract::from_llvm(result_type.abi);
+    if result_abi.kind != fixed_abi_contract::FixedAbiKind::Owned {
+        return error("compiled type resolver: owned constructor result ABI is not owned");
+    }
+    var storage_type = ResolvedType {
+        full_spelling: storage_type_argument_spelling,
+        canonical_identity: ir_bytes[0..0],
+        abi: ir_bytes[0..0],
+        declaring_module: ir_bytes[0..0],
+        spelling_module: module_prefix
+    };
+    if type_size_argument_slot >= 0 and storage_type_concrete {
+        storage_type = try resolve_type_indexed(
+            index, ir_bytes, module_prefix, storage_type_argument_spelling
+        );
+    }
+    let target = try call_target_for_span_indexed(
+        index, ir_bytes, function_name, call_span.start, call_span.end
+    );
+    let builtin = try builtin_call_for_span_indexed(
+        index, ir_bytes, function_name, call_span.start, call_span.end
+    );
+    if target.found {
+        if !std::mem::equal_bytes(target.canonical_identity, result_constructor) {
+            return error("compiled type resolver: source owned constructor target mismatch");
+        }
+    } else {
+        if !builtin.found {
+            return error("compiled type resolver: owned constructor has no exact call classification");
+        }
+        let operation_id = builtin_contract::operation_from_name(builtin.operation);
+        let descriptor = builtin_contract::owned_container_operation(operation_id);
+        if !descriptor.found {
+            return error("compiled type resolver: builtin owned constructor has no descriptor");
+        }
+        if descriptor.action != builtin_contract::owned_container_action_construct() {
+            return error("compiled type resolver: builtin owned constructor action mismatch");
+        }
+        if descriptor.family != builtin_contract::owned_container_family_from_name(family) {
+            return error("compiled type resolver: builtin owned constructor family mismatch");
+        }
+        if descriptor.action != constructor_action {
+            return error("compiled type resolver: builtin owned constructor action mismatch");
+        }
+    }
+    return ResolvedOwnedConstructor {
+        found: true,
+        family: builtin_contract::owned_container_family_from_name(family),
+        result_type: result_type,
+        type_argument_count: type_argument_count,
+        type_arguments_concrete: type_arguments_concrete,
+        storage_type: storage_type
+    };
+}
+
+fn builtin_call_for_span_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    span_start: i64,
+    span_end: i64
+) -> !ResolvedCallBuiltin {
+    var entry = ir_index::first_entry_for_fn_token(
+        index, ir_bytes, "body-call-builtin ", function_name, span_start
+    );
+    if entry < 0 {
+        return empty_call_builtin(ir_bytes);
+    }
+    var found = false;
+    var kind = ir_bytes[0..0];
+    var operation = ir_bytes[0..0];
+    var canonical_identity = ir_bytes[0..0];
+    while ir_index::entry_is_fn_token(
+        index, ir_bytes, entry, "body-call-builtin ", function_name, span_start
+    ) {
+        let key_end = ir_index::entry_key_end(index, entry);
+        let line_end = ir_index::entry_line_end(index, entry);
+        var cursor = skip_ascii_spaces(ir_bytes, key_end, line_end);
+        cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+        cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+        let fact_span_end_start = cursor;
+        cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+        let fact_span_end = try parse_decimal_i64_range(
+            ir_bytes, fact_span_end_start, cursor
+        );
+        if fact_span_end == span_end {
+            if found {
+                return error("compiled type resolver: duplicate body call builtin");
+            }
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            if cursor >= line_end {
+                return error("compiled type resolver: empty body call builtin");
+            }
+            let kind_start = cursor;
+            cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+            kind = ir_bytes[kind_start..cursor];
+            let kind_id = builtin_contract::kind_from_name(kind);
+            if kind_id < 0 {
+                return error("compiled type resolver: invalid body call builtin kind");
+            }
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            let operation_start = cursor;
+            cursor = skip_ascii_token(ir_bytes, cursor, line_end);
+            if operation_start == cursor {
+                return error("compiled type resolver: empty body call builtin operation");
+            }
+            operation = ir_bytes[operation_start..cursor];
+            let operation_id = builtin_contract::operation_from_name(operation);
+            if operation_id < 0 {
+                return error("compiled type resolver: invalid body call builtin operation");
+            }
+            if !builtin_contract::valid_pair(kind_id, operation_id) {
+                return error("compiled type resolver: builtin kind and operation mismatch");
+            }
+            cursor = skip_ascii_spaces(ir_bytes, cursor, line_end);
+            if cursor >= line_end {
+                return error("compiled type resolver: empty body call builtin identity");
+            }
+            canonical_identity = ir_bytes[cursor..line_end];
+            if try builtin_contract::operation_requires_identity(operation_id) {
+                if std::mem::equal_bytes(canonical_identity, "-") {
+                    return error("compiled type resolver: free runtime identity missing");
+                }
+            } else {
+                if !std::mem::equal_bytes(canonical_identity, "-") {
+                    return error("compiled type resolver: receiver builtin has unexpected identity");
+                }
+                canonical_identity = ir_bytes[0..0];
+            }
+            found = true;
+        }
+        entry = entry + 1;
+    }
+    if !found {
+        return empty_call_builtin(ir_bytes);
+    }
+    return ResolvedCallBuiltin {
+        found: true,
+        kind: kind,
+        operation: operation,
+        canonical_identity: canonical_identity
+    };
+}
+
+fn empty_call_builtin(ir_bytes: []u8) -> ResolvedCallBuiltin {
+    return ResolvedCallBuiltin {
+        found: false,
+        kind: ir_bytes[0..0],
+        operation: ir_bytes[0..0],
+        canonical_identity: ir_bytes[0..0]
+    };
+}
+
+fn empty_owned_constructor(ir_bytes: []u8) -> ResolvedOwnedConstructor {
+    let empty = ResolvedType {
+        full_spelling: ir_bytes[0..0],
+        canonical_identity: ir_bytes[0..0],
+        abi: ir_bytes[0..0],
+        declaring_module: ir_bytes[0..0],
+        spelling_module: ir_bytes[0..0]
+    };
+    return ResolvedOwnedConstructor {
+        found: false,
+        family: builtin_contract::owned_container_family_none(),
+        result_type: empty,
+        type_argument_count: 0,
+        type_arguments_concrete: false,
+        storage_type: ResolvedType {
+            full_spelling: ir_bytes[0..0],
+            canonical_identity: ir_bytes[0..0],
+            abi: ir_bytes[0..0],
+            declaring_module: ir_bytes[0..0],
+            spelling_module: ir_bytes[0..0]
+        }
+    };
+}
+
+pub fn builtin_contract_valid_pair_gate() -> !void {
+    let facts = "body-node beta::consume 3 depth 0 kind Call span 5 10
+body-call-builtin beta::consume 5 10 runtime channel-recv -";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let builtin = try call_builtin_indexed(
+        &index, facts, "beta::consume", 3
+    );
+    std::testing::expect(builtin.found);
+    std::testing::expect_equal<[]u8>("runtime", builtin.kind);
+    std::testing::expect_equal<[]u8>("channel-recv", builtin.operation);
+    std::testing::expect(std::mem::len(builtin.canonical_identity) == 0);
+    return;
+}
+
+pub fn owned_constructor_descriptor_gate() -> !void {
+    let facts = "abi-repr std::array::Array %kizu.owned
+abi-repr std::map::Map %kizu.owned
+abi-repr []u8 %kizu.slice.u8
+type-llvm app::Pair %app.pair
+owned-container-family std::array::Array sequence
+owned-container-family std::map::Map map
+body-node beta::make 3 depth 0 kind Call span 5 10
+body-call-target beta::make 5 10 std::array::Array
+body-call-owned-constructor beta::make 5 10 sequence construct std::array::Array std::array::Array<i64> 1 i64
+body-node beta::make_map 4 depth 0 kind Call span 15 30
+body-call-target beta::make_map 15 30 std::map::Map
+body-call-owned-constructor beta::make_map 15 30 map construct std::map::Map std::map::Map<[]u8,i64> 2 []u8 i64
+body-node beta::make_map_bool 5 depth 0 kind Call span 35 50
+body-call-target beta::make_map_bool 35 50 std::map::Map
+body-call-owned-constructor beta::make_map_bool 35 50 map construct std::map::Map std::map::Map<[]u8,bool> 2 []u8 bool
+body-node beta::make_map_slice 6 depth 0 kind Call span 55 70
+body-call-target beta::make_map_slice 55 70 std::map::Map
+body-call-owned-constructor beta::make_map_slice 55 70 map construct std::map::Map std::map::Map<[]u8,[]u8> 2 []u8 []u8
+body-node beta::make_map_pair 7 depth 0 kind Call span 75 90
+body-call-target beta::make_map_pair 75 90 std::map::Map
+body-call-owned-constructor beta::make_map_pair 75 90 map construct std::map::Map std::map::Map<[]u8,app::Pair> 2 []u8 app::Pair";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let constructor = try owned_constructor_indexed(
+        &index, facts, "beta::make", 3
+    );
+    std::testing::expect(constructor.found);
+    std::testing::expect(
+        constructor.family == builtin_contract::owned_container_family_sequence()
+    );
+    std::testing::expect_equal<[]u8>("%kizu.owned", constructor.result_type.abi);
+    std::testing::expect_equal<i64>(1, constructor.type_argument_count);
+    std::testing::expect(constructor.type_arguments_concrete);
+    std::testing::expect_equal<[]u8>("i64", constructor.storage_type.abi);
+    let map_constructor = try owned_constructor_indexed(
+        &index, facts, "beta::make_map", 4
+    );
+    std::testing::expect(map_constructor.found);
+    std::testing::expect(
+        map_constructor.family == builtin_contract::owned_container_family_map()
+    );
+    std::testing::expect_equal<i64>(2, map_constructor.type_argument_count);
+    std::testing::expect(map_constructor.type_arguments_concrete);
+    std::testing::expect_equal<[]u8>("%kizu.owned", map_constructor.result_type.abi);
+    std::testing::expect_equal<[]u8>("i64", map_constructor.storage_type.abi);
+    let bool_constructor = try owned_constructor_indexed(
+        &index, facts, "beta::make_map_bool", 5
+    );
+    std::testing::expect_equal<[]u8>("i1", bool_constructor.storage_type.abi);
+    let slice_constructor = try owned_constructor_indexed(
+        &index, facts, "beta::make_map_slice", 6
+    );
+    std::testing::expect_equal<[]u8>(
+        "%kizu.slice.u8", slice_constructor.storage_type.abi
+    );
+    let pair_constructor = try owned_constructor_indexed(
+        &index, facts, "beta::make_map_pair", 7
+    );
+    std::testing::expect_equal<[]u8>("%app.pair", pair_constructor.storage_type.abi);
+    return;
+}
+
+pub fn owned_constructor_family_mismatch_gate() -> !void {
+    let facts = "abi-repr std::map::Map %kizu.owned
+abi-repr []u8 %kizu.slice.u8
+owned-container-family std::map::Map map
+body-node beta::make_map 4 depth 0 kind Call span 15 30
+body-call-target beta::make_map 15 30 std::map::Map
+body-call-owned-constructor beta::make_map 15 30 sequence construct std::map::Map std::map::Map<[]u8,i64> 2 []u8 i64";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let constructor = try owned_constructor_indexed(
+        &index, facts, "beta::make_map", 4
+    );
+    std::testing::expect(constructor.found);
+    return;
+}
+
+pub fn generic_intrinsic_abi_gate() -> !void {
+    let facts = "abi-repr ptr ptr
+nullable-abi-repr ptr ptr
+abi-repr []u8 %kizu.slice.u8";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let pointer = try resolve_type_indexed(
+        &index, facts, "app::", "ptr<app::Model>"
+    );
+    let nullable_pointer = try resolve_type_indexed(
+        &index, facts, "app::", "?ptr<app::Model>"
+    );
+    let bytes = try resolve_type_indexed(&index, facts, "app::", "[]u8");
+    std::testing::expect_equal<[]u8>("ptr", pointer.canonical_identity);
+    std::testing::expect_equal<[]u8>("ptr", pointer.abi);
+    std::testing::expect_equal<[]u8>("?ptr<app::Model>", nullable_pointer.full_spelling);
+    std::testing::expect_equal<[]u8>("ptr", nullable_pointer.canonical_identity);
+    std::testing::expect_equal<[]u8>("ptr", nullable_pointer.abi);
+    std::testing::expect_equal<[]u8>("%kizu.slice.u8", bytes.abi);
+    return;
+}
+
+pub fn invalid_nullable_abi_gate() -> !void {
+    let facts = "abi-repr ptr ptr
+nullable-abi-repr ptr ptr";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let unused = try resolve_type_indexed(&index, facts, "app::", "?i64");
+    print(unused.abi);
+    return;
+}
+
+fn previous_token_start(bytes: []u8, line_start: i64, token_end: i64) -> i64 {
+    var cursor = token_end;
+    while cursor > line_start and bytes[cursor - 1] == cast<u8>(32) {
+        cursor = cursor - 1;
+    }
+    while cursor > line_start and bytes[cursor - 1] != cast<u8>(32) {
+        cursor = cursor - 1;
+    }
+    return cursor;
+}
+
+fn skip_ascii_spaces(bytes: []u8, start: i64, end: i64) -> i64 {
+    var cursor = start;
+    while cursor < end and bytes[cursor] == cast<u8>(32) {
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn skip_ascii_token(bytes: []u8, start: i64, end: i64) -> i64 {
+    var cursor = start;
+    while cursor < end and bytes[cursor] != cast<u8>(32) {
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn parse_decimal_i64_range(
+    bytes: []u8,
+    start: i64,
+    end: i64
+) -> !i64 {
+    if start >= end { return error("compiled type resolver: empty integer fact token"); }
+    var value = 0;
+    var cursor = start;
+    while cursor < end {
+        let byte = bytes[cursor];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return error("compiled type resolver: invalid integer fact token");
+        }
+        value = value * 10 + cast<i64>(byte - cast<u8>(48));
+        cursor = cursor + 1;
+    }
+    return value;
+}
+
+pub fn resolve_call_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    call_node: i64
+) -> !ResolvedFunction {
+    let target = try call_target_indexed(index, ir_bytes, function_name, call_node);
+    if !target.found {
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled type resolver: body call target not found: ");
+        try message.append_bytes(function_name);
+        try message.append_bytes(" node ");
+        try std::fmt::append_i64(&var message, call_node);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
+    }
+    return try resolve_function_indexed(
+        index, ir_bytes, ir_bytes[0..0], target.canonical_identity
+    );
+}
+
+pub struct FactValue {
+    pub found: bool,
+    pub value: []u8,
+    pub canonical_identity: []u8,
+}
+
+fn reject_canonical_kind_conflict(left: &FactValue, right: &FactValue) -> !void {
+    if !left.found or !right.found or !std::mem::equal_bytes(
+        left.canonical_identity, right.canonical_identity
+    ) {
+        return;
+    }
+    if !std::mem::equal_bytes(left.value, right.value) {
+        return error("compiled type resolver: canonical type kind ABI mismatch");
+    }
+    return error("compiled type resolver: duplicate canonical type kind");
+}
+
+// exact_type_llvm_indexed classifies one already-resolved canonical identity.
+// A miss is a normal non-nominal type; duplicate exact facts remain an error.
+pub fn exact_type_llvm_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    canonical_identity: []u8
+) -> !FactValue {
+    if std::mem::len(canonical_identity) == 0 {
+        return error("compiled type resolver: empty canonical type identity");
+    }
+    return try exact_unique_fact_value_indexed(
+        index, ir_bytes, "type-llvm ", ir_bytes[0..0], canonical_identity
+    );
+}
+
+// exact_union_type_indexed classifies one already-resolved tagged union. Its
+// value is the LLVM named type; union-variant facts own the recursive payload
+// layout inputs.
+pub fn exact_union_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    canonical_identity: []u8
+) -> !FactValue {
+    if std::mem::len(canonical_identity) == 0 {
+        return error("compiled type resolver: empty canonical union identity");
+    }
+    return try exact_unique_fact_value_indexed(
+        index, ir_bytes, "union-type ", ir_bytes[0..0], canonical_identity
+    );
+}
+
+fn empty_fact_value(ir_bytes: []u8) -> FactValue {
+    return FactValue {
+        found: false,
+        value: ir_bytes[0..0],
+        canonical_identity: ir_bytes[0..0]
+    };
+}
+
+fn resolved_type_from_fact(
+    fact: FactValue,
+    full_spelling: []u8,
+    spelling_module: []u8
+) -> ResolvedType {
+    return ResolvedType {
+        full_spelling: full_spelling,
+        canonical_identity: fact.canonical_identity,
+        abi: fact.value,
+        declaring_module: compiled_util::module_prefix_of(fact.canonical_identity),
+        spelling_module: spelling_module
+    };
+}
+
+fn primitive_llvm_or_empty(kizu_type: []u8) -> []u8 {
+    let scalar = fixed_abi_contract::from_kizu_scalar(kizu_type);
+    if scalar.kind != fixed_abi_contract::FixedAbiKind::Missing {
+        return scalar.llvm_name;
+    }
+    return kizu_type[0..0];
+}
+
+// type_constructor removes generic arguments while preserving the canonical
+// constructor spelling: Map<[]u8, T> and Map<i64, bool> share one abi-repr fact.
+fn type_constructor(kizu_type: []u8) -> []u8 {
+    let len = std::mem::len(kizu_type);
+    var cursor = 0;
+    while cursor < len {
+        if kizu_type[cursor] == cast<u8>(60) {
+            return kizu_type[0..cursor];
+        }
+        cursor = cursor + 1;
+    }
+    return kizu_type;
+}
+
+fn resolve_fact_value_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    fact_prefix: []u8,
+    module_prefix: []u8,
+    type_name: []u8
+) -> !FactValue {
+    if !contains_double_colon(type_name) {
+        let local = try exact_unique_fact_value_indexed(
+            index, ir_bytes, fact_prefix, module_prefix, type_name
+        );
+        if local.found { return local; }
+        let intrinsic = try exact_unique_fact_value_indexed(
+            index, ir_bytes, fact_prefix, ir_bytes[0..0], type_name
+        );
+        if intrinsic.found { return intrinsic; }
+        return empty_fact_value(ir_bytes);
+    }
+    // An exact canonical identity wins before interpreting the first segment as
+    // an import alias. Thus std::foo::T cannot be shadowed by an alias named std.
+    let canonical = try exact_unique_fact_value_indexed(
+        index, ir_bytes, fact_prefix, ir_bytes[0..0], type_name
+    );
+    if canonical.found { return canonical; }
+    let alias = split_alias(type_name);
+    if !alias.found { return empty_fact_value(ir_bytes); }
+    let package_root = try exact_unique_fact_value_indexed(
+        index, ir_bytes, "package-root ", "", alias.prefix
+    );
+    if package_root.found { return empty_fact_value(ir_bytes); }
+    let target = try exact_unique_fact_value_indexed(
+        index, ir_bytes, "module-alias ", module_prefix, alias.prefix
+    );
+    if !target.found { return empty_fact_value(ir_bytes); }
+    return try exact_unique_fact_value_indexed(
+        index, ir_bytes, fact_prefix, target.value, alias.remainder
+    );
+}
+
+fn contains_double_colon(type_name: []u8) -> bool {
+    return split_alias(type_name).found;
+}
+
+pub struct AliasSplit {
+    pub found: bool,
+    pub prefix: []u8,
+    pub remainder: []u8,
+}
+
+fn split_alias(type_name: []u8) -> AliasSplit {
+    let len = std::mem::len(type_name);
+    var cursor = 0;
+    while cursor + 1 < len {
+        if type_name[cursor] == cast<u8>(58) and
+            type_name[cursor + 1] == cast<u8>(58) {
+            return AliasSplit {
+                found: true,
+                prefix: type_name[0..cursor],
+                remainder: type_name[cursor + 2..len]
+            };
+        }
+        cursor = cursor + 1;
+    }
+    return AliasSplit {
+        found: false,
+        prefix: type_name[0..0],
+        remainder: type_name[0..0]
+    };
+}
+
+// exact_unique_fact_value_indexed rejects duplicates before a first-match-wins
+// lookup could hide declaration or representation debt.
+fn exact_unique_fact_value_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    fact_prefix: []u8,
+    module_prefix: []u8,
+    type_name: []u8
+) -> !FactValue {
+    var entry = ir_index::first_matching_entry(
+        index, ir_bytes, fact_prefix, module_prefix, type_name
+    );
+    if entry < 0 { return empty_fact_value(ir_bytes); }
+    let first = fact_entry_value(index, ir_bytes, entry);
+    entry = entry + 1;
+    if ir_index::entry_matches_query(
+        index, ir_bytes, entry, fact_prefix, module_prefix, type_name
+    ) {
+        return error("compiled type resolver: duplicate exact fact");
+    }
+    let key_start = ir_index::entry_line_start(index, entry - 1) +
+        std::mem::len(fact_prefix);
+    let key_end = ir_index::entry_key_end(index, entry - 1);
+    return FactValue {
+        found: true,
+        value: first,
+        canonical_identity: ir_bytes[key_start..key_end]
+    };
+}
+
+pub fn gate_body_call_instance_symbol_mismatch() -> !void {
+    let facts = "body-node app::root 0 depth 0 kind Call span 10 20
+body-call-target app::root 10 20 app::generic::identity
+package-definition-name 0 0 app::generic::identity
+function-instance-symbol 0 0 0 kizu_instance_0_0_0
+body-call-instance app::root 10 20 0 0 0 kizu_instance_wrong";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let result = try call_instance_symbol_indexed(
+        &index, facts, "app::root", 0
+    );
+    print(result.canonical_identity);
+    return;
+}
+
+pub fn gate_body_call_instance_duplicate() -> !void {
+    let facts = "body-node app::root 0 depth 0 kind Call span 10 20
+body-call-target app::root 10 20 app::generic::identity
+package-definition-name 0 0 app::generic::identity
+function-instance-symbol 0 0 0 kizu_instance_0_0_0
+body-call-instance app::root 10 20 0 0 0 kizu_instance_0_0_0
+body-call-instance app::root 10 20 0 0 0 kizu_instance_0_0_0";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let result = try call_instance_symbol_indexed(&index, facts, "app::root", 0);
+    print(result.canonical_identity);
+    return;
+}
+
+pub fn gate_body_call_instance_target_mismatch() -> !void {
+    let facts = "body-node app::root 0 depth 0 kind Call span 10 20
+body-call-target app::root 10 20 app::generic::identity
+package-definition-name 1 0 app::other::identity
+function-instance-symbol 1 0 0 kizu_instance_1_0_0
+body-call-instance app::root 10 20 1 0 0 kizu_instance_1_0_0";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let result = try call_instance_symbol_indexed(&index, facts, "app::root", 0);
+    print(result.canonical_identity);
+    return;
+}
+
+pub fn gate_function_instance_symbol_owner_collision() -> !void {
+    let facts = "body-node app::root 0 depth 0 kind Call span 10 20
+body-call-target app::root 10 20 app::generic::identity
+package-definition-name 0 0 app::generic::identity
+function-instance-symbol 0 0 0 kizu_instance_shared
+function-instance-symbol 1 0 0 kizu_instance_shared
+body-call-instance app::root 10 20 0 0 0 kizu_instance_shared";
+    var index = try ir_index::build(facts);
+    defer index.deinit();
+    let result = try call_instance_symbol_indexed(&index, facts, "app::root", 0);
+    print(result.canonical_identity);
+    return;
+}
+
+fn fact_entry_value(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    entry: i64
+) -> []u8 {
+    let line_end = ir_index::entry_line_end(index, entry);
+    var start = ir_index::entry_key_end(index, entry);
+    while start < line_end and ir_bytes[start] == cast<u8>(32) {
+        start = start + 1;
+    }
+    return ir_bytes[start..line_end];
+}

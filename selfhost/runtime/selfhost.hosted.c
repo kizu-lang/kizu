@@ -73,6 +73,26 @@ void kizu_host_init(int argc, char **argv) {
     kizu_argv = NULL;
 }
 
+void kizu_print_string(const unsigned char *s, int64_t len) {
+    fwrite(s, 1, (size_t)len, stdout);
+    fputc('\n', stdout);
+}
+
+void kizu_print_int(int64_t value) {
+    printf("%lld\n", (long long)value);
+}
+
+void kizu_print_bool(_Bool value) {
+    fputs(value ? "true\n" : "false\n", stdout);
+}
+
+void kizu_main_error_message(const unsigned char *bytes, int64_t len) {
+    size_t message_len = len < 0 ? 0 : (size_t)len;
+    fwrite("error: ", 1, 7, stderr);
+    fwrite(bytes, 1, message_len, stderr);
+    fputc('\n', stderr);
+}
+
 static kizu_slice_u8 borrowed_slice(const char *text) {
     kizu_slice_u8 out;
     out.ptr = (const uint8_t *)text;

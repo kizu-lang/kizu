@@ -2,6 +2,7 @@ import selfhost::backend::cli_check_gate_llvm;
 import selfhost::backend::cli_hosted_metadata_llvm;
 import selfhost::backend::data;
 import selfhost::backend::hosted;
+import selfhost::abi::fixed_abi_contract;
 
 pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_llvm_constant_bytes(out, "test_dir", hosted::test_artifact_dir());
@@ -178,8 +179,6 @@ fn append_test_case_ll_suffix_constant(
     );
     let stream_name = try hosted_output_stream_llvm_name(stream);
     let output_len = hosted_output_len(payload, append_newline);
-    let header =
-        "\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A";
     let global_prefix = "%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.";
     let global_middle = " = private unnamed_addr constant [";
     let global_suffix = " x i8] c\22";
@@ -199,7 +198,7 @@ fn append_test_case_ll_suffix_constant(
     let write_prefix = "  %write = call %kizu.error.void @kizu_rt_io_write_";
     let write_suffix = "(%kizu.owned %io, %kizu.slice.u8 %slice)\0A";
     try append_llvm_constant_header(out, name, size);
-    try out.append_bytes(header);
+    try append_hosted_fixed_abi_c_string_header(out);
     try out.append_bytes(global_prefix);
     try out.append_bytes(global);
     try out.append_bytes(global_middle);
@@ -235,7 +234,19 @@ fn append_test_case_ll_suffix_constant(
     return;
 }
 
-pub fn append_cli_test_blocks(out: &var std::string::String, ir_bytes: []u8) -> !void {
+pub fn append_cli_test_blocks(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    parse_result_abi: []u8,
+    ast_abi: []u8,
+    node_id_abi: []u8,
+    parse_result_ast_index: i64,
+    parse_result_root_index: i64,
+    executable_abi: []u8,
+    executable_error_abi: []u8,
+    executable_kind_index: i64,
+    executable_payload_index: i64
+) -> !void {
     let test_call_kind = try executable_kind_tag(ir_bytes, "Call");
     try append_line(out, "dispatch_test:");
     try append_line(out, "  %test_io = call %kizu.owned @kizu_rt_io_blocking()");
@@ -245,7 +256,7 @@ pub fn append_cli_test_blocks(out: &var std::string::String, ir_bytes: []u8) -> 
     try append_line(out, "  br i1 %test_file_ok, label %test_read_ok, label %check_failed");
     try append_line(out, "test_read_ok:");
     try append_line(out, "  %test_bytes = extractvalue %kizu.error.slice.u8 %test_file, 1");
-    try cli_check_gate_llvm::append_static_check_gate(
+    try cli_check_gate_llvm::append_parse_validation_gate(
         out,
         "test_check",
         "test_check",
@@ -256,14 +267,60 @@ pub fn append_cli_test_blocks(out: &var std::string::String, ir_bytes: []u8) -> 
     try append_line(out, "test_match_source:");
     try append_line(out,
         "  %test_allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
-    try append_line(out,
-        "  %test_parsed = call %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast(%kizu.owned %test_allocator, %kizu.slice.u8 %target, %kizu.slice.u8 %test_bytes)");
-    try append_line(out,
-        "  %test_executable = call %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_parse_result(%kizu.slice.u8 %test_bytes, %kizu.kizu.ast.parse_result %test_parsed)");
-    try append_line(out,
-        "  %test_executable_kind = extractvalue %kizu.selfhost.executable %test_executable, 0");
-    try append_line(out,
-        "  %test_executable_payload = extractvalue %kizu.selfhost.executable %test_executable, 1");
+    try out.append_bytes("  %test_parsed = call ");
+    try out.append_bytes(parse_result_abi);
+    try out.append_bytes(" @kizu_selfhost__cli_parse_validated_ast(%kizu.owned %test_allocator, %kizu.slice.u8 %target, %kizu.slice.u8 %test_bytes)");
+    try out.append_byte(cast<u8>(10));
+    try cli_check_gate_llvm::append_semantic_check_gate(
+        out,
+        parse_result_abi,
+        "test_check",
+        "test_io",
+        "test_allocator",
+        "target",
+        "test_bytes",
+        "test_parsed",
+        "test_semantic_ok"
+    );
+    try append_line(out, "test_semantic_ok:");
+    try out.append_bytes("  %test_ast = extractvalue ");
+    try out.append_bytes(parse_result_abi);
+    try out.append_bytes(" %test_parsed, ");
+    try std::fmt::append_i64(out, parse_result_ast_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %test_root = extractvalue ");
+    try out.append_bytes(parse_result_abi);
+    try out.append_bytes(" %test_parsed, ");
+    try std::fmt::append_i64(out, parse_result_root_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %test_lowered = call ");
+    try out.append_bytes(executable_error_abi);
+    try out.append_bytes(" @kizu_selfhost__backend_executable_lower_test_executable(%kizu.slice.u8 %test_bytes, ");
+    try out.append_bytes(ast_abi);
+    try out.append_bytes(" %test_ast, ");
+    try out.append_bytes(node_id_abi);
+    try out.append_bytes(" %test_root)");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %test_lowered_ok = extractvalue ");
+    try out.append_bytes(executable_error_abi);
+    try out.append_bytes(" %test_lowered, 0");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  br i1 %test_lowered_ok, label %test_lowered_ready, label %exit_one");
+    try append_line(out, "test_lowered_ready:");
+    try out.append_bytes("  %test_executable = extractvalue ");
+    try out.append_bytes(executable_error_abi);
+    try out.append_bytes(" %test_lowered, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %test_executable_kind = extractvalue ");
+    try out.append_bytes(executable_abi);
+    try out.append_bytes(" %test_executable, ");
+    try std::fmt::append_i64(out, executable_kind_index);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %test_executable_payload = extractvalue ");
+    try out.append_bytes(executable_abi);
+    try out.append_bytes(" %test_executable, ");
+    try std::fmt::append_i64(out, executable_payload_index);
+    try out.append_byte(cast<u8>(10));
     try append_executable_kind_compare(out, "test_call_found", "test_executable_kind", test_call_kind);
     try append_line(out, "  br i1 %test_call_found, label %match_test_payload, label %usage");
     try append_line(out, "match_test_payload:");
@@ -672,8 +729,6 @@ fn test_case_ll_suffix_size(
 ) -> !i64 {
     let stream_name = try hosted_output_stream_llvm_name(stream);
     let output_len = hosted_output_len(payload, append_newline);
-    let header =
-        "\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A";
     let global_prefix = "%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.";
     let global_middle = " = private unnamed_addr constant [";
     let global_suffix = " x i8] c\22";
@@ -692,7 +747,8 @@ fn test_case_ll_suffix_size(
     let slice_suffix = ", 1\0A";
     let write_prefix = "  %write = call %kizu.error.void @kizu_rt_io_write_";
     let write_suffix = "(%kizu.owned %io, %kizu.slice.u8 %slice)\0A";
-    var size = llvm_c_decoded_len(header) + llvm_c_decoded_len(global_prefix) +
+    let fixed_header_size = try hosted_fixed_abi_c_string_header_decoded_len();
+    var size = fixed_header_size + llvm_c_decoded_len(global_prefix) +
         std::mem::len(global) + std::mem::len(global_middle) +
         decimal_len_i64(output_len) + llvm_c_decoded_len(global_suffix) +
         std::mem::len(payload) + llvm_c_decoded_len(declare_head) +
@@ -711,6 +767,37 @@ fn test_case_ll_suffix_size(
         size = size + llvm_c_decoded_len("\5C0A");
     }
     return size;
+}
+
+fn append_hosted_fixed_abi_c_string_header(
+    out: &var std::string::String
+) -> !void {
+    try out.append_bytes("\22\0A\0A");
+    // Hosted executables reference the first two shared named ABIs: slice and
+    // owned. Encode their descriptor-derived declarations into the outer LLVM
+    // constant instead of maintaining a second escaped representation table.
+    var declaration = 0;
+    while declaration < 2 {
+        let abi = try fixed_abi_contract::named_declaration_at(declaration);
+        try append_llvm_c_string_payload(out, abi.llvm_name);
+        try out.append_bytes(" = type ");
+        try append_llvm_c_string_payload(out, abi.llvm_body);
+        try out.append_bytes("\0A");
+        declaration = declaration + 1;
+    }
+    return;
+}
+
+fn hosted_fixed_abi_c_string_header_decoded_len() -> !i64 {
+    var len = llvm_c_decoded_len("\22\0A\0A");
+    var declaration = 0;
+    while declaration < 2 {
+        let abi = try fixed_abi_contract::named_declaration_at(declaration);
+        len = len + std::mem::len(abi.llvm_name) +
+            std::mem::len(" = type ") + std::mem::len(abi.llvm_body) + 1;
+        declaration = declaration + 1;
+    }
+    return len;
 }
 
 fn host_main_block_prefix() -> []u8 {

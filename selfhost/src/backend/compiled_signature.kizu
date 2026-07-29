@@ -1,6 +1,8 @@
 import selfhost::backend::compiled_util;
-import selfhost::backend::compiled_fact_lookup;
 import selfhost::backend::compiled_type_lower;
+import selfhost::backend::compiled_type_resolver;
+import selfhost::backend::compiled_canonical_facts;
+import selfhost::backend::compiled_instance_context;
 import selfhost::backend::ir_contract;
 import selfhost::backend::ir_index;
 
@@ -183,108 +185,6 @@ fn extract_param_kizu_type_from_line(
     return entry[colon2 + 1..entry_len];
 }
 
-pub fn struct_field_index_by_name(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    var_name: []u8,
-    params_spec: []u8,
-    field_name: []u8
-) -> !i64 {
-    let kizu_type = try find_param_kizu_type(ir_bytes, module_prefix, var_name, params_spec);
-    return try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
-        ir_bytes, module_prefix, kizu_type, field_name
-    );
-}
-
-pub fn struct_field_llvm_type(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    var_name: []u8,
-    params_spec: []u8,
-    field_index: i64
-) -> ![]u8 {
-    let kizu_type = try find_param_kizu_type(ir_bytes, module_prefix, var_name, params_spec);
-    let field_type = try compiled_fact_lookup::lookup_struct_field_type_by_prefix(
-        ir_bytes, module_prefix, kizu_type, field_index
-    );
-    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, field_type);
-}
-
-pub fn resolve_call_return_type(
-    ir_bytes: []u8,
-    function_name: []u8,
-    module_prefix: []u8,
-    call_node: i64,
-    bs: i64
-) -> ![]u8 {
-    let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, bs
-    );
-    var ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, "function-signature-return ", module_prefix, callee_name
-    );
-    if std::mem::len(ret_type) == 0 {
-        // Receiver-method callees (e.g. 'ast.finish_children') carry a module-agnostic
-        // 'function-signature-return ast.<method> <type>' fact emitted globally, so fall back
-        // to an empty module-prefix lookup when the caller-module-qualified lookup misses.
-        ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-            ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
-        );
-    }
-    if std::mem::len(ret_type) == 0 {
-        var message = std::string::String(std::mem::page_allocator());
-        try message.append_bytes("compiled signature: call return type not found: ");
-        try message.append_bytes(function_name);
-        try message.append_bytes(" -> ");
-        try message.append_bytes(callee_name);
-        let message_bytes = message.as_bytes();
-        return error(message_bytes);
-    }
-    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, ret_type);
-}
-
-pub fn resolve_call_return_type_indexed(
-    index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    function_name: []u8,
-    module_prefix: []u8,
-    call_node: i64,
-    bs: i64
-) -> ![]u8 {
-    // cf tightens the structural callee read to the call node's body-node line via the index
-    // (the 'body-call' detail sorts immediately after it); the signature-return lookup below is
-    // index-keyed by callee name, so it is unaffected. Byte-identical to a scan from bs.
-    let cf = ir_index::body_node_line_start_for_sequence(
-        index, ir_bytes, function_name, call_node, bs
-    );
-    let callee_name = try ir_contract::body_call_callee_or_empty_from(
-        ir_bytes, function_name, call_node, cf
-    );
-    var ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
-        index, ir_bytes, "function-signature-return ", module_prefix, callee_name
-    );
-    if std::mem::len(ret_type) == 0 {
-        // Receiver-method callees (e.g. 'ast.finish_children') carry a module-agnostic
-        // 'function-signature-return ast.<method> <type>' fact emitted globally, so fall back
-        // to an empty module-prefix lookup when the caller-module-qualified lookup misses.
-        ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
-            index, ir_bytes, "function-signature-return ", ir_bytes[0..0], callee_name
-        );
-    }
-    if std::mem::len(ret_type) == 0 {
-        var message = std::string::String(std::mem::page_allocator());
-        try message.append_bytes("compiled signature: call return type not found: ");
-        try message.append_bytes(function_name);
-        try message.append_bytes(" -> ");
-        try message.append_bytes(callee_name);
-        let message_bytes = message.as_bytes();
-        return error(message_bytes);
-    }
-    return try compiled_type_lower::kizu_type_to_llvm_indexed(
-        index, ir_bytes, module_prefix, ret_type
-    );
-}
-
 pub fn resolve_struct_literal_type_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
@@ -307,16 +207,18 @@ pub fn resolve_struct_literal_type_indexed(
         ir_bytes, function_name, type_node, nf
     );
     if std::mem::len(type_name) > 0 {
-        return try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
+        let resolved = try compiled_type_resolver::resolve_type_indexed(
             index, ir_bytes, module_prefix, type_name
         );
+        return resolved.abi;
     }
     let qualified_name = try ir_contract::sequence_fact_value_from(
         ir_bytes, "body-struct-literal ", function_name, struct_literal_node, nf
     );
-    return try compiled_fact_lookup::lookup_type_llvm_by_prefix_indexed(
+    let resolved = try compiled_type_resolver::resolve_type_indexed(
         index, ir_bytes, module_prefix, qualified_name
     );
+    return resolved.abi;
 }
 
 pub fn resolve_struct_literal_type(
@@ -326,89 +228,11 @@ pub fn resolve_struct_literal_type(
     struct_literal_node: i64,
     bs: i64
 ) -> ![]u8 {
-    let type_node = try ir_contract::body_child_sequence_from(
-        ir_bytes, function_name, struct_literal_node, "type", 0, bs
+    var index = try ir_index::build(ir_bytes);
+    defer index.deinit();
+    return try resolve_struct_literal_type_indexed(
+        &index, ir_bytes, function_name, module_prefix, struct_literal_node, bs
     );
-    let type_name = try ir_contract::body_token_or_empty_from(
-        ir_bytes, function_name, type_node, bs
-    );
-    if std::mem::len(type_name) > 0 {
-        return try compiled_fact_lookup::lookup_type_llvm_by_prefix(
-            ir_bytes, module_prefix, type_name
-        );
-    }
-    let qualified_name = try ir_contract::sequence_fact_value_from(
-        ir_bytes, "body-struct-literal ", function_name, struct_literal_node, bs
-    );
-    return try compiled_fact_lookup::lookup_type_llvm_by_prefix(
-        ir_bytes, module_prefix, qualified_name
-    );
-}
-
-pub fn resolve_call_arg_type(
-    ir_bytes: []u8,
-    module_prefix: []u8,
-    callee_name: []u8,
-    arg_index: i64
-) -> ![]u8 {
-    return try resolve_call_arg_type_with_lookup_prefix(
-        ir_bytes, module_prefix, module_prefix, callee_name, arg_index
-    );
-}
-
-fn resolve_call_arg_type_with_lookup_prefix(
-    ir_bytes: []u8,
-    lookup_prefix: []u8,
-    type_module_prefix: []u8,
-    callee_name: []u8,
-    arg_index: i64
-) -> ![]u8 {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "function-signature-param ";
-    let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(lookup_prefix);
-    let name_len = std::mem::len(callee_name);
-    var index = 0;
-    var matched = 0;
-    while index + prefix_len + mp_len + name_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let mp_start = index + prefix_len;
-            let mp_end = mp_start + mp_len;
-            let cn_end = mp_end + name_len;
-            if cn_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], lookup_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..cn_end], callee_name) and
-                ir_bytes[cn_end] == cast<u8>(32) {
-                if matched == arg_index {
-                    let line_end_pos = compiled_util::find_line_end(ir_bytes, cn_end);
-                    let entry = ir_bytes[cn_end..line_end_pos];
-                    let entry_len = std::mem::len(entry);
-                    // The entry is ' <arg_index> <name>:runtime:<type>'; the type begins after
-                    // the second colon (the one after 'runtime'). A fully-qualified type such
-                    // as std::kizu::ast::Ast carries further '::' colons, so taking everything
-                    // after the second colon keeps the whole module path rather than truncating
-                    // to the last segment (tracker 961).
-                    let colon1 = compiled_util::find_byte(entry, cast<u8>(58), 0);
-                    let colon2 = compiled_util::find_byte(entry, cast<u8>(58), colon1 + 1);
-                    if colon2 < entry_len {
-                        let kizu_type = entry[colon2 + 1..entry_len];
-                        return try compiled_type_lower::kizu_type_to_llvm(
-                            ir_bytes, type_module_prefix, kizu_type
-                        );
-                    }
-                }
-                matched = matched + 1;
-            }
-        }
-        index = compiled_util::find_line_end(ir_bytes, index) + 1;
-    }
-    if std::mem::len(lookup_prefix) > 0 {
-        return try resolve_call_arg_type_with_lookup_prefix(
-            ir_bytes, ir_bytes[0..0], type_module_prefix, callee_name, arg_index
-        );
-    }
-    return error("compiled function: call arg type not found");
 }
 
 // derive_callee_llvm_symbol mangles a call target from its (module_prefix, callee_name)
@@ -512,17 +336,9 @@ pub fn derive_return_type(
     ir_bytes: []u8,
     function_name: []u8
 ) -> ![]u8 {
-    let module_prefix = compiled_util::module_prefix_of(function_name);
-    let mp_len = std::mem::len(module_prefix);
-    let fn_len = std::mem::len(function_name);
-    let short_name = function_name[mp_len..fn_len];
-    let kizu_return_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
-        ir_bytes, "function-signature-return ", module_prefix, short_name
-    );
-    if std::mem::len(kizu_return_type) == 0 {
-        return error("compiled signature: function return type not found");
-    }
-    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_return_type);
+    var index = try ir_index::build(ir_bytes);
+    defer index.deinit();
+    return derive_return_type_indexed(&index, ir_bytes, function_name);
 }
 
 pub fn derive_return_type_indexed(
@@ -530,19 +346,26 @@ pub fn derive_return_type_indexed(
     ir_bytes: []u8,
     function_name: []u8
 ) -> ![]u8 {
-    let module_prefix = compiled_util::module_prefix_of(function_name);
-    let mp_len = std::mem::len(module_prefix);
-    let fn_len = std::mem::len(function_name);
-    let short_name = function_name[mp_len..fn_len];
-    let kizu_return_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty_indexed(
-        index, ir_bytes, "function-signature-return ", module_prefix, short_name
+    let function = try compiled_type_resolver::resolve_function_indexed(
+        index, ir_bytes, ir_bytes[0..0], function_name
     );
-    if std::mem::len(kizu_return_type) == 0 {
-        return error("compiled signature: function return type not found");
-    }
     return try compiled_type_lower::kizu_type_to_llvm_indexed(
-        index, ir_bytes, module_prefix, kizu_return_type
+        index, ir_bytes, function.owner_module, function.return_spelling
     );
+}
+
+pub fn instance_return_canonical_type_id_indexed(
+    index: &ir_index::IrIndex,
+    canonical: &compiled_canonical_facts::CanonicalFactTable,
+    context: &compiled_instance_context::InstanceContext,
+    ir_bytes: []u8,
+    function_name: []u8
+) -> !i64 {
+    let result_id = try compiled_instance_context::result_type_id(context);
+    let ignored_kind = try compiled_canonical_facts::parsed_canonical_kind(
+        canonical, result_id
+    );
+    return result_id;
 }
 
 // gate_llvm_symbol is the append_function_llvm_symbol behavior gate (tracker

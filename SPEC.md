@@ -1837,7 +1837,9 @@ std::array::Array<T>(allocator: Allocator) -> std::array::Array<T>
 array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
+array.reserve(additional: i64) -> !void
 array.pop() -> !T
+array.pop_or_panic() -> T
 array.get(index: i64) -> !T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T borrows self
@@ -1853,6 +1855,9 @@ array.deinit() -> void
 v0.2 の `get` / `get_or_panic` は copy element 限定です。
 non-copy element は `at` / `at_mut` で local borrow として読み書きします。
 `pop` は最後の initialized element を array から move して `!T` を返します。
+`pop_or_panic` も最後の initialized element を move して `T` を返し、
+empty array なら runtime error で停止します。copy / non-copy のどちらにも使え、
+recoverable な empty case を扱う場合は `pop` を使います。
 `set` は置換前の element を cleanup してから新しい value を move します。
 `deinit` は残っている initialized element を cleanup してから array storage を解放します。
 element cleanup は explicit `deinit(self: T) -> void` があればそれを使います。
@@ -1860,7 +1865,7 @@ element cleanup は explicit `deinit(self: T) -> void` があればそれを使�
 field / payload 内の既知 owner を再帰的に cleanup できます。
 これは explicit `array.deinit()` の一部であり、implicit destructor や callable な
 `T.deinit()` 合成ではありません。
-element borrow が生きている間は `append`、`pop`、`set`、`deinit` を禁止します。
+element borrow が生きている間は `append`、`pop`、`pop_or_panic`、`set`、`deinit` を禁止します。
 mutable element borrow が生きている間は array 全体の read も禁止します。
 `deinit` 後の array 使用は safe Kizu では禁止します。
 `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可し、

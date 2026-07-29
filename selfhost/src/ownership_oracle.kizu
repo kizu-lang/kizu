@@ -10,6 +10,7 @@ import selfhost::types;
 pub fn gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
+    try expect_mutable_parameter_field_reborrow(allocator);
     var states = std::map::Map<[]u8, data::OwnershipState>(allocator);
     var kinds = std::map::Map<[]u8, data::ResourceKind>(allocator);
     var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
@@ -72,6 +73,27 @@ pub fn gate() -> !void {
     print(summary.borrows);
     print("ownership-errors");
     print(summary.errors);
+    return;
+}
+
+fn expect_mutable_parameter_field_reborrow(allocator: Allocator) -> !void {
+    let module = "ownership/mutable_parameter_field_reborrow";
+    let text = "struct Scratch {} struct Prepared { scratch: Scratch, } fn probe(prepared: &var Prepared) -> void { let scratch = &var prepared.scratch; }";
+    var files = std::array::Array<source::SourceFile>(allocator);
+    defer files.deinit();
+    try files.append(source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::Selfhost,
+        package_name: "selfhost",
+        module_start: 0,
+        module_end: std::mem::len(module),
+        path: module,
+        text: text
+    });
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    let checked = try ownership::check_package(allocator, files, typed);
+    std::testing::expect_equal<i64>(0, checked.diagnostics);
     return;
 }
 

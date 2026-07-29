@@ -8,6 +8,112 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
+// TestSelfhostBorrowedDeclaredStructFieldTypeGate verifies that field lookup
+// auto-dereferences a borrowed declared receiver before consulting field facts.
+func TestSelfhostBorrowedDeclaredStructFieldTypeGate(t *testing.T) {
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = interp.New(&out).RunEntry(
+		program,
+		"selfhost::types_oracle::borrowed_declared_struct_field_gate",
+	)
+	if err != nil {
+		t.Fatalf("borrowed declared struct field gate failed: %v\n%s", err, out.String())
+	}
+	if got := out.String(); got != "borrowed-declared-struct-field-ok\n" {
+		t.Fatalf("borrowed declared struct field output = %q", got)
+	}
+}
+
+func TestSelfhostExactStructFieldOwnerGate(t *testing.T) {
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = interp.New(&out).RunEntry(
+		program,
+		"selfhost::types_oracle::exact_struct_field_owner_gate",
+	)
+	if err != nil {
+		t.Fatalf("exact struct field owner gate failed: %v\n%s", err, out.String())
+	}
+	if got := out.String(); got != "exact-struct-field-owner-ok\n" {
+		t.Fatalf("exact struct field owner output = %q", got)
+	}
+}
+
+// TestSelfhostFastDiagnosticsUsePackageExpressionFacts keeps cross-file
+// receiver resolution on the package-wide fact set built from parsed ASTs.
+func TestSelfhostFastDiagnosticsUsePackageExpressionFacts(t *testing.T) {
+	content := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
+	required := []string{
+		"var expression_types = expression_facts::init(allocator)",
+		"function_calls::collect_function_signatures_from_ast(",
+		"types::collect_nominal_resolution_facts_from_ast(",
+		"types::collect_struct_field_resolution_facts_from_ast(",
+		"types::first_pre_move_check_diagnostic_ast_node_with_facts(",
+		"types::first_post_move_check_diagnostic_ast_node_with_facts(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("package fast diagnostics missing exact expression fact flow %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostExpressionFactsSeparateSourceAndOwnedFieldStorage prevents
+// source-backed slices from sharing a getter contract with owned field spellings.
+func TestSelfhostExpressionFactsSeparateSourceAndOwnedFieldStorage(t *testing.T) {
+	content := readSelfhostFile(t, "../../selfhost/src/types/expression_facts.kizu")
+	required := []string{
+		"source_indexes: std::map::Map<[]u8, i64>",
+		"field_indexes: std::map::Map<[]u8, i64>",
+		"ranges: std::array::Array<FactRange>",
+		"fn contains_source(",
+		"fn get_source(",
+		"fn insert_source(",
+		"fn contains_field(",
+		") -> ![]u8 borrows self",
+		"spelling_storage: std::string::String",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("expression facts missing split ownership contract %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"fn get(self: &ExpressionTypeFacts",
+		"pub source_values:",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(content, fragment) {
+			t.Fatalf("expression facts retained ambiguous getter %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostTypeGate executes the Kizu-owned type checker oracle entry.
 func TestSelfhostTypeGate(t *testing.T) {
 	requireSelfhostGate(t)

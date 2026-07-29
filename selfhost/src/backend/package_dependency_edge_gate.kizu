@@ -1,6 +1,9 @@
-import selfhost::backend::cli_llvm;
+import selfhost::backend::compiled_program_llvm;
 import selfhost::backend::ir_index;
+import selfhost::backend::compiled_canonical_facts;
 import selfhost::ir::executable_functions;
+import selfhost::ir::package_catalog;
+import selfhost::ir::package_dependency_graph;
 
 fn ensure_target_dir(io: Io) -> !void {
     if !(try std::fs::exists(io, "target")) {
@@ -33,6 +36,35 @@ fn require_single_definition(llvm: []u8, symbol: []u8) -> !void {
     return;
 }
 
+// Keeps the queue accessor gate in a test-only owner while constructing the
+// queue through the real dense catalog and graph APIs.
+pub fn queue_target_component_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var catalog = package_catalog::init(allocator);
+    defer catalog.deinit();
+    let component = try package_catalog::register_component(
+        &var catalog, "gate", "queue"
+    );
+    let target = try package_catalog::register_function(
+        &var catalog, component, "root", "", "void", 0, -1, 0, 4
+    );
+    var queue = try package_dependency_graph::function_target_queue(
+        allocator, &catalog
+    );
+    defer queue.deinit();
+    try package_dependency_graph::queue_append(&var queue, &catalog, target);
+    print("queue-component");
+    var value = std::string::String(allocator);
+    defer value.deinit();
+    try std::fmt::append_i64(
+        &var value,
+        try package_dependency_graph::queue_target_component_value(&queue, 0)
+    );
+    let value_bytes = value.as_bytes();
+    print(value_bytes);
+    return;
+}
+
 // Exercises the production numeric dependency consumer through an owned
 // on-disk handoff, matching the CLI boundary rather than borrowing a String.
 pub fn consume_constructor_facts_gate() -> !void {
@@ -48,10 +80,16 @@ pub fn consume_constructor_facts_gate() -> !void {
     try std::fs::remove_file(io, &path);
     var index = try ir_index::build(owned);
     defer index.deinit();
+    var canonical_facts = try compiled_canonical_facts::parse_and_validate(
+        &index, owned
+    );
+    defer canonical_facts.deinit();
     var llvm = std::string::String(allocator);
     defer llvm.deinit();
-    let claimed = try cli_llvm::consume_package_dependencies(&var llvm, &index, owned);
-    if claimed < 2 { return error("constructor facts dependency claims missing"); }
+    let emitted = try compiled_program_llvm::append_reachable_functions(
+        &var llvm, &index, &canonical_facts, owned
+    );
+    if emitted < 2 { return error("constructor facts reachable functions missing"); }
     let llvm_bytes = llvm.as_bytes();
     let llvm_path = "target/selfhost/constructor-facts-edge-gate.ll";
     try std::fs::write_file(io, llvm_path, llvm_bytes);
@@ -67,7 +105,7 @@ pub fn consume_constructor_facts_gate() -> !void {
         owned_llvm, "define %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get("
     );
     try require_single_definition(
-        owned_llvm, "define %kizu.error.node_id @kizu_kizu__ast_ast_child_at("
+        owned_llvm, "define %kizu.error.kizu.kizu.ast.node_id @kizu_kizu__ast_ast_child_at("
     );
     print("constructor-facts-dependencies-ok");
     return;
@@ -98,7 +136,7 @@ fn consume_mutated_constructor_facts(path: []u8, bad_caller: bool) -> !void {
     let entry = ir_index::first_entry_with_fact_prefix(&original_index, original_owned, "package-dependency ");
     if entry < 0 { return error("constructor dependency record missing"); }
     let line = original_owned[ir_index::entry_line_start(&original_index, entry)..ir_index::entry_line_end(&original_index, entry)];
-    let record = try cli_llvm::dependency_record_from_line(line);
+    let record = try compiled_program_llvm::dependency_record_from_line(line);
     original_index.deinit();
     try facts.append_bytes("package-dependency ");
     if bad_caller { try std::fmt::append_i64(&var facts, record.caller_component_id + 1000000); }
@@ -117,9 +155,15 @@ fn consume_mutated_constructor_facts(path: []u8, bad_caller: bool) -> !void {
     try std::fs::remove_file(io, &path);
     var index = try ir_index::build(owned);
     defer index.deinit();
+    var canonical_facts = try compiled_canonical_facts::parse_and_validate(
+        &index, owned
+    );
+    defer canonical_facts.deinit();
     var llvm = std::string::String(allocator);
     defer llvm.deinit();
-    let claimed = try cli_llvm::consume_package_dependencies(&var llvm, &index, owned);
-    if claimed >= 0 { return error("mutated constructor dependency was accepted"); }
+    let emitted = try compiled_program_llvm::append_reachable_functions(
+        &var llvm, &index, &canonical_facts, owned
+    );
+    if emitted >= 0 { return error("mutated constructor dependency was accepted"); }
     return;
 }

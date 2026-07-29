@@ -34,6 +34,67 @@ func TestSelfhostCheckPhasesUseParserFacade(t *testing.T) {
 	}
 }
 
+// TestSelfhostHostedCommandsShareParsedSemanticFacade prevents the hosted CLI
+// from growing separate raw-source move/undefined checkers again.
+func TestSelfhostHostedCommandsShareParsedSemanticFacade(t *testing.T) {
+	check := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
+	facade := selfhostKizuFunctionBody(t, check, "pub fn fast_diagnostics_parsed_file(")
+	requireSourceFragments(t, "parsed semantic facade", facade, []string{
+		"loader::load_file_sources(",
+		"fast_diagnostics_ast_node(",
+		"parsed.ast",
+		"parsed.root",
+	})
+
+	gate := readSelfhostFile(t, "../../selfhost/src/backend/cli_check_gate_llvm.kizu")
+	requireSourceFragments(t, "hosted semantic gate", gate, []string{
+		"pub fn append_parse_validation_gate(",
+		"pub fn append_semantic_check_gate(",
+		"@kizu_selfhost__cli_check_fast_diagnostics_parsed_file(",
+	})
+	for _, path := range []string{
+		"../../selfhost/src/backend/cli_llvm.kizu",
+		"../../selfhost/src/backend/cli_run_llvm.kizu",
+		"../../selfhost/src/backend/cli_test_llvm.kizu",
+	} {
+		source := readSelfhostFile(t, path)
+		if !strings.Contains(source, "cli_check_gate_llvm::append_semantic_check_gate(") {
+			t.Fatalf("%s does not call the shared parsed semantic gate", filepath.Clean(path))
+		}
+	}
+
+	executable := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	numeric := selfhostKizuFunctionBody(t, executable, "fn append_numeric_package_closure(")
+	manifest := readSelfhostFile(t, "../../selfhost/src/ir/external_abi_entrypoints.kizu")
+	requireSourceFragments(t, "semantic external ABI entrypoint", manifest, []string{
+		`"selfhost", "cli/check", "fast_diagnostics_parsed_file"`,
+	})
+	requireSourceFragments(t, "generic external ABI root consumption", numeric, []string{
+		"external_abi_entrypoints::collect(allocator)",
+		"package_exact_lookup::resolve_call(",
+		"package_dependency_graph::queue_append(&var pending, catalog, target)",
+	})
+
+	legacySources := gate + check + executable +
+		readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	for _, forbidden := range []string{
+		"first_hosted_check_undefined_variable_start_ast_node",
+		"hosted_check_",
+		"append_compiled_undefined_variable_gate",
+		"cli_moved_value_name",
+		"append_types_checker_function_facts",
+		"append_source_function_facts",
+		"append_source_reachable_compiled_functions",
+	} {
+		if strings.Contains(legacySources, forbidden) {
+			t.Fatalf("hosted semantic path retained legacy gate %q", forbidden)
+		}
+	}
+	if _, err := os.Stat("../../selfhost/src/backend/cli_match_llvm.kizu"); !os.IsNotExist(err) {
+		t.Fatalf("legacy raw-source matcher still exists: %v", err)
+	}
+}
+
 // TestSelfhostParserFacadeValidatesCheckedFiles fixes the checked CLI parse path.
 func TestSelfhostParserFacadeValidatesCheckedFiles(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/parser.kizu")
@@ -301,574 +362,64 @@ func TestSelfhostComponentFunctionCatalogAPI(t *testing.T) {
 
 // assertSelfhostClosureUsesCommonCalleeCollector keeps the four closure paths
 // on the shared AST callee traversal helper.
-func assertSelfhostClosureUsesCommonCalleeCollector(
-	t *testing.T,
-	executableFunctions string,
-	closureBody string,
-	qualifiedPrefix string,
-	unsupportedCallForm string,
-	unsupportedQualifiedCallee string,
-) {
-	t.Helper()
-	requiredGlobal := []string{
-		"fn collect_catalog_closure_direct_callees(",
-		"fn collect_catalog_closure_call_callee(",
-		"fn collect_catalog_closure_var_callee(",
-		"fn collect_catalog_closure_qualified_callee(",
-		"component_function_catalog::find_local_function_index(catalog, callee_text)",
-		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
-		"std::mem::starts_with(callee_text, \"std::mem::\")",
-		"std::mem::starts_with(callee_text, qualified_prefix)",
-		"return error(unsupported_call_form_error);",
-		"return error(unsupported_qualified_callee_error);",
-	}
-	for _, fragment := range requiredGlobal {
-		if !strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("common closure callee collector missing %q", fragment)
-		}
-	}
-	requiredBody := []string{
-		"collect_catalog_closure_direct_callees(",
-		qualifiedPrefix,
-		unsupportedCallForm,
-		unsupportedQualifiedCallee,
-	}
-	for _, fragment := range requiredBody {
-		if !strings.Contains(closureBody, fragment) {
-			t.Fatalf("closure helper body missing common collector fragment %q", fragment)
-		}
-	}
-	forbidden := []string{
-		"collect_source_",
-		"collect_loader_",
-		"collect_lexer_",
-		"collect_kizu_lexer_",
-	}
-	for _, fragment := range forbidden {
-		if strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("common closure callee collector left old collector family %q", fragment)
-		}
-	}
-}
-
-// TestSelfhostSourceClosureUsesComponentCatalog keeps source helper body closure
-// resolution tied to the AST-derived component function catalog.
-func TestSelfhostSourceClosureUsesComponentCatalog(t *testing.T) {
+func TestSelfhostSourceClosureOwnedBySemanticPackageGraph(t *testing.T) {
 	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	sourceClosureBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
+	manifest := readSelfhostFile(t, "../../selfhost/src/ir/external_abi_entrypoints.kizu")
+	if !strings.Contains(manifest, `"selfhost", "cli/check", "fast_diagnostics_parsed_file"`) {
+		t.Fatal("semantic package external ABI root missing")
+	}
+	for _, fragment := range []string{
+		"fn append_source_function_facts(",
+		"fn append_source_reachable_helper_bodies(",
 		"fn append_source_closure_helper_body(",
-	)
-	required := []string{
-		"import selfhost::ir::component_function_catalog;",
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::source\"",
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"component_function_catalog::find_local_function_index(catalog, \"is_source_code\")",
-		"component_function_catalog::find_local_function_index(catalog, \"is_frontend_source\")",
-		"component_function_catalog::find_local_function_index(catalog, \"module_path\")",
-		"component_function_catalog::find_local_function_index(catalog, \"is_absolute_name_for_file\")",
-		"component_function_catalog::find_local_function_index(catalog, callee_text)",
-		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
-		"component_function_catalog::function_node_id(",
-	}
-	for _, fragment := range required {
-		if !strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("source closure catalog path missing %q", fragment)
-		}
-	}
-	assertSelfhostClosureUsesCommonCalleeCollector(
-		t,
-		executableFunctions,
-		sourceClosureBody,
-		"\"selfhost::source::\"",
-		"\"source closure: unsupported call form\"",
-		"\"source closure: unsupported qualified callee\"",
-	)
-	forbiddenGlobal := []string{
-		"fn source_closure_supported_local(",
-		"fn source_closure_qualified_name(",
-		"source_closure_supported_local(name)",
-		"source_closure_qualified_name(local_name)",
-		"source_catalog_local_index",
-		"source_catalog_qualified_index",
-	}
-	for _, fragment := range forbiddenGlobal {
+		"fn source_closure_role(",
+	} {
 		if strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("source closure keeps handwritten lookup %q", fragment)
-		}
-	}
-	forbiddenBody := []string{
-		"try function_node(text, ast, root, local_name)",
-	}
-	for _, fragment := range forbiddenBody {
-		if strings.Contains(sourceClosureBody, fragment) {
-			t.Fatalf("source closure keeps handwritten lookup %q", fragment)
+			t.Fatalf("source closure retained overlapping manual seed %q", fragment)
 		}
 	}
 }
 
 // TestSelfhostLoaderClosureUsesComponentCatalog keeps source loader helper body
 // closure resolution tied to the AST-derived component function catalog.
-func TestSelfhostLoaderClosureUsesComponentCatalog(t *testing.T) {
-	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	loaderClosureBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_loader_closure_helper_body(",
-	)
-	required := []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::source::loader\"",
-		"component_function_catalog::find_local_function_index(catalog, \"package_module_end\")",
-		"component_function_catalog::find_local_function_index(catalog, \"is_manifest_root_source\")",
-		"component_function_catalog::find_local_function_index(catalog, \"package_module_start\")",
-		"component_function_catalog::find_local_function_index(catalog, \"source_file\")",
-		"component_function_catalog::find_local_function_index(catalog, callee_text)",
-		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"component_function_catalog::function_node_id(",
-	}
-	for _, fragment := range required {
-		if !strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("loader closure catalog path missing %q", fragment)
-		}
-	}
-	assertSelfhostClosureUsesCommonCalleeCollector(
-		t,
-		executableFunctions,
-		loaderClosureBody,
-		"\"selfhost::source::loader::\"",
-		"\"loader closure: unsupported call form\"",
-		"\"loader closure: unsupported qualified callee\"",
-	)
-	forbiddenGlobal := []string{
-		"fn loader_closure_supported_local(",
-		"fn loader_closure_qualified_name(",
-		"loader_closure_supported_local(name)",
-		"loader_closure_qualified_name(local_name)",
-		"loader_catalog_local_index",
-		"loader_catalog_qualified_index",
-	}
-	for _, fragment := range forbiddenGlobal {
-		if strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("loader closure keeps handwritten lookup %q", fragment)
-		}
-	}
-	forbiddenBody := []string{
-		"try function_node(text, ast, root, local_name)",
-	}
-	for _, fragment := range forbiddenBody {
-		if strings.Contains(loaderClosureBody, fragment) {
-			t.Fatalf("loader closure keeps handwritten lookup %q", fragment)
-		}
-	}
-}
-
-// TestSelfhostStdLexerClosureUsesComponentCatalog keeps std::kizu::lexer
-// helper body closure resolution tied to the AST-derived component catalog.
-func TestSelfhostStdLexerClosureUsesComponentCatalog(t *testing.T) {
-	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	kizuLexerClosureBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_kizu_lexer_closure_helper_body(",
-	)
-	required := []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"std::kizu::lexer\"",
-		"component_function_catalog::find_local_function_index(catalog, \"first_token\")",
-		"component_function_catalog::find_local_function_index(catalog, \"next_token\")",
-		"component_function_catalog::find_local_function_index(catalog, callee_text)",
-		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"component_function_catalog::function_node_id(",
-	}
-	for _, fragment := range required {
-		if !strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("std kizu lexer closure catalog path missing %q", fragment)
-		}
-	}
-	assertSelfhostClosureUsesCommonCalleeCollector(
-		t,
-		executableFunctions,
-		kizuLexerClosureBody,
-		"\"std::kizu::lexer::\"",
-		"\"std lexer closure: unsupported call form\"",
-		"\"std lexer closure: unsupported qualified callee\"",
-	)
-	forbiddenGlobal := []string{
-		"fn kizu_lexer_closure_supported_local(",
-		"fn kizu_lexer_closure_qualified_name(",
-		"kizu_lexer_closure_supported_local(name)",
-		"kizu_lexer_closure_qualified_name(local_name)",
-		"kizu_lexer_catalog_local_index",
-		"kizu_lexer_catalog_qualified_index",
-	}
-	for _, fragment := range forbiddenGlobal {
-		if strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("std kizu lexer closure keeps handwritten lookup %q", fragment)
-		}
-	}
-	forbiddenBody := []string{
-		"try function_node(text, ast, root, local_name)",
-	}
-	for _, fragment := range forbiddenBody {
-		if strings.Contains(kizuLexerClosureBody, fragment) {
-			t.Fatalf("std kizu lexer closure keeps handwritten lookup %q", fragment)
-		}
-	}
-}
-
-// TestSelfhostLexerClosureUsesComponentCatalog keeps selfhost::lexer helper body
-// closure resolution tied to the AST-derived component function catalog.
-func TestSelfhostLexerClosureUsesComponentCatalog(t *testing.T) {
-	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	lexerClosureBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_lexer_closure_helper_body(",
-	)
-	required := []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::lexer\"",
-		"component_function_catalog::find_local_function_index(catalog, \"is_identifier_continue\")",
-		"component_function_catalog::find_local_function_index(catalog, \"invalid_token_display\")",
-		"component_function_catalog::find_local_function_index(catalog, callee_text)",
-		"component_function_catalog::find_qualified_function_index(catalog, callee_text)",
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"component_function_catalog::function_node_id(",
-	}
-	for _, fragment := range required {
-		if !strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("selfhost lexer closure catalog path missing %q", fragment)
-		}
-	}
-	assertSelfhostClosureUsesCommonCalleeCollector(
-		t,
-		executableFunctions,
-		lexerClosureBody,
-		"\"selfhost::lexer::\"",
-		"\"lexer closure: unsupported call form\"",
-		"\"lexer closure: unsupported qualified callee\"",
-	)
-	forbiddenGlobal := []string{
-		"fn lexer_closure_supported_local(",
-		"fn lexer_closure_qualified_name(",
-		"lexer_closure_supported_local(name)",
-		"lexer_closure_qualified_name(local_name)",
-		"frontend_closure_supported_local",
-		"frontend_closure_qualified_prefix",
-		"collect_frontend_",
-		"lexer_catalog_local_index",
-		"lexer_catalog_qualified_index",
-	}
-	for _, fragment := range forbiddenGlobal {
-		if strings.Contains(executableFunctions, fragment) {
-			t.Fatalf("selfhost lexer closure keeps handwritten lookup %q", fragment)
-		}
-	}
-	forbiddenBody := []string{
-		"try function_node(text, ast, root, local_name)",
-		"function_signature::append(out",
-		"executable_body::append_helper_body_ir(out",
-	}
-	for _, fragment := range forbiddenBody {
-		if strings.Contains(lexerClosureBody, fragment) {
-			t.Fatalf("selfhost lexer closure keeps handwritten lookup %q", fragment)
-		}
-	}
-}
-
-// TestSelfhostASTClosureUsesComponentCatalog keeps selfhost::ast helper body
-// selection on the component catalog and shared body-call closure.
 func TestSelfhostASTClosureUsesComponentCatalog(t *testing.T) {
 	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	astFactsBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_selfhost_ast_function_facts_claimed(",
+	production := selfhostKizuFunctionBody(t, executableFunctions, "fn append_facts_from_parsed(")
+	queueWalk := selfhostKizuFunctionBody(
+		t, executableFunctions, "fn append_numeric_package_closure_from_queue(",
 	)
-	astWrapperBody := selfhostKizuFunctionBody(
-		t, executableFunctions, "pub fn append_selfhost_ast_function_facts(",
-	)
-	productionBody := selfhostKizuFunctionBody(t, executableFunctions, "pub fn append_facts(")
-	astClosureBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_selfhost_ast_closure_helper_body(",
-	)
-	policyBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn collect_catalog_closure_external_callee_allowed(",
-	)
-	assertSelfhostASTClosureCatalogSeed(t, astWrapperBody, productionBody, astFactsBody)
-	assertSelfhostASTClosureBody(t, astClosureBody)
-	assertSelfhostASTExternalAccessorPolicy(t, policyBody)
-	assertSelfhostASTClosureScope(t, astFactsBody, astClosureBody, policyBody)
+	for _, fragment := range []string{
+		"package_catalog_collect::collect_from_parsed_files(",
+		"package_dependency_graph::dependency_graph(",
+		"package_call_resolution::append_resolved_dependencies(",
+	} {
+		if !strings.Contains(production, fragment) {
+			t.Fatalf("selfhost AST production graph path missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"package_dependency_graph::queue_append_dependencies(",
+		"append_numeric_package_definition(",
+	} {
+		if !strings.Contains(queueWalk, fragment) {
+			t.Fatalf("selfhost AST numeric closure queue walk missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"append_selfhost_ast_function_facts", "append_selected_helper_body",
+		"component_function_catalog::find_local_function_index(catalog, \"declaration_count\")",
+	} {
+		if strings.Contains(executableFunctions, forbidden) {
+			t.Fatalf("legacy selfhost AST selector remains %q", forbidden)
+		}
+	}
 }
 
 // assertSelfhostASTClosureCatalogSeed pins the selfhost::ast BFS seeds.
-func assertSelfhostASTClosureCatalogSeed(
-	t *testing.T,
-	wrapperBody string,
-	productionBody string,
-	astFactsBody string,
-) {
-	t.Helper()
-	for _, fragment := range []string{
-		"parser::parse_source_files(allocator, &files)",
-		"package_dependency::collect_from_parsed_files(",
-		"package_dependency::emitted_targets(allocator, &package_catalog)",
-		"append_selfhost_ast_function_facts_claimed(",
-	} {
-		if !strings.Contains(wrapperBody, fragment) {
-			t.Fatalf("selfhost ast public wrapper missing package catalog path %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"append_selfhost_ast_function_facts_claimed(",
-		"&package_catalog, &var emitted_targets",
-	} {
-		if !strings.Contains(productionBody, fragment) {
-			t.Fatalf("production selfhost ast path does not share package claims %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::ast\"",
-		"component_function_catalog::find_local_function_index(catalog, \"declaration_count\")",
-		"component_function_catalog::find_local_function_index(catalog, \"node_count\")",
-		"append_selfhost_ast_closure_helper_body(",
-		"closure_index_seen(&emitted, function_index)",
-	} {
-		if !strings.Contains(astFactsBody, fragment) {
-			t.Fatalf("selfhost ast closure seed path missing %q", fragment)
-		}
-	}
-	if strings.Contains(wrapperBody, "component_function_catalog::collect_from_ast(") {
-		t.Fatal("selfhost ast public wrapper bypasses package catalog with a component catalog")
-	}
-}
-
-// assertSelfhostASTClosureBody pins the shared collector path for each member.
-func assertSelfhostASTClosureBody(t *testing.T, astClosureBody string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"selfhost_ast_closure_role(local_name)",
-		"collect_catalog_closure_direct_callees(",
-		"\"selfhost::ast::\"",
-		"\"selfhost ast closure: unsupported call form\"",
-		"\"selfhost ast closure: unsupported qualified callee\"",
-	} {
-		if !strings.Contains(astClosureBody, fragment) {
-			t.Fatalf("selfhost ast closure body missing %q", fragment)
-		}
-	}
-}
-
-// assertSelfhostASTExternalAccessorPolicy pins the narrow external callee allowlist.
-func assertSelfhostASTExternalAccessorPolicy(t *testing.T, policyBody string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"std::mem::equal_bytes(qualified_prefix, \"selfhost::ast::\")",
-		"std::mem::equal_bytes(callee_text, \"tree.get\")",
-		"std::mem::equal_bytes(callee_text, \"tree.child_at\")",
-	} {
-		if !strings.Contains(policyBody, fragment) {
-			t.Fatalf("selfhost ast external accessor policy missing %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"std::mem::starts_with(callee_text, \"std::kizu::\")",
-		"std::mem::starts_with(callee_text, \"selfhost::\")",
-	} {
-		if strings.Contains(policyBody, fragment) {
-			t.Fatalf("selfhost ast external accessor policy is too broad: %q", fragment)
-		}
-	}
-}
-
-// assertSelfhostASTClosureScope rejects the old manual list and broad closure expansion.
-func assertSelfhostASTClosureScope(
-	t *testing.T,
-	astFactsBody string,
-	astClosureBody string,
-	_ string,
-) {
-	t.Helper()
-	if strings.Contains(astFactsBody, "append_selected_helper_body(") {
-		t.Fatal("selfhost ast function facts keep hand-written helper body selection")
-	}
-	for _, local := range []string{
-		"count_range",
-		"count_one",
-		"count_two",
-		"count_three",
-		"count_five",
-		"count_with_range",
-		"count_node_with_range",
-		"count_named_range",
-		"count_named_ranges",
-		"count_fn_decl_parts",
-	} {
-		if strings.Contains(astFactsBody, "\"selfhost::ast::"+local+"\"") {
-			t.Fatalf("selfhost ast function facts keep hand-written selection for %s", local)
-		}
-	}
-	for _, fragment := range []string{
-		"tokenize",
-		"std::kizu::parser::",
-		"parser::parse_program",
-	} {
-		if strings.Contains(astClosureBody, fragment) {
-			t.Fatalf("selfhost ast closure expands outside the AST helper cluster via %q", fragment)
-		}
-	}
-}
-
 // TestSelfhostExecutableHelperClosureUsesComponentCatalog keeps the
 // selfhost::backend::executable shared-helper body facts seeded from the
 // component catalog and expanded by the common BFS callee collector instead of
 // the hand-written append_selected_helper_body table.
-func TestSelfhostExecutableHelperClosureUsesComponentCatalog(t *testing.T) {
-	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	helperFactsBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_executable_helper_body_facts(",
-	)
-	helperClosureBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_executable_helper_closure_body(",
-	)
-	policyBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn collect_catalog_closure_external_callee_allowed(",
-	)
-	seedRequired := []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::backend::executable\"",
-		"component_function_catalog::find_local_function_index(catalog, \"lower_test_executable\")",
-		"component_function_catalog::find_local_function_index(catalog, \"is_empty_node\")",
-		"component_function_catalog::find_local_function_index(catalog, \"unsupported_executable\")",
-		"component_function_catalog::find_local_function_index(catalog, \"ast_node_text\")",
-		"append_executable_helper_closure_body(",
-		"closure_index_seen(&emitted, function_index)",
-	}
-	for _, fragment := range seedRequired {
-		if !strings.Contains(helperFactsBody, fragment) {
-			t.Fatalf("executable helper closure seed path missing %q", fragment)
-		}
-	}
-	if strings.Contains(helperFactsBody, "append_selected_helper_body(") {
-		t.Fatal("executable helper body facts keep hand-written helper body selection")
-	}
-	closureRequired := []string{
-		"component_function_catalog::local_function_name(catalog, function_index)",
-		"component_function_catalog::function_node_id(",
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"executable_closure_role(local_name)",
-	}
-	for _, fragment := range closureRequired {
-		if !strings.Contains(helperClosureBody, fragment) {
-			t.Fatalf("executable helper closure body missing %q", fragment)
-		}
-	}
-	if strings.Contains(helperClosureBody, "try function_node(text, ast, root, local_name)") {
-		t.Fatal("executable helper closure keeps handwritten function_node lookup")
-	}
-	assertExecutableClosureRoleMapping(t, executableFunctions)
-	assertSelfhostClosureUsesCommonCalleeCollector(
-		t,
-		executableFunctions,
-		helperClosureBody,
-		"\"selfhost::backend::executable::\"",
-		"\"executable helper closure: unsupported call form\"",
-		"\"executable helper closure: unsupported qualified callee\"",
-	)
-	assertExecutableClosureExternalCalleePolicy(t, executableFunctions, policyBody)
-}
-
-// TestSelfhostBackendWrapperClosureUsesComponentCatalog keeps the backend
-// run-codegen wrapper body facts seeded from the component catalog and expanded
-// by the shared BFS instead of the hand-written
-// append_selected_function_with_body table.
-func TestSelfhostBackendWrapperClosureUsesComponentCatalog(t *testing.T) {
-	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	wrapperFactsBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_backend_wrapper_body_facts(",
-	)
-	wrapperClosureBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn append_backend_wrapper_closure_body(",
-	)
-	policyBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn collect_catalog_closure_external_callee_allowed(",
-	)
-	seedRequired := []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::backend\"",
-		"component_function_catalog::find_local_function_index(catalog, \"render_run_codegen_artifact\")",
-		"append_backend_wrapper_closure_body(",
-		"closure_index_seen(&emitted, function_index)",
-	}
-	for _, fragment := range seedRequired {
-		if !strings.Contains(wrapperFactsBody, fragment) {
-			t.Fatalf("backend wrapper closure seed path missing %q", fragment)
-		}
-	}
-	// The wrappers must no longer be hand-selected through append_selected_function_with_body.
-	if strings.Contains(wrapperFactsBody, "append_selected_function_with_body(") {
-		t.Fatal("backend wrapper body facts keep hand-written wrapper selection")
-	}
-	closureRequired := []string{
-		"component_function_catalog::local_function_name(catalog, function_index)",
-		"component_function_catalog::function_node_id(",
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"backend_wrapper_role(local_name)",
-	}
-	for _, fragment := range closureRequired {
-		if !strings.Contains(wrapperClosureBody, fragment) {
-			t.Fatalf("backend wrapper closure body missing %q", fragment)
-		}
-	}
-	if strings.Contains(wrapperClosureBody, "try function_node(text, ast, root, local_name)") {
-		t.Fatal("backend wrapper closure keeps handwritten function_node lookup")
-	}
-	assertBackendWrapperClosureRoleMapping(t, executableFunctions)
-	assertSelfhostClosureUsesCommonCalleeCollector(
-		t,
-		executableFunctions,
-		wrapperClosureBody,
-		"\"selfhost::backend::\"",
-		"\"backend wrapper closure: unsupported call form\"",
-		"\"backend wrapper closure: unsupported qualified callee\"",
-	)
-	assertBackendWrapperClosureExternalCalleePolicy(t, executableFunctions, policyBody)
-}
-
-// assertBackendWrapperClosureRoleMapping keeps render_run_codegen_artifact on its
-// checked-run-codegen-wrapper role and emit_rendered_run_artifact on its
-// checked-run-codegen-artifact-wrapper role, both resolved through the role
-// mapping rather than the hand-written append_selected_function_with_body call.
 func assertBackendWrapperClosureRoleMapping(t *testing.T, executableFunctions string) {
 	t.Helper()
 	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn backend_wrapper_role(")
@@ -974,158 +525,18 @@ func assertExecutableClosureExternalCalleePolicy(
 // helper is only treated as supported when its function-signature-return fact
 // actually exists, resolved through the shared collector's
 // component_compiled_local_present gate.
-func TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
+func TestSelfhostLexerCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	abi := readSelfhostFile(t, "../../selfhost/src/backend/compiled_abi_params.kizu")
-
-	assertComponentReachableCompiledClosure(
-		t,
-		cli,
-		"fn append_kizu_lexer_reachable_compiled_functions(",
-		"std::kizu::lexer::",
-		false,
-		[]string{"first_token", "next_token"},
-	)
-
-	if !strings.Contains(cli, "import selfhost::backend::compiled_abi_params;") {
-		t.Fatal("std lexer compiled params derivation missing ABI params import")
-	}
-	assertSharedCompiledClosurePath(t, cli)
-	assertComponentCompiledCalleeFactGate(t, cli)
-	assertNoPerComponentCompiledClosureHelpers(t, cli)
-	removed := []string{
-		"fn kizu_lexer_compiled_supported_local(",
-		"fn kizu_lexer_compiled_qualified_name(",
-	}
-	for _, fragment := range removed {
-		if strings.Contains(cli, fragment) {
-			t.Fatalf("std lexer compiled closure keeps hand-written lookup %q", fragment)
-		}
-	}
-	forbidden := []string{
-		"fn kizu_lexer_compiled_params_spec(",
-		"\"i64 line;i64 column\"",
-		"\"%kizu.slice.u8 source;i64 offset;%kizu.kizu.lexer.position initial\"",
-		"\"%kizu.slice.u8 source;%kizu.kizu.lexer.token previous\"",
-	}
-	for _, fragment := range forbidden {
-		if strings.Contains(cli, fragment) {
-			t.Fatalf("std lexer compiled params keeps hand-written fragment %q", fragment)
-		}
-	}
-	abiRequired := []string{
-		"pub fn append_params_spec(",
-		"function-signature-param ",
-		"std::mem::equal_bytes(kizu_type, \"TokenKind\")",
-		"std::mem::equal_bytes(kizu_type, \"Position\")",
-		"std::mem::equal_bytes(kizu_type, \"Token\")",
-	}
-	for _, fragment := range abiRequired {
-		if !strings.Contains(abi, fragment) {
-			t.Fatalf("compiled ABI params mapper missing %q", fragment)
-		}
-	}
-	reachable := selfhostKizuFunctionBody(t, cli, "fn append_kizu_lexer_reachable_compiled_functions(")
-	if strings.Contains(reachable, "\"tokenize\"") {
-		t.Fatal("std lexer compiled closure expands to tokenize")
-	}
-}
-
-// assertCompiledClosureParamsDerivation pins that the shared compiled-closure
-// emitter derives its params_spec from function-signature-param facts and guards
-// the empty case behind allow_empty_params, instead of a handwritten params_spec
-// table.
-func assertCompiledClosureParamsDerivation(t *testing.T, cli string) {
-	t.Helper()
-	closureBody := selfhostKizuFunctionBody(t, cli, "fn emit_compiled_closure_member(")
-	closureRequired := []string{
-		"var params_spec = std::string::String(std::mem::page_allocator());",
-		"defer params_spec.deinit();",
-		"compiled_abi_params::append_params_spec_indexed(",
-		"lookup_index, &var params_spec, ir_bytes, name",
-		"if params_spec.len() == 0 and !allow_empty_params {",
-		"compiled closure: missing signature params",
-		"let params_spec_bytes = params_spec.as_bytes();",
-		"params_spec_bytes",
-	}
-	for _, fragment := range closureRequired {
-		if !strings.Contains(closureBody, fragment) {
-			t.Fatalf("compiled closure params derivation missing %q", fragment)
-		}
-	}
-}
-
-// assertSelfhostLexerCompiledClosureFactDriven pins that the selfhost::lexer
-// compiled closure resolves from IR facts through the shared path: the closure
-// seeds the shared BFS with the "selfhost::lexer::" prefix and allow_empty_params
-// set to true, so the parameterless seed member invalid_token_display survives the
-// shared emitter's empty guard. The shared member builder, params derivation, and
-// callee fact-gate are pinned by the shared assertions; here the lexer-specific
-// expectation is the allow_empty_params=true seeding.
-func assertSelfhostLexerCompiledClosureFactDriven(t *testing.T, cli string) {
-	t.Helper()
-	assertComponentReachableCompiledClosure(
-		t,
-		cli,
-		"fn append_lexer_reachable_compiled_functions(",
-		"selfhost::lexer::",
-		true,
-		[]string{"is_identifier_continue", "invalid_token_display"},
-	)
-	assertSharedCompiledClosurePath(t, cli)
-	assertComponentCompiledCalleeFactGate(t, cli)
-	assertNoPerComponentCompiledClosureHelpers(t, cli)
-
-	// The shared emitter tolerates an empty params_spec only behind
-	// allow_empty_params, which the selfhost::lexer closure passes as true so the
-	// parameterless invalid_token_display member is emitted with empty params.
-	emitter := selfhostKizuFunctionBody(t, cli, "fn emit_compiled_closure_member(")
-	if !strings.Contains(emitter, "if params_spec.len() == 0 and !allow_empty_params {") {
-		t.Fatal("compiled closure emitter must gate the empty params_spec behind allow_empty_params")
-	}
-}
-
-// TestSelfhostLexerLoaderCompiledParamsSpecDerivedFromSignatures keeps the
-// selfhost::lexer and selfhost::source::loader compiled closures tied to
-// function-signature-param facts instead of handwritten params_spec tables. The
-// lexer closures admit a parameterless helper (invalid_token_display) so they
-// derive without a non-empty guard, while the loader closures keep the guard
-// because every loader helper takes at least one parameter. The forbidden
-// fragments pin that the handwritten tables and their literal entries are gone,
-// and the ABI mapper learns SourceKind without any new params_spec literal.
-func TestSelfhostLexerLoaderCompiledParamsSpecDerivedFromSignatures(t *testing.T) {
-	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
-	abi := readSelfhostFile(t, "../../selfhost/src/backend/compiled_abi_params.kizu")
-
-	assertSelfhostLexerCompiledClosureFactDriven(t, cli)
-
-	// The loader closure seeds the shared BFS with the loader prefix and keeps the
-	// missing-params guard (allow_empty_params is false) because every loader
-	// helper takes at least one parameter.
-	assertComponentReachableCompiledClosure(
-		t,
-		cli,
-		"fn append_loader_reachable_compiled_functions(",
-		"selfhost::source::loader::",
-		false,
-		[]string{
-			"package_module_end",
-			"is_manifest_root_source",
-			"package_module_start",
-			"source_file",
-		},
-	)
-
-	// The shared compiled-closure emitter keeps the params_spec derived from
-	// function-signature-param facts and guards the empty case behind
-	// allow_empty_params.
-	assertCompiledClosureParamsDerivation(t, cli)
 
 	forbidden := []string{
 		"fn lexer_compiled_params_spec(",
 		"fn loader_compiled_params_spec(",
 		"fn lexer_compiled_supported_local(",
 		"fn lexer_compiled_qualified_name(",
+		"fn append_loader_reachable_compiled_functions(",
+		"fn append_lexer_reachable_compiled_functions(",
+		"fn append_component_reachable_compiled_functions(",
 		"\"%kizu.slice.u8 path;i64 start\"",
 		"\"%kizu.slice.u8 module_root;%kizu.slice.u8 path\"",
 		"\"i64 source_root_len;%kizu.slice.u8 path\"",
@@ -1138,13 +549,21 @@ func TestSelfhostLexerLoaderCompiledParamsSpecDerivedFromSignatures(t *testing.T
 		}
 	}
 
-	abiRequired := []string{
+	abiForbidden := []string{
 		"std::mem::equal_bytes(kizu_type, \"source::SourceKind\")",
 		"std::mem::equal_bytes(kizu_type, \"selfhost::source::SourceKind\")",
 	}
-	for _, fragment := range abiRequired {
+	for _, fragment := range abiForbidden {
+		if strings.Contains(abi, fragment) {
+			t.Fatalf("compiled ABI params retains nominal spelling branch %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"compiled_type_resolver::function_owner_module_indexed(",
+		"compiled_type_resolver::resolve_indexed(",
+	} {
 		if !strings.Contains(abi, fragment) {
-			t.Fatalf("compiled ABI params mapper missing %q", fragment)
+			t.Fatalf("compiled ABI params does not use canonical resolver %q", fragment)
 		}
 	}
 }
@@ -1930,8 +1349,7 @@ func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
 	cliRun := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
 	cliTest := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu")
 	astBoundary := readSelfhostFile(t, "../../selfhost/src/backend/cli_ast_boundary_llvm.kizu")
-	testAst := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_ast_llvm.kizu")
-	combined := cli + cliRun + cliTest + astBoundary + testAst
+	combined := cli + cliRun + cliTest + astBoundary
 
 	for _, fragment := range []string{
 		"cli_frontend_llvm",
@@ -1952,7 +1370,7 @@ func TestSelfhostRunFrontendScannerRemoved(t *testing.T) {
 		"@kizu_selfhost__cli_parse_validated_ast",
 		"@kizu_kizu__parser_parse_program",
 		"@kizu_selfhost__cli_execute_render_checked_run_artifact",
-		"@kizu_selfhost__cli_lower_test_parse_result",
+		"@kizu_selfhost__backend_executable_lower_test_executable",
 	} {
 		if !strings.Contains(combined, fragment) {
 			t.Fatalf("stage2 run/test path missing parse-result AST boundary %q", fragment)
@@ -2019,7 +1437,6 @@ func assertCodegenIRShape(t *testing.T, codegen string) {
 		"return \"selfhost::ir::codegen::Program function-block-instruction-v0\";",
 		"pub struct CodeEval",
 		"pub fn lower_code_module(",
-		"fn empty_int_env(text: []u8, decls: std::kizu::ast::ChildRange) -> IntEnv",
 		"fn string_literal_span(",
 		"fn ast_node_text(",
 	}
@@ -2091,11 +1508,10 @@ func assertHostedRunLLVMResponsibilities(
 	}
 	requiredAstBoundary := []string{
 		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
-		// issue 1157: the AST boundary now delegates tokenizing + parsing to the compiled
-		// std::kizu::parser::parse_program rather than the retired hand-written tokenize loop.
+		// The AST boundary delegates to the compiled parser and rejects its error edge
+		// explicitly; it must not manufacture a synthetic AST.
 		"@kizu_kizu__parser_parse_program",
-		"@kizu_kizu__ast_ast_add_node",
-		"@kizu_kizu__ast_parse_result",
+		"@kizu_rt_process_exit(i64 1)",
 	}
 	for _, fragment := range requiredAstBoundary {
 		if !strings.Contains(cliAstBoundary, fragment) {
@@ -2262,13 +1678,14 @@ func assertCompiledEntryModule(t *testing.T, compiled string) {
 func assertCompiledSubModules(t *testing.T) {
 	t.Helper()
 	assertFileContains(t, "../../selfhost/src/backend/compiled_fact_lookup.kizu",
-		"pub fn enum_variant_tag_by_prefix(", "pub fn lookup_struct_field_index_by_prefix(")
+		"pub fn enum_variant_tag_by_prefix_indexed(",
+		"pub fn lookup_struct_field_exact_indexed(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_util.kizu",
 		"pub fn module_prefix_of(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_signature.kizu",
 		"pub fn find_param_type(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_type_lower.kizu",
-		"pub fn kizu_type_to_llvm(")
+		"pub fn kizu_type_to_llvm_indexed(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir.kizu",
 		"pub struct MirFunction", "pub struct MirBlock", "pub struct MirValue",
 		"pub union MirInstruction", "pub struct MirTerminator", "pub struct MirType",
@@ -2283,7 +1700,7 @@ func assertCompiledSubModules(t *testing.T) {
 		"pub fn lower_struct_fields(", "fn lower_struct_field(",
 		"fn lower_nested_struct_field_expr(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_types.kizu",
-		"pub fn resolve_value_llvm_type(", "pub fn resolve_value_kizu_type(",
+		"pub fn resolve_value_llvm_type_indexed(", "pub fn resolve_value_kizu_type(",
 		"pub fn struct_lookup_kizu_type(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_llvm.kizu",
 		"pub fn append_function(", "fn append_struct_return(", "fn append_expr_return(")
@@ -2345,13 +1762,13 @@ func assertFileContains(t *testing.T, path string, fragments ...string) {
 func assertCompiledFunctionGeneric(t *testing.T) {
 	t.Helper()
 	compiled := readSelfhostFile(t, "../../selfhost/src/backend/compiled_llvm.kizu")
-	cliLlvm := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	programLLVM := readSelfhostFile(t, "../../selfhost/src/backend/compiled_program_llvm.kizu")
 	assertCompiledEntryModule(t, compiled)
 	assertCompiledSubModules(t)
 	assertCompiledModulesNoHardcoding(t, compiled)
 	assertNoLegacyCompiledEmitters(t, compiled)
 	assertCompiledMirPaths(t, compiled)
-	assertCliCompiledSymbols(t, cliLlvm)
+	assertCompiledProgramPackageDefinitions(t, programLLVM)
 }
 
 // assertNoLegacyCompiledEmitters rejects direct per-shape LLVM emitters.
@@ -2406,24 +1823,20 @@ func assertCompiledMirPaths(t *testing.T, compiled string) {
 	}
 }
 
-// assertCliCompiledSymbols keeps the compiled helper symbol list wired. The
-// selfhost::ir::codegen Program builder / metadata / Value helper cluster
-// (metadata_line, return_void_instruction, const_string_value,
-// const_string_instruction, call_instruction, build_main_print_program,
-// lowered_main_print_program, plus the unsupported_program / none_value /
-// main_print_payload / metadata_for_program roots) is now derived through the
-// shared compiled closure BFS, so cli_llvm delegates to
-// append_codegen_reachable_compiled_functions_profiled instead of carrying a handwritten
-// mangled symbol per member. The dedicated derivation is pinned in
-// selfhost_codegen_compiled_closure_test.go.
-func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
+// assertCompiledProgramPackageDefinitions keeps compiled Kizu functions on the
+// package-definition consumer rather than a backend component seed list.
+func assertCompiledProgramPackageDefinitions(t *testing.T, programLLVM string) {
 	t.Helper()
-	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto_indexed(") {
-		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto_indexed")
+	consumer := selfhostKizuFunctionBody(t, programLLVM, "pub fn append_reachable_functions(")
+	if !strings.Contains(consumer, "out, lookup_index, canonical_facts, ir_bytes, name") {
+		t.Fatal("compiled_program_llvm package consumer does not emit reachable definitions")
 	}
-	delegation := "try append_codegen_reachable_compiled_functions_profiled("
-	if !strings.Contains(cliLlvm, delegation) {
-		t.Fatal("cli_llvm does not delegate to the shared codegen compiled closure")
+	emitter := selfhostKizuFunctionBody(t, programLLVM, "fn emit_numeric_package_definition(")
+	if !strings.Contains(emitter, "compiled_llvm::append_compiled_function_auto_indexed(") {
+		t.Fatal("compiled_program_llvm generic package emitter does not lower definitions")
+	}
+	if strings.Contains(programLLVM, "append_codegen_reachable_compiled_functions") {
+		t.Fatal("compiled_program_llvm retains the superseded codegen component closure")
 	}
 }
 
@@ -2586,7 +1999,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"cli_artifact_dir_llvm::append_globals(",
 		"cli_artifact_dir_llvm::append_functions(",
 		"cli_ast_boundary_llvm::append_functions(",
-		"cli_test_ast_llvm::append_functions(",
 		"compiled_llvm::append_compiled_function_auto_indexed(",
 	},
 	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
@@ -2600,7 +2012,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_write_concat5_function(",
 		"fn append_write_concat9_function(",
 		"fn append_i64_decimal_function(",
-		"fn append_artifact_stem_function(",
 	},
 	"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu": {
 		"import selfhost::backend::hosted;",
@@ -2627,7 +2038,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
-		"cli_check_gate_llvm::append_static_check_gate(",
+		"cli_check_gate_llvm::append_parse_validation_gate(",
+		"cli_check_gate_llvm::append_semantic_check_gate(",
 		"@kizu_selfhost__cli_parse_validated_ast",
 		"@kizu_selfhost__cli_execute_render_checked_run_artifact",
 		"@kizu_selfhost__cli_emit_run_codegen_artifact",
@@ -2635,14 +2047,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_ast_boundary_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_functions(",
-		// issue 1157: the boundary is now the four-function glue over the compiled
-		// parser; the per-shape hand-parse appenders + keyword globals were deleted.
-		"fn append_ast_new_function(",
-		"fn append_unsupported_parse_result_function(",
+		// The boundary constructs SourceFile and delegates to the compiled parser.
+		// Parser rejection exits explicitly instead of manufacturing a fake AstData.
 		"fn append_parse_validated_ast_function(",
-		"fn append_add_leaf_node_function(",
 		"@kizu_kizu__parser_parse_program",
-		"@kizu_kizu__ast_ast_add_node",
+		"@kizu_rt_process_exit(i64 1)",
 	},
 	"../../selfhost/src/backend/cli_codegen_llvm.kizu": {
 		"pub fn append_globals(",
@@ -2655,24 +2064,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"pub fn append_cli_test_blocks(",
 		"@kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_selfhost__cli_lower_test_parse_result",
+		"@kizu_selfhost__backend_executable_lower_test_executable",
 		"fn executable_kind_tag(",
 		"fn append_executable_kind_compare(",
 		"fn append_test_ok_emit_block(",
 		"@kizu_selfhost__ensure_artifact_dir",
-	},
-	"../../selfhost/src/backend/cli_test_ast_llvm.kizu": {
-		"import selfhost::backend::executable;",
-		"pub fn append_functions(",
-		"fn append_lower_test_parse_result_function(",
-		"fn append_lower_test_program_function(",
-		"fn append_lower_test_call_function(",
-		"executable::unsupported_executable_kind_tag(",
-		"executable::call_executable_kind_tag(",
-	},
-	"../../selfhost/src/backend/cli_match_llvm.kizu": {
-		"pub fn append_functions(",
-		"fn append_cli_moved_value_name_function(",
 	},
 	"../../selfhost/src/backend/compiled_llvm.kizu": {
 		"pub fn append_compiled_function(",
@@ -2708,7 +2104,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn lower_nested_struct_field_expr(",
 	},
 	"../../selfhost/src/backend/compiled_mir_types.kizu": {
-		"pub fn resolve_value_llvm_type(",
+		"pub fn resolve_value_llvm_type_indexed(",
 		"pub fn resolve_value_kizu_type(",
 		"pub fn struct_lookup_kizu_type(",
 	},
@@ -2762,24 +2158,35 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/ir/executable_functions.kizu": {
 		"pub fn append_facts(",
-		"fn append_execute_function_facts(",
-		"fn append_backend_function_facts(",
-		"fn append_executable_function_facts(",
-		"fn append_executable_helper_body_facts(",
-		"fn append_hosted_function_facts(",
-		"fn append_selected_enum_variant_facts(",
-		"enum-variant ",
-		"BinaryOp",
-		"function_signature::append(",
-		"fn append_codegen_reachable_helper_bodies(",
-		"fn append_codegen_closure_helper_body(",
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"fn append_selected_function_with_body(",
-		"fn function_node(",
-		"executable_body::append_function_body_ir(",
+		"package_catalog_collect::collect_from_parsed_files(",
+		"package_call_resolution::resolve_package_calls(",
+		"package_dependency_graph::dependency_graph(",
+		"fn append_numeric_package_closure(",
+		"external_abi_entrypoints::collect(allocator)",
+		"fn append_numeric_package_definition(",
+		"fn append_numeric_package_definition_body(",
+		"function_signature::append(out, text, ast, definition, name)",
 		"executable_body::append_helper_body_ir(",
-		"fn append_selected_helper_body(",
+		"package_type_facts::append_package_component_type_facts(",
+	},
+	"../../selfhost/src/ir/package_type_facts.kizu": {
+		"pub fn append_core_abi_representation_facts(",
+		"pub fn append_package_component_type_facts(",
+		"pub fn append_component_declaration_type_facts(",
+		"union-type ",
+		"union-variant ",
+	},
+	"../../selfhost/src/ir/package_resolver_gates.kizu": {
+		"fn resolve_test_files(",
+		"pub fn package_catalog_dense_function_range_gate(",
+		"pub fn package_resolver_builtin_gate(",
+		"pub fn package_resolver_duplicate_enum_tag_gate(",
+	},
+	"../../selfhost/src/ir/package_type_facts_gates.kizu": {
+		"pub fn component_type_facts_gate(",
+		"pub fn package_component_type_facts_gate(",
+		"package_type_facts::append_component_declaration_type_facts(",
+		"package_type_facts::append_package_component_type_facts(",
 	},
 	"../../selfhost/src/ir/function_signature.kizu": {
 		"pub fn append(",
@@ -2907,34 +2314,35 @@ func assertHostedExecutableFactOrigins(
 		sources.contract,
 		sources.llvm,
 	)
-	assertExecutableSelectedFunctionsComeFromCheckedAST(
-		t,
-		sources.ir,
-		sources.selected,
-		sources.llvm,
-	)
-	assertExecutableSelectedSignaturesComeFromCheckedAST(
-		t,
-		sources.ir,
-		sources.selected,
-		sources.llvm,
-		facts.selectedSignatureDetails,
-	)
-	assertExecutableSelectedBodiesComeFromCheckedAST(
-		t,
-		sources.ir,
-		sources.selected,
-		sources.body,
-		sources.llvm,
-	)
-	assertExecutableSelectedHelperBodiesComeFromCheckedAST(
-		t,
-		sources.ir,
-		sources.selected,
-		sources.body,
-		sources.llvm,
-	)
-	assertHostedHelperBodyFactsAreCatalogDriven(t, sources.selected)
+	assertHostedExecutablePackageGraphFacts(t, sources.selected)
+}
+
+// assertHostedExecutablePackageGraphFacts keeps executable signatures and body
+// facts on the single parsed package graph. Component-specific selector tables
+// must not regain ownership of this path.
+func assertHostedExecutablePackageGraphFacts(t *testing.T, selected string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"package_catalog_collect::collect_from_parsed_files(",
+		"package_dependency_graph::dependency_graph(",
+		"package_call_resolution::append_resolved_dependencies(",
+		"append_numeric_package_definition_body(",
+		"function_signature::append(out, text, ast, definition, name)",
+		"executable_body::append_helper_body_ir(",
+	} {
+		if !strings.Contains(selected, fragment) {
+			t.Fatalf("hosted executable package graph missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"collect_catalog_closure_",
+		"append_selected_helper_body(",
+		"append_selected_function_with_body(",
+	} {
+		if strings.Contains(selected, fragment) {
+			t.Fatalf("hosted executable facts retain legacy selector %q", fragment)
+		}
+	}
 }
 
 // assertHostedExecutableRendererConsumers checks generated renderers consume
@@ -2953,11 +2361,12 @@ func assertHostedExecutableRendererConsumers(
 	assertExecutableABIConsumers(
 		t,
 		sources.parser,
-		sources.ast,
+		sources.test,
 		sources.run,
 		sources.test,
 		facts.abi,
 	)
+	assertExecutableLowererABIConsumers(t, sources.lowerer)
 	assertExecutableHostedSharedRendererOwners(
 		t,
 		sources.llvm,
@@ -2971,7 +2380,7 @@ func assertHostedExecutableRendererConsumers(
 		sources.llvm,
 		sources.cli,
 		sources.parser,
-		sources.ast,
+		sources.test,
 	)
 }
 
@@ -2985,7 +2394,6 @@ type hostedExecutableContractSources struct {
 	llvm     string
 	cli      string
 	parser   string
-	ast      string
 	lowerer  string
 	run      string
 	test     string
@@ -3005,10 +2413,9 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 		llvm:   readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu"),
 		cli:    readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu"),
 		parser: readSelfhostFile(t, "../../selfhost/src/backend/cli_ast_boundary_llvm.kizu"),
-		ast:    readSelfhostFile(t, "../../selfhost/src/backend/cli_test_ast_llvm.kizu"),
 		lowerer: readSelfhostFile(
 			t,
-			"../../selfhost/src/backend/cli_test_ast_llvm.kizu",
+			"../../selfhost/src/ir/executable_lowering.kizu",
 		),
 		run:  readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu"),
 		test: readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu"),
@@ -3087,386 +2494,6 @@ func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string) {
 
 // assertExecutableSelectedFunctionsComeFromCheckedAST keeps selected hosted
 // executable functions tied to parsed selfhost source function bodies.
-func assertExecutableSelectedFunctionsComeFromCheckedAST(
-	t *testing.T,
-	ir string,
-	selected string,
-	llvm string,
-) {
-	t.Helper()
-	if strings.Contains(ir, `"executable-selected-functions checked-ast-path-v1"`) {
-		t.Fatal("IR root hardcodes selected executable function facts")
-	}
-	required := []string{
-		"parser::parse_checked_file(",
-		"source::module_path(file)",
-		"fn append_execute_function_facts(",
-		"fn append_executable_function_facts(",
-		"fn append_hosted_function_facts(",
-		"fn append_selected_function_with_body(",
-		"executable_body::append_function_body_ir(",
-	}
-	for _, fragment := range required {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("selected executable function facts do not use checked AST with %q", fragment)
-		}
-	}
-	for _, content := range []string{selected, llvm} {
-		if strings.Contains(content, `"selected-function `) {
-			t.Fatal("executable path still depends on dedicated selected-function facts")
-		}
-	}
-	for _, fragment := range []string{
-		"fn require_function_body_fragment(",
-		"node_text_contains(",
-		"bytes_contains(",
-	} {
-		if strings.Contains(selected, fragment) {
-			t.Fatalf("selected executable function facts still use source substring validation %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		`"check::checked_ast_node"`,
-		`"backend::emit_test_executable_artifact"`,
-		`"executable_lowering::lower_test_executable"`,
-		`"ensure_hosted_artifact_dir"`,
-	} {
-		if !strings.Contains(llvm, fragment) {
-			t.Fatalf("backend body IR validation does not require selected call %q", fragment)
-		}
-	}
-}
-
-// assertExecutableSelectedSignaturesComeFromCheckedAST keeps signature facts
-// derived from parsed function declarations instead of backend fixtures.
-func assertExecutableSelectedSignaturesComeFromCheckedAST(
-	t *testing.T,
-	ir string,
-	selected string,
-	llvm string,
-	details []string,
-) {
-	t.Helper()
-	if strings.Contains(ir, `"executable-selected-signatures checked-ast-signature-v1"`) {
-		t.Fatal("IR root hardcodes selected executable signature facts")
-	}
-	for _, fragment := range []string{
-		"function_signature::append(",
-		"fn append_from_decl(",
-		"fn append_return(",
-		"fn append_param(",
-		"append_type_token(",
-		"function_node(",
-		"function_body_from_node(",
-		"parser::parse_checked_file(",
-	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("selected executable signatures are not checked AST-derived via %q", fragment)
-		}
-	}
-	for _, content := range []string{selected, llvm} {
-		if strings.Contains(content, `"selected-signature`) {
-			t.Fatal("executable path still depends on selected-signature facts")
-		}
-		if strings.Contains(content, `"selected-signature `) {
-			t.Fatal("executable path still depends on dedicated selected-signature header facts")
-		}
-	}
-	for _, fact := range details {
-		assertSelectedSignatureDetailOrigin(t, selected, llvm, fact)
-	}
-}
-
-// assertSelectedSignatureDetailOrigin checks detail facts are assembled from
-// declaration shape instead of duplicated as static backend facts.
-func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm string, fact string) {
-	t.Helper()
-	if strings.Contains(llvm, `"`+fact+`"`) {
-		t.Fatalf("backend hardcodes complete function-signature detail %q", fact)
-	}
-	parts := strings.Fields(fact)
-	if len(parts) != 3 && len(parts) != 4 {
-		t.Fatalf("invalid function-signature detail fixture %q", fact)
-	}
-	name := parts[1]
-	if strings.HasPrefix(fact, "function-signature-param ") {
-		if !strings.Contains(selected, "try std::fmt::append_i64(out, index)") {
-			t.Fatalf("function signature emitter does not derive param index for %q", fact)
-		}
-	}
-	for _, fragment := range []string{
-		`"` + parts[0] + ` "`,
-		`"` + name + `"`,
-	} {
-		if strings.HasPrefix(name, "selfhost::ir::codegen::") {
-			assertCodegenCatalogSignatureOrigin(t, selected, fact)
-			return
-		}
-		if strings.HasPrefix(name, "selfhost::backend::executable::") {
-			assertExecutableCatalogSignatureOrigin(t, selected, fact)
-			return
-		}
-		if name == "selfhost::backend::render_run_codegen_artifact" ||
-			name == "selfhost::backend::emit_rendered_run_artifact" {
-			assertBackendWrapperCatalogSignatureOrigin(t, selected, fact)
-			return
-		}
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("function signature emitter does not publish %q via %q", fact, fragment)
-		}
-	}
-}
-
-// assertCodegenCatalogSignatureOrigin keeps codegen signature facts derived from
-// the component catalog closure instead of per-helper qualified-name literals.
-func assertCodegenCatalogSignatureOrigin(t *testing.T, selected string, fact string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::ir::codegen\"",
-		"append_codegen_reachable_helper_bodies(",
-		"function_signature::append_catalog(",
-	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("codegen signature fact %q is not catalog-derived via %q", fact, fragment)
-		}
-	}
-}
-
-// assertExecutableCatalogSignatureOrigin keeps the executable wrapper/helper
-// signature facts derived from the component catalog closure instead of
-// per-function qualified-name literals.
-func assertExecutableCatalogSignatureOrigin(t *testing.T, selected string, fact string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::backend::executable\"",
-		"append_executable_helper_body_facts(",
-		"function_signature::append_catalog(",
-	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("executable signature fact %q is not catalog-derived via %q", fact, fragment)
-		}
-	}
-}
-
-// assertBackendWrapperCatalogSignatureOrigin keeps the backend run-codegen
-// wrapper signature facts derived from the component catalog closure instead of
-// per-function qualified-name literals.
-func assertBackendWrapperCatalogSignatureOrigin(t *testing.T, selected string, fact string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"component_function_catalog::collect_from_ast(",
-		"\"selfhost::backend\"",
-		"append_backend_wrapper_body_facts(",
-		"function_signature::append_catalog(",
-	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("backend wrapper signature fact %q is not catalog-derived via %q", fact, fragment)
-		}
-	}
-}
-
-// assertExecutableSelectedBodiesComeFromCheckedAST keeps body IR facts emitted
-// from parsed checked AST nodes instead of static backend fixtures.
-func assertExecutableSelectedBodiesComeFromCheckedAST(
-	t *testing.T,
-	ir string,
-	selected string,
-	body string,
-	llvm string,
-) {
-	t.Helper()
-	if strings.Contains(ir, `"executable-selected-body-ir checked-ast-body-v1"`) {
-		t.Fatal("IR root hardcodes selected executable body IR facts")
-	}
-	for _, fragment := range []string{
-		"parser::parse_checked_file(",
-		"function_body_node(",
-		"executable_body::append_function_body_ir(",
-	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("selected executable body IR is not rooted in checked AST via %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"pub fn append_function_body_ir(",
-		"fn append_body_node_ir(",
-		"ast.get(node_id)",
-		"ast.child_at(range, index)",
-		"body-node ",
-		"body-edge ",
-		"body-call ",
-		"body-struct-literal ",
-	} {
-		if !strings.Contains(body, fragment) {
-			t.Fatalf("selected executable body IR emitter missing %q", fragment)
-		}
-	}
-	for _, content := range []string{body, llvm} {
-		if strings.Contains(content, `"selected-function-body `) {
-			t.Fatal("executable path still depends on dedicated selected-function-body header facts")
-		}
-		if strings.Contains(content, `"selected-function-body-end `) {
-			t.Fatal("executable path still depends on selected function body count facts")
-		}
-	}
-}
-
-// assertExecutableSelectedHelperBodiesComeFromCheckedAST keeps private helper
-// body facts rooted in parsed checked AST, not backend-side static fixtures.
-func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
-	t *testing.T,
-	ir string,
-	selected string,
-	body string,
-	llvm string,
-) {
-	t.Helper()
-	if strings.Contains(ir, `"executable-selected-helper-body-ir checked-ast-helper-body-v1"`) {
-		t.Fatal("IR root hardcodes selected executable helper body IR facts")
-	}
-	for _, fragment := range []string{
-		"append_executable_helper_body_facts(",
-		"component_function_catalog::collect_from_ast(",
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-		"unsupported_executable",
-		"ast_node_text",
-		"is_empty_node",
-	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("selected helper body IR is not rooted in checked AST via %q", fragment)
-		}
-	}
-	assertExecutableHelperBodyFactsAreCatalogDriven(t, selected)
-	for _, fragment := range []string{
-		"pub fn append_catalog_helper_body_ir(",
-		"fn append_body_ir(",
-		"body-call ",
-		"body-struct-literal ",
-	} {
-		if !strings.Contains(body, fragment) {
-			t.Fatalf("selected helper body IR emitter missing %q", fragment)
-		}
-	}
-	for _, content := range []string{body, llvm} {
-		if strings.Contains(content, `"selected-helper-body `) {
-			t.Fatal("executable path still depends on dedicated selected-helper-body header facts")
-		}
-		if strings.Contains(content, `"selected-helper-body-end `) {
-			t.Fatal("executable path still depends on selected helper body count facts")
-		}
-	}
-}
-
-// assertExecutableHelperBodyFactsAreCatalogDriven keeps
-// append_executable_helper_body_facts seeded from the component catalog and
-// expanded by the shared BFS, guarding it from regressing back to the
-// hand-written append_selected_helper_body table.
-func assertExecutableHelperBodyFactsAreCatalogDriven(t *testing.T, selected string) {
-	t.Helper()
-	helperFactsBody := selfhostKizuFunctionBody(
-		t,
-		selected,
-		"fn append_executable_helper_body_facts(",
-	)
-	helperClosureBody := selfhostKizuFunctionBody(
-		t,
-		selected,
-		"fn append_executable_helper_closure_body(",
-	)
-	for _, fragment := range []string{
-		"component_function_catalog::collect_from_ast(",
-		`"selfhost::backend::executable"`,
-		`component_function_catalog::find_local_function_index(catalog, "lower_test_executable")`,
-		`component_function_catalog::find_local_function_index(catalog, "is_empty_node")`,
-		`component_function_catalog::find_local_function_index(catalog, "unsupported_executable")`,
-		`component_function_catalog::find_local_function_index(catalog, "ast_node_text")`,
-		"append_executable_helper_closure_body(",
-		"closure_index_seen(&emitted, function_index)",
-	} {
-		if !strings.Contains(helperFactsBody, fragment) {
-			t.Fatalf("executable helper body facts no longer catalog-driven, missing %q", fragment)
-		}
-	}
-	// The wrapper must no longer be hand-selected through append_selected_function_with_body.
-	if strings.Contains(helperFactsBody, "append_selected_function_with_body(") {
-		t.Fatal("executable function body facts keep hand-written wrapper selection")
-	}
-	if strings.Contains(helperFactsBody, "append_selected_helper_body(") {
-		t.Fatal("executable helper body facts reverted to hand-written append_selected_helper_body")
-	}
-	assertSelfhostClosureUsesCommonCalleeCollector(
-		t,
-		selected,
-		helperClosureBody,
-		`"selfhost::backend::executable::"`,
-		`"executable helper closure: unsupported call form"`,
-		`"executable helper closure: unsupported qualified callee"`,
-	)
-}
-
-// assertHostedHelperBodyFactsAreCatalogDriven keeps append_hosted_helper_body_facts
-// seeded from the component catalog and expanded by the shared BFS, guarding the
-// converted hosted helpers from regressing back to the hand-written
-// append_selected_helper_body table.
-func assertHostedHelperBodyFactsAreCatalogDriven(t *testing.T, selected string) {
-	t.Helper()
-	helperFactsBody := selfhostKizuFunctionBody(
-		t,
-		selected,
-		"fn append_hosted_helper_body_facts(",
-	)
-	helperClosureBody := selfhostKizuFunctionBody(
-		t,
-		selected,
-		"fn append_hosted_helper_closure_body(",
-	)
-	findLocal := "component_function_catalog::find_local_function_index(catalog, "
-	for _, fragment := range []string{
-		"component_function_catalog::collect_from_ast(",
-		`"selfhost::backend::hosted"`,
-		// #1255 slice4 PR-2 severed the hosted_executable_metadata_from_codegen shape
-		// seed; the hosted helper closure now seeds from the live tape run-metadata
-		// executable (its codegen::metadata_line crossing) plus the shared
-		// hosted_output_len helper.
-		findLocal + `"rendered_run_metadata_executable")`,
-		findLocal + `"hosted_output_len")`,
-		"append_hosted_helper_closure_body(",
-		"closure_index_seen(&emitted, function_index)",
-	} {
-		if !strings.Contains(helperFactsBody, fragment) {
-			t.Fatalf("hosted helper body facts no longer catalog-driven, missing %q", fragment)
-		}
-	}
-	if strings.Contains(helperFactsBody, "append_selected_helper_body(") {
-		t.Fatal("hosted helper body facts reverted to hand-written append_selected_helper_body")
-	}
-	// The hosted closure must not reintroduce per-helper selection inside its body.
-	if strings.Contains(helperClosureBody, "append_selected_helper_body(") {
-		t.Fatal("hosted helper closure body reverted to hand-written append_selected_helper_body")
-	}
-	for _, fragment := range []string{
-		"function_signature::append_catalog(",
-		"executable_body::append_catalog_helper_body_ir(",
-	} {
-		if !strings.Contains(helperClosureBody, fragment) {
-			t.Fatalf("hosted helper closure body missing catalog emitter %q", fragment)
-		}
-	}
-	assertSelfhostClosureUsesCommonCalleeCollector(
-		t,
-		selected,
-		helperClosureBody,
-		`"selfhost::backend::hosted::"`,
-		`"hosted helper closure: unsupported call form"`,
-		`"hosted helper closure: unsupported qualified callee"`,
-	)
-}
-
-// assertExecutableContractFactsComeFromCheckedAST keeps executable facts tied to
-// selfhost source declarations instead of hardcoded in the IR root.
 func assertExecutableContractFactsComeFromCheckedAST(
 	t *testing.T,
 	ir string,
@@ -3625,8 +2652,7 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	for _, fragment := range []string{
 		"@kizu_kizu__parser_parse_program",
 		"@kizu_selfhost__cli_parse_validated_ast",
-		"@kizu_kizu__ast_ast_add_node",
-		"@kizu_kizu__ast_parse_result",
+		"@kizu_rt_process_exit(i64 1)",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume tokenized AST boundary with %q", fragment)
@@ -3706,7 +2732,6 @@ func assertExecutableABIConsumers(
 ) {
 	t.Helper()
 	assertExecutableASTABIConsumers(t, parser, ast, abiFacts)
-	assertExecutableLowererABIConsumers(t, ast)
 	assertExecutableDispatchABIConsumers(t, run, test)
 }
 
@@ -3738,11 +2763,10 @@ func assertExecutableASTABIConsumers(
 func assertExecutableLowererABIConsumers(t *testing.T, lowerer string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"executable::unsupported_executable_kind_tag(",
-		"executable::call_executable_kind_tag(",
+		"pub fn lower_test_executable(",
 	} {
 		if !strings.Contains(lowerer, fragment) {
-			t.Fatalf("hosted executable lowerer does not consume source-owned ABI tags with %q", fragment)
+			t.Fatalf("hosted executable boundary does not delegate lowering with %q", fragment)
 		}
 	}
 	for _, forbidden := range []string{
@@ -3880,11 +2904,10 @@ func assertExecutableIRThreading(
 	}
 	for _, fragment := range []string{
 		"try cli_llvm::append_functions(\n        out,\n        lookup_index,\n        ir_bytes,",
-		"try cli_ast_boundary_llvm::append_functions(out)",
-		"try cli_test_ast_llvm::append_functions(out)",
+		"try cli_ast_boundary_llvm::append_functions(",
 		"try cli_test_llvm::append_functions(out, ir_bytes)",
-		"try cli_test_llvm::append_cli_test_blocks(out, ir_bytes)",
-		"try cli_run_llvm::append_cli_run_blocks(out, ir_bytes)",
+		"try cli_test_llvm::append_cli_test_blocks(",
+		"try cli_run_llvm::append_cli_run_blocks(out, ir_bytes, parse_result_abi)",
 	} {
 		combined := llvm + cli + parser + ast + test
 		if !strings.Contains(combined, fragment) {
@@ -3904,20 +2927,11 @@ func hostedExecutableABIFacts() []string {
 	}
 }
 
-// hostedExecutableSelectedSignatureDetailFacts returns representative function
-// signature details checked by the backend before direct executable lowering.
+// hostedExecutableSelectedSignatureDetailFacts is empty because external ABI
+// signatures are now validated from the canonical manifest as a complete set.
+// Per-root examples here would recreate the deleted manual root list.
 func hostedExecutableSelectedSignatureDetailFacts() []string {
-	return []string{
-		"function-signature-return selfhost::cli::execute::run_file_cli !i64",
-		"function-signature-param selfhost::cli::execute::run_file_cli 0 " +
-			"allocator:runtime:Allocator",
-		// #1255 slice4 PR-1: the hosted per-shape signature details (lower_run_*/
-		// main_print_program/stdout_payload/lower_run_codegen_program) were severed from
-		// the executable signature contract. run_file_cli and lower_test_executable are
-		// the surviving live entrypoint / test-wrapper signature details.
-		"function-signature-param selfhost::backend::executable::" +
-			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast",
-	}
+	return nil
 }
 
 // hostedExecutableBodyContractFragments returns representative generic body IR
@@ -3929,18 +2943,12 @@ func hostedExecutableBodyContractFragments() []string {
 	return fragments
 }
 
-// hostedExecutableCommonBodyContractFragments returns shared body checks. The shape
-// body edges (lower_run_codegen_program / codegen::stdout_payload) were severed by
-// #1255 slice4 PR-1; only the live tape run path body calls remain.
+// hostedExecutableCommonBodyContractFragments returns body checks for functions
+// that remain in the manifest-owned closure.
 func hostedExecutableCommonBodyContractFragments() []string {
 	return []string{
+		"require_metadata_line_body(bytes)",
 		"ir_contract::require_body_call(",
-		`"selfhost::cli::execute::run_file_cli"`,
-		`"check::checked_ast_node"`,
-		`"backend::render_run_codegen_artifact"`,
-		`"backend::emit_rendered_run_artifact"`,
-		`"code_render::render_run_ast_artifact"`,
-		`"hosted::emit_rendered_run_artifact"`,
 	}
 }
 
@@ -3956,12 +2964,8 @@ func hostedExecutableRunBodyContractFragments() []string {
 // hostedExecutableTestBodyContractFragments returns test executable body checks.
 func hostedExecutableTestBodyContractFragments() []string {
 	return []string{
-		`"selfhost::cli::execute::test_file_cli"`,
-		`"backend::lower_test_executable"`,
 		`"selfhost::backend::executable::lower_test_executable"`,
 		`"executable_lowering::lower_test_executable"`,
-		`"selfhost::backend::hosted::emit_test_executable_artifact"`,
-		`"write_test_artifact"`,
 	}
 }
 

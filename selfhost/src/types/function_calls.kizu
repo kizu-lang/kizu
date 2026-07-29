@@ -1,5 +1,8 @@
 import selfhost::parser;
 import selfhost::source;
+import selfhost::type_constructor;
+import selfhost::types::expression_facts;
+import selfhost::types::expression_infer;
 import selfhost::types::model;
 import selfhost::types::package_modules;
 
@@ -93,7 +96,7 @@ pub fn collect_function_signatures_from_ast(
     ast: &std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId,
     arities: &var std::map::Map<[]u8, i64>,
-    returns: &var std::map::Map<[]u8, []u8>
+    returns: &var expression_facts::ExpressionTypeFacts
 ) -> !void {
     let node = ast.get(root);
     match node.data {
@@ -115,7 +118,40 @@ pub fn collect_function_signatures_from_ast(
             arities,
             returns
         );,
+        ImplDecl(impl_decl) => return collect_method_param_type_facts_in_range(
+            allocator,
+            file,
+            ast,
+            impl_decl.methods,
+            returns
+        );,
         _ => return;,
+    }
+    return;
+}
+
+fn collect_method_param_type_facts_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    methods: std::kizu::ast::ChildRange,
+    returns: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    var index = 0;
+    while index < methods.len {
+        let child = try ast.child_at(methods, index);
+        let node = ast.get(child);
+        match node.data {
+            FnDecl(fn_decl) => try collect_function_param_type_facts(
+                allocator,
+                file,
+                ast,
+                fn_decl.params,
+                returns
+            );,
+            _ => ignore_function_param_type_fact();,
+        }
+        index = index + 1;
     }
     return;
 }
@@ -126,7 +162,7 @@ fn collect_function_signatures_in_range_from_ast(
     ast: &std::kizu::ast::Ast,
     declarations: std::kizu::ast::ChildRange,
     arities: &var std::map::Map<[]u8, i64>,
-    returns: &var std::map::Map<[]u8, []u8>
+    returns: &var expression_facts::ExpressionTypeFacts
 ) -> !void {
     var index = 0;
     while index < declarations.len {
@@ -152,7 +188,7 @@ fn collect_function_signature_from_ast(
     params: std::kizu::ast::ChildRange,
     return_type: std::kizu::ast::NodeId,
     arities: &var std::map::Map<[]u8, i64>,
-    returns: &var std::map::Map<[]u8, []u8>
+    returns: &var expression_facts::ExpressionTypeFacts
 ) -> !void {
     var qualified = std::string::String(allocator);
     try append_module_name(qualified, file);
@@ -163,8 +199,69 @@ fn collect_function_signature_from_ast(
         return error("duplicate function");
     }
     try arities.insert(function_name, params.len);
-    try returns.insert(function_name, ast_return_type(file, ast, return_type));
+    var canonical_return = try expression_infer::build_canonical_type_spelling(
+        allocator,
+        file,
+        ast_return_type(file, ast, return_type),
+        returns
+    );
+    defer canonical_return.deinit();
+    try returns.insert_source_owned(&function_name, &canonical_return);
+    try collect_function_param_type_facts(
+        allocator, file, ast, params, returns
+    );
     qualified.deinit();
+    return;
+}
+
+fn collect_function_param_type_facts(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    returns: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        let node = ast.get(child);
+        match node.data {
+            Param(param_node) => try insert_function_param_type_fact(
+                allocator, file, ast, child, param_node.type_node, returns
+            );,
+            _ => ignore_function_param_type_fact();,
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn insert_function_param_type_fact(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    param_node: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    returns: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try expression_infer::append_param_type_key(
+        key, file, ast, param_node
+    );
+    let key_bytes = key.as_bytes();
+    var canonical_type = try expression_infer::build_canonical_type_spelling(
+        allocator,
+        file,
+        ast_return_type(file, ast, type_node),
+        returns
+    );
+    defer canonical_type.deinit();
+    try returns.insert_source_owned(&key_bytes, &canonical_type);
+    return;
+}
+
+fn ignore_function_param_type_fact() -> void {
     return;
 }
 
@@ -815,7 +912,7 @@ fn function_call_error_for_ast_call(
     let name = function_call_name_text(file, ast, callee);
     if should_skip_function_reference(name) or
         last_segment_starts_with_uppercase(name) or
-        is_generic_constructor_text(name) or
+        (try is_generic_constructor_text(name)) or
         (local_only and is_qualified_name(name)) or
         (!local_only and !is_qualified_name(name)) {
         return function_call_summary(false, 0, 0, 0, 0, 0);
@@ -895,16 +992,48 @@ fn function_call_summary(
 }
 
 pub fn should_skip_function_reference(name: []u8) -> bool {
-    return std::mem::equal_bytes(name, "print") or
-        std::mem::equal_bytes(name, "error") or
-        std::mem::equal_bytes(name, "cast") or
-        std::mem::equal_bytes(name, "return") or
-        std::mem::equal_bytes(name, "or") or
-        std::mem::equal_bytes(name, "and") or
-        std::mem::equal_bytes(name, "if") or
-        std::mem::equal_bytes(name, "while") or
-        std::mem::equal_bytes(name, "for") or
-        std::mem::equal_bytes(name, "match");
+    return expression_infer::should_skip_function_reference(name);
+}
+
+// append_compact_path_name appends a path with its ASCII whitespace removed. A path is a run of
+// identifiers separated by '::' and the separator's spacing carries no meaning, so the resolved
+// key this builds must not carry it either: declaration names never do, and a spaced key misses
+// every one of them. It appends into the caller's String rather than compacting into a local one,
+// because a slice borrowed from a local String cannot be handed to another function.
+pub fn append_compact_path_name(
+    out: &var std::string::String,
+    name: []u8
+) -> !void {
+    return append_compact_path_name_from(out, name, 0);
+}
+
+// append_compact_path_name_from takes the tail's start offset rather than a slice of name: a
+// slice whose end bound is a call ('name[start..std::mem::len(name)]') has no lowering as a
+// source-function argument, and the offset carries the same information.
+pub fn append_compact_path_name_from(
+    out: &var std::string::String,
+    name: []u8,
+    start: i64
+) -> !void {
+    let length = std::mem::len(name);
+    var index = start;
+    while index < length {
+        let byte = name[index];
+        if !path_byte_is_ascii_space(byte) {
+            try out.append_byte(byte);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn path_byte_is_ascii_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or
+        byte == cast<u8>(9) or
+        byte == cast<u8>(10) or
+        byte == cast<u8>(13) or
+        byte == cast<u8>(11) or
+        byte == cast<u8>(12);
 }
 
 pub fn append_resolved_function_name(
@@ -915,27 +1044,27 @@ pub fn append_resolved_function_name(
     import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !void {
     if source::is_absolute_name_for_file(file, name) {
-        try out.append_bytes(name);
+        try append_compact_path_name(out, name);
         return;
     }
     if is_qualified_name(name) {
         let first_end = first_qualified_segment_end(name);
-        let alias = name[0..first_end];
+        let alias = std::mem::trim_ascii(name[0..first_end]);
         if import_alias_starts.contains(alias) {
             let module_start = try import_alias_starts.get(alias);
             let module_end = try import_alias_ends.get(alias);
             try out.append_bytes(file.text[module_start..module_end]);
-            try out.append_bytes(name[first_end..std::mem::len(name)]);
+            try append_compact_path_name_from(out, name, first_end);
             return;
         }
         try source::append_package_prefix(out, file);
         try out.append_bytes("::");
-        try out.append_bytes(name);
+        try append_compact_path_name(out, name);
         return;
     }
     try source::append_qualified_module_name(out, file);
     try out.append_bytes("::");
-    try out.append_bytes(name);
+    try append_compact_path_name(out, name);
     return;
 }
 
@@ -973,19 +1102,11 @@ fn ast_ref_node_text(
     return std::mem::trim_ascii(file.text[span.start..span.end]);
 }
 
-pub fn is_generic_constructor_text(text: []u8) -> bool {
-    return std::mem::equal_bytes(text, "std::array::Array") or
-        std::mem::starts_with(text, "std::array::Array<") or
-        std::mem::equal_bytes(text, "std::map::Map") or
-        std::mem::starts_with(text, "std::map::Map<") or
-        std::mem::equal_bytes(text, "std::mem::Box") or
-        std::mem::starts_with(text, "std::mem::Box<") or
-        std::mem::equal_bytes(text, "std::arena::Arena") or
-        std::mem::starts_with(text, "std::arena::Arena<") or
-        std::mem::equal_bytes(text, "std::arena::Handle") or
-        std::mem::starts_with(text, "std::arena::Handle<") or
-        std::mem::equal_bytes(text, "std::atomic::Atomic") or
-        std::mem::starts_with(text, "std::atomic::Atomic<");
+pub fn is_generic_constructor_text(text: []u8) -> !bool {
+    if try type_constructor::is_builtin_application(text) {
+        return true;
+    }
+    return type_constructor::is_builtin_name(text);
 }
 
 fn first_qualified_segment_end(name: []u8) -> i64 {
