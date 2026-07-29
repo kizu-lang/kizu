@@ -25,6 +25,7 @@ source_filename = "target/selfhost/selfhost.storage"
 @.kizu.rt.invalid_array_element = private unnamed_addr constant [21 x i8] c"invalid array element"
 @.kizu.rt.array_index_out_of_bounds = private unnamed_addr constant [25 x i8] c"array index out of bounds"
 @.kizu.rt.array_pop_empty = private unnamed_addr constant [20 x i8] c"pop from empty array"
+@.kizu.rt.string_truncate_out_of_bounds = private unnamed_addr constant [36 x i8] c"string truncate length out of bounds"
 @.kizu.rt.array_smoke = private unnamed_addr constant [8 x i8] c"array-ok"
 @.kizu.rt.array_smoke_second = private unnamed_addr constant [8 x i8] c"payload2"
 @.kizu.rt.string_smoke = private unnamed_addr constant [3 x i8] c"kiz"
@@ -517,6 +518,27 @@ entry:
   %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2
   %len = load i64, ptr %len_field
   ret i64 %len
+}
+
+define %kizu.error.void @kizu_rt_string_truncate(%kizu.owned %string, i64 %length) {
+entry:
+  %raw = extractvalue %kizu.owned %string, 0
+  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2
+  %current = load i64, ptr %len_field
+  %length_nonnegative = icmp sge i64 %length, 0
+  %length_in_bounds = icmp sle i64 %length, %current
+  %length_ok = and i1 %length_nonnegative, %length_in_bounds
+  br i1 %length_ok, label %store, label %out_of_bounds
+store:
+  store i64 %length, ptr %len_field
+  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+out_of_bounds:
+  %message_ptr = getelementptr inbounds [36 x i8], ptr @.kizu.rt.string_truncate_out_of_bounds, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 36, 1
+  %fail_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %fail_result = insertvalue %kizu.error.void %fail_base, %kizu.slice.u8 %message, 1
+  ret %kizu.error.void %fail_result
 }
 
 define %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %string) {

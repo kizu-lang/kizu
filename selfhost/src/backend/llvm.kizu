@@ -1103,6 +1103,12 @@ fn render_llvm_module(
 // and copies the existing bytes, mirroring the storage module definitions exactly.
 fn append_string_runtime(out: &var std::string::String) -> !void {
     try out.append_bytes(
+        "@.kizu.rt.string_truncate_out_of_bounds = private unnamed_addr constant [36 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("string truncate length out of bounds");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(
         "@.kizu.rt.allocation_failed = private unnamed_addr constant [17 x i8] c");
     try out.append_byte(cast<u8>(34));
     try out.append_bytes("allocation failed");
@@ -1360,6 +1366,37 @@ fn append_string_runtime(out: &var std::string::String) -> !void {
         "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2");
     try append_line(out, "  %len = load i64, ptr %len_field");
     try append_line(out, "  ret i64 %len");
+    try append_line(out, "}");
+    try append_line(out, "");
+    // truncate drops the tail of a String by moving its length field, which is what an
+    // append-then-rewind builder does when a path segment is rolled back. It checks the length
+    // against the current one and answers a real failure rather than trapping, matching the
+    // '!void' the operation is declared with. The hosted compiler module carries its own copy,
+    // exactly as it does for the rest of the @kizu_rt_string_* family.
+    try append_line(out,
+        "define %kizu.error.void @kizu_rt_string_truncate(%kizu.owned %string, i64 %length) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %raw = extractvalue %kizu.owned %string, 0");
+    try append_line(out,
+        "  %len_field = getelementptr inbounds %kizu.rt.string, ptr %raw, i32 0, i32 2");
+    try append_line(out, "  %current = load i64, ptr %len_field");
+    try append_line(out, "  %length_nonnegative = icmp sge i64 %length, 0");
+    try append_line(out, "  %length_in_bounds = icmp sle i64 %length, %current");
+    try append_line(out, "  %length_ok = and i1 %length_nonnegative, %length_in_bounds");
+    try append_line(out, "  br i1 %length_ok, label %store, label %out_of_bounds");
+    try append_line(out, "store:");
+    try append_line(out, "  store i64 %length, ptr %len_field");
+    try append_line(out,
+        "  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }");
+    try append_line(out, "out_of_bounds:");
+    try append_line(out,
+        "  %message_ptr = getelementptr inbounds [36 x i8], ptr @.kizu.rt.string_truncate_out_of_bounds, i64 0, i64 0");
+    try append_line(out, "  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0");
+    try append_line(out, "  %message = insertvalue %kizu.slice.u8 %message_base, i64 36, 1");
+    try append_line(out, "  %fail_base = insertvalue %kizu.error.void poison, i1 false, 0");
+    try append_line(out,
+        "  %fail_result = insertvalue %kizu.error.void %fail_base, %kizu.slice.u8 %message, 1");
+    try append_line(out, "  ret %kizu.error.void %fail_result");
     try append_line(out, "}");
     try append_line(out, "");
     try append_line(out, "define %kizu.slice.u8 @kizu_rt_string_as_bytes(%kizu.owned %string) {");
