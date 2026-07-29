@@ -2570,8 +2570,9 @@ func (c *Checker) checkMatchArms(
 		allReturn = allReturn && returns
 	}
 	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
-		return false, errorf("type error: match on `%s` is not exhaustive",
-			matchTypeName(enumType, unionType))
+		return false, errorf("type error: match on `%s` is not exhaustive: missing %s",
+			matchTypeName(enumType, unionType),
+			strings.Join(missingMatchVariants(enumType, unionType, seen), ", "))
 	}
 	return allReturn, nil
 }
@@ -2624,6 +2625,32 @@ func matchVariantCount(enumType *enumType, unionType *unionType) int {
 		return len(enumType.tags)
 	}
 	return len(unionType.variants)
+}
+
+// missingMatchVariants lists the variants a match does not cover, sorted so the message is
+// stable. Match arms carry no source position, so the type name alone left the reader searching
+// every match on that type; naming what is missing points at the arm to add instead.
+func missingMatchVariants(
+	enumType *enumType,
+	unionType *unionType,
+	seen map[string]bool,
+) []string {
+	var missing []string
+	if enumType != nil {
+		for tag := range enumType.tags {
+			if !seen[tag] {
+				missing = append(missing, tag)
+			}
+		}
+	} else {
+		for variant := range unionType.variants {
+			if !seen[variant] {
+				missing = append(missing, variant)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // checkExpr computes the static type of an expression.
@@ -2811,8 +2838,9 @@ func (c *Checker) checkMatchExprArms(
 		}
 	}
 	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
-		return "", errorf("type error: match on `%s` is not exhaustive",
-			matchTypeName(enumType, unionType))
+		return "", errorf("type error: match on `%s` is not exhaustive: missing %s",
+			matchTypeName(enumType, unionType),
+			strings.Join(missingMatchVariants(enumType, unionType, seen), ", "))
 	}
 	return result, nil
 }
