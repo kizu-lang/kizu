@@ -17250,6 +17250,51 @@ fn while_carries_body_scalar_var_deep(
     return false;
 }
 
+// while_is_condition_only reports whether a loop threads no value from one iteration to the next.
+// Nothing in its body assigns a name, so there is no counter to advance, no latch to find, and no
+// loop-head phi to seed: the header alone decides the exit, re-reading state the body mutated
+// through calls on an owned aggregate.
+//
+//   while parsed_sources.len() > 0 {
+//       let parsed = try parsed_sources.pop();
+//       parsed.deinit();
+//   }
+//
+// This is a property of the loop, not a source shape: the question is only whether any body
+// statement assigns, which collect_loop_assigned_var_names answers for nested arms too. A loop
+// that does assign is left to the trailing-latch machinery, so a genuinely missing induction
+// increment still fails loudly instead of silently losing an advance.
+fn while_is_condition_only(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> !bool {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_node, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 1 {
+        return false;
+    }
+    var index = 0;
+    while index < body_count {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", index, bs
+        );
+        var assigned = std::array::Array<[]u8>(std::mem::page_allocator());
+        defer assigned.deinit();
+        try collect_loop_assigned_var_names(
+            ir_bytes, function_name, body_stmt, &var assigned, bs
+        );
+        if assigned.len() > 0 {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
 fn while_carries_induction_var(
     ir_bytes: []u8,
     function_name: []u8,
@@ -17345,6 +17390,12 @@ fn while_carries_induction_var(
             }
         }
     }
+    // A condition-only loop assigns nothing, so it advances no counter and no 'var <name> = <init>'
+    // ahead of it belongs to a loop-head phi. Answering here also keeps the trailing-increment count
+    // below from erroring on its non-Assign tail.
+    if try while_is_condition_only(ir_bytes, function_name, while_node, bs) {
+        return false;
+    }
     let latch_count = try while_trailing_increment_count(
         ir_bytes, function_name, body_node, body_count, bs
     );
@@ -17432,7 +17483,16 @@ fn find_induction_init(
         index = index + 1;
     }
     if !found {
-        return error("compiled mir: induction variable initializer not found");
+        // Name the function and the counter. Which loop failed to find its seed is the whole
+        // question here, and a bare "not found" makes the reader scan every while in the
+        // compiled closure for one whose counter is declared where this scan cannot see it.
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled mir: induction variable initializer not found: ");
+        try message.append_bytes(function_name);
+        try message.append_bytes(" counter ");
+        try message.append_bytes(induction_var);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
     let value_kind = try ir_contract::body_node_kind_from(
         ir_bytes, function_name, init_value, bs
@@ -17562,7 +17622,13 @@ fn find_induction_init_value_node(
         index = index + 1;
     }
     if !found {
-        return error("compiled mir: induction variable initializer not found");
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled mir: induction variable initializer not found: ");
+        try message.append_bytes(function_name);
+        try message.append_bytes(" counter ");
+        try message.append_bytes(induction_var);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
     return init_value;
 }
@@ -18928,6 +18994,27 @@ fn lower_multi_while_statement(
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
     }
+    // A condition-only loop carries nothing between iterations, so it has no latch to find and no
+    // loop-head phi to seed. Dispatch it before the trailing-latch machinery below, which requires
+    // the body's last statement to be the induction increment.
+    if try while_is_condition_only(ir_bytes, function_name, statement, bs) {
+        return try lower_multi_while_condition_only(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            llvm_return_type,
+            locals_spec,
+            statement,
+            string_counter,
+            temp_counter,
+            alias_counter,
+            loop_index,
+            aliases,
+            stmts,
+            bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+    }
     let body_count = try while_body_statement_count(
         ir_bytes, function_name, body_node, bs
     );
@@ -19780,6 +19867,210 @@ fn lower_multi_while_statement(
         carried_scalars,
         init_insts,
         init_result_id,
+        false,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
+    ));
+    return MultiIfLowerResult {
+        temp_counter: body_temp_counter,
+        string_counter: body_string_counter,
+        try_counter: 0,
+        alias_counter: body_alias_counter
+    };
+}
+// lower_multi_while_condition_only lowers a loop that threads no value between iterations. It
+// emits a MirWhileStmt whose induction variable is empty, which the renderer spells as the same
+// preheader/head/body/latch/exit layout every other while uses, minus the counter phi and the
+// latch advance. There is no induction seed to resolve, no secondary counter, no carried scalar,
+// and no latch statement, so the body lowers as a plain statement run.
+fn lower_multi_while_condition_only(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    alias_counter: i64,
+    loop_index: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiIfLowerResult {
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    // A genuine short-circuit header exists to keep a later leaf from running until an earlier one
+    // has decided -- the guard that lets 'index < length and !is_line_break(source[index])' load a
+    // byte safely. A condition-only loop has no counter for such a guard to range over, so the
+    // chain lowering is not wired here; an eager comparison tree still folds into one 'br i1'.
+    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_kind != 0 {
+        return error("compiled mir: condition-only loop header must fold into a single branch");
+    }
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        bs,
+        ir_lookup_index, canonical_facts, call_arg_type_cache
+    );
+    // The header reads the enclosing scope's current SSA names. This loop defines no phi, so there
+    // is nothing for the rename to hold back: the empty carried set and empty induction names leave
+    // only the enclosing aliases to apply.
+    var carried_scalar_states =
+        std::array::Array<CarriedScalarState>(std::mem::page_allocator());
+    defer carried_scalar_states.deinit();
+    try rename_loop_cond_reads(&var cond_insts, aliases, &carried_scalar_states, "", "");
+    var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
+    var body_temp_counter = temp_counter + cond_insts.len();
+    var body_try_counter = loop_index * 1000;
+    var body_alias_counter = alias_counter;
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var body_aliases = try copy_local_aliases(aliases);
+    defer body_aliases.deinit();
+    var body_index = 0;
+    while body_index < body_count {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", body_index, bs
+        );
+        let body_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, body_stmt, bs
+        );
+        if std::mem::equal_bytes(body_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                llvm_return_type,
+                locals_spec,
+                body_stmt,
+                body_string_counter,
+                body_temp_counter,
+                body_try_counter,
+                &var body_aliases,
+                &var body_stmts,
+                bs,
+                ir_lookup_index, canonical_facts, call_arg_type_cache
+            );
+            body_string_counter = let_result.string_counter;
+            body_temp_counter = let_result.temp_counter;
+            body_try_counter = let_result.try_counter;
+        } else {
+            if std::mem::equal_bytes(body_kind, "If") {
+                let if_result = try lower_multi_if_statement(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    body_stmt,
+                    body_string_counter,
+                    body_temp_counter,
+                    body_try_counter,
+                    body_alias_counter,
+                    loop_index * 1000 + body_index + 1,
+                    &var body_aliases,
+                    &var body_stmts,
+                    bs,
+                    ir_lookup_index, canonical_facts, call_arg_type_cache
+                );
+                body_temp_counter = if_result.temp_counter;
+                body_string_counter = if_result.string_counter;
+                body_try_counter = if_result.try_counter;
+                body_alias_counter = if_result.alias_counter;
+            } else {
+                if std::mem::equal_bytes(body_kind, "ExprStmt") {
+                    let expr_result = try lower_multi_expr_statement(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        llvm_return_type,
+                        locals_spec,
+                        body_stmt,
+                        body_string_counter,
+                        body_temp_counter,
+                        body_try_counter,
+                        &body_aliases,
+                        &var body_stmts,
+                        bs,
+                        ir_lookup_index, canonical_facts, call_arg_type_cache
+                    );
+                    body_string_counter = expr_result.string_counter;
+                    body_temp_counter = expr_result.temp_counter;
+                    body_try_counter = expr_result.try_counter;
+                } else {
+                    if std::mem::equal_bytes(body_kind, "Match") {
+                        let match_result = try lower_multi_match_statement(
+                            ir_bytes,
+                            function_name,
+                            module_prefix,
+                            llvm_return_type,
+                            locals_spec,
+                            body_stmt,
+                            body_string_counter,
+                            body_temp_counter,
+                            body_try_counter,
+                            &var body_aliases,
+                            &var body_stmts,
+                            bs,
+                            ir_lookup_index,
+                            canonical_facts,
+                            call_arg_type_cache,
+                            false,
+                            "",
+                            ""
+                        );
+                        body_string_counter = match_result.string_counter;
+                        body_temp_counter = match_result.temp_counter;
+                        body_try_counter = match_result.try_counter;
+                    } else {
+                        return error(
+                            "compiled mir: unsupported condition-only loop body statement"
+                        );
+                    }
+                }
+            }
+        }
+        body_index = body_index + 1;
+    }
+    try stmts.append(compiled_mir::while_stmt(
+        loop_index,
+        "",
+        0,
+        "",
+        0,
+        "",
+        0,
+        cond_result,
+        cond_insts,
+        0,
+        -1,
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCondTarget>(std::mem::page_allocator()),
+        body_stmts,
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        "",
+        std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
+        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
+        -1,
         false,
         -1,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
