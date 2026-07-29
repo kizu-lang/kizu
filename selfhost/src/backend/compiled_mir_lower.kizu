@@ -9622,7 +9622,10 @@ pub fn lower_multi_statement_function(
                         string_counter,
                         temp_counter,
                         alias_counter,
-                        stmt_index,
+                        // The loop's own bucket, resolved here rather than left as the raw
+                        // statement index: bucket 0 hands its children 1..1000, which is the band
+                        // the top-level statements themselves occupy (see reserved_nested_base).
+                        try reserved_nested_base(stmt_index, ir_bytes, function_name, bs),
                         0,
                         stmt_index,
                         &var aliases,
@@ -9685,7 +9688,9 @@ pub fn lower_multi_statement_function(
                         temp_counter,
                         try_counter,
                         alias_counter,
-                        stmt_index,
+                        // The if's own bucket, resolved here for the same reason the loop above
+                        // resolves its own: bucket 0's children land in the top-level band.
+                        try reserved_nested_base(stmt_index, ir_bytes, function_name, bs),
                         &var aliases,
                         &var stmts,
                         -1,
@@ -10280,6 +10285,51 @@ fn claim_local_alias_loop_phi(
         loop_phi_name: phi_name
     });
     return;
+}
+
+// claim_local_alias_loop_exit makes the same head claim claim_local_alias_loop_phi does, then
+// points statements after the loop at exit_name instead of at the head. A slot-carried loop can be
+// left from inside its body, where the head's definition is already behind the slot, so what
+// survives the loop is the exit block's reload and not the value the head last read.
+fn claim_local_alias_loop_exit(
+    aliases: &var std::array::Array<LocalAliasState>,
+    source_name: []u8,
+    head_name: []u8,
+    exit_name: []u8
+) -> !void {
+    let index = try local_alias_index(aliases, source_name);
+    if index < 0 {
+        try aliases.append(LocalAliasState {
+            source_name: source_name,
+            current_name: exit_name,
+            loop_phi_name: head_name
+        });
+        return;
+    }
+    try aliases.set(index, LocalAliasState {
+        source_name: source_name,
+        current_name: exit_name,
+        loop_phi_name: head_name
+    });
+    return;
+}
+
+// loop_exit_carried_name spells the name a slot-carried loop's exit block binds for one carried
+// variable. It must match what the renderer emits there, so both spell 'loop<N>_exit_<var>'.
+fn loop_exit_carried_name(
+    source_name: []u8,
+    loop_index: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> ![]u8 {
+    if loop_index < 0 {
+        return error("compiled mir: negative loop index");
+    }
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(&var out, loop_index);
+    try out.append_bytes("_exit_");
+    try out.append_bytes(source_name);
+    return call_arg_type_cache.name_store.own(out);
 }
 
 // loop_scoped_induction_phi_name spells the loop-head phi name a while takes when %<var> is
@@ -15097,9 +15147,14 @@ fn return_body_advance(
 // that bucket (statement_count * 1000) sits one bucket past every sibling's bucket and own label,
 // so the labels stay disjoint. Every other statement (index >= 1) and every already-nested
 // encoding (index >= 1) is returned unchanged, so only the first top-level statement's children
-// move. Only an If can be a top-level statement-0 control construct -- a top-level while always
-// follows its induction/seed init at an earlier statement -- so only the if-body encoders consult
-// this.
+// move.
+// The same bucket also namespaces the call-argument temporaries the renderer emits for each nested
+// statement ('%arg<base * 1000 + body_index + 1>_<n>'), and there the merge clang performs on
+// duplicate labels becomes an outright duplicate SSA definition. So the top-level dispatch resolves
+// an If's or a While's own bucket through here before handing it down, rather than leaving the raw
+// statement index for the nested encoders to correct: the construct's index and the base its
+// children encode under are then the same number, which is what lets the renderer derive the
+// children's namespace from the index it can see.
 fn reserved_nested_base(
     index: i64,
     ir_bytes: []u8,
@@ -17854,10 +17909,10 @@ fn find_induction_init_value_node_or_minus_one(
     return 0;
 }
 
-// statement_has_loop_continue reports whether a loop body statement contains a 'continue' that
-// belongs to this loop. It follows blocks and if arms and stops at a nested while, whose continues
-// are that loop's back edge rather than this one's.
-fn statement_has_loop_continue(
+// statement_has_loop_jump reports whether a loop body statement contains a 'continue' or a 'break'
+// that belongs to this loop. It follows blocks and if arms and stops at a nested while, whose
+// jumps are that loop's edges rather than this one's.
+fn statement_has_loop_jump(
     ir_bytes: []u8,
     function_name: []u8,
     statement: i64,
@@ -17865,6 +17920,9 @@ fn statement_has_loop_continue(
 ) -> !bool {
     let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
     if std::mem::equal_bytes(kind, "Continue") {
+        return true;
+    }
+    if std::mem::equal_bytes(kind, "Break") {
         return true;
     }
     if std::mem::equal_bytes(kind, "While") {
@@ -17879,7 +17937,7 @@ fn statement_has_loop_continue(
             if child < 0 {
                 return false;
             }
-            if try statement_has_loop_continue(ir_bytes, function_name, child, bs) {
+            if try statement_has_loop_jump(ir_bytes, function_name, child, bs) {
                 return true;
             }
             child_index = child_index + 1;
@@ -17891,7 +17949,7 @@ fn statement_has_loop_continue(
             ir_bytes, function_name, statement, "then", 0, bs
         );
         if then_node >= 0 {
-            if try statement_has_loop_continue(ir_bytes, function_name, then_node, bs) {
+            if try statement_has_loop_jump(ir_bytes, function_name, then_node, bs) {
                 return true;
             }
         }
@@ -17899,7 +17957,7 @@ fn statement_has_loop_continue(
             ir_bytes, function_name, statement, "else", 0, bs
         );
         if else_node >= 0 {
-            if try statement_has_loop_continue(ir_bytes, function_name, else_node, bs) {
+            if try statement_has_loop_jump(ir_bytes, function_name, else_node, bs) {
                 return true;
             }
         }
@@ -17908,11 +17966,14 @@ fn statement_has_loop_continue(
     return false;
 }
 
-// while_body_has_continue answers whether this loop must carry its values in slots rather than
-// loop-head phis, which is exactly the question of whether its body contains a continue of its
-// own. The restricted continue-latch shape is dispatched before this is asked, so a loop that
-// reaches here and answers true is one whose continues do not fold into its latch.
-fn while_body_has_continue(
+// while_body_has_loop_jump answers whether this loop must carry its values in slots rather than
+// loop-head phis, which is exactly the question of whether its body jumps to an edge the latch does
+// not run through. A continue re-enters the head from a point no latch value describes; a break
+// leaves from a point the head's definitions are already behind, and phis can only say what either
+// one carries by taking an operand per jump site. One slot per variable says it once, for any
+// number of sites. The restricted continue-latch shape is dispatched before this is asked, so a
+// loop that reaches here and answers true is one whose jumps do not fold into its latch.
+fn while_body_has_loop_jump(
     ir_bytes: []u8,
     function_name: []u8,
     body_node: i64,
@@ -17924,7 +17985,7 @@ fn while_body_has_continue(
         let body_stmt = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, body_node, "statement", index, bs
         );
-        if try statement_has_loop_continue(ir_bytes, function_name, body_stmt, bs) {
+        if try statement_has_loop_jump(ir_bytes, function_name, body_stmt, bs) {
             return true;
         }
         index = index + 1;
@@ -19278,9 +19339,10 @@ fn lower_multi_while_statement(
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
     }
-    // A loop whose body contains a continue is re-entered from a point the latch never sees, so
-    // it carries its values in slots instead of loop-head phis: the head reloads them however
-    // control got back, and the continue itself is a bare branch.
+    // A loop whose body contains a continue is re-entered from a point the latch never sees, and a
+    // loop whose body contains a break is left from one the head never sees. Either way it carries
+    // its values in slots instead of loop-head phis: the head reloads them however control got
+    // back, the exit reloads them however control got out, and the jump itself is a bare branch.
     // A loop that advances nothing at the end of its body has no counter either, and the shapes
     // that hide their advance elsewhere are already dispatched above. It carries whatever the body
     // updates in slots for the same reason a continue does: there is no single latch value for a
@@ -19289,7 +19351,7 @@ fn lower_multi_while_statement(
         ir_bytes, function_name, statement, bs
     );
     let memory_carried =
-        no_trailing_latch or try while_body_has_continue(ir_bytes, function_name, body_node, bs);
+        no_trailing_latch or try while_body_has_loop_jump(ir_bytes, function_name, body_node, bs);
     let body_count = try while_body_statement_count(
         ir_bytes, function_name, body_node, bs
     );
@@ -20148,12 +20210,48 @@ fn lower_multi_while_statement(
     // Statements after the loop read the value it leaves live on every exit edge: the loop-head
     // phi. Claiming the name here also tells a later loop over the same variable that %<phi> is
     // taken, so it renames its own head phi instead of redefining this one.
+    // A slot-carried loop leaves a different value live. Its head is only current for an exit taken
+    // at the head; a break leaves from inside the body, after stores the head never saw. The exit
+    // block reloads every slot for exactly that reason, so the reads after the loop go there --
+    // while the head keeps its claim on %<phi>, which is still a definition a later loop must not
+    // collide with.
     if std::mem::len(induction_var) > 0 {
-        try claim_local_alias_loop_phi(aliases, induction_var, induction_phi);
+        if memory_carried {
+            let induction_exit_name = try loop_exit_carried_name(
+                induction_phi, loop_index, call_arg_type_cache
+            );
+            try claim_local_alias_loop_exit(
+                aliases, induction_var, induction_phi, induction_exit_name
+            );
+        } else {
+            try claim_local_alias_loop_phi(aliases, induction_var, induction_phi);
+        }
     }
     let carried_scalars = try materialize_carried_scalars(
         &carried_scalar_states, carried_exclude
     );
+    if memory_carried {
+        var exit_secondary_index = 0;
+        while exit_secondary_index < secondary_inductions.len() {
+            let exit_secondary = try secondary_inductions.at(exit_secondary_index);
+            let exit_secondary_name = exit_secondary.var_name;
+            let secondary_exit_name = try loop_exit_carried_name(
+                exit_secondary_name, loop_index, call_arg_type_cache
+            );
+            try set_local_alias(aliases, exit_secondary_name, secondary_exit_name);
+            exit_secondary_index = exit_secondary_index + 1;
+        }
+        var exit_carried_index = 0;
+        while exit_carried_index < carried_scalars.len() {
+            let exit_carried = try carried_scalars.at(exit_carried_index);
+            let exit_carried_name = exit_carried.var_name;
+            let carried_exit_name = try loop_exit_carried_name(
+                exit_carried_name, loop_index, call_arg_type_cache
+            );
+            try set_local_alias(aliases, exit_carried_name, carried_exit_name);
+            exit_carried_index = exit_carried_index + 1;
+        }
+    }
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
         induction_phi,

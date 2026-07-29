@@ -7804,6 +7804,40 @@ fn append_while_carry_load(
     return;
 }
 
+// append_while_carry_exit_ref names the value a carried variable holds once the loop is over. It
+// has to be a name of its own: the head already defines %<var>, and the exit cannot redefine it.
+fn append_while_carry_exit_ref(
+    out: &var std::string::String,
+    loop_index: i64,
+    var_name: []u8
+) -> !void {
+    try out.append_bytes("%loop");
+    try std::fmt::append_i64(out, loop_index);
+    try out.append_bytes("_exit_");
+    try out.append_bytes(var_name);
+    return;
+}
+
+// append_while_carry_exit_load rebinds a carried variable in the exit block. The head's load is
+// only current for an exit taken at the head; a break leaves from inside the body, after stores the
+// head never saw. Reloading here gives every exit edge one name holding what the slot holds, which
+// is what a phi-carried loop would need an operand-per-break-site phi to say.
+fn append_while_carry_exit_load(
+    out: &var std::string::String,
+    loop_index: i64,
+    var_name: []u8,
+    llvm_type: []u8
+) -> !void {
+    try out.append_bytes("  ");
+    try append_while_carry_exit_ref(out, loop_index, var_name);
+    try out.append_bytes(" = load ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(", ptr ");
+    try append_while_carry_slot_ref(out, loop_index, var_name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 // append_while_carry_store_next writes the latch's advanced value back to its slot. The advance
 // binds %<var>_next, so the name is spelled here rather than built into a temporary the borrow
 // checker would have to let escape.
@@ -8148,6 +8182,32 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_exit:");
     try out.append_byte(cast<u8>(10));
+    // Every exit edge converges here, including the ones a break takes from inside the body, so
+    // this is the one place a single name can hold what each carried variable ended up with. The
+    // lowering points reads after the loop at these names.
+    if stmt.memory_carried {
+        if std::mem::len(stmt.induction_var) > 0 {
+            try append_while_carry_exit_load(
+                out, stmt.loop_index, stmt.induction_var, try while_induction_phi_type(stmt)
+            );
+        }
+        var exit_secondary_index = 0;
+        while exit_secondary_index < secondary.len() {
+            let entry = try secondary.at(exit_secondary_index);
+            try append_while_carry_exit_load(
+                out, stmt.loop_index, entry.var_name, "i64"
+            );
+            exit_secondary_index = exit_secondary_index + 1;
+        }
+        var exit_scalar_index = 0;
+        while exit_scalar_index < carried.len() {
+            let entry = try carried.at(exit_scalar_index);
+            try append_while_carry_exit_load(
+                out, stmt.loop_index, entry.var_name, entry.llvm_type
+            );
+            exit_scalar_index = exit_scalar_index + 1;
+        }
+    }
     return;
 }
 // append_while_short_circuit_branches renders the guarded leaf blocks of a genuine short-circuit
