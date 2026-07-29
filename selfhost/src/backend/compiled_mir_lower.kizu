@@ -10061,6 +10061,16 @@ fn shadow_binding_name(
     return call_arg_type_cache.name_store.own(out);
 }
 
+// llvm_reserved_local_name reports whether a source name is one the renderer already spells in the
+// function's own local namespace. LLVM keeps block labels and values in one namespace, and 'entry'
+// is the single block this backend names without an index -- every other block carries the index of
+// the construct that owns it -- so a local spelled 'entry' would redefine the entry block. Such a
+// binding is renamed through the alias map, which is what keeps the source spelling readable while
+// the emitted name stays out of the renderer's way.
+fn llvm_reserved_local_name(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "entry");
+}
+
 // dispatch_payload_binding_name gives every match arm payload an SSA name unique
 // within the function. Match arms commonly reuse the source name value for
 // different variant payload types, so the source spelling cannot be defined in
@@ -11792,8 +11802,12 @@ fn lower_multi_let_statement(
         ir_bytes, function_name, let_name_node, sf
     );
     let shadowed = try let_binding_is_shadowed(ir_bytes, function_name, source_name, bs);
+    // A reserved name is renamed the same way a shadowed one is, but it is shadowing nothing: the
+    // join-merge rule that skips shadowed names must keep treating it as an ordinary binding, so
+    // the two answers stay apart rather than folding into one flag.
+    let reserved = llvm_reserved_local_name(source_name);
     var emit_name = source_name;
-    if shadowed {
+    if shadowed or reserved {
         emit_name = try shadow_binding_name(source_name, statement, call_arg_type_cache);
     }
     let result = try lower_multi_let_statement_named(
@@ -11801,7 +11815,7 @@ fn lower_multi_let_statement(
         source_name, emit_name, string_counter, temp_counter, try_counter, aliases, stmts, bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
-    if shadowed {
+    if shadowed or reserved {
         try set_local_alias(aliases, source_name, emit_name);
     }
     return result;
