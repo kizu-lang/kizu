@@ -1045,6 +1045,71 @@ pub fn body_child_sequence_or_minus_one_from(
     return -1;
 }
 
+// BodyParentEdge names the one edge that owns a body node: the parent node, the ordinal the node
+// occupies on that edge, and whether the edge is a block's statement list. Walking these outward
+// from a node reconstructs its lexical scope chain, which is what any lookup that has to resolve a
+// name against enclosing blocks needs. parent is -1 when the node has no owner (the function body
+// root), so a walk terminates on it.
+pub struct BodyParentEdge {
+    pub parent: i64,
+    pub ordinal: i64,
+    pub is_statement: bool,
+}
+
+// body_parent_edge_from finds the edge whose child is child_sequence. A body node has exactly one
+// owner, so the first match is the answer.
+pub fn body_parent_edge_from(
+    bytes: []u8,
+    function_name: []u8,
+    child_sequence: i64,
+    from: i64
+) -> !BodyParentEdge {
+    let byte_len = std::mem::len(bytes);
+    let prefix = "body-edge ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(function_name);
+    var index = from;
+    var seen = false;
+    while index + prefix_len + name_len < byte_len {
+        if is_line_start(bytes, index) and
+            std::mem::equal_bytes(bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(bytes[name_start..name_end], function_name) and
+                is_space(bytes[name_end]) {
+                seen = true;
+                let parent_start = skip_spaces(bytes, name_end);
+                let parent_value = try parse_i64_token(bytes, parent_start);
+                let parent_end = token_end(bytes, parent_start);
+                let edge_start = skip_spaces(bytes, parent_end);
+                let edge_end = token_end(bytes, edge_start);
+                let ordinal_start = skip_spaces(bytes, edge_end);
+                let ordinal_value = try parse_i64_token(bytes, ordinal_start);
+                let ordinal_end = token_end(bytes, ordinal_start);
+                let child_start = skip_spaces(bytes, ordinal_end);
+                let child_value = try parse_i64_token(bytes, child_start);
+                if child_value == child_sequence {
+                    return BodyParentEdge {
+                        parent: parent_value,
+                        ordinal: ordinal_value,
+                        is_statement: std::mem::equal_bytes(
+                            bytes[edge_start..edge_end], "statement"
+                        )
+                    };
+                }
+            } else {
+                if seen {
+                    return BodyParentEdge {
+                        parent: 0 - 1, ordinal: 0 - 1, is_statement: false
+                    };
+                }
+            }
+        }
+        index = line_end(bytes, index) + 1;
+    }
+    return BodyParentEdge { parent: 0 - 1, ordinal: 0 - 1, is_statement: false };
+}
+
 pub fn body_node_kind_from(
     bytes: []u8,
     function_name: []u8,

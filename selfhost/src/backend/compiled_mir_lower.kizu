@@ -17443,13 +17443,104 @@ pub struct InductionInit {
     pub offset: i64,
 }
 // find_induction_init finds the 'var counter = <init>' initializer for the while at
-// scope_stmt_index of the block scope_node and returns its loop-head phi seed. Only Let statements
-// of that same block that precede the while are considered, and the nearest preceding match wins,
-// so two whiles reusing the same counter name each resolve their own initializer rather than
-// aliasing the first one -- and a loop nested in another loop's body reads the seed the enclosing
-// body binds rather than a same-named one at the function's top level. Only an integer literal or a plain parameter/local name init is accepted;
+// scope_stmt_index of the block scope_node and returns its loop-head phi seed. Visibility is
+// ordinary lexical scoping (scope_chain_init_value_node): the innermost block wins over an
+// enclosing one, and within a block the nearest preceding declaration wins, so two whiles reusing
+// the same counter name each resolve their own initializer rather than aliasing the first, and a
+// loop nested in another loop's body prefers the seed the enclosing body binds over a same-named
+// one further out. Only an integer literal or a plain parameter/local name init is accepted;
 // any other initializer shape is an explicit error so the restricted loop support never
 // silently lowers a computed seed.
+// ScopeFrame is one lexical block on the chain enclosing a statement: the block itself, and the
+// index that statement occupies in it. A name declared before that index in that block is visible
+// to the statement.
+struct ScopeFrame {
+    node: i64,
+    stmt_index: i64,
+}
+
+// enclosing_scope_frame answers the next lexical scope outward from a block. It follows the body
+// node's owner edges until one is a block's statement list; that block, together with the index of
+// the statement this scope hangs off, is the next frame. A node with no owner is the function body
+// root, which ends the walk.
+fn enclosing_scope_frame(
+    ir_bytes: []u8,
+    function_name: []u8,
+    scope_node: i64,
+    bs: i64
+) -> !ScopeFrame {
+    var current = scope_node;
+    while current >= 0 {
+        let edge = try ir_contract::body_parent_edge_from(
+            ir_bytes, function_name, current, bs
+        );
+        if edge.parent < 0 {
+            return ScopeFrame { node: -1, stmt_index: -1 };
+        }
+        if edge.is_statement {
+            return ScopeFrame { node: edge.parent, stmt_index: edge.ordinal };
+        }
+        current = edge.parent;
+    }
+    return ScopeFrame { node: -1, stmt_index: -1 };
+}
+
+// scope_chain_init_value_node returns the value node of the nearest 'var <name> = <value>'
+// declaration visible from the statement at scope_stmt_index of scope_node: the innermost block
+// first, then each enclosing block in turn, and within a block the last declaration that precedes
+// the statement. It answers -1 when no visible scope declares the name.
+//
+// The chain is the point. A loop nested in another loop's body sees the names its own block
+// declares, the names every enclosing block declares, and the ones at the function's top level;
+// a counter or a carried scalar may be declared at any of those depths. Searching only the
+// immediate block missed every outer declaration, which either failed a seed lookup outright
+// (std::path::join declares its `depth` counter two blocks out) or, worse, answered "not
+// declared" for a carried scalar and left it without a loop-head phi.
+fn scope_chain_init_value_node(
+    ir_bytes: []u8,
+    function_name: []u8,
+    name: []u8,
+    scope_node: i64,
+    scope_stmt_index: i64,
+    bs: i64
+) -> !i64 {
+    var frame_node = scope_node;
+    var frame_index = scope_stmt_index;
+    while frame_node >= 0 {
+        var init_value = -1;
+        var index = 0;
+        while index < frame_index {
+            let statement = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, frame_node, "statement", index, bs
+            );
+            let kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, statement, bs
+            );
+            if std::mem::equal_bytes(kind, "Let") {
+                let name_node = try ir_contract::body_child_sequence_from(
+                    ir_bytes, function_name, statement, "name", 0, bs
+                );
+                let declared = try ir_contract::body_token_or_empty_from(
+                    ir_bytes, function_name, name_node, bs
+                );
+                if std::mem::equal_bytes(declared, name) {
+                    init_value = try ir_contract::body_child_sequence_from(
+                        ir_bytes, function_name, statement, "value", 0, bs
+                    );
+                }
+            }
+            index = index + 1;
+        }
+        if init_value >= 0 {
+            return init_value;
+        }
+        let outer = try enclosing_scope_frame(ir_bytes, function_name, frame_node, bs);
+        frame_node = outer.node;
+        frame_index = outer.stmt_index;
+    }
+    return -1;
+}
+
 fn find_induction_init(
     ir_bytes: []u8,
     function_name: []u8,
@@ -17458,34 +17549,13 @@ fn find_induction_init(
     scope_stmt_index: i64,
     bs: i64
 ) -> !InductionInit {
-    var found = false;
-    var init_value = -1;
-    var index = 0;
-    while index < scope_stmt_index {
-        let statement = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, scope_node, "statement", index, bs
-        );
-        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
-        if std::mem::equal_bytes(kind, "Let") {
-            let name_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, statement, "name", 0, bs
-            );
-            let name = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, name_node, bs
-            );
-            if std::mem::equal_bytes(name, induction_var) {
-                found = true;
-                init_value = try ir_contract::body_child_sequence_from(
-                    ir_bytes, function_name, statement, "value", 0, bs
-                );
-            }
-        }
-        index = index + 1;
-    }
-    if !found {
+    let init_value = try scope_chain_init_value_node(
+        ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
+    );
+    if init_value < 0 {
         // Name the function and the counter. Which loop failed to find its seed is the whole
         // question here, and a bare "not found" makes the reader scan every while in the
-        // compiled closure for one whose counter is declared where this scan cannot see it.
+        // compiled closure for one whose counter no visible scope declares.
         var message = std::string::String(std::mem::page_allocator());
         try message.append_bytes("compiled mir: induction variable initializer not found: ");
         try message.append_bytes(function_name);
@@ -17597,31 +17667,10 @@ fn find_induction_init_value_node(
     scope_stmt_index: i64,
     bs: i64
 ) -> !i64 {
-    var found = false;
-    var init_value = -1;
-    var index = 0;
-    while index < scope_stmt_index {
-        let statement = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, scope_node, "statement", index, bs
-        );
-        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
-        if std::mem::equal_bytes(kind, "Let") {
-            let name_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, statement, "name", 0, bs
-            );
-            let name = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, name_node, bs
-            );
-            if std::mem::equal_bytes(name, induction_var) {
-                found = true;
-                init_value = try ir_contract::body_child_sequence_from(
-                    ir_bytes, function_name, statement, "value", 0, bs
-                );
-            }
-        }
-        index = index + 1;
-    }
-    if !found {
+    let init_value = try scope_chain_init_value_node(
+        ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
+    );
+    if init_value < 0 {
         var message = std::string::String(std::mem::page_allocator());
         try message.append_bytes("compiled mir: induction variable initializer not found: ");
         try message.append_bytes(function_name);
@@ -17635,8 +17684,10 @@ fn find_induction_init_value_node(
 
 // find_induction_init_value_node_or_minus_one answers the same question without failing.
 // A name assigned inside a loop body but declared inside that body -- a branch-local binding --
-// has no initializer in the enclosing scope, and the carried-scalar scan uses the -1 answer to
-// leave it alone instead of claiming a loop-head phi for a value the loop does not carry.
+// is declared by no scope that encloses the loop, and the carried-scalar scan uses the -1 answer
+// to leave it alone instead of claiming a loop-head phi for a value the loop does not carry. The
+// scope walk only reaches declarations that precede the loop, so a body-local stays invisible to
+// it however deeply the loop itself is nested.
 fn find_induction_init_value_node_or_minus_one(
     ir_bytes: []u8,
     function_name: []u8,
@@ -17645,27 +17696,10 @@ fn find_induction_init_value_node_or_minus_one(
     scope_stmt_index: i64,
     bs: i64
 ) -> !i64 {
-    var found = false;
-    var index = 0;
-    while index < scope_stmt_index {
-        let statement = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, scope_node, "statement", index, bs
-        );
-        let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
-        if std::mem::equal_bytes(kind, "Let") {
-            let name_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, statement, "name", 0, bs
-            );
-            let name = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, name_node, bs
-            );
-            if std::mem::equal_bytes(name, induction_var) {
-                found = true;
-            }
-        }
-        index = index + 1;
-    }
-    if !found {
+    let init_value = try scope_chain_init_value_node(
+        ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
+    );
+    if init_value < 0 {
         return -1;
     }
     return 0;
