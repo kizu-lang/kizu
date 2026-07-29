@@ -5838,7 +5838,7 @@ fn lower_value_cursor_append_loop(
                 let if_result = try lower_multi_if_statement(
                     ir_bytes, function_name, module_prefix, llvm_return_type, params_spec, body_stmt,
                     body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
-                    body_index + 1, &var body_aliases, &var body_stmts, bs, ir_lookup_index,
+                    body_index + 1, &var body_aliases, &var body_stmts, -1, bs, ir_lookup_index,
                     canonical_facts,
                     &var call_arg_type_cache
                 );
@@ -6941,7 +6941,7 @@ fn lower_precedence_loop(
                 let if_result = try lower_multi_if_statement(
                     ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
                     body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
-                    body_index + 1, &var body_aliases, &var body_stmts, bs, ir_lookup_index,
+                    body_index + 1, &var body_aliases, &var body_stmts, -1, bs, ir_lookup_index,
                     canonical_facts,
                     &var call_arg_type_cache
                 );
@@ -7322,7 +7322,7 @@ fn lower_trailing_token_loop(
                 let if_result = try lower_multi_if_statement(
                     ir_bytes, function_name, module_prefix, llvm_return_type, post_locals, statement,
                     post_string_counter, post_temp_counter, post_try_counter, post_alias_counter,
-                    post_index, &var post_aliases, &var stmts, bs, ir_lookup_index,
+                    post_index, &var post_aliases, &var stmts, -1, bs, ir_lookup_index,
                     canonical_facts,
                     &var call_arg_type_cache
                 );
@@ -7713,7 +7713,7 @@ fn lower_type_apply_nested_counted_while(
                 let if_result = try lower_multi_if_statement(
                     ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, body_stmt,
                     body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
-                    loop_index * 1000 + body_index + 1, aliases, &var body_stmts, bs,
+                    loop_index * 1000 + body_index + 1, aliases, &var body_stmts, -1, bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
                 body_string_counter = if_result.string_counter;
@@ -7766,7 +7766,8 @@ fn lower_type_apply_nested_counted_while(
         false,
         -1,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        false
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
@@ -8026,7 +8027,7 @@ fn lower_type_apply_loop(
         ir_bytes, function_name, module_prefix, llvm_return_type, arg_locals, guard_stmt,
         terminal_result.string_counter, terminal_result.temp_counter,
         terminal_result.try_counter, terminal_result.alias_counter, 6000,
-        &var guard_aliases, &var guard_stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        &var guard_aliases, &var guard_stmts, -1, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
     );
     let latch_stmt = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, body_node, "statement", 4, bs
@@ -9094,7 +9095,7 @@ fn lower_embedded_value_cursor_append_loop(
                 let if_result = try lower_multi_if_statement(
                     ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
                     body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
-                    stmt_index * 1000 + body_index + 1, &var body_aliases, &var body_stmts, bs,
+                    stmt_index * 1000 + body_index + 1, &var body_aliases, &var body_stmts, -1, bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
                 body_temp_counter = if_result.temp_counter;
@@ -9687,6 +9688,7 @@ pub fn lower_multi_statement_function(
                         stmt_index,
                         &var aliases,
                         &var stmts,
+                        -1,
                         bs,
                         ir_lookup_index,
                         canonical_facts,
@@ -13609,6 +13611,7 @@ fn lower_try_call_void_if(
         if_index,
         &var branch_aliases,
         &var then_body_stmts,
+        -1,
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
@@ -15140,6 +15143,7 @@ fn lower_void_then_body(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     then_body_stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    continue_loop_index: i64,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -15217,6 +15221,7 @@ fn lower_void_then_body(
                     child_namespace * 1000 + body_index + 1,
                     aliases,
                     then_body_stmts,
+                    continue_loop_index,
                     bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
@@ -15310,6 +15315,40 @@ fn lower_void_then_body(
                             body_temps = advance.temp_counter;
                             body_returns = true;
                         } else {
+                        if std::mem::equal_bytes(stmt_kind, "Continue") {
+                            // A continue ends its block the way a return does: whatever follows it
+                            // in the source is unreachable, so there must be nothing to lower.
+                            let after_continue =
+                                try ir_contract::body_child_sequence_or_minus_one_from(
+                                    ir_bytes, function_name, then_node, "statement",
+                                    body_index + 1, body_scan_from
+                                );
+                            if after_continue >= 0 {
+                                return error(
+                                    "compiled mir: void then-body continue must be final"
+                                );
+                            }
+                            if continue_loop_index < 0 {
+                                // Only a loop that carries its values in slots can be re-entered
+                                // from an arbitrary point in its body. Every other loop shape
+                                // reaches here with -1, and saying so beats emitting a branch to a
+                                // head whose phis have no operand for this edge.
+                                return error(
+                                    "compiled mir: continue is not supported in this loop shape"
+                                );
+                            }
+                            try emit_pending_defers(
+                                ir_lookup_index, canonical_facts, ir_bytes,
+                                function_name, module_prefix, llvm_return_type,
+                                body_locals, &pending_defers, body_strings,
+                                body_temps, body_tries, aliases, then_body_stmts,
+                                bs, call_arg_type_cache
+                            );
+                            try then_body_stmts.append(
+                                compiled_mir::loop_continue_stmt(continue_loop_index)
+                            );
+                            body_returns = true;
+                        } else {
                             var message = std::string::String(std::mem::page_allocator());
                             try message.append_bytes(
                                 "compiled mir: unsupported then-body statement kind: "
@@ -15321,6 +15360,7 @@ fn lower_void_then_body(
                             try message.append_bytes(stmt_kind);
                             let message_bytes = message.as_bytes();
                             return error(message_bytes);
+                        }
                         }
                     }
                 }
@@ -15507,6 +15547,7 @@ fn lower_void_if_else_statement(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    continue_loop_index: i64,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -15532,6 +15573,7 @@ fn lower_void_if_else_statement(
         if_index,
         &var then_aliases,
         &var then_body_stmts,
+        continue_loop_index,
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
@@ -15555,6 +15597,7 @@ fn lower_void_if_else_statement(
         (try reserved_nested_base(if_index, ir_bytes, function_name, bs)) * 1000 + 500,
         &var else_aliases,
         &var else_body_stmts,
+        continue_loop_index,
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
@@ -15626,6 +15669,7 @@ fn lower_void_if_no_else_statement(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    continue_loop_index: i64,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -15650,6 +15694,7 @@ fn lower_void_if_no_else_statement(
         if_index,
         &var branch_aliases,
         &var then_body_stmts,
+        continue_loop_index,
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
@@ -15754,6 +15799,7 @@ fn lower_void_if_body_statement(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    continue_loop_index: i64,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -15795,6 +15841,7 @@ fn lower_void_if_body_statement(
                 if_index,
                 aliases,
                 stmts,
+                continue_loop_index,
                 bs,
                 ir_lookup_index, canonical_facts, call_arg_type_cache
             );
@@ -15823,6 +15870,7 @@ fn lower_void_if_body_statement(
         if_index,
         aliases,
         stmts,
+        continue_loop_index,
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
@@ -15842,6 +15890,7 @@ fn lower_multi_if_statement(
     if_index: i64,
     aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    continue_loop_index: i64,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -16179,6 +16228,7 @@ fn lower_multi_if_statement(
             if_index,
             aliases,
             stmts,
+            continue_loop_index,
             bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
@@ -17705,6 +17755,84 @@ fn find_induction_init_value_node_or_minus_one(
     return 0;
 }
 
+// statement_has_loop_continue reports whether a loop body statement contains a 'continue' that
+// belongs to this loop. It follows blocks and if arms and stops at a nested while, whose continues
+// are that loop's back edge rather than this one's.
+fn statement_has_loop_continue(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    bs: i64
+) -> !bool {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+    if std::mem::equal_bytes(kind, "Continue") {
+        return true;
+    }
+    if std::mem::equal_bytes(kind, "While") {
+        return false;
+    }
+    if std::mem::equal_bytes(kind, "Block") {
+        var child_index = 0;
+        while true {
+            let child = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, statement, "statement", child_index, bs
+            );
+            if child < 0 {
+                return false;
+            }
+            if try statement_has_loop_continue(ir_bytes, function_name, child, bs) {
+                return true;
+            }
+            child_index = child_index + 1;
+        }
+        return false;
+    }
+    if std::mem::equal_bytes(kind, "If") {
+        let then_node = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, statement, "then", 0, bs
+        );
+        if then_node >= 0 {
+            if try statement_has_loop_continue(ir_bytes, function_name, then_node, bs) {
+                return true;
+            }
+        }
+        let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, statement, "else", 0, bs
+        );
+        if else_node >= 0 {
+            if try statement_has_loop_continue(ir_bytes, function_name, else_node, bs) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+// while_body_has_continue answers whether this loop must carry its values in slots rather than
+// loop-head phis, which is exactly the question of whether its body contains a continue of its
+// own. The restricted continue-latch shape is dispatched before this is asked, so a loop that
+// reaches here and answers true is one whose continues do not fold into its latch.
+fn while_body_has_continue(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body_node: i64,
+    bs: i64
+) -> !bool {
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    var index = 0;
+    while index < body_count {
+        let body_stmt = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, body_node, "statement", index, bs
+        );
+        if try statement_has_loop_continue(ir_bytes, function_name, body_stmt, bs) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 // collect_loop_assigned_var_names appends every local a loop body statement reassigns, following
 // nested blocks and if arms. A scalar updated inside 'if ... { line = line + 1; }' is carried by
 // the loop exactly like one updated at the body's top level: it is live on the back edge and
@@ -18243,6 +18371,7 @@ fn lower_branch_merge_block_prefix(
                     label_index * 1000 + body_index + 1,
                     aliases,
                     stmts,
+                    -1,
                     bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
@@ -18901,7 +19030,8 @@ fn lower_multi_while_branch_merge_latch(
         branch_latch_exit_on_true,
         branch_cond_result,
         branch_cond_insts,
-        branch_advance_stmts
+        branch_advance_stmts,
+        false
     ));
     return MultiIfLowerResult {
         temp_counter: advance_result.temp_counter,
@@ -19049,6 +19179,10 @@ fn lower_multi_while_statement(
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
     }
+    // A loop whose body contains a continue is re-entered from a point the latch never sees, so
+    // it carries its values in slots instead of loop-head phis: the head reloads them however
+    // control got back, and the continue itself is a bare branch.
+    let memory_carried = try while_body_has_continue(ir_bytes, function_name, body_node, bs);
     let body_count = try while_body_statement_count(
         ir_bytes, function_name, body_node, bs
     );
@@ -19469,6 +19603,7 @@ fn lower_multi_while_statement(
                     body_if_index,
                     &var body_aliases,
                     &var body_stmts,
+                    loop_index,
                     bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
@@ -19584,9 +19719,13 @@ fn lower_multi_while_statement(
                             &value_insts
                         );
                         let value_temps = value_insts.len();
-                        try body_stmts.append(compiled_mir::alias_assign_stmt(
+                        var carry_index = -1;
+                        if memory_carried {
+                            carry_index = loop_index;
+                        }
+                        try body_stmts.append(compiled_mir::carried_alias_assign_stmt(
                             target_name, output_name, state_llvm_type,
-                            value_result, value_insts
+                            value_result, value_insts, carry_index
                         ));
                         // Statements after this assign read the value it just produced, not the
                         // loop-head phi, so the body alias map has to follow the rename the way it
@@ -19904,7 +20043,8 @@ fn lower_multi_while_statement(
         false,
         -1,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        memory_carried
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
@@ -20021,6 +20161,7 @@ fn lower_multi_while_condition_only(
                     loop_index * 1000 + body_index + 1,
                     &var body_aliases,
                     &var body_stmts,
+                    loop_index,
                     bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
@@ -20108,7 +20249,8 @@ fn lower_multi_while_condition_only(
         false,
         -1,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        false
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
@@ -21010,6 +21152,7 @@ fn lower_multi_while_leading_decrement(
                         body_if_index,
                         &var body_aliases,
                         &var body_stmts,
+                        -1,
                         bs,
                         ir_lookup_index, canonical_facts, call_arg_type_cache
                     );
@@ -21050,7 +21193,8 @@ fn lower_multi_while_leading_decrement(
         false,
         -1,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        false
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,
@@ -21576,6 +21720,7 @@ fn lower_multi_while_continue_latch(
                     body_if_index,
                     &var body_aliases,
                     &var body_stmts,
+                    -1,
                     bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
@@ -21709,7 +21854,8 @@ fn lower_multi_while_continue_latch(
         false,
         -1,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator())
+        std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
+        false
     ));
     return MultiIfLowerResult {
         temp_counter: body_temp_counter,

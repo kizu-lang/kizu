@@ -542,6 +542,11 @@ pub struct MirAliasAssignStmt {
     pub llvm_type: []u8,
     pub expr_result_id: i64,
     pub expr_insts: std::array::Array<MirExprInst>,
+    // carry_loop_index names the memory-carried loop whose slot this assignment updates, or -1
+    // when the value is not loop-carried. The renderer follows the value with a store, so the
+    // loop head reloads it on the next iteration however control reached the head -- through the
+    // latch or through a continue.
+    pub carry_loop_index: i64,
 }
 
 // MirScalarSelectAssignStmt backs a side-effect-free conditional scalar update inside a loop:
@@ -849,6 +854,18 @@ pub struct MirWhileStmt {
     pub branch_latch_cond_result_id: i64,
     pub branch_latch_cond_insts: std::array::Array<MirExprInst>,
     pub branch_latch_advance_stmts: std::array::Array<MirStmt>,
+    // memory_carried moves every value the loop carries out of loop-head phis and into a stack
+    // slot per variable: the preheader allocates and seeds them, the head loads each one into the
+    // same %<var> name the phi used to define, and each update stores. Nothing else in the
+    // condition or body changes shape, because the name they read is defined either way.
+    //
+    // It is set when the body contains a 'continue'. A continue edge re-enters the head carrying
+    // whatever the body had reached at that point, so a phi would need one incoming per continue
+    // site, threaded through every nested if that can reach one. A slot needs none: the last
+    // store wins, an unassigned path simply leaves the previous value in place, and the continue
+    // itself is a bare branch back to the head. This is the loop twin of MirIfMergeVar, which
+    // already merges an if's mutated locals through a slot rather than renaming them.
+    pub memory_carried: bool,
 }
 
 // MirCountRangeStmt backs count_range: 'var count = 0; var index = 0; while index <
@@ -1734,6 +1751,7 @@ pub union MirStmt {
     LetArrayGet(MirLetArrayGetStmt),
     If(MirIfStmt),
     While(MirWhileStmt),
+    LoopContinue(MirLoopContinueStmt),
     EnumDispatch(MirEnumDispatchStmt),
 }
 
@@ -2437,6 +2455,7 @@ impl MirStmt {
             LetArrayGet(payload) => payload.deinit(),
             If(payload) => payload.deinit(),
             While(payload) => payload.deinit(),
+            LoopContinue(payload) => payload.deinit(),
             EnumDispatch(payload) => payload.deinit(),
         }
     }
@@ -4047,12 +4066,28 @@ pub fn alias_assign_stmt(
     result_id: i64,
     insts: std::array::Array<MirExprInst>
 ) -> MirStmt {
+    return carried_alias_assign_stmt(
+        source_name, output_name, llvm_type, result_id, insts, -1
+    );
+}
+
+// carried_alias_assign_stmt is the same binding inside a memory-carried loop: the value is also
+// stored to the loop's slot for that variable.
+pub fn carried_alias_assign_stmt(
+    source_name: []u8,
+    output_name: []u8,
+    llvm_type: []u8,
+    result_id: i64,
+    insts: std::array::Array<MirExprInst>,
+    carry_loop_index: i64
+) -> MirStmt {
     return MirStmt::AliasAssign(MirAliasAssignStmt {
         source_name: source_name,
         output_name: output_name,
         llvm_type: llvm_type,
         expr_result_id: result_id,
-        expr_insts: insts
+        expr_insts: insts,
+        carry_loop_index: carry_loop_index
     });
 }
 
@@ -5428,7 +5463,8 @@ pub fn while_stmt(
     branch_latch_exit_on_true: bool,
     branch_latch_cond_result_id: i64,
     branch_latch_cond_insts: std::array::Array<MirExprInst>,
-    branch_latch_advance_stmts: std::array::Array<MirStmt>
+    branch_latch_advance_stmts: std::array::Array<MirStmt>,
+    memory_carried: bool
 ) -> MirStmt {
     return MirStmt::While(MirWhileStmt {
         loop_index: loop_index,
@@ -5455,8 +5491,28 @@ pub fn while_stmt(
         branch_latch_exit_on_true: branch_latch_exit_on_true,
         branch_latch_cond_result_id: branch_latch_cond_result_id,
         branch_latch_cond_insts: branch_latch_cond_insts,
-        branch_latch_advance_stmts: branch_latch_advance_stmts
+        branch_latch_advance_stmts: branch_latch_advance_stmts,
+        memory_carried: memory_carried
     });
+}
+
+// MirLoopContinueStmt backs a 'continue' inside a memory-carried loop. Every value the loop
+// carries already lives in its slot, so the statement is exactly the back edge: a branch to the
+// loop head, which reloads them. loop_index names the loop the continue belongs to.
+pub struct MirLoopContinueStmt {
+    pub loop_index: i64,
+}
+
+impl MirLoopContinueStmt {
+    // A back edge owns no storage; the impl exists so every MirStmt arm releases its payload the
+    // same way.
+    fn deinit(self: MirLoopContinueStmt) -> void {
+        return;
+    }
+}
+
+pub fn loop_continue_stmt(loop_index: i64) -> MirStmt {
+    return MirStmt::LoopContinue(MirLoopContinueStmt { loop_index: loop_index });
 }
 pub fn secondary_induction(
     var_name: []u8,

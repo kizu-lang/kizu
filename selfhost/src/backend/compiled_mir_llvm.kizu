@@ -1075,6 +1075,7 @@ fn append_multi_stmt(
         LetArrayGet(payload) => try append_multi_let_array_get(out, function, payload);,
         If(payload) => try append_multi_if(out, function, payload, local_prefix);,
         While(payload) => try append_multi_while(out, function, payload);,
+        LoopContinue(payload) => try append_loop_continue(out, payload);,
         EnumDispatch(payload) => try append_multi_enum_dispatch(out, function, payload, local_prefix);,
     }
     return;
@@ -6503,6 +6504,13 @@ fn append_alias_assign(
     try out.append_bytes(" ");
     try append_expr_value_ref(out, &stmt.expr_insts, stmt.expr_result_id);
     try out.append_byte(cast<u8>(10));
+    // Inside a memory-carried loop the update is also written to the variable's slot, so the head
+    // reloads it whichever edge control takes back -- the latch, or a continue that skips it.
+    if stmt.carry_loop_index >= 0 {
+        try append_while_carry_store(
+            out, stmt.carry_loop_index, stmt.source_name, stmt.llvm_type, stmt.output_name
+        );
+    }
     return;
 }
 
@@ -6612,6 +6620,8 @@ fn append_stmt_globals(
         LetArrayGet(payload) => try append_expr_globals(out, llvm_symbol, &payload.expr_insts);,
         If(payload) => try append_if_globals(out, llvm_symbol, payload);,
         While(payload) => try append_while_globals(out, llvm_symbol, payload);,
+        // A back edge carries no expression, so it owns no string globals.
+        LoopContinue(payload) => return;,
         EnumDispatch(payload) => try append_enum_dispatch_globals(out, llvm_symbol, payload);,
     }
     return;
@@ -7695,6 +7705,154 @@ fn append_while_branch_merge_latch(
     return;
 }
 
+// append_while_carry_slot_ref names a memory-carried loop's slot for one variable. The slot is
+// keyed by the variable rather than by an index so a store can be rendered from the assignment
+// alone, without the assignment having to know its position in the loop's carried list.
+fn append_while_carry_slot_ref(
+    out: &var std::string::String,
+    loop_index: i64,
+    var_name: []u8
+) -> !void {
+    try out.append_bytes("%loop");
+    try std::fmt::append_i64(out, loop_index);
+    try out.append_bytes("_carry_");
+    try out.append_bytes(var_name);
+    return;
+}
+
+// append_while_carry_seed renders the value a carried variable holds on entry: the same operand a
+// loop-head phi would take on its preheader edge.
+fn append_while_carry_seed(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt,
+    counter_var: []u8,
+    init_var: []u8,
+    init_offset: i64,
+    init_literal: i64,
+    init_name: []u8,
+    init_result_id: i64
+) -> !void {
+    if std::mem::len(init_name) > 0 {
+        try out.append_bytes("%");
+        try out.append_bytes(init_name);
+        return;
+    }
+    if init_result_id >= 0 {
+        try append_expr_value_ref(out, &stmt.init_insts, init_result_id);
+        return;
+    }
+    if std::mem::len(init_var) > 0 {
+        try out.append_bytes("%");
+        if init_offset == 0 {
+            try out.append_bytes(init_var);
+        } else {
+            try out.append_bytes(counter_var);
+            try out.append_bytes("_init");
+        }
+        return;
+    }
+    try std::fmt::append_i64(out, init_literal);
+    return;
+}
+
+// append_while_carry_alloca reserves and seeds one carried variable's slot in the preheader.
+fn append_while_carry_alloca(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt,
+    var_name: []u8,
+    llvm_type: []u8,
+    init_var: []u8,
+    init_offset: i64,
+    init_literal: i64,
+    init_name: []u8,
+    init_result_id: i64
+) -> !void {
+    try out.append_bytes("  ");
+    try append_while_carry_slot_ref(out, stmt.loop_index, var_name);
+    try out.append_bytes(" = alloca ");
+    try out.append_bytes(llvm_type);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  store ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(" ");
+    try append_while_carry_seed(
+        out, stmt, var_name, init_var, init_offset, init_literal, init_name, init_result_id
+    );
+    try out.append_bytes(", ptr ");
+    try append_while_carry_slot_ref(out, stmt.loop_index, var_name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_while_carry_load defines the carried variable at the loop head. It binds the same
+// %<var> name the loop-head phi would define, so the condition and body read it unchanged.
+fn append_while_carry_load(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt,
+    var_name: []u8,
+    llvm_type: []u8
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(var_name);
+    try out.append_bytes(" = load ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(", ptr ");
+    try append_while_carry_slot_ref(out, stmt.loop_index, var_name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_while_carry_store_next writes the latch's advanced value back to its slot. The advance
+// binds %<var>_next, so the name is spelled here rather than built into a temporary the borrow
+// checker would have to let escape.
+fn append_while_carry_store_next(
+    out: &var std::string::String,
+    loop_index: i64,
+    var_name: []u8,
+    llvm_type: []u8
+) -> !void {
+    try out.append_bytes("  store ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(var_name);
+    try out.append_bytes("_next, ptr ");
+    try append_while_carry_slot_ref(out, loop_index, var_name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_while_carry_store writes a produced value back to its slot.
+fn append_while_carry_store(
+    out: &var std::string::String,
+    loop_index: i64,
+    var_name: []u8,
+    llvm_type: []u8,
+    value_name: []u8
+) -> !void {
+    try out.append_bytes("  store ");
+    try out.append_bytes(llvm_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(value_name);
+    try out.append_bytes(", ptr ");
+    try append_while_carry_slot_ref(out, loop_index, var_name);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_loop_continue renders a 'continue'. A loop that contains one carries its values in
+// slots rather than loop-head phis, so every update has already been stored by the time control
+// reaches here and the back edge is the whole statement: the head reloads them on arrival.
+fn append_loop_continue(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirLoopContinueStmt
+) -> !void {
+    try out.append_bytes("  br label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_head");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 fn append_multi_while(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -7741,6 +7899,36 @@ fn append_multi_while(
         }
         carried_init_index = carried_init_index + 1;
     }
+    // A memory-carried loop reserves one slot per carried variable here and seeds it with the
+    // value the loop-head phi would have taken on this edge. Everything downstream then reads the
+    // slot, so a continue needs to carry nothing of its own.
+    if stmt.memory_carried {
+        if std::mem::len(stmt.induction_var) > 0 {
+            try append_while_carry_alloca(
+                out, stmt, stmt.induction_var, try while_induction_phi_type(stmt),
+                stmt.induction_init_var, stmt.induction_init_offset, stmt.induction_init,
+                "", stmt.init_result_id
+            );
+        }
+        var carry_secondary_index = 0;
+        while carry_secondary_index < secondary.len() {
+            let entry = try secondary.at(carry_secondary_index);
+            try append_while_carry_alloca(
+                out, stmt, entry.var_name, "i64", entry.init_var, entry.init_offset,
+                entry.init_literal, "", -1
+            );
+            carry_secondary_index = carry_secondary_index + 1;
+        }
+        var carry_scalar_index = 0;
+        while carry_scalar_index < carried.len() {
+            let entry = try carried.at(carry_scalar_index);
+            try append_while_carry_alloca(
+                out, stmt, entry.var_name, entry.llvm_type, entry.init_var, entry.init_offset,
+                entry.init_literal, entry.init_name, -1
+            );
+            carry_scalar_index = carry_scalar_index + 1;
+        }
+    }
     try out.append_bytes("  br label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_head");
@@ -7753,25 +7941,40 @@ fn append_multi_while(
     // named after its variable so plain Var reads in the condition and body resolve to it.
     // A condition-only loop carries no counter, so the head defines no primary phi: the header is
     // re-evaluated against state the body mutated through calls, and that decides the exit.
+    // A memory-carried loop defines the same names by loading its slots instead, so the condition
+    // and body below are identical either way.
     if std::mem::len(stmt.induction_var) > 0 {
-        try append_while_counter_phi(
-            out, stmt, stmt.induction_var, stmt.induction_init_var,
-            stmt.induction_init_offset, stmt.induction_init, stmt.latch_copy_var,
-            stmt.init_result_id, try while_induction_phi_type(stmt)
-        );
+        if stmt.memory_carried {
+            try append_while_carry_load(
+                out, stmt, stmt.induction_var, try while_induction_phi_type(stmt)
+            );
+        } else {
+            try append_while_counter_phi(
+                out, stmt, stmt.induction_var, stmt.induction_init_var,
+                stmt.induction_init_offset, stmt.induction_init, stmt.latch_copy_var,
+                stmt.init_result_id, try while_induction_phi_type(stmt)
+            );
+        }
     }
     var phi_index = 0;
     while phi_index < secondary.len() {
         let entry = try secondary.at(phi_index);
-        try append_while_counter_phi(
-            out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal, "", -1,
-            "i64"
-        );
+        if stmt.memory_carried {
+            try append_while_carry_load(out, stmt, entry.var_name, "i64");
+        } else {
+            try append_while_counter_phi(
+                out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal,
+                "", -1, "i64"
+            );
+        }
         phi_index = phi_index + 1;
     }
     var carried_phi_index = 0;
     while carried_phi_index < carried.len() {
         let entry = try carried.at(carried_phi_index);
+        if stmt.memory_carried {
+            try append_while_carry_load(out, stmt, entry.var_name, entry.llvm_type);
+        } else {
         if std::mem::len(entry.init_name) > 0 or
             !std::mem::equal_bytes(entry.llvm_type, "i64") {
             try append_while_carried_scalar_phi(
@@ -7782,6 +7985,7 @@ fn append_multi_while(
                 out, stmt, entry.var_name, entry.init_var, entry.init_offset, entry.init_literal,
                 entry.latch_var, -1, "i64"
             );
+        }
         }
         carried_phi_index = carried_phi_index + 1;
     }
@@ -7893,6 +8097,34 @@ fn append_multi_while(
         try std::fmt::append_i64(out, entry.step);
         try out.append_byte(cast<u8>(10));
         latch_index = latch_index + 1;
+    }
+    // The latch is the one edge that advances a counter, so a memory-carried loop writes the
+    // advanced values back here. Carried scalars are not written here: their own assignment stored
+    // them, which is what lets a continue skip the latch and still reach the head with the value
+    // the body produced.
+    if stmt.memory_carried {
+        if std::mem::len(stmt.induction_var) > 0 {
+            let latch_value = stmt.latch_copy_var;
+            if std::mem::len(latch_value) == 0 {
+                try append_while_carry_store_next(
+                    out, stmt.loop_index, stmt.induction_var,
+                    try while_induction_phi_type(stmt)
+                );
+            } else {
+                try append_while_carry_store(
+                    out, stmt.loop_index, stmt.induction_var,
+                    try while_induction_phi_type(stmt), latch_value
+                );
+            }
+        }
+        var carry_latch_index = 0;
+        while carry_latch_index < secondary.len() {
+            let entry = try secondary.at(carry_latch_index);
+            try append_while_carry_store_next(
+                out, stmt.loop_index, entry.var_name, "i64"
+            );
+            carry_latch_index = carry_latch_index + 1;
+        }
     }
     try out.append_bytes("  br label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
