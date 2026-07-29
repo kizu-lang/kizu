@@ -15278,6 +15278,33 @@ fn lower_void_then_body(
                         body_tries = assign_result.try_counter;
                         body_alias_counter = assign_result.alias_counter;
                     } else {
+                        if std::mem::equal_bytes(stmt_kind, "While") {
+                            // A loop inside an if arm lowers through the same path a loop in
+                            // another loop's body takes. Its labels and carried names take this
+                            // block's own namespace, and its seeds resolve against this block --
+                            // the lexical scope walk reaches whatever the enclosing blocks declare.
+                            let nested_result = try lower_multi_while_statement(
+                                ir_bytes,
+                                function_name,
+                                module_prefix,
+                                llvm_return_type,
+                                body_locals,
+                                statement,
+                                body_strings,
+                                body_temps,
+                                body_alias_counter,
+                                child_namespace * 1000 + body_index + 1,
+                                then_node,
+                                body_index,
+                                aliases,
+                                then_body_stmts,
+                                bs,
+                                ir_lookup_index, canonical_facts, call_arg_type_cache
+                            );
+                            body_strings = nested_result.string_counter;
+                            body_temps = nested_result.temp_counter;
+                            body_alias_counter = nested_result.alias_counter;
+                        } else {
                         if std::mem::equal_bytes(stmt_kind, "Return") {
                             let after_return = try ir_contract::body_child_sequence_or_minus_one_from(
                                 ir_bytes, function_name, then_node, "statement",
@@ -15313,6 +15340,36 @@ fn lower_void_then_body(
                             );
                             body_strings = advance.string_counter;
                             body_temps = advance.temp_counter;
+                            body_returns = true;
+                        } else {
+                        if std::mem::equal_bytes(stmt_kind, "Break") {
+                            // A break ends its block the way a continue does, and leaves by the
+                            // loop's exit edge instead of its back edge.
+                            let after_break =
+                                try ir_contract::body_child_sequence_or_minus_one_from(
+                                    ir_bytes, function_name, then_node, "statement",
+                                    body_index + 1, body_scan_from
+                                );
+                            if after_break >= 0 {
+                                return error(
+                                    "compiled mir: void then-body break must be final"
+                                );
+                            }
+                            if continue_loop_index < 0 {
+                                return error(
+                                    "compiled mir: break is not supported in this loop shape"
+                                );
+                            }
+                            try emit_pending_defers(
+                                ir_lookup_index, canonical_facts, ir_bytes,
+                                function_name, module_prefix, llvm_return_type,
+                                body_locals, &pending_defers, body_strings,
+                                body_temps, body_tries, aliases, then_body_stmts,
+                                bs, call_arg_type_cache
+                            );
+                            try then_body_stmts.append(
+                                compiled_mir::loop_break_stmt(continue_loop_index)
+                            );
                             body_returns = true;
                         } else {
                         if std::mem::equal_bytes(stmt_kind, "Continue") {
@@ -15360,6 +15417,8 @@ fn lower_void_then_body(
                             try message.append_bytes(stmt_kind);
                             let message_bytes = message.as_bytes();
                             return error(message_bytes);
+                        }
+                        }
                         }
                         }
                     }
@@ -17300,6 +17359,45 @@ fn while_carries_body_scalar_var_deep(
     return false;
 }
 
+// while_has_no_trailing_latch reports whether a loop advances nothing at the end of its body. The
+// trailing-latch machinery requires the last body statement to be the induction increment; a loop
+// ending in anything else -- an if that updates a cursor in one arm, a call, a nested loop -- has
+// no single value for a latch to write, and so no loop-head phi to seed either. It carries
+// whatever the body updates in slots instead, which is the same answer a continue forces.
+//
+// The shapes that hide their advance elsewhere (continue-latch, leading-decrement, branch-merge)
+// are dispatched before this is asked, so a loop that reaches here genuinely has no latch.
+fn while_has_no_trailing_latch(
+    ir_bytes: []u8,
+    function_name: []u8,
+    while_node: i64,
+    bs: i64
+) -> !bool {
+    let body_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, while_node, "body", 0, bs
+    );
+    let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    if body_count < 1 {
+        return false;
+    }
+    let last_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, body_node, "statement", body_count - 1, bs
+    );
+    let last_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, last_stmt, bs
+    );
+    if !std::mem::equal_bytes(last_kind, "Assign") {
+        return true;
+    }
+    let target = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, last_stmt, "target", 0, bs
+    );
+    let target_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, target, bs
+    );
+    return !std::mem::equal_bytes(target_kind, "Var");
+}
+
 // while_is_condition_only reports whether a loop threads no value from one iteration to the next.
 // Nothing in its body assigns a name, so there is no counter to advance, no latch to find, and no
 // loop-head phi to seed: the header alone decides the exit, re-reading state the body mutated
@@ -17440,10 +17538,11 @@ fn while_carries_induction_var(
             }
         }
     }
-    // A condition-only loop assigns nothing, so it advances no counter and no 'var <name> = <init>'
-    // ahead of it belongs to a loop-head phi. Answering here also keeps the trailing-increment count
-    // below from erroring on its non-Assign tail.
-    if try while_is_condition_only(ir_bytes, function_name, while_node, bs) {
+    // A loop with no trailing latch advances no counter, so no 'var <name> = <init>' ahead of it
+    // belongs to a loop-head phi -- its carried values are seeded from their own declarations and
+    // live in slots. Answering here also keeps the trailing-increment count below from erroring on
+    // the non-Assign tail such a loop ends with.
+    if try while_has_no_trailing_latch(ir_bytes, function_name, while_node, bs) {
         return false;
     }
     let latch_count = try while_trailing_increment_count(
@@ -19182,14 +19281,31 @@ fn lower_multi_while_statement(
     // A loop whose body contains a continue is re-entered from a point the latch never sees, so
     // it carries its values in slots instead of loop-head phis: the head reloads them however
     // control got back, and the continue itself is a bare branch.
-    let memory_carried = try while_body_has_continue(ir_bytes, function_name, body_node, bs);
+    // A loop that advances nothing at the end of its body has no counter either, and the shapes
+    // that hide their advance elsewhere are already dispatched above. It carries whatever the body
+    // updates in slots for the same reason a continue does: there is no single latch value for a
+    // loop-head phi to take.
+    let no_trailing_latch = try while_has_no_trailing_latch(
+        ir_bytes, function_name, statement, bs
+    );
+    let memory_carried =
+        no_trailing_latch or try while_body_has_continue(ir_bytes, function_name, body_node, bs);
     let body_count = try while_body_statement_count(
         ir_bytes, function_name, body_node, bs
     );
-    let latch_count = try while_trailing_increment_count(
-        ir_bytes, function_name, body_node, body_count, bs
-    );
-    let induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
+    var latch_count = 0;
+    if !no_trailing_latch {
+        latch_count = try while_trailing_increment_count(
+            ir_bytes, function_name, body_node, body_count, bs
+        );
+    }
+    // An empty induction variable is what the rest of this function reads as "no counter": every
+    // derived value below computes trivially from it, and the blocks that only make sense for a
+    // counter are guarded on it.
+    var induction_var = "";
+    if !no_trailing_latch {
+        induction_var = try while_induction_var(ir_bytes, function_name, statement, bs);
+    }
     let induction_alias = try local_alias_current_name(aliases, induction_var);
     // The loop-head phi is named after the induction variable, so two whiles over one variable in a
     // single function would define %<var> twice. When an earlier loop in this scope already claimed
@@ -19364,6 +19480,9 @@ fn lower_multi_while_statement(
     var init_result_id = -1;
     var cond_string_base = seed_string_counter;
     var cond_temp_base = seed_temp_counter;
+    // Only a counter has a seed to resolve. A slot-carried loop with no counter leaves these at
+    // their empty defaults; its carried values were seeded above, each from its own declaration.
+    if std::mem::len(induction_var) > 0 {
     let init_node = try find_induction_init_value_node(
         ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
     );
@@ -19405,6 +19524,7 @@ fn lower_multi_while_statement(
             induction_init_var = induction_alias;
             induction_init_offset = 0;
         }
+    }
     }
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var cond_rhs_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
@@ -19540,7 +19660,9 @@ fn lower_multi_while_statement(
     // head defines are then reseated onto their phis, which own the value in the body.
     var body_aliases = try copy_local_aliases(aliases);
     defer body_aliases.deinit();
-    try set_local_alias(&var body_aliases, induction_var, induction_phi);
+    if std::mem::len(induction_var) > 0 {
+        try set_local_alias(&var body_aliases, induction_var, induction_phi);
+    }
     var carried_reset_index = 0;
     while carried_reset_index < carried_scalar_states.len() {
         let carried_reset_state = try carried_scalar_states.at(carried_reset_index);
@@ -19589,6 +19711,14 @@ fn lower_multi_while_statement(
         } else {
             if std::mem::equal_bytes(body_kind, "If") {
                 let body_if_index = loop_index * 1000 + body_index + 1;
+                // Only a slot-carried loop can be re-entered or left from inside its body. A loop
+                // that still uses head phis has no operand for such an edge, so it names itself -1
+                // and a continue or break under it is rejected rather than emitted as a branch
+                // into a phi that does not expect it.
+                var body_continue_target = -1;
+                if memory_carried {
+                    body_continue_target = loop_index;
+                }
                 let if_result = try lower_multi_if_statement(
                     ir_bytes,
                     function_name,
@@ -19603,7 +19733,7 @@ fn lower_multi_while_statement(
                     body_if_index,
                     &var body_aliases,
                     &var body_stmts,
-                    loop_index,
+                    body_continue_target,
                     bs,
                     ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
@@ -19833,6 +19963,9 @@ fn lower_multi_while_statement(
     var step = 0;
     var latch_copy_var = "";
     var latch_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    // Only a counter has a latch to build. A slot-carried loop with no counter leaves the latch a
+    // bare branch back to the head: everything it carries was stored where it was updated.
+    if std::mem::len(induction_var) > 0 {
     if induction_is_carried {
         // The tail advance already lowered as this loop's last carried assign, so the latch
         // emits no add of its own: the loop-head phi reads that assign's alias on the latch
@@ -19975,6 +20108,7 @@ fn lower_multi_while_statement(
             }
         }
     }
+    }
     // The increments before the primary latch (body_boundary .. body_count - 2) are the
     // secondary lockstep counters. Each is a constant-step 'name = name + <int>' increment
     // with its own preceding 'var name = <init>' initializer, so it gets its own loop-head
@@ -20014,7 +20148,9 @@ fn lower_multi_while_statement(
     // Statements after the loop read the value it leaves live on every exit edge: the loop-head
     // phi. Claiming the name here also tells a later loop over the same variable that %<phi> is
     // taken, so it renames its own head phi instead of redefining this one.
-    try claim_local_alias_loop_phi(aliases, induction_var, induction_phi);
+    if std::mem::len(induction_var) > 0 {
+        try claim_local_alias_loop_phi(aliases, induction_var, induction_phi);
+    }
     let carried_scalars = try materialize_carried_scalars(
         &carried_scalar_states, carried_exclude
     );
