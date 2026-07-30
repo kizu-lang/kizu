@@ -9522,6 +9522,33 @@ pub fn lower_multi_statement_function(
                     ir_bytes, function_name, 0, statement, statement_count, bs
                 );
             }
+            if is_induction_init and try loop_seed_must_stay_in_place(
+                ir_bytes, function_name, 0, statement, statement_count, bs
+            ) {
+                let seed_result = try lower_loop_seed_binding_in_place(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    statement,
+                    string_counter,
+                    temp_counter,
+                    try_counter,
+                    &var aliases,
+                    &var stmts,
+                    bs,
+                    ir_lookup_index,
+                    canonical_facts,
+                    &var call_arg_type_cache
+                );
+                locals_spec = seed_result.locals_spec;
+                string_counter = seed_result.string_counter;
+                temp_counter = seed_result.temp_counter;
+                try_counter = seed_result.try_counter;
+                stmt_index = stmt_index + 1;
+                continue;
+            }
             if is_induction_init {
                 if try induction_init_needs_prewhile_alias(
                     ir_bytes, function_name, statement, stmt_index, statement_count, bs
@@ -10059,6 +10086,16 @@ fn shadow_binding_name(
     try out.append_bytes(".shadow.");
     try std::fmt::append_i64(&var out, slot);
     return call_arg_type_cache.name_store.own(out);
+}
+
+// llvm_reserved_local_name reports whether a source name is one the renderer already spells in the
+// function's own local namespace. LLVM keeps block labels and values in one namespace, and 'entry'
+// is the single block this backend names without an index -- every other block carries the index of
+// the construct that owns it -- so a local spelled 'entry' would redefine the entry block. Such a
+// binding is renamed through the alias map, which is what keeps the source spelling readable while
+// the emitted name stays out of the renderer's way.
+fn llvm_reserved_local_name(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "entry");
 }
 
 // dispatch_payload_binding_name gives every match arm payload an SSA name unique
@@ -11792,8 +11829,12 @@ fn lower_multi_let_statement(
         ir_bytes, function_name, let_name_node, sf
     );
     let shadowed = try let_binding_is_shadowed(ir_bytes, function_name, source_name, bs);
+    // A reserved name is renamed the same way a shadowed one is, but it is shadowing nothing: the
+    // join-merge rule that skips shadowed names must keep treating it as an ordinary binding, so
+    // the two answers stay apart rather than folding into one flag.
+    let reserved = llvm_reserved_local_name(source_name);
     var emit_name = source_name;
-    if shadowed {
+    if shadowed or reserved {
         emit_name = try shadow_binding_name(source_name, statement, call_arg_type_cache);
     }
     let result = try lower_multi_let_statement_named(
@@ -11801,9 +11842,144 @@ fn lower_multi_let_statement(
         source_name, emit_name, string_counter, temp_counter, try_counter, aliases, stmts, bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
-    if shadowed {
+    if shadowed or reserved {
         try set_local_alias(aliases, source_name, emit_name);
     }
+    return result;
+}
+
+// loop_seed_is_foldable reports whether a loop-seed declaration can be dropped in favour of the
+// loop head's own definition. The loop rebuilds the seed at its preheader, which is free and
+// unobservable for a pure expression over locals. A call is neither: rebuilding it there moves the
+// work past every statement between the declaration and the loop, and dropping it leaves the reads
+// in between naming a value only the loop head defines, later still. That is what
+// cli::check::package_fast_diagnostics does -- 'var ok = try parse_package_fast_diagnostic_sources
+// (..)', then 'if ok', then a while that carries ok.
+fn loop_seed_is_foldable(
+    ir_bytes: []u8,
+    function_name: []u8,
+    let_statement: i64,
+    bs: i64
+) -> !bool {
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_statement, "value", 0, bs
+    );
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if std::mem::equal_bytes(kind, "Call") {
+        return false;
+    }
+    if std::mem::equal_bytes(kind, "TryExpr") {
+        return false;
+    }
+    return true;
+}
+
+// loop_seed_must_stay_in_place answers whether a declaration a later while carries has to be
+// emitted where it stands. Folding it into the loop head means the loop rebuilds the value at its
+// preheader, and that is sound only when nothing can observe the declaration first. Two things have
+// to hold for it not to be: the value cannot be rebuilt without moving work -- a call -- and the
+// loop is not the very next statement, so something runs in between that could read it. A
+// call-seeded induction counter declared immediately ahead of its loop keeps its existing preheader
+// init; 'var ok = try parse_package_fast_diagnostic_sources(..)' with an 'if ok' before the loop
+// that carries ok does not.
+// The test is the statement's position in its scope, not its node number: a statement between the
+// two that merely could read the name is enough, and answering that way needs no assumption about
+// how subtree nodes are numbered relative to their parent.
+fn loop_seed_must_stay_in_place(
+    ir_bytes: []u8,
+    function_name: []u8,
+    scope_node: i64,
+    let_statement: i64,
+    statement_count: i64,
+    bs: i64
+) -> !bool {
+    if try loop_seed_is_foldable(ir_bytes, function_name, let_statement, bs) {
+        return false;
+    }
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_statement, "name", 0, bs
+    );
+    let let_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, name_node, bs
+    );
+    var let_index = -1;
+    var index = 0;
+    while index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, scope_node, "statement", index, bs
+        );
+        if statement == let_statement {
+            let_index = index;
+        }
+        if let_index >= 0 and index > let_index {
+            let kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, statement, bs
+            );
+            if std::mem::equal_bytes(kind, "While") {
+                if try while_carries_induction_var(
+                    ir_bytes, function_name, statement, let_name, bs
+                ) {
+                    return index > let_index + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// loop_seed_binding_name spells the name such a declaration binds. It is keyed by the declaration's
+// own node, so it is unique in the function and cannot collide with the loop head's %<name>.
+fn loop_seed_binding_name(
+    source_name: []u8,
+    statement: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> ![]u8 {
+    if statement < 0 {
+        return error("compiled mir: negative loop seed binding slot");
+    }
+    var out = std::string::String(std::mem::page_allocator());
+    try out.append_bytes(source_name);
+    try out.append_bytes(".seed.");
+    try std::fmt::append_i64(&var out, statement);
+    return call_arg_type_cache.name_store.own(out);
+}
+
+// lower_loop_seed_binding_in_place emits a loop-seed declaration the loop must not rebuild. It
+// stays where it stands, under a name of its own so the loop head is still free to define %<name>,
+// and the alias map points both the reads between here and the loop, and the loop's own seed, at
+// the value this statement actually produced.
+fn lower_loop_seed_binding_in_place(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    try_counter: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !MultiLowerResult {
+    let sf = compiled_mir_types::fn_node_line_start(call_arg_type_cache, statement, bs);
+    let let_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "name", 0, sf
+    );
+    let source_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, let_name_node, sf
+    );
+    let emit_name = try loop_seed_binding_name(source_name, statement, call_arg_type_cache);
+    let result = try lower_multi_let_statement_named(
+        ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, statement,
+        source_name, emit_name, string_counter, temp_counter, try_counter, aliases, stmts, bs,
+        ir_lookup_index, canonical_facts, call_arg_type_cache
+    );
+    try set_local_alias(aliases, source_name, emit_name);
     return result;
 }
 
@@ -15266,6 +15442,40 @@ fn lower_void_then_body(
                 ),
                 bs
             ) {
+                // Unless something between it and the loop reads a value the loop cannot rebuild,
+                // in which case it stays here under a name of its own and the loop seeds from that.
+                if !(try loop_seed_must_stay_in_place(
+                    ir_bytes,
+                    function_name,
+                    then_node,
+                    statement,
+                    try ir_contract::body_edge_count_from(
+                        ir_bytes, function_name, then_node, "statement", bs
+                    ),
+                    bs
+                )) {
+                    body_index = body_index + 1;
+                    continue;
+                }
+                let seed_result = try lower_loop_seed_binding_in_place(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    body_locals,
+                    statement,
+                    body_strings,
+                    body_temps,
+                    body_tries,
+                    aliases,
+                    then_body_stmts,
+                    bs,
+                    ir_lookup_index, canonical_facts, call_arg_type_cache
+                );
+                body_locals = seed_result.locals_spec;
+                body_strings = seed_result.string_counter;
+                body_temps = seed_result.temp_counter;
+                body_tries = seed_result.try_counter;
                 body_index = body_index + 1;
                 continue;
             }
@@ -19834,6 +20044,32 @@ fn lower_multi_while_statement(
             if try statement_is_induction_init(
                 ir_bytes, function_name, body_node, body_stmt, body_boundary, bs
             ) {
+                // Unless something between it and the loop reads a value the loop cannot rebuild,
+                // in which case it stays here under a name of its own and the loop seeds from that.
+                if !(try loop_seed_must_stay_in_place(
+                    ir_bytes, function_name, body_node, body_stmt, body_boundary, bs
+                )) {
+                    body_index = body_index + 1;
+                    continue;
+                }
+                let seed_result = try lower_loop_seed_binding_in_place(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    body_stmt,
+                    body_string_counter,
+                    body_temp_counter,
+                    body_try_counter,
+                    &var body_aliases,
+                    &var body_stmts,
+                    bs,
+                    ir_lookup_index, canonical_facts, call_arg_type_cache
+                );
+                body_string_counter = seed_result.string_counter;
+                body_temp_counter = seed_result.temp_counter;
+                body_try_counter = seed_result.try_counter;
                 body_index = body_index + 1;
                 continue;
             }
@@ -20387,6 +20623,23 @@ fn lower_multi_while_statement(
                 try set_local_alias(aliases, exit_carried_source, carried_exit_name);
             }
             exit_carried_index = exit_carried_index + 1;
+        }
+    } else {
+        // A phi-carried loop leaves each carried scalar live in its head phi, so statements after
+        // the loop read that -- the same claim the induction counter makes just above. Without it a
+        // scalar whose declaration bound a name of its own keeps resolving to that declaration, and
+        // reads after the loop see the value from before the first iteration.
+        var phi_carried_index = 0;
+        while phi_carried_index < carried_scalar_states.len() {
+            let phi_carried = try carried_scalar_states.at(phi_carried_index);
+            let phi_carried_source = phi_carried.source_name;
+            let phi_carried_head = phi_carried.head_name;
+            if !std::mem::equal_bytes(phi_carried_source, carried_exclude) {
+                try claim_local_alias_loop_phi(
+                    aliases, phi_carried_source, phi_carried_head
+                );
+            }
+            phi_carried_index = phi_carried_index + 1;
         }
     }
     try stmts.append(compiled_mir::while_stmt(
