@@ -1,4 +1,28 @@
 import selfhost::types::model;
+import selfhost::types::primitive_type;
+
+// is_builtin_primitive_name reports whether a name spells a primitive the compiler already
+// models. It asks primitive_type's decoder rather than reading a seeded list, so a width
+// the storage ABI supports is a width the type checker accepts and the two cannot drift.
+// Seeding a fixed subset is what left Array<i32> rejected by the frontend long after the
+// scalar storage ABI had been generalized over every supported width.
+pub fn is_builtin_primitive_name(name: []u8) -> bool {
+    let record = primitive_type::record_from_text(name);
+    return record.kind != primitive_type::type_kind_unknown();
+}
+
+// type_name_is_known answers the question the seeded map alone used to answer: a declared
+// type resolves from the map, and anything else falls through to the primitive decoder.
+// The map is consulted first so a user type that happens to spell a primitive still wins.
+pub fn type_name_is_known(
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    name: []u8
+) -> bool {
+    if kinds.contains(name) {
+        return true;
+    }
+    return is_builtin_primitive_name(name);
+}
 
 pub fn declare_type(
     kinds: &var std::map::Map<[]u8, model::TypeKind>,
@@ -18,10 +42,15 @@ pub fn declare_type(
     return;
 }
 
+// The three accessors below fall back to the primitive decoder on the same terms as
+// type_name_is_known: a primitive takes no type arguments and is copied by value.
 pub fn lookup_kind(
     kinds: &std::map::Map<[]u8, model::TypeKind>,
     name: []u8
 ) -> !model::TypeKind {
+    if !kinds.contains(name) and is_builtin_primitive_name(name) {
+        return model::TypeKind::Primitive;
+    }
     return kinds.get(name);
 }
 
@@ -29,6 +58,9 @@ pub fn arity_of(
     arities: &std::map::Map<[]u8, i64>,
     name: []u8
 ) -> !i64 {
+    if !arities.contains(name) and is_builtin_primitive_name(name) {
+        return 0;
+    }
     return arities.get(name);
 }
 
@@ -36,6 +68,9 @@ pub fn is_copyable(
     copyable: &std::map::Map<[]u8, bool>,
     name: []u8
 ) -> !bool {
+    if !copyable.contains(name) and is_builtin_primitive_name(name) {
+        return true;
+    }
     return copyable.get(name);
 }
 
