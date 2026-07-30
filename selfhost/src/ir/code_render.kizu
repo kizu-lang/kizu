@@ -128,6 +128,26 @@ fn channel_empty_message() -> []u8 {
     return "error: runtime error: channel is empty";
 }
 
+// error_prefix_message is what a runtime failure line starts with, shared by the trap
+// messages above and by an error a try carries out of main. The trap messages spell it
+// inline because they are whole lines; a propagated error supplies only its own text, so
+// the prefix is a global of its own that the fail block writes ahead of that text.
+fn error_prefix_message() -> []u8 {
+    return "error: runtime error: ";
+}
+
+fn render_error_prefix_global(out: &var std::string::String) -> !void {
+    let message = error_prefix_message();
+    try w(out, "@.kizu.run.error_prefix = private unnamed_addr constant [");
+    try wi(out, std::mem::len(message));
+    try w(out, " x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try w(out, message);
+    try out.append_byte(cast<u8>(34));
+    try nl(out);
+    return;
+}
+
 // render_expect_fail_global emits the expectation-failure message global the
 // EXPECT fail blocks point their trap slice at (message plus a newline byte).
 fn render_expect_fail_global(out: &var std::string::String) -> !void {
@@ -249,7 +269,10 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "%kizu.error.union.i64 = type { i1, i64, %kizu.run.union }");
     try wl(out, "%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }");
     try wl(out, "%kizu.rt.string = type { ptr, ptr, i64, i64 }");
-    try wl(out, "%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }");
+    // %kizu.rt.map mirrors the layout selfhost/runtime/selfhost.storage.ll allocates and
+    // indexes: allocator, entries, len, cap, value_size. A run artifact links against that
+    // runtime, so this declaration is not free to describe a different struct.
+    try wl(out, "%kizu.rt.map = type { ptr, ptr, i64, i64, i64 }");
     try wl(out, "%kizu.rt.box = type { ptr, ptr, i64 }");
     try wl(out, "%kizu.run.channel = type { ptr, ptr, i1 }");
     try nl(out);
@@ -274,10 +297,11 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try wl(out, "declare i64 @kizu_rt_array_len(%kizu.owned)");
     try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned, i64)");
     try wl(out, "declare void @kizu_rt_array_deinit(%kizu.owned)");
-    try wl(out, "declare %kizu.owned @kizu_rt_map_new(%kizu.owned)");
-    try wl(out, "declare %kizu.error.void @kizu_rt_map_insert(%kizu.owned, %kizu.slice.u8, i64)");
+    try wl(out, "declare %kizu.owned @kizu_rt_map_new(%kizu.owned, i64)");
+    try wl(out, "declare %kizu.error.void @kizu_rt_map_insert(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8)");
     try wl(out, "declare i1 @kizu_rt_map_contains(%kizu.owned, %kizu.slice.u8)");
-    try wl(out, "declare %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned, %kizu.slice.u8)");
+    try wl(out, "declare i64 @kizu_rt_map_len(%kizu.owned)");
+    try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_map_get(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare void @kizu_rt_map_deinit(%kizu.owned)");
     try wl(out, "declare %kizu.error.owned @kizu_rt_box_new(%kizu.owned, %kizu.slice.u8)");
     try wl(out, "declare %kizu.error.slice.u8 @kizu_rt_box_borrow(%kizu.owned)");
@@ -298,6 +322,7 @@ fn render_preamble(out: &var std::string::String, source_path: []u8) -> !void {
     try render_bool_print_global(out, "@.kizu.run.bool_false = private unnamed_addr constant [6 x i8] c", "false");
     try render_expect_fail_global(out);
     try render_channel_empty_global(out);
+    try render_error_prefix_global(out);
     try w(out, "@.kizu.run.string_truncate_oob = private unnamed_addr constant [36 x i8] c");
     try out.append_byte(cast<u8>(34));
     try w(out, "String.truncate length out of bounds");
@@ -4706,7 +4731,7 @@ fn render_try_i64_propagate(
     let err_i64 = ret_abi_user_err_i64();
     let err_owned = ret_abi_user_err_owned();
     if abi == main_abi {
-        try render_try_propagate_exit(out, index);
+        try render_try_propagate_exit_slice(out, "tc", index, "%kizu.error.i64", 2);
     }
     if abi == err_i64 {
         try render_try_i64_propagate_err_i64(out, index);
@@ -4792,7 +4817,7 @@ fn render_try_typed_error_i64_propagate(
     let typed_err_i64 = ret_abi_user_typed_error_i64();
     let typed_err_void = ret_abi_user_typed_error_void();
     if abi == main_abi {
-        try render_try_propagate_exit(out, index);
+        try render_try_propagate_exit_union(out, "tc", index, "%kizu.error.union.i64", 2);
     }
     if abi == typed_err_i64 {
         try render_try_typed_error_i64_propagate_err_i64(out, index);
@@ -4848,7 +4873,7 @@ fn render_try_typed_error_void_propagate(
     let typed_err_i64 = ret_abi_user_typed_error_i64();
     let typed_err_void = ret_abi_user_typed_error_void();
     if abi == main_abi {
-        try render_try_propagate_exit(out, index);
+        try render_try_propagate_exit_union(out, "tc", index, "%kizu.error.union.void", 1);
     }
     if abi == typed_err_i64 {
         try render_try_typed_error_void_propagate_err_i64(out, index);
@@ -4947,7 +4972,7 @@ fn render_try_propagate(
     try render_error_cleanup(out, code, index);
     let main_abi = ret_abi_main();
     if abi == main_abi {
-        try render_try_propagate_exit(out, index);
+        try render_try_propagate_exit_slice(out, "tc", index, "%kizu.error.void", 1);
     }
     if abi != main_abi {
         try render_try_propagate_error(out, index, abi);
@@ -4955,13 +4980,128 @@ fn render_try_propagate(
     return;
 }
 
-fn render_try_propagate_exit(out: &var std::string::String, index: i64) -> !void {
-    try w(out, "  %tc");
-    try wi(out, index);
-    try wl(out, "_exit = call i64 @kizu_rt_process_exit_code(i64 1)");
-    try w(out, "  ret i64 %tc");
-    try wi(out, index);
+// render_try_propagate_exit_slice ends a failed try that leaves kizu_run_main, for a union
+// whose message is a %kizu.slice.u8 at the given field. prefix/key name the SSA value the
+// union is bound to: a try binds %tc<record index>, an inlined fs read binds %fr<dst>.
+fn render_try_propagate_exit_slice(
+    out: &var std::string::String,
+    prefix: []u8,
+    key: i64,
+    union_type: []u8,
+    field: i64
+) -> !void {
+    try render_exit_value_name(out, prefix, key, "_dm");
+    try w(out, " = extractvalue ");
+    try w(out, union_type);
+    try w(out, " %");
+    try w(out, prefix);
+    try wi(out, key);
+    try w(out, ", ");
+    try wi(out, field);
+    try nl(out);
+    try render_try_propagate_exit(out, prefix, key, "_dm");
+    return;
+}
+
+// render_try_propagate_exit_union does the same for a typed error union, whose payload at
+// the given field is a %kizu.run.union carrying the message in its own field 2.
+fn render_try_propagate_exit_union(
+    out: &var std::string::String,
+    prefix: []u8,
+    key: i64,
+    union_type: []u8,
+    field: i64
+) -> !void {
+    try render_exit_value_name(out, prefix, key, "_du");
+    try w(out, " = extractvalue ");
+    try w(out, union_type);
+    try w(out, " %");
+    try w(out, prefix);
+    try wi(out, key);
+    try w(out, ", ");
+    try wi(out, field);
+    try nl(out);
+    try render_exit_value_name(out, prefix, key, "_dm");
+    try w(out, " = extractvalue %kizu.run.union %");
+    try w(out, prefix);
+    try wi(out, key);
+    try wl(out, "_du, 2");
+    try render_try_propagate_exit(out, prefix, key, "_dm");
+    return;
+}
+
+// render_try_propagate_exit writes the failed try's diagnostic to stderr and exits 1.
+// message_suffix names the already-bound %kizu.slice.u8 holding the error's own text, so a
+// caller that extracted it under a name of its own does not extract it twice. Reporting is
+// the point: an error a try carried out of main used to exit 1 with both streams empty, so
+// a program that failed at run time was indistinguishable from one that never started.
+fn render_try_propagate_exit(
+    out: &var std::string::String,
+    prefix: []u8,
+    key: i64,
+    message_suffix: []u8
+) -> !void {
+    let prefix_len = std::mem::len(error_prefix_message());
+    try render_try_propagate_exit_write(
+        out, prefix, key, "_dpfx", "@.kizu.run.error_prefix", prefix_len
+    );
+    try render_exit_value_name(out, prefix, key, "_dwm");
+    try w(out, " = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %io, %kizu.slice.u8 %");
+    try w(out, prefix);
+    try wi(out, key);
+    try w(out, message_suffix);
+    try wl(out, ")");
+    try render_try_propagate_exit_write(out, prefix, key, "_dnl", "@.kizu.run.newline", 1);
+    try render_exit_value_name(out, prefix, key, "_exit");
+    try wl(out, " = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try w(out, "  ret i64 %");
+    try w(out, prefix);
+    try wi(out, key);
     try wl(out, "_exit");
+    return;
+}
+
+// render_try_propagate_exit_write builds a slice over a constant global and writes it to
+// stderr. The prefix and the trailing newline are both fixed globals, so they share this.
+fn render_try_propagate_exit_write(
+    out: &var std::string::String,
+    prefix: []u8,
+    key: i64,
+    name: []u8,
+    global: []u8,
+    length: i64
+) -> !void {
+    try render_exit_value_name(out, prefix, key, name);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr ");
+    try w(out, global);
+    try wl(out, ", 0");
+    try render_exit_value_name(out, prefix, key, name);
+    try w(out, " = insertvalue %kizu.slice.u8 %");
+    try w(out, prefix);
+    try wi(out, key);
+    try w(out, name);
+    try w(out, "_base, i64 ");
+    try wi(out, length);
+    try wl(out, ", 1");
+    try render_exit_value_name(out, prefix, key, name);
+    try w(out, "_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %io, %kizu.slice.u8 %");
+    try w(out, prefix);
+    try wi(out, key);
+    try w(out, name);
+    try wl(out, ")");
+    return;
+}
+
+fn render_exit_value_name(
+    out: &var std::string::String,
+    prefix: []u8,
+    key: i64,
+    name: []u8
+) -> !void {
+    try w(out, "  %");
+    try w(out, prefix);
+    try wi(out, key);
+    try w(out, name);
     return;
 }
 
@@ -6786,8 +6926,14 @@ fn storage_new_symbol(kind: i64) -> []u8 {
     return "kizu_rt_arena_new";
 }
 
+// storage_new_needs_size reports whether the runtime constructor takes an element or
+// value size. @kizu_rt_map_new does, and rejects a size of zero or less, so a map that
+// omitted it was passing whatever the second argument register happened to hold.
 fn storage_new_needs_size(kind: i64) -> bool {
     if codegen::code_kind_is_owned_array(kind) {
+        return true;
+    }
+    if codegen::code_kind_is_owned_map(kind) {
         return true;
     }
     return codegen::code_kind_is_arena(kind);
@@ -7561,7 +7707,9 @@ fn render_array_get_propagate(
     let err_i64 = ret_abi_user_err_i64();
     let err_owned = ret_abi_user_err_owned();
     if abi == main_abi {
-        try render_try_propagate_exit(out, index);
+        // The caller already bound %tc<index>_pm from its own union, whose value is not
+        // named %tc<index>, so reuse that slice rather than extracting it again.
+        try render_try_propagate_exit(out, "tc", index, "_pm");
     }
     if abi == err_i64 {
         try w(out, "  %tc");
@@ -7834,22 +7982,46 @@ fn render_try_map_insert_i64(
         try wi(out, value);
         try wl(out, " to i64");
     }
+    // @kizu_rt_map_insert takes the value as a byte view and validates its length against
+    // the value_size the map was built with; it is not a bare i64 parameter. Marshal the
+    // i64 value slot through stack storage the way an array append does.
+    try w(out, "  %mi");
+    try wi(out, index);
+    try wl(out, "_slot = alloca i64");
+    try w(out, "  store i64 ");
+    if value_is_bool {
+        try w(out, "%mi");
+        try wi(out, index);
+        try w(out, "_v");
+    }
+    if !value_is_bool {
+        try w(out, "%v");
+        try wi(out, value);
+    }
+    try w(out, ", ptr %mi");
+    try wi(out, index);
+    try wl(out, "_slot");
+    try w(out, "  %mi");
+    try wi(out, index);
+    try w(out, "_base = insertvalue %kizu.slice.u8 poison, ptr %mi");
+    try wi(out, index);
+    try wl(out, "_slot, 0");
+    try w(out, "  %mi");
+    try wi(out, index);
+    try w(out, "_slice = insertvalue %kizu.slice.u8 %mi");
+    try wi(out, index);
+    try w(out, "_base, i64 ");
+    try wi(out, codegen::code_map_value_size());
+    try wl(out, ", 1");
     try w(out, "  %tc");
     try wi(out, index);
     try w(out, " = call %kizu.error.void @kizu_rt_map_insert(%kizu.owned %v");
     try wi(out, receiver);
     try w(out, ", %kizu.slice.u8 %v");
     try wi(out, key);
-    if value_is_bool {
-        try w(out, ", i64 %mi");
-        try wi(out, index);
-        try w(out, "_v");
-    }
-    if !value_is_bool {
-        try w(out, ", i64 %v");
-        try wi(out, value);
-    }
-    try wl(out, ")");
+    try w(out, ", %kizu.slice.u8 %mi");
+    try wi(out, index);
+    try wl(out, "_slice)");
     try render_try_void_result(out, code, index, abi);
     return;
 }
@@ -7879,21 +8051,14 @@ fn render_map_len(
 ) -> !void {
     let dst = try code.get(index + 1);
     let receiver = try code.get(index + 2);
-    try w(out, "  %ml");
-    try wi(out, index);
-    try w(out, "_raw = extractvalue %kizu.owned %v");
-    try wi(out, receiver);
-    try wl(out, ", 0");
-    try w(out, "  %ml");
-    try wi(out, index);
-    try w(out, "_len_ptr = getelementptr inbounds %kizu.rt.map, ptr %ml");
-    try wi(out, index);
-    try wl(out, "_raw, i32 0, i32 1");
+    // Ask the runtime for the count rather than indexing %kizu.rt.map here. Reaching into
+    // the struct is how this read came to load field 1, the entries pointer, instead of
+    // field 2: it answered 0 for an empty map only because entries starts null.
     try w(out, "  %v");
     try wi(out, dst);
-    try w(out, " = load i64, ptr %ml");
-    try wi(out, index);
-    try wl(out, "_len_ptr");
+    try w(out, " = call i64 @kizu_rt_map_len(%kizu.owned %v");
+    try wi(out, receiver);
+    try wl(out, ")");
     return;
 }
 
@@ -7909,19 +8074,22 @@ fn render_try_map_get_i64(
     let key = try code.get(index + 3);
     let dst_kind = try kinds.get(dst);
     let dst_is_bool = dst_kind == codegen::code_kind_bool();
-    try w(out, "  %tc");
+    // @kizu_rt_map_get hands back a view of the stored value slot, not an i64 error union.
+    // There is no @kizu_rt_map_get_i64 in the runtime at all; declaring one only stayed
+    // harmless while nothing called it.
+    try w(out, "  %mg");
     try wi(out, index);
-    try w(out, " = call %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned %v");
+    try w(out, " = call %kizu.error.slice.u8 @kizu_rt_map_get(%kizu.owned %v");
     try wi(out, receiver);
     try w(out, ", %kizu.slice.u8 %v");
     try wi(out, key);
     try wl(out, ")");
-    try w(out, "  %tc");
+    try w(out, "  %mg");
     try wi(out, index);
-    try w(out, "_ok = extractvalue %kizu.error.i64 %tc");
+    try w(out, "_ok = extractvalue %kizu.error.slice.u8 %mg");
     try wi(out, index);
     try wl(out, ", 0");
-    try w(out, "  br i1 %tc");
+    try w(out, "  br i1 %mg");
     try wi(out, index);
     try w(out, "_ok, label %tc");
     try wi(out, index);
@@ -7931,21 +8099,36 @@ fn render_try_map_get_i64(
     try w(out, "tc");
     try wi(out, index);
     try wl(out, "_fail:");
-    try render_try_i64_propagate(out, code, index, abi);
+    try w(out, "  %tc");
+    try wi(out, index);
+    try w(out, "_pm = extractvalue %kizu.error.slice.u8 %mg");
+    try wi(out, index);
+    try wl(out, ", 2");
+    try render_array_get_propagate(out, code, index, abi);
     try w(out, "tc");
     try wi(out, index);
     try wl(out, "_cont:");
-    // A bool map packs 0/1 into the i64 slot; narrow the extracted i64 back to an
-    // i1 (icmp ne 0) so downstream bool consumers see the right type. The i64 map
-    // binds the extracted i64 directly. Mutually exclusive then-body guards fall
-    // through to a single return (the shape the compiled-MIR void if-lowering
-    // accepts; an early 'return;' inside a then-body is rejected).
+    try w(out, "  %mg");
+    try wi(out, index);
+    try w(out, "_view = extractvalue %kizu.error.slice.u8 %mg");
+    try wi(out, index);
+    try wl(out, ", 1");
+    try w(out, "  %mg");
+    try wi(out, index);
+    try w(out, "_ptr = extractvalue %kizu.slice.u8 %mg");
+    try wi(out, index);
+    try wl(out, "_view, 0");
+    try w(out, "  %mg");
+    try wi(out, index);
+    try w(out, "_raw = load i64, ptr %mg");
+    try wi(out, index);
+    try wl(out, "_ptr");
+    // A bool map packs 0/1 into the i64 slot; narrow the loaded i64 back to an i1
+    // (icmp ne 0) so downstream bool consumers see the right type. The i64 map binds
+    // the loaded i64 directly. Mutually exclusive then-body guards fall through to a
+    // single return (the shape the compiled-MIR void if-lowering accepts; an early
+    // 'return;' inside a then-body is rejected).
     if dst_is_bool {
-        try w(out, "  %mg");
-        try wi(out, index);
-        try w(out, "_raw = extractvalue %kizu.error.i64 %tc");
-        try wi(out, index);
-        try wl(out, ", 1");
         try w(out, "  %v");
         try wi(out, dst);
         try w(out, " = icmp ne i64 %mg");
@@ -7955,9 +8138,9 @@ fn render_try_map_get_i64(
     if !dst_is_bool {
         try w(out, "  %v");
         try wi(out, dst);
-        try w(out, " = extractvalue %kizu.error.i64 %tc");
+        try w(out, " = add i64 %mg");
         try wi(out, index);
-        try wl(out, ", 1");
+        try wl(out, "_raw, 0");
     }
     return;
 }
@@ -8305,13 +8488,11 @@ fn render_fs_read_propagate(
     return;
 }
 
+// render_fs_read_propagate_exit reports the read failure the same way a try that leaves
+// main does. The union is bound to %fr<dst> rather than %tc<index>, which is why the exit
+// renderer takes the value's prefix and key instead of assuming one.
 fn render_fs_read_propagate_exit(out: &var std::string::String, dst: i64) -> !void {
-    try w(out, "  %fr");
-    try wi(out, dst);
-    try wl(out, "_exit = call i64 @kizu_rt_process_exit_code(i64 1)");
-    try w(out, "  ret i64 %fr");
-    try wi(out, dst);
-    try wl(out, "_exit");
+    try render_try_propagate_exit_slice(out, "fr", dst, "%kizu.error.slice.u8", 2);
     return;
 }
 
