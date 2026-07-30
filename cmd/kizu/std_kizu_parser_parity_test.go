@@ -1122,6 +1122,15 @@ func unsupportedStdParserSource(source string) string {
 			inString = true
 			continue
 		}
+		// Comment bytes are trivia to std::kizu::lexer, which drops them in
+		// skip_line_comment, so scanning them here rejects sources the lexer
+		// handles fine. Prose is not the subset: a `#` in an issue reference is
+		// the byte that surfaced this, and an apostrophe or a lone quote in a
+		// comment would have desynchronized the string tracking above.
+		if r == '/' && index+1 < len(source) && source[index+1] == '/' {
+			index = stdParserLineCommentEnd(source, index) - 1
+			continue
+		}
 		if r == '\\' && index+1 < len(source) && source[index+1] == '\\' {
 			end := lexerParityStringTokenEnd(source, index)
 			if end <= index {
@@ -1142,6 +1151,16 @@ func unsupportedStdParserSource(source string) string {
 		return "unterminated string literal"
 	}
 	return ""
+}
+
+// stdParserLineCommentEnd returns the index just past a `//` comment, which the
+// std lexer ends at the newline or at end of source. Kizu has line comments only,
+// so there is no block form to close.
+func stdParserLineCommentEnd(source string, start int) int {
+	if next := strings.IndexByte(source[start:], '\n'); next >= 0 {
+		return start + next
+	}
+	return len(source)
 }
 
 // summarizeProgramSubset summarizes a complete Go AST program when it is in subset.
