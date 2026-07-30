@@ -59,7 +59,7 @@ just perf-cache-isolated
 | interpreter | none | Go interpreter | Go-owned | No switch planned before Kizu compiler frontend can emit a stable execution IR. |
 | IR / backend | `selfhost::{ir, backend}` skeleton | Go IR / backend | Go-owned | Requires a separate backend fingerprint and artifact/cache issue before any production switch. |
 | build cache / artifacts | none | Go cache / target paths | Go-owned | Requires explicit cache-key, prune, status, no-op rebuild, and artifact-size evidence. |
-| #458 selfhost CLI path | `selfhost::{ir, backend}` plus hosted runtime ABI | `target/selfhost/stage2/selfhost` | switched for `check selfhost` and `stage selfhost` | `just selfhost-production-from-scratch` passes; Go remains only in explicit stage0 bootstrap/oracle jobs; general CLI parity remains blocked by #497. |
+| #458 selfhost CLI path | `selfhost::{ir, backend}` plus hosted runtime ABI | `target/selfhost/stage2/selfhost` | switched for `check selfhost` and `stage selfhost` | `just selfhost-production-from-scratch` passes; Go remains only in explicit stage0 bootstrap/oracle jobs; general CLI parity is tracked by #1075, which #1071 and #1072 feed. |
 | #752 run/test executable lowering | `selfhost::cli::execute`, `selfhost::backend::executable`, `selfhost::backend::hosted` | hosted stage2 uses the direct bounded executable renderer; native selfhost source executable uses checked AST | switched for bounded source path | `just selfhost-native-source-gate` builds the selfhost source package as a native executable and verifies run/test artifacts carry `executable_lowering selfhost::backend::executable checked-ast`, including local string `let` plus `print(local)` multiple-statement run lowering; hosted stage2 no longer depends on the old generated source-shape matcher module. |
 
 ## Phase Replacement Checklist
@@ -401,7 +401,7 @@ target/selfhost/stage2/selfhost stage selfhost
 ```
 
 The artifact may also run the manifest-selected #460 supported corpus. It must
-not be described as a general replacement for the `kizu` CLI until #497 closes.
+not be described as a general replacement for the `kizu` CLI until #1075 closes.
 
 Rollback is a revert of the #461 production-boundary change or a release note
 that points operators back to explicit bootstrap/oracle commands. Rollback must

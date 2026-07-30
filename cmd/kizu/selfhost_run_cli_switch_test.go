@@ -81,8 +81,16 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	}
 
 	const supported = "selfhost/tests/cli/run_hello.kizu"
-	const unsupported = "examples/atomic_flag.kizu"
-	const unsupportedGoOutput = "false\ntrue\n"
+
+	// The unsupported fixture has to be a shape selfhost genuinely defers, and its Go
+	// output has to be non-empty: the leak check below is a strings.Contains, which any
+	// string satisfies against "". examples/atomic_flag.kizu was this fixture until
+	// selfhost learned to run it end to end, at which point the case stopped testing
+	// anything and started failing. A &var struct field write is deferred with the
+	// explicit "run source lowering not supported" diagnostic, and "bob\nbob\n" cannot
+	// occur in that diagnostic.
+	const unsupported = "examples/mutable_borrow.kizu"
+	const unsupportedGoOutput = "bob\nbob\n"
 
 	// Gate on: the supported shape is selfhost-owned end to end. The printed
 	// output comes from executing the linked native artifact, not the Go

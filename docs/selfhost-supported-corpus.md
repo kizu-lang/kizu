@@ -33,8 +33,9 @@ just selfhost-corpus-gate-from-scratch
 ```
 
 Cases outside the manifest are excluded by selector. Broad command parity,
-general example/conformance coverage, and unsupported ABI shapes remain blocked
-by #497 and #495. Adding a corpus entry requires updating the manifest and the
+general example/conformance coverage, and unsupported ABI shapes are tracked by
+#1075 and #1074, the live successors to the closed #497 and #495 buckets. Adding
+a corpus entry requires updating the manifest and the
 hosted artifact behavior in the same change.
 
 The #525 `parse <file>` parity cases are intentionally tracked in a separate
