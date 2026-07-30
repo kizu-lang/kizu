@@ -9,7 +9,11 @@ import (
 // structured-control-flow detection out of every other compiled component.
 func TestSelfhostCompiledLLVMGuardsFormatOnlyStructuredCFShapes(t *testing.T) {
 	compiled := readSelfhostFile(t, "../../selfhost/src/backend/compiled_llvm.kizu")
-	body := selfhostKizuFunctionBody(t, compiled, "pub fn append_compiled_function_params_indexed(")
+	// append_compiled_function_params_indexed is now a wrapper; the dispatch body
+	// it used to hold lives in the context-taking variant.
+	body := selfhostKizuFunctionBody(
+		t, compiled, "fn append_compiled_function_params_context_indexed(",
+	)
 	guard := "if compiled_function_is_format_component(function_name) {"
 	guardIndex := strings.Index(body, guard)
 	if guardIndex < 0 {

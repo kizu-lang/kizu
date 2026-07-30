@@ -593,6 +593,10 @@ func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
 			t.Fatalf("selfhost type reference diagnostics keep token path %q", fragment)
 		}
 	}
+	// The pre-move entry delegates through three layers now: the AST node entry
+	// takes types, which takes facts, and the facts layer is where the AST type
+	// reference pass actually runs. All three are read so the forbidden token
+	// paths below are rejected anywhere along the chain.
 	preASTBody := selfhostKizuFunctionBody(
 		t,
 		checker,
@@ -601,6 +605,10 @@ func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
 		t,
 		checker,
 		"pub fn first_pre_move_check_diagnostic_ast_node_with_types(",
+	) + selfhostKizuFunctionBody(
+		t,
+		checker,
+		"pub fn first_pre_move_check_diagnostic_ast_node_with_facts(",
 	)
 	if !strings.Contains(preASTBody, "type_ref_ast::first_type_error_in_ast(") {
 		t.Fatal("pre-move AST diagnostic entry does not use AST type reference diagnostics")
@@ -989,8 +997,10 @@ func assertSelfhostFastDiagnosticsASTNode(t *testing.T, wrapperBody string, astB
 	t.Helper()
 	required := []string{
 		"resolver::first_duplicate_declaration_ast_node(",
-		"types::first_pre_move_check_diagnostic_ast_node_with_types(",
-		"types::first_post_move_check_diagnostic_ast_node(",
+		// The check entry calls the facts-taking layer directly; _with_types is
+		// now the intermediate that forwards to it.
+		"types::first_pre_move_check_diagnostic_ast_node_with_facts(",
+		"types::first_post_move_check_diagnostic_ast_node_with_facts(",
 		"ownership::first_use_after_move_summary_ast_node_with_borrow_params(",
 	}
 	for _, fragment := range required {

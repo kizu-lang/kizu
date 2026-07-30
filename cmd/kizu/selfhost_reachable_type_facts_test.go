@@ -203,8 +203,13 @@ func TestSelfhostNumericCollectorHasNoNamedTypeSeeds(t *testing.T) {
 }
 
 func TestSelfhostFunctionTypeParametersUseCatalogFacts(t *testing.T) {
-	emitter := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	body := selfhostKizuFunctionBody(t, emitter, "fn append_function_type_parameter_facts(")
+	// The emitter moved out of executable_functions into the dependency graph and
+	// was split into an entry, a per-entry step, and the row writer. All three are
+	// read so the assertions still cover the whole emitter.
+	emitter := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency_graph.kizu")
+	body := selfhostKizuFunctionBody(t, emitter, "pub fn append_function_type_parameter_facts(") +
+		selfhostKizuFunctionBody(t, emitter, "fn append_entry_function_type_parameter_facts(") +
+		selfhostKizuFunctionBody(t, emitter, "fn append_function_type_parameter_rows(")
 	requireSourceFragments(t, "function type parameter fact emitter", body, []string{
 		`out.append_bytes("function-type-parameter ")`,
 		"package_catalog::function_type_parameter_len(",
