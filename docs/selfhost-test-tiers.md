@@ -22,6 +22,7 @@ direct heavyweight gates into routine hosted artifact validation.
 | Oracle performance or budget changes | `just selfhost-oracle-budget` | explicit performance gate | Same oracle with budget enforcement enabled. |
 | Debugging one interpreted selfhost stage or the CLI contract | `just selfhost-integration-gates` or `just selfhost-cli-gate` | focused debugging | Direct heavyweight interpreter gates; not routine preflight. |
 | Run tape / renderer internals that only exist as interpreter entry points | raw `go test` with the explicit `KIZU_RUN_SELFHOST_RUN_*` env | last-resort debugging | No `just` recipe on purpose. Prefer hosted stage2 parity, native-source, or production-from-scratch gates first. |
+| Package dependency numeric identity blockers | raw `go test` with `KIZU_RUN_SELFHOST_PACKAGE_IDENTITY=1` | last-resort debugging | Two `interp.New(...).RunEntry(...)` gates that pin the next interpreted-consumer blocker. Measured together at 2043s. No `just` recipe on purpose; write full output to a log file. |
 
 ## Daily Gate
 
@@ -37,12 +38,39 @@ It runs ordinary unit tests, command smokes, conformance checks, and the
 lightweight lexer/parser parity harnesses. It does not run heavyweight selfhost
 integration gates by default.
 
-Measured locally on 2026-05-21 after #503:
+The budget is what makes the pre-commit hook usable: `.pre-commit-config.yaml` runs
+`go test ./...` unconditionally under a 10-minute timeout. A heavyweight gate that
+reaches this tier does not slow the hook down, it makes the hook impossible to
+pass, and `--no-verify` becomes routine. That is what happened to the three
+`interp.New(...).RunEntry(...)` numeric-package-collector gates: they grew to
+2287s of the 2383s `cmd/kizu` took, so the hook timed out regardless of whether
+the code was correct. They are opt-in behind
+`KIZU_RUN_SELFHOST_PACKAGE_IDENTITY=1` as of this measurement.
+
+Measured locally on 2026-07-30:
+
+| Command | Elapsed |
+| --- | ---: |
+| `go test ./... -count=1` | 87.5s |
+| `go test ./cmd/kizu -count=1` | 86.5s |
+
+The same commands before the three gates became opt-in, for comparison:
+
+| Command | Elapsed |
+| --- | ---: |
+| `go test ./... -count=1` | ~2400s |
+| `go test ./cmd/kizu -count=1` | 2382.8s |
+
+Measured locally on 2026-05-21 after #503, when the tier was still inside budget:
 
 | Command | Elapsed |
 | --- | ---: |
 | `go test ./cmd/kizu -count=1` | 31.7s |
 | `pre-commit run --all-files` | 33.5s |
+
+The gap between 31.7s and 86.5s is unexplained drift, not a single gate. Anything
+that pushes this tier past two minutes should be measured and either made opt-in
+or fixed, rather than absorbed.
 
 ## Aggregate Selfhost Oracle
 

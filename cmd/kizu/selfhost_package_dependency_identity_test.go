@@ -112,6 +112,7 @@ func countEveryEmittedBodyCallClassificationFailures(t *testing.T, facts string)
 // constructor-facts component against the complete numeric package catalog,
 // then emits the real collect_checked closure without source-text selection.
 func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
+	requirePackageIdentityGate(t)
 	restore, err := chdirRepoRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -239,11 +240,42 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 	}
 }
 
+// requirePackageIdentityGate keeps the three interpreted numeric-package-collector gates out
+// of the daily tier. Each loads and checks the selfhost package and then runs a gate entry
+// through the Go interpreter with interp.New(...).RunEntry(...) --  the shape
+// docs/selfhost-test-tiers.md excludes from `go test ./...` by policy and CLAUDE.md calls
+// debug-only. Measured:
+//
+//	...BackendConsumerRejectsWrongIDs   1533s
+//	...BackendConsumer                   510s
+//	...Behavior                          244s
+//	                                    -----
+//	                                    2287s of the cmd/kizu package's 2383s
+//
+// At that cost `go test ./...` cannot finish inside the pre-commit hook's 10-minute timeout
+// no matter what the code does, so the hook could never pass and --no-verify became routine.
+// Skipping them by default drops the Behavior gate's positive fact assertions from the daily
+// run; that coverage is still reachable through the command below, and the alternative was a
+// daily tier nobody could run.
+//
+// There is deliberately no just recipe, for the same reason the run tape and render gates have
+// none. Run it directly and read the log rather than piping it through tail:
+//
+//	KIZU_RUN_SELFHOST_PACKAGE_IDENTITY=1 go test -timeout=60m ./cmd/kizu \
+//	  -run 'TestSelfhostNumericPackageCollector' -count=1 -v > gate.log 2>&1
+func requirePackageIdentityGate(t *testing.T) {
+	t.Helper()
+	if os.Getenv("KIZU_RUN_SELFHOST_PACKAGE_IDENTITY") != "1" {
+		t.Skip("set KIZU_RUN_SELFHOST_PACKAGE_IDENTITY=1 to run the interpreted package identity gates")
+	}
+}
+
 // TestSelfhostNumericPackageCollectorBackendConsumer crosses the owned-file backend boundary
 // and pins the next interpreted-consumer blocker after ConstructorFacts ABI mapping: lowering
 // the checked producer reaches a mutable struct-field assignment that the interpreter does not
 // yet represent as a struct value. The native stage path is checked separately from this gate.
 func TestSelfhostNumericPackageCollectorBackendConsumer(t *testing.T) {
+	requirePackageIdentityGate(t)
 	restore, err := chdirRepoRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -270,6 +302,7 @@ func TestSelfhostNumericPackageCollectorBackendConsumer(t *testing.T) {
 
 // TestSelfhostNumericPackageCollectorBackendConsumerRejectsWrongIDs guards both numeric identities.
 func TestSelfhostNumericPackageCollectorBackendConsumerRejectsWrongIDs(t *testing.T) {
+	requirePackageIdentityGate(t)
 	restore, err := chdirRepoRoot()
 	if err != nil {
 		t.Fatal(err)
