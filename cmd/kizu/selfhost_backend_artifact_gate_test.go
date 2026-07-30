@@ -565,8 +565,16 @@ func requiredLLVMSourceLoaderFragments() []string {
 		"%t8 = icmp sgt i64 %start, 0",
 		"%t11 = sub i64 %start, 1",
 		"%t14 = icmp ne i8 %t12, 47",
-		"%arg5_0_sstart = add i64 %start, 0",
-		"%arg5_0_send = add i64 %path_len, 0",
+		// The trailing slice path[start..path_len] handed to equal_bytes is bounds-checked
+		// against the receiver's own length before its view is built, so a drifted bound
+		// traps instead of reading past the slice. It is materialized as an ordinary slice
+		// temp; an earlier revision of these fragments pinned a per-argument
+		// %arg5_0_sstart / %arg5_0_send pair that no longer exists.
+		"%t18_endhigh = icmp sgt i64 %path_len, %t18_srclen",
+		"%t18_gep = getelementptr i8, ptr %t18_baseptr, i64 %start",
+		"%t18_len = sub i64 %path_len, %start",
+		"%t19 = call i1 @kizu_std__mem_equal_bytes(" +
+			"%kizu.slice.u8 %t18, %kizu.slice.u8 %module_root)",
 		"define i64 @kizu_selfhost__source_loader_package_module_start",
 		"%t2 = icmp slt i64 %source_root_len, 0",
 		"%t6 = icmp sle i64 %t4, %source_root_len",
@@ -778,24 +786,31 @@ func requiredLLVMArenaGetFragments() []string {
 // (a two-level extractvalue), while the default arm returns the literal 0 (a real value,
 // not 'unreachable'). The %kizu.kizu.ast.program_node payload struct is the only modelled
 // AstData variant payload.
+//
+// The names below are the ones the compiled backend actually spells: a value the source
+// binds keeps that name (%node), an anonymous subexpression becomes %t<n>, and the union
+// dispatch numbers its blocks and payload slot after the construct and the AST node it
+// lowers (dispatch1_*, %dispatch.payload.9.0). These fragments were first written against
+// an invented %match_* naming, before the cluster was reachable and could be observed.
 func requiredLLVMMatchUnionFragments() []string {
 	return []string{
 		"%kizu.kizu.ast.program_node = type { %kizu.kizu.ast.child_range }",
 		"define i64 @kizu_selfhost__ast_declaration_count",
-		"%match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+		"%node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %root)",
-		"%match_data = extractvalue %kizu.kizu.ast.ast_node %match_node, 1",
-		"%match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0",
-		"%match_is_variant = icmp eq i64 %match_tag, 0",
-		"br i1 %match_is_variant, label %match_arm_variant, label %match_arm_default",
-		"%match_payload_ptr = getelementptr %kizu.kizu.ast.ast_data, " +
-			"ptr %match_payload_slot, i32 0, i32 1",
-		"%match_payload = load %kizu.kizu.ast.program_node, ptr %match_payload_ptr, align 8",
-		"%match_field0 = extractvalue %kizu.kizu.ast.program_node %match_payload, 0",
-		"%match_value = extractvalue %kizu.kizu.ast.child_range %match_field0, 1",
-		"  ret i64 %match_value",
-		"match_arm_default:",
-		"  ret i64 0",
+		"%t0 = extractvalue %kizu.kizu.ast.ast_node %node, 1",
+		"%dispatch1_tag0 = extractvalue %kizu.kizu.ast.ast_data %t0, 0",
+		"%dispatch1_is_0 = icmp eq i64 %dispatch1_tag0, 0",
+		"br i1 %dispatch1_is_0, label %dispatch1_arm_0, label %dispatch1_check_1",
+		"%dispatch.payload.9.0.slot = alloca %kizu.kizu.ast.ast_data, align 8",
+		"%dispatch.payload.9.0.ptr = getelementptr %kizu.kizu.ast.ast_data, " +
+			"ptr %dispatch.payload.9.0.slot, i32 0, i32 1",
+		"%dispatch.payload.9.0 = load %kizu.kizu.ast.program_node, " +
+			"ptr %dispatch.payload.9.0.ptr, align 8",
+		"%t1 = extractvalue %kizu.kizu.ast.program_node %dispatch.payload.9.0, 0",
+		"%t2 = extractvalue %kizu.kizu.ast.child_range %t1, 1",
+		"  ret i64 %t2",
+		"dispatch1_arm_1:\n  ret i64 0",
 	}
 }
 
@@ -895,31 +910,40 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_ranges(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_fn_decl_parts(",
 		// node_count: bind the AstNode via Ast.get, extract the union tag, and dispatch over
-		// the exhaustive icmp/br arm chain (Program tag 0 first, FnDecl tag 43, ...).
-		"%match_node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
+		// the 45-arm icmp/br chain (Program tag 0 first, FnDecl tag 43 second, ...). The
+		// chain is exhaustive over AstData, so the last test is elided: dispatch1_check_44
+		// falls through unconditionally to the Empty arm, which returns 1. No 'unreachable'.
+		"%node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %node_id)",
-		"%match_tag = extractvalue %kizu.kizu.ast.ast_data %match_data, 0",
-		"%match_is_0 = icmp eq i64 %match_tag, 0",
-		"br i1 %match_is_0, label %match_arm_0, label %match_check_1",
+		"%dispatch1_is_1 = icmp eq i64 %dispatch1_tag0, 43",
+		"br i1 %dispatch1_is_1, label %dispatch1_arm_1, label %dispatch1_check_2",
+		"dispatch1_check_44:\n  br label %dispatch1_arm_44",
+		"%enumdispatchret1_44_val = insertvalue %kizu.error.i64 " +
+			"%enumdispatchret1_44_ok, i64 1, 1",
 		// node_count Program arm: load the ProgramNode payload, forward declarations to
-		// count_with_range, and return its (identically-typed) error union directly.
-		"%match_arm_0_payload = load %kizu.kizu.ast.program_node, " +
-			"ptr %match_arm_0_ptr, align 8",
-		"%match_arm_0_a1 = extractvalue %kizu.kizu.ast.program_node %match_arm_0_payload, 0",
-		"%match_arm_0_call = call %kizu.error.i64 @kizu_selfhost__ast_count_with_range(" +
-			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %match_arm_0_a1)",
-		"  ret %kizu.error.i64 %match_arm_0_call",
+		// count_with_range, then try-unwrap that error union and re-wrap the i64 as this
+		// function's own success. The argument is named from the call-argument namespace
+		// reserved for a nested statement, hence the 1000001 base.
+		"%arg1000001_1_ex = extractvalue %kizu.kizu.ast.program_node %dispatch.payload.9.0, 0",
+		"%t1 = call %kizu.error.i64 @kizu_selfhost__ast_count_with_range(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %arg1000001_1_ex)",
+		"%enumdispatchret1_0_val = insertvalue %kizu.error.i64 " +
+			"%enumdispatchret1_0_ok, i64 %t2, 1",
+		"  ret %kizu.error.i64 %enumdispatchret1_0_val",
 		// count_range: a two-phi accumulator loop over the range calling the checked
 		// Ast.child_at and the recursive node_count, propagating either failure and returning
-		// the accumulated count wrapped as the success.
-		"%range_len = extractvalue %kizu.kizu.ast.child_range %range, 1",
-		"%count = phi i64 [ 0, %entry ], [ %count_next, %count_nc_cont ]",
-		"%index = phi i64 [ 0, %entry ], [ %index_next, %count_nc_cont ]",
+		// the accumulated count wrapped as the success. Both phis take their back edge from
+		// the latch, and the exit reads the head phi, so the returned count is the one the
+		// last completed iteration produced.
+		"%t1 = extractvalue %kizu.kizu.ast.child_range %range, 1",
+		"%count = phi i64 [ 0, %loop2_preheader ], [ %count.loop.24, %loop2_latch ]",
+		"%index = phi i64 [ 0, %loop2_preheader ], [ %index_next, %loop2_latch ]",
 		"%child_call = call %kizu.error.kizu.kizu.ast.node_id @kizu_kizu__ast_ast_child_at(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %range, i64 %index)",
-		"%nc_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
+		"%t4 = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %child)",
-		"%count_next = add i64 %count, %nc",
+		"%t6 = add i64 %count, %t5",
+		"loop2_exit:\n  %retwrap7_ok = insertvalue %kizu.error.i64 zeroinitializer, i1 true, 0",
 		// count_two: let-try the recursive node_count, propagate failure, bind the success,
 		// then return the arithmetic wrapped as the error-union success.
 		"%first_count_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
