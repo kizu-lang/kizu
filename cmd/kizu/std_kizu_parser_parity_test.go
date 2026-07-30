@@ -1139,10 +1139,7 @@ func unsupportedStdParserSource(source string) string {
 			index = end - 1
 			continue
 		}
-		if isStdParserSpace(r) || isStdParserPunctuation(r) {
-			continue
-		}
-		if isStdParserWordRune(r) {
+		if isStdParserScannableRune(r) {
 			continue
 		}
 		return "source contains tokens outside std parser subset"
@@ -1151,6 +1148,12 @@ func unsupportedStdParserSource(source string) string {
 		return "unterminated string literal"
 	}
 	return ""
+}
+
+// isStdParserScannableRune reports a byte the std lexer can scan outside strings
+// and comments: trivia, punctuation, or an identifier/number byte.
+func isStdParserScannableRune(r rune) bool {
+	return isStdParserSpace(r) || isStdParserPunctuation(r) || isStdParserWordRune(r)
 }
 
 // stdParserLineCommentEnd returns the index just past a `//` comment, which the
