@@ -26,6 +26,13 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 		`"selfhost", "parser/format", "format_source"`,
 		`"selfhost", "backend/hosted", "artifact_path"`,
 		`"selfhost", "ir/codegen", "metadata_line"`,
+		// The manifest doubles as the emission closure's root set. These two are roots for
+		// that reason rather than because the handwritten boundary calls them: package_cli
+		// pulls in source::loader, and summarize_parse_result is the narrowest root that
+		// reaches ast.kizu's node_count family. The count assertion below is what keeps the
+		// set closed, so a new root has to be added here deliberately.
+		`"selfhost", "cli/check", "package_cli"`,
+		`"selfhost", "ast", "summarize_parse_result"`,
 	}
 	for _, entry := range entries {
 		if count := strings.Count(manifest, entry); count != 1 {
@@ -46,6 +53,10 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 		`"artifact_path", "!std::string::String",`,
 		`"Allocator;[]u8;[]u8;[]u8"`,
 		`"metadata_line", "[]u8", ""`,
+		`"package_cli", "!i64",`,
+		`"Allocator;Io;[]u8"`,
+		`"summarize_parse_result", "!AstSummary",`,
+		`"&std::kizu::ast::ParseResult;i64;i64"`,
 	} {
 		if !strings.Contains(manifest, signature) {
 			t.Fatalf("external ABI manifest lacks exact semantic signature %q", signature)
