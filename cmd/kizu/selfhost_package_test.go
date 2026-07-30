@@ -791,7 +791,12 @@ func TestSelfhostTypeLocalsUseParsedAST(t *testing.T) {
 		}
 	}
 	required := []string{
-		"try collect_param_local(file, ast, child, local_types, local_mutability);",
+		// Params are read off the parsed AST child rather than the body text.
+		// Pinned as the traversal plus the call, not one exact argument list,
+		// which is what went stale when collect_param_local gained an allocator
+		// and the function-return facts.
+		"let child = try ast.child_at(params, index);",
+		"try collect_param_local(",
 		"collect_statement_locals_from_node(",
 		"collect_let_statement_local(",
 		"let type_name = try expression_infer::infer_expression_type(",
