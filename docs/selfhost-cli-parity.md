@@ -1,7 +1,9 @@
 # Selfhost CLI Parity Scope
 
-Issue #497 tracks hosted selfhost CLI parity after the first bootstrap path.
-This document records the release-scope decision after #530.
+Issue #497 tracked hosted selfhost CLI parity after the first bootstrap path and
+has closed into bounded child issues; #1075 now owns promoting the stage2 artifact
+to public command owner, with #1071 (ir/build) and #1072 (build cache) owning the
+commands it needs. This document records the release-scope decision after #530.
 
 The hosted selfhost artifact is not a general-purpose replacement for Go
 `cmd/kizu` yet. It must not add hidden Go parser, Go interpreter, Go test
@@ -236,8 +238,8 @@ outside the explicit build/cache design.
 
 ## Deferred Slices
 
-These #497 slices are explicitly deferred from the current hosted artifact
-release scope:
+These slices are explicitly deferred from the current hosted artifact release
+scope:
 
 | Slice | Decision | Reason | Next child issue shape |
 | --- | --- | --- | --- |

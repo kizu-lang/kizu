@@ -566,8 +566,8 @@ selfhost check examples/negative/moved_value.kizu
 These targets are bounded to checked manifests. The supported corpus manifest in
 `selfhost/tests/supported-corpus.tsv` verifies user-visible stdout, stderr, and
 exit-code behavior through the hosted artifact. Broad CLI parity, broad
-example/conformance coverage, and unsupported ABI shapes remain blocked by #497
-and #495.
+example/conformance coverage, and unsupported ABI shapes are tracked by #1075 and
+#1074, the live successors to the closed #497 and #495 buckets.
 
 For #530, those same bounded `check <file>` targets are also recorded in
 `selfhost/tests/cli/check-parity.tsv` with checked-in stdout/stderr goldens:
