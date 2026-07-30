@@ -341,10 +341,11 @@ selfhost storage symbols are:
 | String length | `@kizu_rt_string_len` | returns byte length |
 | String borrowed view | `@kizu_rt_string_as_bytes` | returns a local read-only byte view |
 | String cleanup | `@kizu_rt_string_deinit` | releases owned string storage |
-| Map construction | `@kizu_rt_map_new` | resolver, type, and ownership tables |
-| Map insert | `@kizu_rt_map_insert` | copies `[]u8` key and copy value |
+| Map construction | `@kizu_rt_map_new` | resolver, type, and ownership tables; takes the value slot size and rejects a non-positive one |
+| Map insert | `@kizu_rt_map_insert` | copies `[]u8` key and a value byte view whose length must equal the map's value size |
 | Map contains | `@kizu_rt_map_contains` | checks key presence |
-| Map `i64` get | `@kizu_rt_map_get_i64` | returns copy payloads used by symbol tables |
+| Map length | `@kizu_rt_map_len` | returns the entry count |
+| Map get | `@kizu_rt_map_get` | returns `![]u8`, a read-only view of the stored value slot |
 | Map cleanup | `@kizu_rt_map_deinit` | releases owned map storage |
 | Diagnostic buffer construction | `@kizu_rt_diagnostic_buffer_new` | compiler failure storage |
 | Diagnostic push | `@kizu_rt_diagnostic_push` | copies diagnostic message text |
