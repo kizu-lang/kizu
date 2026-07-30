@@ -487,7 +487,7 @@ func nativeSourceRunErrorUnionVoidFail() runParityCase {
 		fixture:      "selfhost/tests/cli/run_error_union_void_fail.kizu",
 		exitCode:     1,
 		stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		stderrGolden: "selfhost/tests/cli/golden/run_error_union_void_fail.stderr",
 		artifactMode: "hosted-artifact",
 		artifactStem: "run_error_union_void_fail",
 	}
@@ -574,7 +574,7 @@ func nativeSourceRunExampleFsReadMissing() runParityCase {
 		fixture:      "examples/negative/fs_read_missing.kizu",
 		exitCode:     1,
 		stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-		stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+		stderrGolden: "selfhost/tests/cli/golden/fs_read_missing.stderr",
 		artifactMode: "hosted-artifact",
 		artifactStem: "fs_read_missing",
 	}
