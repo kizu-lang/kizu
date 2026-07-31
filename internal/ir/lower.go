@@ -198,9 +198,56 @@ func (l *lowerer) paramIRTypeName(param ast.Param) string {
 	return "&" + param.TypeName
 }
 
+// scopedBinding remembers what a name meant before a block rebound it.
+type scopedBinding struct {
+	name  string
+	value Value
+	bound bool
+}
+
+// scopeBlockBindings makes the declarations written directly in block local to
+// it and returns a function that puts the enclosing bindings back. Nested blocks
+// scope themselves, so only this level is collected.
+//
+// Without this, a `let` inside a loop body stayed in the environment after the
+// loop, so the next if statement saw two different SSA values for that name --
+// one from each sibling loop -- and mergeEnvs built a phi over them. Neither
+// value dominates the merge, because either loop can run zero times, so the
+// emitted module failed the LLVM verifier.
+func (l *lowerer) scopeBlockBindings(block *ast.BlockStmt) func() {
+	var saved []scopedBinding
+	for _, stmt := range block.Statements {
+		declaration, ok := stmt.(*ast.LetStmt)
+		if !ok {
+			continue
+		}
+		previous, bound := l.env[declaration.Name]
+		saved = append(saved, scopedBinding{
+			name: declaration.Name, value: previous, bound: bound,
+		})
+	}
+	if len(saved) == 0 {
+		return func() {}
+	}
+	return func() {
+		// Reverse order, so a name declared twice in one block ends on the
+		// binding that was in scope before either declaration.
+		for index := len(saved) - 1; index >= 0; index-- {
+			binding := saved[index]
+			if binding.bound {
+				l.env[binding.name] = binding.value
+				continue
+			}
+			delete(l.env, binding.name)
+		}
+	}
+}
+
 // lowerBlock lowers statements into the current block.
 func (l *lowerer) lowerBlock(block *ast.BlockStmt) error {
 	frame := l.pushDeferFrame()
+	restoreBindings := l.scopeBlockBindings(block)
+	defer restoreBindings()
 	for _, stmt := range block.Statements {
 		if l.block.Terminator.Op != "" {
 			l.popDeferFrame()
