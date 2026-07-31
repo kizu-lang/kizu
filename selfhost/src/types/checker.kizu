@@ -2210,12 +2210,15 @@ fn binary_operand_type_mismatch(
         left_type, right_type
     ) {
         let right_node = ast.get(right);
+        // The comparison above is on canonical types, which is the identity. The
+        // note quotes what the source wrote, so this file's own module prefix comes
+        // back off before the names reach the report.
         return diagnostic_summary::argument_type_summary(
             true,
             right_node.span.start,
             right_node.span.end,
-            left_type,
-            right_type
+            try local_module_type_name(allocator, file, left_type),
+            try local_module_type_name(allocator, file, right_type)
         );
     }
     return diagnostic_summary::no_argument_type_mismatch();
@@ -5046,6 +5049,40 @@ fn first_match_diagnostic_in_three_nodes(
     );
 }
 
+// local_module_type_name drops this file's own module prefix from a canonical type
+// name, so a type declared here is spelled the way the source wrote it. Inference
+// canonicalizes a declared type to <module>::<Name>, while the tables built from
+// this file's declarations are keyed by <Name> and diagnostics quote what was
+// written. A name carrying any other module's path is returned unchanged, so it
+// still fails to match a local declaration -- which is the correct answer for it.
+fn local_module_type_name(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    value_type: []u8
+) -> ![]u8 borrows value_type {
+    var prefix = std::string::String(allocator);
+    defer prefix.deinit();
+    try ast_text::append_module_name(prefix, file);
+    try prefix.append_bytes("::");
+    let prefix_len = prefix.len();
+    let prefix_bytes = prefix.as_bytes();
+    if std::mem::len(value_type) <= prefix_len {
+        return value_type;
+    }
+    // The length comes off the String and the bytes are compared by index:
+    // prefix_bytes borrows that String, and passing a borrowed view into a
+    // function -- std::mem::len or std::mem::starts_with alike -- is an escape,
+    // while indexing it is not.
+    var index = 0;
+    while index < prefix_len {
+        if value_type[index] != prefix_bytes[index] {
+            return value_type;
+        }
+        index = index + 1;
+    }
+    return value_type[prefix_len..std::mem::len(value_type)];
+}
+
 fn first_match_diagnostic_for_match(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -5077,7 +5114,15 @@ fn first_match_diagnostic_for_match(
             function_returns
         );
     }
-    if !enum_counts.contains(value_type) {
+    // infer_expression_type reports an enum value with its canonical
+    // module-qualified type, while enum_counts and enum_tags are keyed by the
+    // declaration text collected from this file. Looking the qualified spelling up
+    // in that table always missed, so every enum match fell through to the
+    // not-an-enum path and the exhaustiveness, unknown-tag and duplicate-tag
+    // diagnostics were dropped silently. Enums declared elsewhere keep their path
+    // and still miss, which is the same answer as before for them.
+    let local_type = try local_module_type_name(allocator, file, value_type);
+    if !enum_counts.contains(local_type) {
         if unsupported_match_value_type(value_type) {
             return diagnostic_summary::match_diagnostic_summary(true, 1, value_type, "");
         }
@@ -5096,7 +5141,7 @@ fn first_match_diagnostic_for_match(
         allocator,
         file,
         ast,
-        value_type,
+        local_type,
         arms,
         enum_counts,
         enum_tags

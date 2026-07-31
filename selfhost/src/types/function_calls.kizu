@@ -195,21 +195,27 @@ fn collect_function_signature_from_ast(
     try qualified.append_bytes("::");
     try qualified.append_bytes(ast_ref_node_text(file, ast, name));
     let function_name = qualified.as_bytes();
-    if arities.contains(function_name) {
-        return error("duplicate function");
+    // A repeated function identity is user source, not a broken invariant: every
+    // caller of this collector is a frontend type-check pass over a file the user
+    // wrote. Failing here aborted `check` with an internal `runtime error:
+    // duplicate function` before the resolver could report `duplicate symbol`. The
+    // first declaration keeps the facts, which is the one the diagnostic points
+    // back to. Written as a guard rather than an early return so the single deinit
+    // below still follows every use of the borrowed name.
+    if !arities.contains(function_name) {
+        try arities.insert(function_name, params.len);
+        var canonical_return = try expression_infer::build_canonical_type_spelling(
+            allocator,
+            file,
+            ast_return_type(file, ast, return_type),
+            returns
+        );
+        defer canonical_return.deinit();
+        try returns.insert_source_owned(&function_name, &canonical_return);
+        try collect_function_param_type_facts(
+            allocator, file, ast, params, returns
+        );
     }
-    try arities.insert(function_name, params.len);
-    var canonical_return = try expression_infer::build_canonical_type_spelling(
-        allocator,
-        file,
-        ast_return_type(file, ast, return_type),
-        returns
-    );
-    defer canonical_return.deinit();
-    try returns.insert_source_owned(&function_name, &canonical_return);
-    try collect_function_param_type_facts(
-        allocator, file, ast, params, returns
-    );
     qualified.deinit();
     return;
 }
@@ -335,10 +341,13 @@ fn collect_function_arity(
     try qualified.append_bytes("::");
     try qualified.append_bytes(ast_ref_node_text(file, ast, name));
     let key = qualified.as_bytes();
-    if arities.contains(key) {
-        return error("duplicate function");
+    // Same as collect_function_signature_from_ast: the duplicate is reported as
+    // `duplicate symbol` by the resolver, so the first arity stays and this pass
+    // does not abort the check. Written as a guard rather than an early return so
+    // the single deinit still follows every use of the borrowed key.
+    if !arities.contains(key) {
+        try arities.insert(key, params);
     }
-    try arities.insert(key, params);
     qualified.deinit();
     return;
 }
