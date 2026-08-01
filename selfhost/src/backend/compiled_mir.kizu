@@ -6,9 +6,9 @@ import selfhost::ir::builtin_contract;
 // for exactly as long as this store does.
 //
 // That lifetime outlives the lowering. A MirFunction is rendered by its caller, after the lowering
-// that built it has returned, so the store must not be torn down when the lowering's per-function
-// caches are -- freeing it there leaves the renderer reading freed buffers and emitting identifiers
-// made of heap garbage. Nothing releases the names today; they live until the process exits.
+// that built it has returned, so the store must not be torn down when the lowering returns. It is
+// owned by the CallArgTypeCache the render site creates and holds across the render call, so every
+// name stays readable until the function that carries it has been emitted.
 pub struct MirNameStore {
     names: std::array::Array<std::string::String>,
     views: std::map::Map<[]u8, []u8>,
@@ -24,6 +24,18 @@ pub fn mir_name_store() -> MirNameStore {
 }
 
 impl MirNameStore {
+    // views holds byte views into the Strings names owns, so it goes first: releasing the Strings
+    // while the map still indexes them would leave the map pointing at freed buffers.
+    fn deinit(self: MirNameStore) -> void {
+        self.views.deinit();
+        while self.names.len() > 0 {
+            let name = self.names.pop_or_panic();
+            name.deinit();
+        }
+        self.names.deinit();
+        return;
+    }
+
     fn own(
         self: &var MirNameStore,
         name: std::string::String
