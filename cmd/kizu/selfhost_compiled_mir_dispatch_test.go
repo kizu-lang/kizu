@@ -133,9 +133,16 @@ func assertPackageDefinitionEmissionForwardsIndexedFacts(t *testing.T, consumer 
 	const forwarded = "try emit_numeric_package_definition( " +
 		"out, lookup_index, canonical_facts, ir_bytes,"
 	if !strings.HasPrefix(call, forwarded) {
-		t.Fatalf("generic package definition emission does not forward the caller-owned index and canonical facts: %q", call)
+		t.Fatalf(
+			"generic package definition emission does not forward the caller-owned "+
+				"index and canonical facts: %q",
+			call,
+		)
 	}
 	if !strings.HasSuffix(call, ", name") {
-		t.Fatalf("generic package definition emission does not lower the indexed definition name: %q", call)
+		t.Fatalf(
+			"generic package definition emission does not lower the indexed definition name: %q",
+			call,
+		)
 	}
 }

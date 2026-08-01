@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+// TestSelfhostArbitraryRootPackageClosure covers the claim that any checked
+// function can serve as the emission root, not just a function named main. The
+// gate picks a root by source identity and the three assertions below cover what
+// that has to mean: the emitted facts are exactly the root's closure, the
+// selection is identity-based rather than name-based, and a root that cannot be
+// trusted is refused instead of narrowed.
 func TestSelfhostArbitraryRootPackageClosure(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t,
@@ -15,6 +21,19 @@ func TestSelfhostArbitraryRootPackageClosure(t *testing.T) {
 		t.Fatalf("arbitrary source root facts gate failed: %v\n%s", err, out)
 	}
 
+	assertArbitrarySourceRootFacts(t, out)
+	assertArbitrarySourceRootSelection(t)
+	assertCheckedEntryRootsFailClosed(t)
+}
+
+// assertArbitrarySourceRootFacts checks the emitted fact stream is exactly the
+// selected root's closure: one program entry naming that root, the root and the
+// helper it calls present with the call resolved between them, and the unrelated
+// definition absent down to its body facts. The last check keeps the source-root
+// closure from picking up the external ABI manifest roots, which belong to the
+// separate whole-package closure.
+func assertArbitrarySourceRootFacts(t *testing.T, out string) {
+	t.Helper()
 	var entries []string
 	var definitions []string
 	for _, line := range strings.Split(out, "\n") {
@@ -57,7 +76,14 @@ func TestSelfhostArbitraryRootPackageClosure(t *testing.T) {
 	if strings.Contains(out, "external-abi-entrypoint ") {
 		t.Fatalf("source-root closure leaked external ABI roots\n%s", out)
 	}
+}
 
+// assertArbitrarySourceRootSelection requires the root to be found by matching
+// source id and name span through the catalog. The forbidden "main" literal is
+// the point of the gate: a hardcoded entry name would make every other root
+// unreachable no matter what the caller asked for.
+func assertArbitrarySourceRootSelection(t *testing.T) {
+	t.Helper()
 	source := readSelfhostFile(
 		t, "../../selfhost/src/ir/executable_functions.kizu",
 	)
@@ -73,7 +99,14 @@ func TestSelfhostArbitraryRootPackageClosure(t *testing.T) {
 	if strings.Contains(rootSelection, `"main"`) {
 		t.Fatal("source root selection hardcodes the main function name")
 	}
+}
 
+// assertCheckedEntryRootsFailClosed requires the two ways a checked entry root
+// can be untrustworthy -- the package still has diagnostics, or the root does not
+// belong to the source it claims -- to be errors naming their cause, rather than
+// a silently reduced closure.
+func assertCheckedEntryRootsFailClosed(t *testing.T) {
+	t.Helper()
 	for _, failure := range []struct {
 		entry   string
 		message string
@@ -109,6 +142,9 @@ func TestSelfhostArbitraryRootPackageClosure(t *testing.T) {
 	}
 }
 
+// containsExactString reports whether values holds wanted verbatim. Fact names
+// are compared exactly on purpose: a substring match would let a longer
+// qualified name satisfy an assertion about a shorter one.
 func containsExactString(values []string, wanted string) bool {
 	for _, value := range values {
 		if value == wanted {

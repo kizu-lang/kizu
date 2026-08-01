@@ -37,6 +37,9 @@ func TestSelfhostBorrowedDeclaredStructFieldTypeGate(t *testing.T) {
 	}
 }
 
+// TestSelfhostExactStructFieldOwnerGate verifies that a field lookup resolves
+// against the receiver's exact declared owner, so two structs sharing a field
+// name cannot resolve to each other's field type.
 func TestSelfhostExactStructFieldOwnerGate(t *testing.T) {
 	restore, err := chdirRepoRoot()
 	if err != nil {

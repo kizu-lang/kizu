@@ -8,17 +8,12 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
-func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
-	manifest := readSelfhostFile(t, "../../selfhost/src/ir/external_abi_entrypoints.kizu")
-	executable := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
-	validation := readSelfhostFile(t, "../../selfhost/src/backend/external_abi_validation.kizu")
-	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
-	externalRoots := selfhostKizuFunctionBody(
-		t, executable, "fn append_external_abi_roots(",
-	)
-
-	entries := []string{
+// externalABIManifestRoots returns the exact root set the manifest must declare,
+// one entry per root. It is a function rather than a literal inside the test
+// because the same list is both the membership check and the size oracle: the
+// count assertion against it is what keeps the emission closure closed.
+func externalABIManifestRoots() []string {
+	return []string{
 		`"selfhost", "cli/check", "fast_diagnostics_parsed_file"`,
 		`"selfhost", "cli/execute", "render_checked_run_artifact"`,
 		`"selfhost", "backend/executable", "lower_test_executable"`,
@@ -34,11 +29,57 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 		`"selfhost", "cli/check", "package_cli"`,
 		`"selfhost", "ast", "summarize_parse_result"`,
 	}
+}
+
+// TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots pins the external ABI
+// manifest as the single source of truth for which functions cross the compiled
+// boundary. Every claim below hangs off that: the manifest declares the closed
+// root set and each root's exact semantic signature, the numeric package closure
+// seeds itself from the manifest, the validator fails closed against it, and the
+// backend keeps neither a parallel hand-maintained closure nor a hand-written AST
+// lowering path around it.
+func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
+	manifest := readSelfhostFile(t, "../../selfhost/src/ir/external_abi_entrypoints.kizu")
+	executable := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	validation := readSelfhostFile(t, "../../selfhost/src/backend/external_abi_validation.kizu")
+	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
+	externalRoots := selfhostKizuFunctionBody(
+		t, executable, "fn append_external_abi_roots(",
+	)
+
+	assertExternalABIManifestRootSet(t, manifest)
+	assertExternalABIManifestSignatures(t, manifest)
+	assertExternalABIManifestQualifiedNameAPI(t, manifest)
+	assertExternalABIRootsSeedNumericClosure(t, externalRoots)
+	assertExternalABIValidationConsumesManifest(t, llvm, validation)
+	assertBackendDroppedManualClosures(t, cli)
+	assertExternalABIManifestHasBackendConsumers(t)
+	assertCompiledCLIAstBoundary(t, cli)
+}
+
+// assertExternalABIManifestRootSet checks the manifest declares each root exactly
+// once and declares no others. The append count is compared against the table
+// rather than a number so adding a root without listing it here fails.
+func assertExternalABIManifestRootSet(t *testing.T, manifest string) {
+	t.Helper()
+	entries := externalABIManifestRoots()
 	for _, entry := range entries {
 		if count := strings.Count(manifest, entry); count != 1 {
 			t.Fatalf("external ABI manifest entry %q count = %d, want one", entry, count)
 		}
 	}
+	if count := strings.Count(manifest, "try append("); count != len(entries) {
+		t.Fatalf("external ABI manifest root count = %d, want %d", count, len(entries))
+	}
+}
+
+// assertExternalABIManifestSignatures pins each root's return type and parameter
+// list exactly. These strings are the compiled calling convention: a widened or
+// reordered signature here would still link but would misread the caller's
+// arguments, so the manifest has to spell them out rather than describe them.
+func assertExternalABIManifestSignatures(t *testing.T, manifest string) {
+	t.Helper()
 	for _, signature := range []string{
 		`"fast_diagnostics_parsed_file", "!bool",`,
 		`"Allocator;Io;[]u8;[]u8;std::kizu::ast::ParseResult"`,
@@ -62,9 +103,15 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 			t.Fatalf("external ABI manifest lacks exact semantic signature %q", signature)
 		}
 	}
-	if count := strings.Count(manifest, "try append("); count != len(entries) {
-		t.Fatalf("external ABI manifest root count = %d, want %d", count, len(entries))
-	}
+}
+
+// assertExternalABIManifestQualifiedNameAPI checks the manifest keeps the entry
+// shape and the accessors its consumers need, including the qualified-name
+// builder. Consumers must assemble the name from the package, module, and
+// function fields; if they spelled it out themselves the manifest would stop
+// being the thing that decides what a root is called.
+func assertExternalABIManifestQualifiedNameAPI(t *testing.T, manifest string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"pub return_type: []u8",
 		"pub param_types: []u8",
@@ -83,6 +130,15 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 			t.Fatalf("external ABI manifest lacks canonical qualified-name builder %q", fragment)
 		}
 	}
+}
+
+// assertExternalABIRootsSeedNumericClosure checks the numeric package closure
+// starts from the collected manifest: it resolves each entrypoint through exact
+// lookup, emits it as a root fact, and queues it into the dependency walk. That
+// is what makes the manifest the closure's root set rather than a document
+// alongside it.
+func assertExternalABIRootsSeedNumericClosure(t *testing.T, externalRoots string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"external_abi_entrypoints::collect(allocator)",
 		"let manifest_entries = &entrypoints.entrypoints",
@@ -96,12 +152,18 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 			t.Fatalf("numeric package closure missing manifest ownership %q", fragment)
 		}
 	}
-	for _, fragment := range []string{
-		"external_abi_validation::require_manifest_roots(bytes)",
-	} {
-		if !strings.Contains(llvm, fragment) {
-			t.Fatalf("LLVM backend does not consume manifest roots: missing %q", fragment)
-		}
+}
+
+// assertExternalABIValidationConsumesManifest checks the backend validates
+// emitted facts against the collected manifest rather than against a checked-in
+// list: it walks the manifest's own accessors, compares the return and each
+// parameter type, and rejects both mismatches and duplicates. The forbidden names
+// are the per-root hand-written checks this replaced.
+func assertExternalABIValidationConsumesManifest(t *testing.T, llvm, validation string) {
+	t.Helper()
+	const manifestRootCheck = "external_abi_validation::require_manifest_roots(bytes)"
+	if !strings.Contains(llvm, manifestRootCheck) {
+		t.Fatalf("LLVM backend does not consume manifest roots: missing %q", manifestRootCheck)
 	}
 	for _, fragment := range []string{
 		"external_abi_entrypoints::collect(allocator)",
@@ -132,6 +194,14 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 			t.Fatalf("external ABI validation retains manual root path %q", forbidden)
 		}
 	}
+}
+
+// assertBackendDroppedManualClosures keeps the per-component reachability
+// collectors out of the backend. Each one was a hand-maintained closure for one
+// subsystem; with the manifest owning the root set they can only diverge from it,
+// so their absence is the assertion.
+func assertBackendDroppedManualClosures(t *testing.T, cli string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"append_component_reachable_compiled_functions",
 		"append_codegen_reachable_compiled_functions",
@@ -147,6 +217,14 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 			t.Fatalf("backend retains duplicate manual compiled closure %q", fragment)
 		}
 	}
+}
+
+// assertExternalABIManifestHasBackendConsumers checks each declared root is
+// actually called from the backend under its mangled symbol. A root nothing calls
+// is dead weight that still forces its whole closure to be emitted, so the
+// manifest and the call sites have to stay in step in both directions.
+func assertExternalABIManifestHasBackendConsumers(t *testing.T) {
+	t.Helper()
 	consumerSources := readSelfhostFile(t, "../../selfhost/src/backend/cli_check_gate_llvm.kizu") +
 		readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu") +
 		readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu") +
@@ -166,7 +244,15 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 			t.Fatalf("external ABI manifest has no backend consumer %q", consumer)
 		}
 	}
+}
 
+// assertCompiledCLIAstBoundary checks the static CLI crosses into the AST through
+// compiled roots and looked-up struct fields instead of open-coding the AST
+// layout. The forbidden fragments are that open-coded path: hand-written
+// %kizu.kizu.ast.* types and literal extractvalue indices, which silently read
+// the wrong field the moment a struct gains or reorders one.
+func assertCompiledCLIAstBoundary(t *testing.T, cli string) {
+	t.Helper()
 	cliBoundary := cli +
 		readSelfhostFile(t, "../../selfhost/src/backend/cli_ast_boundary_llvm.kizu") +
 		readSelfhostFile(t, "../../selfhost/src/backend/cli_check_gate_llvm.kizu") +
@@ -212,6 +298,11 @@ func TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots(t *testing.T) {
 	}
 }
 
+// TestSelfhostExternalABIManifestValidationFailsClosed checks the validator
+// rejects every way emitted facts can disagree with the manifest -- a missing or
+// duplicated root, return signature, or parameter, and a wrong type or mode --
+// each with its own diagnostic. The accepting cases come first so a validator
+// that rejects everything cannot pass the table below.
 func TestSelfhostExternalABIManifestValidationFailsClosed(t *testing.T) {
 	_, program, err := loadPackageProgram("../../selfhost")
 	if err != nil {

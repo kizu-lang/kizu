@@ -8,25 +8,20 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
-func TestSelfhostTypeSpellingAndConstructorRegressionGates(t *testing.T) {
-	restore, err := chdirRepoRoot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restore()
+// selfhostTypeRegressionCase pairs a Kizu-side oracle entry with what it must
+// produce: the exact stdout for the accepting gates, an error substring for the
+// rejecting ones.
+type selfhostTypeRegressionCase struct {
+	entry string
+	want  string
+}
 
-	_, program, err := loadPackageProgram("selfhost")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := checkProgram(program); err != nil {
-		t.Fatal(err)
-	}
-
-	successCases := []struct {
-		entry string
-		want  string
-	}{
+// selfhostTypeRegressionSuccessCases lists the type-resolution shapes that once
+// resolved to the wrong type. The expected output names the resolution rather
+// than merely reporting success, so a gate that starts printing something else
+// fails instead of quietly passing.
+func selfhostTypeRegressionSuccessCases() []selfhostTypeRegressionCase {
+	return []selfhostTypeRegressionCase{
 		{
 			entry: "selfhost::types_oracle::constructor_resolution_regression_gate",
 			want:  "constructor-resolution-regression-ok\n",
@@ -44,22 +39,13 @@ func TestSelfhostTypeSpellingAndConstructorRegressionGates(t *testing.T) {
 			want:  "resolver::BindingKind\n",
 		},
 	}
-	for _, tc := range successCases {
-		t.Run(tc.entry, func(t *testing.T) {
-			var out bytes.Buffer
-			if err := interp.New(&out).RunEntry(program, tc.entry); err != nil {
-				t.Fatalf("gate failed: %v\n%s", err, out.String())
-			}
-			if got := out.String(); got != tc.want {
-				t.Fatalf("output = %q, want %q", got, tc.want)
-			}
-		})
-	}
+}
 
-	errorCases := []struct {
-		entry string
-		want  string
-	}{
+// selfhostTypeRegressionErrorCases lists malformed generic type spellings that
+// must be rejected. Each want is the substring naming the specific malformation,
+// so a checker that starts failing these for an unrelated reason is still caught.
+func selfhostTypeRegressionErrorCases() []selfhostTypeRegressionCase {
+	return []selfhostTypeRegressionCase{
 		{
 			entry: "selfhost::types_oracle::malformed_empty_type_arguments_gate",
 			want:  "generic type arguments missing",
@@ -77,7 +63,41 @@ func TestSelfhostTypeSpellingAndConstructorRegressionGates(t *testing.T) {
 			want:  "generic type arguments missing",
 		},
 	}
-	for _, tc := range errorCases {
+}
+
+// TestSelfhostTypeSpellingAndConstructorRegressionGates runs both regression
+// tables against one loaded selfhost program. They share a driver because the
+// accepting and rejecting cases are two halves of the same claim: the type
+// checker resolves well-formed spellings exactly and refuses malformed ones by
+// name, rather than guessing in either direction.
+func TestSelfhostTypeSpellingAndConstructorRegressionGates(t *testing.T) {
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range selfhostTypeRegressionSuccessCases() {
+		t.Run(tc.entry, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := interp.New(&out).RunEntry(program, tc.entry); err != nil {
+				t.Fatalf("gate failed: %v\n%s", err, out.String())
+			}
+			if got := out.String(); got != tc.want {
+				t.Fatalf("output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	for _, tc := range selfhostTypeRegressionErrorCases() {
 		t.Run(tc.entry, func(t *testing.T) {
 			err := interp.New(&bytes.Buffer{}).RunEntry(program, tc.entry)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -87,6 +107,10 @@ func TestSelfhostTypeSpellingAndConstructorRegressionGates(t *testing.T) {
 	}
 }
 
+// TestSelfhostFieldInferenceHasNoUnknownOwnerNameFallback keeps field inference
+// from typing a field by its name alone. Without the owner, two structs sharing
+// a field name would collide, so the declared-field lookup must be the only
+// route and the global name table must stay gone.
 func TestSelfhostFieldInferenceHasNoUnknownOwnerNameFallback(t *testing.T) {
 	content := readSelfhostFile(t, "../../selfhost/src/types/expression_infer.kizu")
 	if strings.Contains(content, "fn field_name_type(") {
@@ -97,6 +121,11 @@ func TestSelfhostFieldInferenceHasNoUnknownOwnerNameFallback(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeConstructorUsesIntrinsicRegistry keeps the type constructor on
+// the intrinsic registry, which answers what a name means and how many type
+// arguments it takes. The forbidden spellings are the hardcoded stdlib names it
+// replaced: with them present, a renamed or user-defined container would be
+// invisible to the constructor.
 func TestSelfhostTypeConstructorUsesIntrinsicRegistry(t *testing.T) {
 	content := readSelfhostFile(t, "../../selfhost/src/type_constructor.kizu")
 	required := []string{

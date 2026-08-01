@@ -5,6 +5,10 @@ import (
 	"testing"
 )
 
+// TestSelfhostSemanticFacade exercises the semantic facade's observable
+// contract: a clean package reports ready, type and ownership problems each
+// surface as their own diagnostic, and a parse failure is an error rather than a
+// diagnostic because there is nothing to check.
 func TestSelfhostSemanticFacade(t *testing.T) {
 	for _, test := range []struct {
 		entry string
@@ -49,6 +53,12 @@ func TestSelfhostSemanticFacade(t *testing.T) {
 	}
 }
 
+// TestSelfhostSemanticFacadeStructure keeps the facade a pure composition over
+// already-loaded sources: each phase runs exactly once, and the forbidden names
+// are the whole-package entry points and file-path handling that would make the
+// facade re-parse instead of consuming what the caller loaded. The parser
+// assertions cover the other half of that deal -- the owned parse result has to
+// free its per-file parses, or reusing it would leak.
 func TestSelfhostSemanticFacadeStructure(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/semantic.kizu")
 	body := selfhostKizuFunctionBody(t, source, "fn check_loaded_sources(")
