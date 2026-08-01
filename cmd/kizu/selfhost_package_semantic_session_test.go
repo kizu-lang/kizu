@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -173,8 +174,54 @@ func TestSelfhostGeneratedMIRNamesUseOneLifetimeStore(t *testing.T) {
 			t.Errorf("call lowering cache missing MIR name-store lifecycle %q", fragment)
 		}
 	}
-	if got := strings.Count(lowering, "call_arg_type_cache.name_store.own(out)"); got != 7 {
-		t.Errorf("generated MIR name store consumers = %d, want 7", got)
+	// The generated-name helpers grow every time the lowering learns to invent
+	// another SSA name, so a fixed consumer census cannot hold -- it was already
+	// wrong when written (7 asserted, 8 in the tree at 1abebb90, 13 today).
+	// Assert the property that census stood in for: every name the lowering
+	// allocates is handed to the one cache-owned store, none is freed or
+	// returned locally, and no site builds a store of its own.
+	builders := strings.Count(
+		lowering,
+		"var out = std::string::String(std::mem::page_allocator());",
+	)
+	owned := strings.Count(lowering, "call_arg_type_cache.name_store.own(out)")
+	if builders == 0 {
+		t.Error("MIR lowering generates no names through MirNameStore at all")
+	}
+	if owned != builders {
+		t.Errorf(
+			"generated MIR names built = %d, handed to the shared name store = %d; "+
+				"every generated name must be owned by MirNameStore",
+			builders,
+			owned,
+		)
+	}
+	if got := regexp.MustCompile(`\bout\.deinit\(\)`).
+		FindAllString(lowering, -1); len(got) != 0 {
+		t.Errorf(
+			"generated MIR name released locally %d times; MirNameStore owns the lifetime",
+			len(got),
+		)
+	}
+	if escaped := regexp.MustCompile(
+		`return\s+[A-Za-z_][A-Za-z0-9_]*\.as_bytes\(\)`,
+	).FindAllString(lowering, -1); len(escaped) != 0 {
+		t.Errorf(
+			"MIR lowering returns locally owned name bytes %v; "+
+				"route them through name_store.own",
+			escaped,
+		)
+	}
+	if got := strings.Count(mirTypes, "compiled_mir::mir_name_store()"); got != 1 {
+		t.Errorf(
+			"MIR name store constructed %d times in the call lowering cache, want exactly 1",
+			got,
+		)
+	}
+	if strings.Contains(lowering, "mir_name_store()") {
+		t.Error(
+			"MIR lowering builds its own name store instead of the one the cache owns",
+		)
 	}
 	if strings.Contains(lowering, "var copied = std::map::Map<[]u8, []u8>") {
 		t.Error("generated MIR name helper retained a per-call Map lifetime workaround")
