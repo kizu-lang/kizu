@@ -9,6 +9,7 @@ import selfhost::backend::compiled_mir_llvm;
 import selfhost::backend::compiled_struct_cf;
 import selfhost::backend::ir_contract;
 import selfhost::backend::ir_index;
+import selfhost::backend::compiled_mir_types;
 
 pub fn append_compiled_function(
     out: &var std::string::String,
@@ -105,6 +106,12 @@ fn append_compiled_function_params_context_indexed(
     let statement_count = try ir_contract::body_edge_count_from(
         ir_bytes, function_name, 0, "statement", bs
     );
+    // Cache lifetime: the SSA/local names a lowering invents are views into the MirNameStore its
+    // CallArgTypeCache owns, and the MirFunction it returns carries those views. The cache must
+    // therefore outlive the lowering that filled it, which is why every name-inventing lowering
+    // below is handed a cache created here instead of making its own. Each site registers the
+    // cache's cleanup first and the MirFunction's second, so cleanups run MIR-first and no name is
+    // read after the store behind it is gone.
     // Every concrete generic body uses the same instance-aware statement lowerer regardless of
     // source shape. This keeps caller-instance call symbols, canonical call types, and comptime
     // argument elision attached to one CallArgTypeCache instead of dropping the instance context
@@ -175,6 +182,8 @@ fn append_compiled_function_params_context_indexed(
             return;
         }
         if std::mem::equal_bytes(kind, "Match") {
+            var match_cache = compiled_mir_types::call_arg_type_cache();
+            defer match_cache.deinit();
             let match_mir = try compiled_mir_lower::lower_single_match_statement_function(
                 ir_lookup_index,
                 canonical_facts,
@@ -185,7 +194,8 @@ fn append_compiled_function_params_context_indexed(
                 llvm_return_type,
                 params_spec,
                 statement,
-                bs
+                bs,
+                &var match_cache
             );
             defer match_mir.deinit();
             try compiled_mir_llvm::append_function(out, &match_mir);
