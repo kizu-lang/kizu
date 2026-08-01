@@ -767,7 +767,8 @@ func requiredLLVMArenaGetFragments() []string {
 		"%elem = load %kizu.kizu.ast.ast_node, ptr %elem_ptr",
 		"  ret %kizu.kizu.ast.ast_node %elem",
 		"call void @kizu_rt_trap(%kizu.slice.u8 %fail_msg)",
-		"@.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c\"invalid arena handle\"",
+		"@.kizu.rt.arena_invalid_handle = private unnamed_addr constant " +
+			"[20 x i8] c\"invalid arena handle\"",
 		"define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %handle)",
 		"%handle_arena = extractvalue %kizu.handle %handle, 0",
 		"%same_arena = icmp eq ptr %raw, %handle_arena",

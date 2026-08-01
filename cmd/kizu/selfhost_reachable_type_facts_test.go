@@ -789,7 +789,16 @@ func TestSelfhostFixedABIContractOwnsScalarClassification(t *testing.T) {
 		`kind: kind, llvm_name: "float", llvm_body: "", size: 4, alignment: 4`,
 		`kind: kind, llvm_name: "double", llvm_body: "", size: 8, alignment: 8`,
 	})
+	assertMirLoweringClassifiesThroughContract(t)
+	assertCommentStateClassifiesThroughContract(t)
+	assertErrorABINamingClassifiesThroughContract(t)
+}
 
+// assertMirLoweringClassifiesThroughContract pins that the two MIR lowerings that
+// read a scalar ABI ask the fixed contract instead of comparing the spelling
+// themselves, so admitting a new scalar does not need an edit here.
+func assertMirLoweringClassifiesThroughContract(t *testing.T) {
+	t.Helper()
 	lower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
 	for _, signature := range []string{
 		"fn resolve_node_span_fetch_abi(",
@@ -811,6 +820,13 @@ func TestSelfhostFixedABIContractOwnsScalarClassification(t *testing.T) {
 		}
 	}
 
+}
+
+// assertCommentStateClassifiesThroughContract pins the comment-preservation state
+// ABI on the same contract: it must name the contract's kinds rather than compare
+// the i8 / i1 spellings its three scalars happen to have today.
+func assertCommentStateClassifiesThroughContract(t *testing.T) {
+	t.Helper()
 	comment := selfhostKizuFunctionBody(t,
 		readSelfhostFile(t, "../../selfhost/src/backend/compiled_struct_cf.kizu"),
 		"pub fn comment_state_abi_indexed(",
@@ -834,6 +850,14 @@ func TestSelfhostFixedABIContractOwnsScalarClassification(t *testing.T) {
 		}
 	}
 
+}
+
+// assertErrorABINamingClassifiesThroughContract pins that error payload naming reads
+// the fixed contract rather than keeping its own copy of the scalar table. The
+// forbidden list is that copy, spelling by spelling: a duplicate table is how the two
+// drift apart and start naming the same payload differently.
+func assertErrorABINamingClassifiesThroughContract(t *testing.T) {
+	t.Helper()
 	errorABI := readSelfhostFile(t, "../../selfhost/src/backend/compiled_error_abi.kizu")
 	knownName := selfhostKizuFunctionBody(t, errorABI, "fn known_name(")
 	if !strings.Contains(knownName, "fixed_abi_contract::from_llvm(payload_abi)") {

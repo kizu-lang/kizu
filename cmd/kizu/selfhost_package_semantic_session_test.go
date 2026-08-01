@@ -56,12 +56,7 @@ func TestSelfhostPackageSemanticSessionUsesReachableCanonicalInstances(t *testin
 // order, or a table that collapsed the two instantiations into one.
 func assertOrderedReachableInstanceFacts(t *testing.T, out string) {
 	t.Helper()
-	var instanceFacts []string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "function-instance ") {
-			instanceFacts = append(instanceFacts, line)
-		}
-	}
+	instanceFacts := functionInstanceFactLines(out)
 	if len(instanceFacts) != 2 {
 		t.Fatalf(
 			"function instance fact count = %d, want deduplicated 2\n%s",
@@ -82,11 +77,30 @@ func assertOrderedReachableInstanceFacts(t *testing.T, out string) {
 	if first[5] != "2" || second[5] != "2" {
 		t.Fatalf("instance ordered type arity drifted: %q", instanceFacts)
 	}
-	if first[6] != "1" || first[11] != "1" ||
-		first[7] != second[12] || first[12] != second[7] ||
-		first[7] == first[12] {
+	if !orderedCanonicalTypeValuesPreserved(first, second) {
 		t.Fatalf("ordered canonical type values were not preserved: %q", instanceFacts)
 	}
+}
+
+// functionInstanceFactLines returns the function-instance rows of a fact tape.
+func functionInstanceFactLines(out string) []string {
+	var facts []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "function-instance ") {
+			facts = append(facts, line)
+		}
+	}
+	return facts
+}
+
+// orderedCanonicalTypeValuesPreserved reports whether two instances of the same
+// generic target kept their type arguments bound in order rather than merged: each
+// carries one ordered value, the two rows carry them in opposite positions, and the
+// pair differs -- which is what distinguishes ordering from deduplication.
+func orderedCanonicalTypeValuesPreserved(first, second []string) bool {
+	return first[6] == "1" && first[11] == "1" &&
+		first[7] == second[12] && first[12] == second[7] &&
+		first[7] != first[12]
 }
 
 // assertCanonicalInstanceConsumers pins the reading half of the fact protocol:
