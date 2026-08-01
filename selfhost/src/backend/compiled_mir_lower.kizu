@@ -9346,24 +9346,23 @@ pub fn lower_multi_statement_function(
     llvm_return_type: []u8,
     params_spec: []u8,
     statement_count: i64,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     if statement_count < 1 {
         return error("compiled mir: statement function requires at least one statement");
     }
-    // The specialized loop lowerings dispatched below share this cache instead of each building
-    // its own, so one per-function node index serves the whole lowering. build_fn_node_index
-    // appends into the cache and is not idempotent: this must stay the only call for this function.
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
+    // The cache is owned by the render site so the names this lowering invents outlive it. The
+    // specialized loop lowerings dispatched below share it, and build_fn_node_index appends into
+    // it and is not idempotent: this must stay the only call for this function.
     try compiled_mir_types::set_instance_context(
-        &var call_arg_type_cache, instance_context
+        call_arg_type_cache, instance_context
     );
     // Build the per-function body-node position index once (pillar A): every per-node structural lookup
     // below resolves its node->line offset through fn_node_line_start in O(1) instead of the global
     // index binary search. Byte-identical (same offsets); only the lookup cost changes.
     try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
+        call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
     );
     // The specialized loop/parser shapes below are compact structural forms. Huge dispatcher
     // functions such as code_render.tape_record_end and render_one_instruction are ordinary
@@ -9388,7 +9387,7 @@ pub fn lower_multi_statement_function(
             if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_grammar_postfix_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    bs, &var call_arg_type_cache
+                    bs, call_arg_type_cache
                 );
             }
             // A type-apply parser loop also uses a bool-literal 'while true' header, but its carried
@@ -9396,7 +9395,7 @@ pub fn lower_multi_statement_function(
             if try is_type_apply_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_type_apply_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    bs, &var call_arg_type_cache
+                    bs, call_arg_type_cache
                 );
             }
             // A 'while true' + match-dispatch loop (parse_generic_type_end's generic-argument walk)
@@ -9404,7 +9403,7 @@ pub fn lower_multi_statement_function(
             if try is_while_match_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_while_match_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    bs, &var call_arg_type_cache
+                    bs, call_arg_type_cache
                 );
             }
             // A precedence-climbing expression loop carries both a ParseNode-like value and an i64
@@ -9412,7 +9411,7 @@ pub fn lower_multi_statement_function(
             if try is_precedence_loop_shape(ir_bytes, function_name, params_spec, statement_count, bs) {
                 return try lower_precedence_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    bs, &var call_arg_type_cache
+                    bs, call_arg_type_cache
                 );
             }
             // A copy-seeded two-carried-value cursor loop threads a value cursor and scalar cursor
@@ -9420,7 +9419,7 @@ pub fn lower_multi_statement_function(
             if try is_dual_cursor_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_dual_cursor_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    bs, &var call_arg_type_cache
+                    bs, call_arg_type_cache
                 );
             }
             // A dual Token-cursor advance loop threads previous/current Token cursors and consumes
@@ -9428,7 +9427,7 @@ pub fn lower_multi_statement_function(
             if try is_trailing_token_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_trailing_token_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    statement_count, bs, &var call_arg_type_cache
+                    statement_count, bs, call_arg_type_cache
                 );
             }
             // A value-carried append-while loop threads a value cursor through a loop-head phi and a
@@ -9436,7 +9435,7 @@ pub fn lower_multi_statement_function(
             if try is_value_cursor_append_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_value_cursor_append_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    bs, &var call_arg_type_cache
+                    bs, call_arg_type_cache
                 );
             }
             // A guarded-cursor loop threads a plain-call Token cursor through a prefix-not predicate
@@ -9444,7 +9443,7 @@ pub fn lower_multi_statement_function(
             if try is_guarded_cursor_return_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_guarded_cursor_return_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    statement_count, bs, &var call_arg_type_cache
+                    statement_count, bs, call_arg_type_cache
                 );
             }
         }
@@ -9517,7 +9516,7 @@ pub fn lower_multi_statement_function(
                     bs,
                     ir_lookup_index,
                     canonical_facts,
-                    &var call_arg_type_cache
+                    call_arg_type_cache
                 );
                 locals_spec = seed_result.locals_spec;
                 string_counter = seed_result.string_counter;
@@ -9544,7 +9543,7 @@ pub fn lower_multi_statement_function(
                         bs,
                         ir_lookup_index,
                         canonical_facts,
-                        &var call_arg_type_cache
+                        call_arg_type_cache
                     );
                     string_counter = init_alias.string_counter;
                     temp_counter = init_alias.temp_counter;
@@ -9568,7 +9567,7 @@ pub fn lower_multi_statement_function(
                 bs,
                 ir_lookup_index,
                 canonical_facts,
-                &var call_arg_type_cache
+                call_arg_type_cache
             );
             locals_spec = let_result.locals_spec;
             string_counter = let_result.string_counter;
@@ -9588,7 +9587,7 @@ pub fn lower_multi_statement_function(
                 try stmts.append(try lower_errdefer_registration(
                     ir_bytes, function_name, module_prefix, locals_spec,
                     statement, &aliases, bs, ir_lookup_index,
-                    canonical_facts, &var call_arg_type_cache
+                    canonical_facts, call_arg_type_cache
                 ));
             } else {
             if std::mem::equal_bytes(stmt_kind, "While") {
@@ -9610,7 +9609,7 @@ pub fn lower_multi_statement_function(
                         bs,
                         ir_lookup_index,
                         canonical_facts,
-                        &var call_arg_type_cache
+                        call_arg_type_cache
                     );
                     string_counter = cursor_result.string_counter;
                     temp_counter = cursor_result.temp_counter;
@@ -9637,7 +9636,7 @@ pub fn lower_multi_statement_function(
                         bs,
                         ir_lookup_index,
                         canonical_facts,
-                        &var call_arg_type_cache
+                        call_arg_type_cache
                     );
                     temp_counter = while_result.temp_counter;
                     string_counter = while_result.string_counter;
@@ -9662,7 +9661,7 @@ pub fn lower_multi_statement_function(
                     &aliases,
                     &var stmts,
                     bs,
-                    &var call_arg_type_cache
+                    call_arg_type_cache
                 );
                 try stmts.append(try lower_multi_return_statement(
                     ir_bytes,
@@ -9677,7 +9676,7 @@ pub fn lower_multi_statement_function(
                     bs,
                     ir_lookup_index,
                     canonical_facts,
-                    &var call_arg_type_cache
+                    call_arg_type_cache
                 ));
             } else {
                 if std::mem::equal_bytes(stmt_kind, "If") {
@@ -9701,7 +9700,7 @@ pub fn lower_multi_statement_function(
                         bs,
                         ir_lookup_index,
                         canonical_facts,
-                        &var call_arg_type_cache
+                        call_arg_type_cache
                     );
                     temp_counter = if_result.temp_counter;
                     string_counter = if_result.string_counter;
@@ -9724,7 +9723,7 @@ pub fn lower_multi_statement_function(
                             bs,
                             ir_lookup_index,
                             canonical_facts,
-                            &var call_arg_type_cache
+                            call_arg_type_cache
                         );
                         string_counter = expr_result.string_counter;
                         temp_counter = expr_result.temp_counter;
@@ -9750,7 +9749,7 @@ pub fn lower_multi_statement_function(
                             bs,
                             ir_lookup_index,
                             canonical_facts,
-                            &var call_arg_type_cache,
+                            call_arg_type_cache,
                             false,
                             "",
                             ""
@@ -9782,7 +9781,7 @@ pub fn lower_multi_statement_function(
                             bs,
                             ir_lookup_index,
                             canonical_facts,
-                            &var call_arg_type_cache
+                            call_arg_type_cache
                         );
                         locals_spec = assign_result.locals_spec;
                         string_counter = assign_result.string_counter;
