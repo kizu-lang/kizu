@@ -1213,19 +1213,33 @@ func TestSelfhostTypeCheckSkipsStdDiagnosticPass(t *testing.T) {
 			len(passes),
 		)
 	}
-	// Declaration collection may take any number of passes; what must hold is that
-	// diagnostics are only ever accumulated inside the frontend gate, so std stays
-	// declarations-only. Everything outside the gated block is scanned.
+	// Declaration collection may take any number of passes; what must hold is that no
+	// diagnostic is produced outside the frontend gate, so std stays declarations-only.
+	// Everything outside the gated block is scanned.
+	//
+	// The scanners are named rather than the accumulators they feed. An accumulator is a
+	// spelling -- `diagnostics = 1 + diagnostics` reads the same and evades a substring
+	// check -- whereas a pass cannot diagnose a file without calling one of these.
 	gated := selfhostKizuBlockAfter(t, body, frontendGate)
 	ungated := strings.Replace(body, gated, "", 1)
-	for _, accumulator := range []string{
+	for _, scanner := range []string{
+		"type_ref_scan_ast::check_file_type_references_from_ast(",
+		"function_call_scan_ast::check_file_function_references_from_ast(",
+		"check_file_body_ast_node(",
 		"diagnostics = diagnostics +",
 		"typed_nodes = typed_nodes +",
 	} {
-		if strings.Contains(ungated, accumulator) {
+		if strings.Contains(ungated, scanner) {
 			t.Fatalf(
 				"type checker runs %q outside the frontend gate, so std is diagnosed",
-				accumulator,
+				scanner,
+			)
+		}
+		if !strings.Contains(gated, scanner) {
+			t.Fatalf(
+				"frontend-gated diagnostic pass no longer runs %q; the gate would pass "+
+					"vacuously if the scan moved out from under it",
+				scanner,
 			)
 		}
 	}

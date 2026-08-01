@@ -7,19 +7,21 @@ import (
 	"testing"
 )
 
-// parseFormatAllocMaxEmissions pins the hand-written parse_format_alloc LLVM emitter at the
-// amount of LLVM it emits. The formatter migration (issue 1165 / issue 1162) moves real
+// parseFormatAllocMaxCodeLines pins the hand-written parse_format_alloc LLVM emitter at its
+// current size. The formatter migration (issue 1165 / issue 1162) moves real
 // selfhost::parser::format helpers onto the compiled path; it must not grow the legacy
 // hand-written indentation / import-sort / comment logic in append_parse_format_alloc_function.
 //
-// The ceiling counts emission statements ("try append_line(" / "try append_global_slice("), not
-// raw source lines. Raw lines also move when the body is documented or re-wrapped, neither of
-// which extends the emitter: commit 5689d099 relocated one already-emitted line below its
-// block's phis (LLVM requires a block's phis to be grouped at the top) and documented why in
-// two comment lines, which tripped a 197-raw-line ceiling while emitting exactly the same LLVM.
-// 162 is the emission count at 5a579a65, before the WIP checkpoint; it has not moved since, so
-// the ceiling has zero headroom and any added append_line / append_global_slice fails the gate.
-const parseFormatAllocMaxEmissions = 162
+// The ceiling counts code lines, skipping comments and blanks. Counting raw lines also fired on
+// documentation: commit 5689d099 relocated one already-emitted line below its block's phis (LLVM
+// groups a block's phis at the top) and explained why in two comment lines, which tripped a
+// 197-raw-line ceiling while emitting exactly the same LLVM. Counting emission statements
+// instead would fix that but stop being a size ceiling at all -- growth spelled with any other
+// helper, including a wall of hardcoded static LLVM, would pass.
+//
+// 197 is the code-line count at 5a579a65, before the WIP checkpoint, and at every revision
+// since, so the ceiling has zero headroom: one added line of code in any idiom fails the gate.
+const parseFormatAllocMaxCodeLines = 197
 
 // formatCompiledHelperSeeds is the read-only formatter closure compiled into stage2: the
 // four TokenKind predicates, token_text, next_token_text_equals (the first token-array
@@ -612,11 +614,11 @@ func assertFormatClosureIncludesDriver(t *testing.T, irEmission, backendEmission
 // not grown for the formatter path, and that hosted fmt now calls the compiled formatter driver.
 func assertParseFormatAllocNotExtended(t *testing.T, parseLLVM string) {
 	t.Helper()
-	emissions := parseFormatAllocEmissionCount(t, parseLLVM)
-	if emissions > parseFormatAllocMaxEmissions {
-		t.Errorf("append_parse_format_alloc_function now emits %d LLVM lines (max %d) -- the "+
+	code := parseFormatAllocCodeLineCount(t, parseLLVM)
+	if code > parseFormatAllocMaxCodeLines {
+		t.Errorf("append_parse_format_alloc_function grew to %d code lines (max %d) -- the "+
 			"formatter migration must not extend the hand-written indentation / import-sort / "+
-			"comment logic", emissions, parseFormatAllocMaxEmissions)
+			"comment logic", code, parseFormatAllocMaxCodeLines)
 	}
 	if !strings.Contains(parseLLVM, "@kizu_selfhost__parser_format_format_source") {
 		t.Errorf("cli_parse_llvm.kizu does not call the compiled format_source driver")
@@ -641,12 +643,11 @@ func assertParseFormatAllocNotExtended(t *testing.T, parseLLVM string) {
 	}
 }
 
-// parseFormatAllocEmissionCount returns the number of LLVM emission statements in the
-// hand-written append_parse_format_alloc_function definition. It locates the same definition
-// span as before (header line through the first column-0 closing brace) but counts only the
-// statements that emit LLVM, so documentation and line re-wrapping inside the body do not
-// register as growth.
-func parseFormatAllocEmissionCount(t *testing.T, parseLLVM string) int {
+// parseFormatAllocCodeLineCount returns the number of code lines in the hand-written
+// append_parse_format_alloc_function definition: the span from its header line through the
+// first column-0 closing brace, skipping blanks and comment-only lines so documenting the
+// body does not register as growth.
+func parseFormatAllocCodeLineCount(t *testing.T, parseLLVM string) int {
 	t.Helper()
 	lines := strings.Split(parseLLVM, "\n")
 	start := -1
@@ -662,14 +663,15 @@ func parseFormatAllocEmissionCount(t *testing.T, parseLLVM string) int {
 	}
 	for i := start; i < len(lines); i++ {
 		if lines[i] == "}" {
-			emissions := 0
+			code := 0
 			for _, body := range lines[start : i+1] {
-				if strings.Contains(body, "try append_line(") ||
-					strings.Contains(body, "try append_global_slice(") {
-					emissions++
+				trimmed := strings.TrimSpace(body)
+				if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+					continue
 				}
+				code++
 			}
-			return emissions
+			return code
 		}
 	}
 	t.Fatalf("append_parse_format_alloc_function has no closing brace")
