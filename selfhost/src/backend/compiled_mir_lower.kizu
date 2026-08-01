@@ -5209,7 +5209,8 @@ fn lower_grammar_postfix_loop(
     llvm_symbol: []u8,
     llvm_return_type: []u8,
     params_spec: []u8,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
     let init_stmt = try ir_contract::body_child_sequence_from(
@@ -5236,11 +5237,6 @@ fn lower_grammar_postfix_loop(
     var branches = std::array::Array<compiled_mir::MirGrammarBranch>(std::mem::page_allocator());
     var aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer aliases.deinit();
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     var string_counter = 0;
     var temp_counter = 0;
     var try_index = 0;
@@ -5263,7 +5259,7 @@ fn lower_grammar_postfix_loop(
             &var cond_insts,
             &aliases,
             bs,
-            ir_lookup_index, canonical_facts, &var call_arg_type_cache
+            ir_lookup_index, canonical_facts, call_arg_type_cache
         );
         let cond_strings = try count_strings_in_insts(&cond_insts);
         let cond_inst_count = cond_insts.len();
@@ -5290,11 +5286,11 @@ fn lower_grammar_postfix_loop(
         let args = try compiled_mir_lower_call::lower_call_args_canonical(
             ir_bytes, function_name, module_prefix, params_spec, call_node, reassign_string_index, bs,
             ir_lookup_index, canonical_facts, &call_info.types,
-            &var call_arg_type_cache
+            call_arg_type_cache
         );
         let arg_strings = try compiled_mir_lower_call::count_string_args(&args);
         let bound_name = try grammar_branch_carried_name(
-            carried_var, try_index, &var call_arg_type_cache
+            carried_var, try_index, call_arg_type_cache
         );
         let reassign = compiled_mir::MirLetTryCallStmt {
             name: bound_name,
@@ -5774,14 +5770,10 @@ fn lower_value_cursor_append_loop(
     llvm_symbol: []u8,
     llvm_return_type: []u8,
     params_spec: []u8,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     // The init copy 'var <cursor> = <init_name>' supplies the loop-head phi's preheader seed; the
     // copied local/param is an existing SSA value, so the let itself is elided (the phi subsumes it).
     let init_stmt = try ir_contract::body_child_sequence_from(
@@ -5804,7 +5796,7 @@ fn lower_value_cursor_append_loop(
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let cond_result = try lower_expr_into(
         ir_bytes, function_name, module_prefix, params_spec, cond_node, 0, 0, &var cond_insts, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     var body_string_counter = try count_strings_in_insts(&cond_insts);
     var body_temp_counter = cond_insts.len();
@@ -5828,7 +5820,7 @@ fn lower_value_cursor_append_loop(
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, params_spec, body_stmt,
                 body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
-                &var body_stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                &var body_stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             body_string_counter = let_result.string_counter;
             body_temp_counter = let_result.temp_counter;
@@ -5840,7 +5832,7 @@ fn lower_value_cursor_append_loop(
                     body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
                     body_index + 1, &var body_aliases, &var body_stmts, -1, bs, ir_lookup_index,
                     canonical_facts,
-                    &var call_arg_type_cache
+                    call_arg_type_cache
                 );
                 body_temp_counter = if_result.temp_counter;
                 body_string_counter = if_result.string_counter;
@@ -5852,7 +5844,7 @@ fn lower_value_cursor_append_loop(
                         ir_bytes, function_name, module_prefix, llvm_return_type, params_spec,
                         body_stmt, body_string_counter, body_temp_counter, body_try_counter,
                         &body_aliases,
-                        &var body_stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                        &var body_stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
                     );
                     body_string_counter = expr_result.string_counter;
                     body_temp_counter = expr_result.temp_counter;
@@ -5888,7 +5880,7 @@ fn lower_value_cursor_append_loop(
     let latch_args = try compiled_mir_lower_call::lower_call_args_canonical(
         ir_bytes, function_name, module_prefix, params_spec, latch_call, body_string_counter, bs,
         ir_lookup_index, canonical_facts, &latch_info.types,
-        &var call_arg_type_cache
+        call_arg_type_cache
     );
     let latch = compiled_mir::value_cursor_try_call_latch(
         cursor_var,
@@ -6820,14 +6812,10 @@ fn lower_precedence_loop(
     llvm_symbol: []u8,
     llvm_return_type: []u8,
     params_spec: []u8,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     var empty_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer empty_aliases.deinit();
     let value_init_stmt = try ir_contract::body_child_sequence_from(
@@ -6847,7 +6835,7 @@ fn lower_precedence_loop(
     );
     let value_init = try lower_precedence_loop_try_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, llvm_return_type, params_spec,
-        value_var, value_init_call, 0, 0, 0, &empty_aliases, bs, &var call_arg_type_cache
+        value_var, value_init_call, 0, 0, 0, &empty_aliases, bs, call_arg_type_cache
     );
     let value_type = value_init.success_type;
     let value_init_string_counter =
@@ -6859,7 +6847,7 @@ fn lower_precedence_loop(
         ir_bytes, params_spec, value_var, value_type
     );
     let value_init_name = try precedence_loop_suffixed_name(
-        value_var, "_init", &var call_arg_type_cache
+        value_var, "_init", call_arg_type_cache
     );
     var init_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer init_aliases.deinit();
@@ -6881,12 +6869,12 @@ fn lower_precedence_loop(
         ir_bytes, function_name, scalar_init_stmt, "value", 0, bs
     );
     let scalar_init_name = try precedence_loop_suffixed_name(
-        scalar_var, "_init", &var call_arg_type_cache
+        scalar_var, "_init", call_arg_type_cache
     );
     let scalar_init = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, value_locals,
         scalar_init_name, scalar_init_call, value_init_string_counter, &init_aliases, bs,
-        &var call_arg_type_cache
+        call_arg_type_cache
     );
     let scalar_type = scalar_init.llvm_type;
     let scalar_init_string_counter =
@@ -6905,7 +6893,7 @@ fn lower_precedence_loop(
     let cond_result = try lower_expr_into(
         ir_bytes, function_name, module_prefix, loop_locals, cond_node,
         scalar_init_string_counter, value_init_temp_counter, &var cond_insts, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     var body_string_counter = scalar_init_string_counter + try count_strings_in_insts(&cond_insts);
     var body_temp_counter = value_init_temp_counter + cond_insts.len();
@@ -6930,7 +6918,7 @@ fn lower_precedence_loop(
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
                 body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
-                &var body_stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                &var body_stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
             body_string_counter = let_result.string_counter;
@@ -6943,7 +6931,7 @@ fn lower_precedence_loop(
                     body_string_counter, body_temp_counter, body_try_counter, body_alias_counter,
                     body_index + 1, &var body_aliases, &var body_stmts, -1, bs, ir_lookup_index,
                     canonical_facts,
-                    &var call_arg_type_cache
+                    call_arg_type_cache
                 );
                 body_temp_counter = if_result.temp_counter;
                 body_string_counter = if_result.string_counter;
@@ -6955,7 +6943,7 @@ fn lower_precedence_loop(
                         ir_bytes, function_name, module_prefix, llvm_return_type, body_locals,
                         body_stmt, body_string_counter, body_temp_counter, body_try_counter,
                         &body_aliases,
-                        &var body_stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                        &var body_stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
                     );
                     body_string_counter = expr_result.string_counter;
                     body_temp_counter = expr_result.temp_counter;
@@ -6979,13 +6967,13 @@ fn lower_precedence_loop(
     let value_latch = try lower_precedence_loop_try_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, llvm_return_type, body_locals,
         value_var, value_latch_call, body_string_counter, body_temp_counter, body_try_counter,
-        &body_aliases, bs, &var call_arg_type_cache
+        &body_aliases, bs, call_arg_type_cache
     );
     let value_latch_string_counter =
         body_string_counter + try count_strings_in_insts(&value_latch.arg_insts) +
         try compiled_mir_lower_call::count_string_args(&value_latch.call_args);
     let value_next_name = try precedence_loop_suffixed_name(
-        value_var, "_next", &var call_arg_type_cache
+        value_var, "_next", call_arg_type_cache
     );
     var latch_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer latch_aliases.deinit();
@@ -7001,12 +6989,12 @@ fn lower_precedence_loop(
         ir_bytes, function_name, scalar_latch_stmt, "value", 0, bs
     );
     let scalar_latch_name = try precedence_loop_suffixed_name(
-        scalar_var, "_next", &var call_arg_type_cache
+        scalar_var, "_next", call_arg_type_cache
     );
     let scalar_latch = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, body_locals,
         scalar_latch_name, scalar_latch_call, value_latch_string_counter, &latch_aliases, bs,
-        &var call_arg_type_cache
+        call_arg_type_cache
     );
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::precedence_loop_stmt(
@@ -7027,14 +7015,10 @@ fn lower_dual_cursor_loop(
     llvm_symbol: []u8,
     llvm_return_type: []u8,
     params_spec: []u8,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     // The value cursor is seeded by copying a prior local/param: its preheader phi value is that
     // source SSA name, so no value-init call is lowered.
     let value_init_stmt = try ir_contract::body_child_sequence_from(
@@ -7097,11 +7081,11 @@ fn lower_dual_cursor_loop(
         loop_phi_name: ""
     });
     let scalar_init_name = try precedence_loop_suffixed_name(
-        scalar_var, "_init", &var call_arg_type_cache
+        scalar_var, "_init", call_arg_type_cache
     );
     let scalar_init = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, value_locals,
-        scalar_init_name, scalar_init_call, 0, &init_aliases, bs, &var call_arg_type_cache
+        scalar_init_name, scalar_init_call, 0, &init_aliases, bs, call_arg_type_cache
     );
     let scalar_type = scalar_init.llvm_type;
     let scalar_init_string_counter =
@@ -7116,7 +7100,7 @@ fn lower_dual_cursor_loop(
     let cond_result = try lower_expr_into(
         ir_bytes, function_name, module_prefix, loop_locals, cond_node,
         scalar_init_string_counter, 0, &var cond_insts, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     var body_string_counter = scalar_init_string_counter + try count_strings_in_insts(&cond_insts);
     var body_temp_counter = cond_insts.len();
@@ -7137,7 +7121,7 @@ fn lower_dual_cursor_loop(
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
                 body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
-                &var body_stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                &var body_stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
             body_string_counter = let_result.string_counter;
@@ -7151,13 +7135,13 @@ fn lower_dual_cursor_loop(
     let value_latch = try lower_precedence_loop_try_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, llvm_return_type, body_locals,
         value_var, value_latch_call, body_string_counter, body_temp_counter, body_try_counter,
-        &body_aliases, bs, &var call_arg_type_cache
+        &body_aliases, bs, call_arg_type_cache
     );
     let value_latch_string_counter =
         body_string_counter + try count_strings_in_insts(&value_latch.arg_insts) +
         try compiled_mir_lower_call::count_string_args(&value_latch.call_args);
     let value_next_name = try precedence_loop_suffixed_name(
-        value_var, "_next", &var call_arg_type_cache
+        value_var, "_next", call_arg_type_cache
     );
     var latch_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer latch_aliases.deinit();
@@ -7173,12 +7157,12 @@ fn lower_dual_cursor_loop(
         ir_bytes, function_name, scalar_latch_stmt, "value", 0, bs
     );
     let scalar_latch_name = try precedence_loop_suffixed_name(
-        scalar_var, "_next", &var call_arg_type_cache
+        scalar_var, "_next", call_arg_type_cache
     );
     let scalar_latch = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, body_locals,
         scalar_latch_name, scalar_latch_call, value_latch_string_counter, &latch_aliases, bs,
-        &var call_arg_type_cache
+        call_arg_type_cache
     );
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::dual_cursor_loop_stmt(
@@ -7209,14 +7193,10 @@ fn lower_trailing_token_loop(
     llvm_return_type: []u8,
     params_spec: []u8,
     statement_count: i64,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     var empty_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer empty_aliases.deinit();
     // The current cursor is seeded by a plain call; its preheader phi value is %<current>_init.
@@ -7233,11 +7213,11 @@ fn lower_trailing_token_loop(
         ir_bytes, function_name, current_init_stmt, "value", 0, bs
     );
     let init_name = try precedence_loop_suffixed_name(
-        current_var, "_init", &var call_arg_type_cache
+        current_var, "_init", call_arg_type_cache
     );
     let init = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, params_spec,
-        init_name, current_init_call, 0, &empty_aliases, bs, &var call_arg_type_cache
+        init_name, current_init_call, 0, &empty_aliases, bs, call_arg_type_cache
     );
     let token_type = init.llvm_type;
     let init_string_counter = try compiled_mir_lower_call::count_string_args(&init.call_args);
@@ -7267,7 +7247,7 @@ fn lower_trailing_token_loop(
     let cond_result = try lower_expr_into(
         ir_bytes, function_name, module_prefix, loop_locals, cond_node,
         init_string_counter, 0, &var cond_insts, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     let cond_inst_count = cond_insts.len();
     let cond_string_counter = init_string_counter + try count_strings_in_insts(&cond_insts);
@@ -7282,11 +7262,11 @@ fn lower_trailing_token_loop(
         ir_bytes, function_name, advance_latch_stmt, "value", 0, bs
     );
     let latch_name = try precedence_loop_suffixed_name(
-        current_var, "_next", &var call_arg_type_cache
+        current_var, "_next", call_arg_type_cache
     );
     let latch = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, loop_locals,
-        latch_name, advance_call, cond_string_counter, &empty_aliases, bs, &var call_arg_type_cache
+        latch_name, advance_call, cond_string_counter, &empty_aliases, bs, call_arg_type_cache
     );
     let latch_string_counter =
         cond_string_counter + try compiled_mir_lower_call::count_string_args(&latch.call_args);
@@ -7315,7 +7295,7 @@ fn lower_trailing_token_loop(
                 ir_bytes, function_name, module_prefix, llvm_return_type, post_locals, statement,
                 post_string_counter, post_temp_counter, &post_aliases, bs, ir_lookup_index,
                 canonical_facts,
-                &var call_arg_type_cache
+                call_arg_type_cache
             ));
         } else {
             if std::mem::equal_bytes(stmt_kind, "If") {
@@ -7324,7 +7304,7 @@ fn lower_trailing_token_loop(
                     post_string_counter, post_temp_counter, post_try_counter, post_alias_counter,
                     post_index, &var post_aliases, &var stmts, -1, bs, ir_lookup_index,
                     canonical_facts,
-                    &var call_arg_type_cache
+                    call_arg_type_cache
                 );
                 post_temp_counter = if_result.temp_counter;
                 post_string_counter = if_result.string_counter;
@@ -7335,7 +7315,7 @@ fn lower_trailing_token_loop(
                     let let_result = try lower_multi_let_statement(
                         ir_bytes, function_name, module_prefix, llvm_return_type, post_locals,
                         statement, post_string_counter, post_temp_counter, post_try_counter,
-                        &var post_aliases, &var stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                        &var post_aliases, &var stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
                     );
                     post_locals = let_result.locals_spec;
                     post_string_counter = let_result.string_counter;
@@ -7346,7 +7326,7 @@ fn lower_trailing_token_loop(
                         let expr_result = try lower_multi_expr_statement(
                             ir_bytes, function_name, module_prefix, llvm_return_type, post_locals,
                             statement, post_string_counter, post_temp_counter, post_try_counter,
-                            &post_aliases, &var stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                            &post_aliases, &var stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
                         );
                         post_string_counter = expr_result.string_counter;
                         post_temp_counter = expr_result.temp_counter;
@@ -7908,14 +7888,10 @@ fn lower_type_apply_loop(
     llvm_symbol: []u8,
     llvm_return_type: []u8,
     params_spec: []u8,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     var empty_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer empty_aliases.deinit();
     let init_stmt = try ir_contract::body_child_sequence_from(
@@ -7931,11 +7907,11 @@ fn lower_type_apply_loop(
         ir_bytes, function_name, init_stmt, "value", 0, bs
     );
     let init_name = try precedence_loop_suffixed_name(
-        cursor_var, "_init", &var call_arg_type_cache
+        cursor_var, "_init", call_arg_type_cache
     );
     let init = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, params_spec,
-        init_name, init_call, 0, &empty_aliases, bs, &var call_arg_type_cache
+        init_name, init_call, 0, &empty_aliases, bs, call_arg_type_cache
     );
     let cursor_type = init.llvm_type;
     let init_string_counter = try compiled_mir_lower_call::count_string_args(&init.call_args);
@@ -7966,7 +7942,7 @@ fn lower_type_apply_loop(
     let parse_arg = try lower_precedence_loop_try_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, llvm_return_type, loop_locals,
         arg_var, parse_arg_call, init_string_counter, 0, 0, &empty_aliases, bs,
-        &var call_arg_type_cache
+        call_arg_type_cache
     );
     let arg_locals = try compiled_signature::extend_locals_spec(
         ir_bytes, loop_locals, arg_var, parse_arg.success_type
@@ -7985,7 +7961,7 @@ fn lower_type_apply_loop(
     let append_result = try lower_multi_expr_statement(
         ir_bytes, function_name, module_prefix, llvm_return_type, arg_locals, append_stmt,
         body_string_counter, body_temp_counter, body_try_counter, &body_aliases,
-        &var body_stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        &var body_stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     body_string_counter = append_result.string_counter;
     body_try_counter = append_result.try_counter;
@@ -7999,7 +7975,7 @@ fn lower_type_apply_loop(
     let terminal_cond_result = try lower_expr_with_local_aliases(
         ir_bytes, function_name, module_prefix, arg_locals, terminal_cond,
         body_string_counter, body_temp_counter, &var terminal_cond_insts, &body_aliases, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     let terminal_string_counter =
         body_string_counter + try count_strings_in_insts(&terminal_cond_insts);
@@ -8015,7 +7991,7 @@ fn lower_type_apply_loop(
         terminal_string_counter, terminal_temp_counter, body_try_counter, 0,
         &var terminal_aliases, &var terminal_stmts, bs, ir_lookup_index,
         canonical_facts,
-        &var call_arg_type_cache
+        call_arg_type_cache
     );
     var guard_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var guard_aliases = try copy_local_aliases(&body_aliases);
@@ -8027,7 +8003,7 @@ fn lower_type_apply_loop(
         ir_bytes, function_name, module_prefix, llvm_return_type, arg_locals, guard_stmt,
         terminal_result.string_counter, terminal_result.temp_counter,
         terminal_result.try_counter, terminal_result.alias_counter, 6000,
-        &var guard_aliases, &var guard_stmts, -1, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        &var guard_aliases, &var guard_stmts, -1, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     let latch_stmt = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, body_node, "statement", 4, bs
@@ -8036,12 +8012,12 @@ fn lower_type_apply_loop(
         ir_bytes, function_name, latch_stmt, "value", 0, bs
     );
     let latch_name = try precedence_loop_suffixed_name(
-        cursor_var, "_next", &var call_arg_type_cache
+        cursor_var, "_next", call_arg_type_cache
     );
     let latch = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, arg_locals,
         latch_name, latch_call, guard_result.string_counter, &guard_aliases, bs,
-        &var call_arg_type_cache
+        call_arg_type_cache
     );
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     try stmts.append(compiled_mir::type_apply_loop_stmt(
@@ -8249,14 +8225,10 @@ fn lower_while_match_loop(
     llvm_symbol: []u8,
     llvm_return_type: []u8,
     params_spec: []u8,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     var empty_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer empty_aliases.deinit();
     let init_stmt = try ir_contract::body_child_sequence_from(
@@ -8272,11 +8244,11 @@ fn lower_while_match_loop(
         ir_bytes, function_name, init_stmt, "value", 0, bs
     );
     let init_name = try precedence_loop_suffixed_name(
-        cursor_var, "_init", &var call_arg_type_cache
+        cursor_var, "_init", call_arg_type_cache
     );
     let init = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, params_spec,
-        init_name, init_call, 0, &empty_aliases, bs, &var call_arg_type_cache
+        init_name, init_call, 0, &empty_aliases, bs, call_arg_type_cache
     );
     let cursor_type = init.llvm_type;
     let init_string_counter = try compiled_mir_lower_call::count_string_args(&init.call_args);
@@ -8306,7 +8278,7 @@ fn lower_while_match_loop(
         let let_result = try lower_multi_let_statement(
             ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, prefix_stmt,
             body_string_counter, body_temp_counter, body_try_counter, &var body_aliases,
-            &var body_stmts, bs, ir_lookup_index, canonical_facts, &var call_arg_type_cache
+            &var body_stmts, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
         );
         body_locals = let_result.locals_spec;
         body_string_counter = let_result.string_counter;
@@ -8325,13 +8297,13 @@ fn lower_while_match_loop(
     );
     let enum_kizu = try resolve_dispatch_enum_kizu_type(
         ir_bytes, function_name, module_prefix, body_locals, scrutinee, scrutinee_kind, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     var scrutinee_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let scrutinee_result_id = try lower_expr_into(
         ir_bytes, function_name, module_prefix, body_locals, scrutinee,
         body_string_counter, body_temp_counter, &var scrutinee_insts, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     let arm_temp_base = body_temp_counter + scrutinee_insts.len();
     let arm_string_base = body_string_counter + try count_strings_in_insts(&scrutinee_insts);
@@ -8376,7 +8348,7 @@ fn lower_while_match_loop(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, llvm_return_type, body_locals,
         cursor_var, latch_call, arm_string_base + latch_arm_index * arm_ssa_stride,
         arm_temp_base + latch_arm_index * arm_ssa_stride, body_try_counter, &body_aliases, bs,
-        &var call_arg_type_cache
+        call_arg_type_cache
     );
     // Build the arms: the latch arm carries no statements (the shared latch renders it); every
     // other arm lowers its 'return <expr>' off a private SSA window.
@@ -8412,7 +8384,7 @@ fn lower_while_match_loop(
                 ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body,
                 arm_string, arm_temp, &body_aliases, bs, ir_lookup_index,
                 canonical_facts,
-                &var call_arg_type_cache
+                call_arg_type_cache
             );
             try arm_stmts.append(return_stmt);
             try arms.append(compiled_mir::while_match_arm(tag, is_default, false, arm_stmts));
@@ -8578,14 +8550,10 @@ fn lower_guarded_cursor_return_loop(
     llvm_return_type: []u8,
     params_spec: []u8,
     statement_count: i64,
-    bs: i64
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !compiled_mir::MirFunction {
     let module_prefix = compiled_util::module_prefix_of(function_name);
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var top_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer top_aliases.deinit();
@@ -8604,7 +8572,7 @@ fn lower_guarded_cursor_return_loop(
         let prefix_result = try lower_multi_let_statement(
             ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec, prefix_stmt,
             string_counter, temp_counter, try_counter, &var top_aliases, &var stmts, bs,
-            ir_lookup_index, canonical_facts, &var call_arg_type_cache
+            ir_lookup_index, canonical_facts, call_arg_type_cache
         );
         locals_spec = prefix_result.locals_spec;
         string_counter = prefix_result.string_counter;
@@ -8627,11 +8595,11 @@ fn lower_guarded_cursor_return_loop(
         ir_bytes, function_name, seed_stmt, "value", 0, bs
     );
     let init_name = try precedence_loop_suffixed_name(
-        cursor_var, "_init", &var call_arg_type_cache
+        cursor_var, "_init", call_arg_type_cache
     );
     let init = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, locals_spec,
-        init_name, seed_call, string_counter, &top_aliases, bs, &var call_arg_type_cache
+        init_name, seed_call, string_counter, &top_aliases, bs, call_arg_type_cache
     );
     let cursor_type = init.llvm_type;
     string_counter = string_counter +
@@ -8653,7 +8621,7 @@ fn lower_guarded_cursor_return_loop(
     let cond_result = try lower_expr_with_local_aliases(
         ir_bytes, function_name, module_prefix, loop_locals, cond_node,
         string_counter, temp_counter, &var cond_insts, &body_aliases, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     string_counter = string_counter + try count_strings_in_insts(&cond_insts);
     temp_counter = temp_counter + cond_insts.len();
@@ -8675,7 +8643,7 @@ fn lower_guarded_cursor_return_loop(
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
                 string_counter, temp_counter, try_counter, &var body_aliases, &var body_stmts, bs,
-                ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             body_locals = let_result.locals_spec;
             string_counter = let_result.string_counter;
@@ -8686,7 +8654,7 @@ fn lower_guarded_cursor_return_loop(
                 let expr_result = try lower_multi_expr_statement(
                     ir_bytes, function_name, module_prefix, llvm_return_type, body_locals, body_stmt,
                     string_counter, temp_counter, try_counter, &body_aliases, &var body_stmts, bs,
-                    ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                    ir_lookup_index, canonical_facts, call_arg_type_cache
                 );
                 string_counter = expr_result.string_counter;
                 temp_counter = expr_result.temp_counter;
@@ -8710,7 +8678,7 @@ fn lower_guarded_cursor_return_loop(
     let terminal_cond_result = try lower_expr_with_local_aliases(
         ir_bytes, function_name, module_prefix, body_locals, terminal_cond,
         string_counter, temp_counter, &var terminal_cond_insts, &body_aliases, bs,
-        ir_lookup_index, canonical_facts, &var call_arg_type_cache
+        ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     string_counter = string_counter + try count_strings_in_insts(&terminal_cond_insts);
     temp_counter = temp_counter + terminal_cond_insts.len();
@@ -8725,11 +8693,11 @@ fn lower_guarded_cursor_return_loop(
         ir_bytes, function_name, latch_assign, "value", 0, bs
     );
     let latch_name = try precedence_loop_suffixed_name(
-        cursor_var, "_next", &var call_arg_type_cache
+        cursor_var, "_next", call_arg_type_cache
     );
     let latch = try lower_precedence_loop_plain_call(
         ir_lookup_index, canonical_facts, ir_bytes, function_name, module_prefix, body_locals,
-        latch_name, latch_call, string_counter, &body_aliases, bs, &var call_arg_type_cache
+        latch_name, latch_call, string_counter, &body_aliases, bs, call_arg_type_cache
     );
     string_counter = string_counter +
         try compiled_mir_lower_call::count_string_args(&latch.call_args);
@@ -8753,7 +8721,7 @@ fn lower_guarded_cursor_return_loop(
             let let_result = try lower_multi_let_statement(
                 ir_bytes, function_name, module_prefix, llvm_return_type, else_locals, else_stmt,
                 string_counter, temp_counter, try_counter, &var else_aliases, &var else_stmts, bs,
-                ir_lookup_index, canonical_facts, &var call_arg_type_cache
+                ir_lookup_index, canonical_facts, call_arg_type_cache
             );
             else_locals = let_result.locals_spec;
             string_counter = let_result.string_counter;
@@ -8765,7 +8733,7 @@ fn lower_guarded_cursor_return_loop(
                     ir_bytes, function_name, module_prefix, llvm_return_type, else_locals, else_stmt,
                     string_counter, temp_counter, &else_aliases, bs, ir_lookup_index,
                     canonical_facts,
-                    &var call_arg_type_cache
+                    call_arg_type_cache
                 ));
             } else {
                 return error("compiled mir: unsupported guarded-cursor else statement");
@@ -8785,7 +8753,7 @@ fn lower_guarded_cursor_return_loop(
         ir_bytes, function_name, module_prefix, llvm_return_type, loop_locals, return_stmt,
         string_counter + 1000, temp_counter + 1000, &top_aliases, bs, ir_lookup_index,
         canonical_facts,
-        &var call_arg_type_cache
+        call_arg_type_cache
     ));
 
     try stmts.append(compiled_mir::guarded_cursor_loop_stmt(
@@ -9383,6 +9351,20 @@ pub fn lower_multi_statement_function(
     if statement_count < 1 {
         return error("compiled mir: statement function requires at least one statement");
     }
+    // The specialized loop lowerings dispatched below share this cache instead of each building
+    // its own, so one per-function node index serves the whole lowering. build_fn_node_index
+    // appends into the cache and is not idempotent: this must stay the only call for this function.
+    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
+    defer call_arg_type_cache.deinit();
+    try compiled_mir_types::set_instance_context(
+        &var call_arg_type_cache, instance_context
+    );
+    // Build the per-function body-node position index once (pillar A): every per-node structural lookup
+    // below resolves its node->line offset through fn_node_line_start in O(1) instead of the global
+    // index binary search. Byte-identical (same offsets); only the lookup cost changes.
+    try compiled_mir_types::build_fn_node_index(
+        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
+    );
     // The specialized loop/parser shapes below are compact structural forms. Huge dispatcher
     // functions such as code_render.tape_record_end and render_one_instruction are ordinary
     // top-level if chains; probing every shape against them turns into repeated full body-fact
@@ -9405,35 +9387,40 @@ pub fn lower_multi_statement_function(
             // guarded arm, and returned from the terminal else) lowers through the GrammarLoop CFG.
             if try is_grammar_postfix_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_grammar_postfix_loop(
-                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                    bs, &var call_arg_type_cache
                 );
             }
             // A type-apply parser loop also uses a bool-literal 'while true' header, but its carried
             // value is a Token cursor seeded and latched by plain calls.
             if try is_type_apply_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_type_apply_loop(
-                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                    bs, &var call_arg_type_cache
                 );
             }
             // A 'while true' + match-dispatch loop (parse_generic_type_end's generic-argument walk)
             // uses a plain-call Token seed and a bool-literal header.
             if try is_while_match_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_while_match_loop(
-                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                    bs, &var call_arg_type_cache
                 );
             }
             // A precedence-climbing expression loop carries both a ParseNode-like value and an i64
             // precedence through phis.
             if try is_precedence_loop_shape(ir_bytes, function_name, params_spec, statement_count, bs) {
                 return try lower_precedence_loop(
-                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                    bs, &var call_arg_type_cache
                 );
             }
             // A copy-seeded two-carried-value cursor loop threads a value cursor and scalar cursor
             // through loop-head phis.
             if try is_dual_cursor_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_dual_cursor_loop(
-                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                    bs, &var call_arg_type_cache
                 );
             }
             // A dual Token-cursor advance loop threads previous/current Token cursors and consumes
@@ -9441,14 +9428,15 @@ pub fn lower_multi_statement_function(
             if try is_trailing_token_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_trailing_token_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    statement_count, bs
+                    statement_count, bs, &var call_arg_type_cache
                 );
             }
             // A value-carried append-while loop threads a value cursor through a loop-head phi and a
             // free-try-call latch.
             if try is_value_cursor_append_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_value_cursor_append_loop(
-                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, bs
+                    ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
+                    bs, &var call_arg_type_cache
                 );
             }
             // A guarded-cursor loop threads a plain-call Token cursor through a prefix-not predicate
@@ -9456,7 +9444,7 @@ pub fn lower_multi_statement_function(
             if try is_guarded_cursor_return_loop_shape(ir_bytes, function_name, statement_count, bs) {
                 return try lower_guarded_cursor_return_loop(
                     ir_lookup_index, canonical_facts, ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec,
-                    statement_count, bs
+                    statement_count, bs, &var call_arg_type_cache
                 );
             }
         }
@@ -9471,17 +9459,6 @@ pub fn lower_multi_statement_function(
     var alias_counter = 0;
     var aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer aliases.deinit();
-    var call_arg_type_cache = compiled_mir_types::call_arg_type_cache();
-    defer call_arg_type_cache.deinit();
-    try compiled_mir_types::set_instance_context(
-        &var call_arg_type_cache, instance_context
-    );
-    // Build the per-function body-node position index once (pillar A): every per-node structural lookup
-    // below resolves its node->line offset through fn_node_line_start in O(1) instead of the global
-    // index binary search. Byte-identical (same offsets); only the lookup cost changes.
-    try compiled_mir_types::build_fn_node_index(
-        &var call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
-    );
     let has_top_level_while = try top_level_has_statement_kind(
         ir_bytes, function_name, statement_count, "While", bs, &call_arg_type_cache
     );
