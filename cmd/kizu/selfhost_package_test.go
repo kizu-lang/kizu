@@ -367,8 +367,10 @@ func TestSelfhostComponentFunctionCatalogAPI(t *testing.T) {
 	}
 }
 
-// assertSelfhostClosureUsesCommonCalleeCollector keeps the four closure paths
-// on the shared AST callee traversal helper.
+// TestSelfhostSourceClosureOwnedBySemanticPackageGraph keeps the source closure rooted in the
+// external ABI manifest rather than in its own seed table: fast_diagnostics_parsed_file must be
+// a declared root, and the four hand-written source-closure functions the package graph replaced
+// must stay deleted, since a returning seed table would silently take ownership back.
 func TestSelfhostSourceClosureOwnedBySemanticPackageGraph(t *testing.T) {
 	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	manifest := readSelfhostFile(t, "../../selfhost/src/ir/external_abi_entrypoints.kizu")
@@ -387,8 +389,10 @@ func TestSelfhostSourceClosureOwnedBySemanticPackageGraph(t *testing.T) {
 	}
 }
 
-// TestSelfhostLoaderClosureUsesComponentCatalog keeps source loader helper body
-// closure resolution tied to the AST-derived component function catalog.
+// TestSelfhostASTClosureUsesComponentCatalog keeps selfhost::ast fact emission split the way the
+// package graph expects: append_facts_from_parsed collects the catalog, builds the dependency
+// graph and resolves calls, while the numeric closure queue walk only drains dependencies into
+// definitions. The forbidden list pins that neither half reacquires a per-component selector.
 func TestSelfhostASTClosureUsesComponentCatalog(t *testing.T) {
 	executableFunctions := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	production := selfhostKizuFunctionBody(t, executableFunctions, "fn append_facts_from_parsed(")
@@ -422,109 +426,7 @@ func TestSelfhostASTClosureUsesComponentCatalog(t *testing.T) {
 	}
 }
 
-// assertSelfhostASTClosureCatalogSeed pins the selfhost::ast BFS seeds.
-// TestSelfhostExecutableHelperClosureUsesComponentCatalog keeps the
-// selfhost::backend::executable shared-helper body facts seeded from the
-// component catalog and expanded by the common BFS callee collector instead of
-// the hand-written append_selected_helper_body table.
-func assertBackendWrapperClosureRoleMapping(t *testing.T, executableFunctions string) {
-	t.Helper()
-	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn backend_wrapper_role(")
-	for _, fragment := range []string{
-		"std::mem::equal_bytes(local_name, \"render_run_codegen_artifact\")",
-		"\"checked-run-codegen-wrapper\"",
-		"\"checked-run-codegen-artifact-wrapper\"",
-	} {
-		if !strings.Contains(roleBody, fragment) {
-			t.Fatalf("backend wrapper closure role mapping missing %q", fragment)
-		}
-	}
-}
-
-// assertBackendWrapperClosureExternalCalleePolicy keeps the backend prefix
-// delegating to the dedicated allowlist, which admits only the codegen and hosted
-// module boundary callees the run-codegen wrappers delegate to without widening
-// to a broad selfhost:: fallback.
-func assertBackendWrapperClosureExternalCalleePolicy(
-	t *testing.T,
-	executableFunctions string,
-	policyBody string,
-) {
-	t.Helper()
-	prefixBranch := "std::mem::equal_bytes(qualified_prefix, \"selfhost::backend::\")"
-	if !strings.Contains(policyBody, prefixBranch) {
-		t.Fatal("backend wrapper external accessor policy missing prefix branch")
-	}
-	if !strings.Contains(policyBody, "backend_wrapper_external_callee_allowed(callee_text)") {
-		t.Fatal("backend prefix does not delegate to the backend wrapper closure allowlist")
-	}
-	backendPolicyBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn backend_wrapper_external_callee_allowed(",
-	)
-	for _, fragment := range []string{
-		"std::mem::equal_bytes(callee_text, \"code_render::render_run_ast_artifact\")",
-		"std::mem::equal_bytes(callee_text, \"hosted::emit_rendered_run_artifact\")",
-	} {
-		if !strings.Contains(backendPolicyBody, fragment) {
-			t.Fatalf("backend wrapper closure allowlist missing %q", fragment)
-		}
-	}
-}
-
-// assertExecutableClosureRoleMapping keeps the wrapper on its checked-test-wrapper
-// role while shared helpers keep the checked-executable-shared-helper role, both
-// resolved through the role mapping rather than the hand-written
-// append_selected_function_with_body call.
-func assertExecutableClosureRoleMapping(t *testing.T, executableFunctions string) {
-	t.Helper()
-	roleBody := selfhostKizuFunctionBody(t, executableFunctions, "fn executable_closure_role(")
-	for _, fragment := range []string{
-		"std::mem::equal_bytes(local_name, \"lower_test_executable\")",
-		"\"checked-test-wrapper\"",
-		"\"checked-executable-shared-helper\"",
-	} {
-		if !strings.Contains(roleBody, fragment) {
-			t.Fatalf("executable closure role mapping missing %q", fragment)
-		}
-	}
-}
-
-// assertExecutableClosureExternalCalleePolicy keeps the executable prefix
-// delegating to the dedicated allowlist, which admits the read-only ast.get
-// accessor and the executable_lowering module boundary callee explicitly without
-// widening to a broad std::kizu:: / selfhost:: fallback.
-func assertExecutableClosureExternalCalleePolicy(
-	t *testing.T,
-	executableFunctions string,
-	policyBody string,
-) {
-	t.Helper()
-	prefixBranch := "std::mem::equal_bytes(qualified_prefix, " +
-		"\"selfhost::backend::executable::\")"
-	if !strings.Contains(policyBody, prefixBranch) {
-		t.Fatal("executable helper external accessor policy missing prefix branch")
-	}
-	if !strings.Contains(policyBody, "executable_closure_external_callee_allowed(callee_text)") {
-		t.Fatal("executable prefix does not delegate to the executable closure allowlist")
-	}
-	executablePolicyBody := selfhostKizuFunctionBody(
-		t,
-		executableFunctions,
-		"fn executable_closure_external_callee_allowed(",
-	)
-	for _, fragment := range []string{
-		"std::mem::equal_bytes(callee_text, \"ast.get\")",
-		"std::mem::equal_bytes(callee_text, \"executable_lowering::lower_test_executable\")",
-	} {
-		if !strings.Contains(executablePolicyBody, fragment) {
-			t.Fatalf("executable closure allowlist missing %q", fragment)
-		}
-	}
-}
-
-// TestSelfhostStdLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
+// TestSelfhostLexerCompiledParamsSpecDerivedFromSignatures keeps std lexer
 // compiled closure params tied to function-signature-param facts. The std lexer
 // closure seeds the shared BFS with the "std::kizu::lexer::" prefix, which builds
 // each member's fully qualified name and derives the params_spec from the IR
@@ -2380,7 +2282,7 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		selectedSignatureDetails: hostedExecutableSelectedSignatureDetailFacts(),
 	}
 	assertHostedExecutableBackendInputs(t, sources, facts)
-	assertHostedExecutableFactOrigins(t, sources, facts)
+	assertHostedExecutableFactOrigins(t, sources)
 	assertHostedExecutableRendererConsumers(t, sources, facts)
 }
 
@@ -2411,11 +2313,13 @@ func assertHostedExecutableBackendInputs(
 }
 
 // assertHostedExecutableFactOrigins checks executable path facts are derived
-// from parsed checked AST sources instead of root-level fixtures.
+// from parsed checked AST sources instead of root-level fixtures. It takes only
+// the sources: the fixture facts it used to consume were the legacy AST rule
+// strings, and eb5e7930 removed that contract, leaving the origin checks purely
+// structural.
 func assertHostedExecutableFactOrigins(
 	t *testing.T,
 	sources hostedExecutableContractSources,
-	facts hostedExecutableContractFacts,
 ) {
 	t.Helper()
 	assertExecutableContractFactsComeFromCheckedAST(
