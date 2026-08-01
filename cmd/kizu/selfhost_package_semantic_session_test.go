@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// TestSelfhostPackageSemanticSessionUsesReachableCanonicalInstances follows one
+// generic function from the semantic session to the backend. The session must
+// emit instance facts only for reachable instantiations and deduplicate them,
+// the backend must read those facts as a view rather than copying the package
+// tables, and neither side may keep the older skip-and-respecialize path around.
 func TestSelfhostPackageSemanticSessionUsesReachableCanonicalInstances(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t,
@@ -15,6 +20,42 @@ func TestSelfhostPackageSemanticSessionUsesReachableCanonicalInstances(t *testin
 	if err != nil {
 		t.Fatalf("package semantic instance gate failed: %v\n%s", err, out)
 	}
+	assertOrderedReachableInstanceFacts(t, out)
+
+	executable := readSelfhostFile(
+		t, "../../selfhost/src/ir/executable_functions.kizu",
+	)
+	for _, fragment := range []string{
+		"package_semantic_session::append_reachable_instances(",
+		"package_semantic_session::append_function_instance_facts(",
+		"&resolved_package_calls.calls",
+		"&resolved_package_calls.canonical_types",
+		"&emitted_targets",
+	} {
+		if !strings.Contains(executable, fragment) {
+			t.Errorf("production executable fact path missing %q", fragment)
+		}
+	}
+
+	compiledProgram := readSelfhostFile(t, "../../selfhost/src/backend/compiled_program_llvm.kizu")
+	canonicalFacts := readSelfhostFile(
+		t, "../../selfhost/src/backend/compiled_canonical_facts.kizu",
+	)
+	instanceContext := readSelfhostFile(
+		t, "../../selfhost/src/backend/compiled_instance_context.kizu",
+	)
+	assertCanonicalInstanceConsumers(t, instanceContext, canonicalFacts)
+	assertCompiledProgramInstancePath(t, compiledProgram)
+}
+
+// assertOrderedReachableInstanceFacts decodes the instance facts the gate
+// printed. The fixture instantiates the same generic twice with the two type
+// arguments swapped, so the two facts must agree on target identity, arity and
+// body-lowering mode while their ordered type columns mirror each other -- the
+// cheapest way to catch an instance key that has stopped distinguishing argument
+// order, or a table that collapsed the two instantiations into one.
+func assertOrderedReachableInstanceFacts(t *testing.T, out string) {
+	t.Helper()
 	var instanceFacts []string
 	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "function-instance ") {
@@ -46,29 +87,15 @@ func TestSelfhostPackageSemanticSessionUsesReachableCanonicalInstances(t *testin
 		first[7] == first[12] {
 		t.Fatalf("ordered canonical type values were not preserved: %q", instanceFacts)
 	}
+}
 
-	executable := readSelfhostFile(
-		t, "../../selfhost/src/ir/executable_functions.kizu",
-	)
-	for _, fragment := range []string{
-		"package_semantic_session::append_reachable_instances(",
-		"package_semantic_session::append_function_instance_facts(",
-		"&resolved_package_calls.calls",
-		"&resolved_package_calls.canonical_types",
-		"&emitted_targets",
-	} {
-		if !strings.Contains(executable, fragment) {
-			t.Errorf("production executable fact path missing %q", fragment)
-		}
-	}
-
-	compiledProgram := readSelfhostFile(t, "../../selfhost/src/backend/compiled_program_llvm.kizu")
-	canonicalFacts := readSelfhostFile(
-		t, "../../selfhost/src/backend/compiled_canonical_facts.kizu",
-	)
-	instanceContext := readSelfhostFile(
-		t, "../../selfhost/src/backend/compiled_instance_context.kizu",
-	)
+// assertCanonicalInstanceConsumers pins the reading half of the fact protocol:
+// the context parses the tape by prefix and honours both lowering modes, and the
+// canonical view resolves a call type by span and instance id. The forbidden
+// names are the copy-based predecessor -- if any of them is back, the backend is
+// specializing off its own duplicate of the package tables again.
+func assertCanonicalInstanceConsumers(t *testing.T, instanceContext, canonicalFacts string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"pub fn load(",
 		`let param_prefix = "function-instance-param ";`,
@@ -100,6 +127,15 @@ func TestSelfhostPackageSemanticSessionUsesReachableCanonicalInstances(t *testin
 			t.Errorf("canonical instance view retained package-table copy path %q", forbidden)
 		}
 	}
+}
+
+// assertCompiledProgramInstancePath keeps the program emitter on the instance
+// context for symbols and parameter specs. The removed names were the old
+// escape hatch, where an instance the emitter could not describe was skipped and
+// re-derived at the callsite; both paths existing at once is how the two
+// disagreed.
+func assertCompiledProgramInstancePath(t *testing.T, compiledProgram string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"compiled_instance_context::load(",
 		"compiled_abi_params::append_params_spec_instance_indexed(",
@@ -120,6 +156,10 @@ func TestSelfhostPackageSemanticSessionUsesReachableCanonicalInstances(t *testin
 	}
 }
 
+// TestSelfhostBodyCallInstanceFactsRejectMismatchedOwnership checks that the
+// resolver refuses instance facts whose symbol, target or multiplicity does not
+// line up. These tapes are well formed, so nothing but the ownership rules
+// stands between them and a wrongly bound call.
 func TestSelfhostBodyCallInstanceFactsRejectMismatchedOwnership(t *testing.T) {
 	for _, entry := range []string{
 		"gate_body_call_instance_symbol_mismatch",
@@ -136,6 +176,11 @@ func TestSelfhostBodyCallInstanceFactsRejectMismatchedOwnership(t *testing.T) {
 	}
 }
 
+// TestSelfhostCanonicalCallLoweringElidesComptimeArguments runs the gate that
+// lowers a call with comptime arguments: those arguments are already part of the
+// canonical instance identity, so they must not also survive as runtime
+// operands. The gate asserts the resulting shape itself; here we only require it
+// to pass.
 func TestSelfhostCanonicalCallLoweringElidesComptimeArguments(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t,
@@ -147,33 +192,18 @@ func TestSelfhostCanonicalCallLoweringElidesComptimeArguments(t *testing.T) {
 	}
 }
 
+// TestSelfhostGeneratedMIRNamesUseOneLifetimeStore pins the lifetime rule for
+// generated SSA names: the call lowering cache owns one MirNameStore, every name
+// the lowering invents is handed to it, and nothing frees or returns a name on
+// its own. The names outlive the function that builds them -- they end up in the
+// emitted MIR -- so a locally released name is a use-after-free, not a leak.
 func TestSelfhostGeneratedMIRNamesUseOneLifetimeStore(t *testing.T) {
 	mir := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir.kizu")
 	mirTypes := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_types.kizu")
 	lowering := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
 
-	for _, fragment := range []string{
-		"pub struct MirNameStore {",
-		"names: std::array::Array<std::string::String>",
-		"views: std::map::Map<[]u8, []u8>",
-		"pub fn mir_name_store() -> MirNameStore",
-		"try self.names.append(name);",
-		"try self.views.insert(generated, generated);",
-		"let name = self.names.pop_or_panic();",
-	} {
-		if !strings.Contains(mir, fragment) {
-			t.Errorf("MIR name store missing %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"pub name_store: compiled_mir::MirNameStore",
-		"name_store: compiled_mir::mir_name_store()",
-		"self.name_store.deinit();",
-	} {
-		if !strings.Contains(mirTypes, fragment) {
-			t.Errorf("call lowering cache missing MIR name-store lifecycle %q", fragment)
-		}
-	}
+	assertMirNameStoreLifecycle(t, mir, mirTypes)
+
 	// The generated-name helpers grow every time the lowering learns to invent
 	// another SSA name, so a fixed consumer census cannot hold -- it was already
 	// wrong when written (7 asserted, 8 in the tree at 1abebb90, 13 today).
@@ -228,6 +258,42 @@ func TestSelfhostGeneratedMIRNamesUseOneLifetimeStore(t *testing.T) {
 	}
 }
 
+// assertMirNameStoreLifecycle pins the store's two halves: the structure that
+// keeps the owned strings alongside the borrowed views handed back to callers,
+// and the cache field that constructs it and, crucially, tears it down. Without
+// the deinit the store is simply a leak with a name.
+func assertMirNameStoreLifecycle(t *testing.T, mir, mirTypes string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"pub struct MirNameStore {",
+		"names: std::array::Array<std::string::String>",
+		"views: std::map::Map<[]u8, []u8>",
+		"pub fn mir_name_store() -> MirNameStore",
+		"try self.names.append(name);",
+		"try self.views.insert(generated, generated);",
+		"let name = self.names.pop_or_panic();",
+	} {
+		if !strings.Contains(mir, fragment) {
+			t.Errorf("MIR name store missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"pub name_store: compiled_mir::MirNameStore",
+		"name_store: compiled_mir::mir_name_store()",
+		"self.name_store.deinit();",
+	} {
+		if !strings.Contains(mirTypes, fragment) {
+			t.Errorf("call lowering cache missing MIR name-store lifecycle %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostGenericAbiUsesStableStaticBindingRecords pins the generic ABI on
+// numeric instance identity. Bindings and call edges are recorded as ids that
+// stay stable across the session, the backend resolves a call through those ids,
+// and the MIR lowering consumes one central call view instead of re-deriving an
+// ABI from the callee's signature. The forbidden lists are the string-keyed and
+// signature-derived predecessors, which are exactly what stable ids replaced.
 func TestSelfhostGenericAbiUsesStableStaticBindingRecords(t *testing.T) {
 	session := readSelfhostFile(
 		t, "../../selfhost/src/ir/package_semantic_session.kizu",
@@ -254,6 +320,20 @@ func TestSelfhostGenericAbiUsesStableStaticBindingRecords(t *testing.T) {
 		readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower_struct.kizu"),
 	}, "\n")
 
+	assertStableInstanceIdentityModel(t, session, callFacts, context, canonical)
+	assertInstanceCallViewConsumers(t, mirTypes, mirLowering, mirConsumers)
+}
+
+// assertStableInstanceIdentityModel covers the producing side: the session
+// records call edges between instance ids, the call facts describe a binding
+// with numeric kinds instead of spelled type names, and the backend can mint and
+// look up an instance id. The superseded names are the string-keyed maps and
+// positional ordinals this model replaced -- an id is only stable if nothing
+// else is still deriving identity a second way.
+func assertStableInstanceIdentityModel(
+	t *testing.T, session, callFacts, context, canonical string,
+) {
+	t.Helper()
 	for _, fragment := range []string{
 		"struct StaticBinding {",
 		"struct CallEdge {",
@@ -286,6 +366,28 @@ func TestSelfhostGenericAbiUsesStableStaticBindingRecords(t *testing.T) {
 			t.Errorf("backend missing exact instance identity %q", fragment)
 		}
 	}
+	for _, forbidden := range []string{
+		"function-instance-type ",
+		"instance_type_map",
+		"call_instance_indexes",
+		"call_caller_components",
+		"instance_target_ordinal",
+		"target_sequence",
+		"pub fn load_into(",
+	} {
+		if strings.Contains(session+"\n"+context+"\n"+canonical, forbidden) {
+			t.Errorf("generic ABI retained superseded path %q", forbidden)
+		}
+	}
+}
+
+// assertInstanceCallViewConsumers covers the consuming side: CallLoweringInfo is
+// the single description of a call, and the lowering asks for it by instance id
+// rather than reassembling a callee name, module prefix or return type. The
+// forbidden helpers all reconstruct the ABI from the signature, which is what
+// makes a generic call disagree with the definition it resolves to.
+func assertInstanceCallViewConsumers(t *testing.T, mirTypes, mirLowering, mirConsumers string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"pub struct CallLoweringInfo {",
 		"pub fn lower_call_info_for_instance_indexed(",
@@ -314,19 +416,6 @@ func TestSelfhostGenericAbiUsesStableStaticBindingRecords(t *testing.T) {
 	} {
 		if strings.Contains(mirConsumers, forbidden) {
 			t.Errorf("production MIR consumer retained signature-based call ABI %q", forbidden)
-		}
-	}
-	for _, forbidden := range []string{
-		"function-instance-type ",
-		"instance_type_map",
-		"call_instance_indexes",
-		"call_caller_components",
-		"instance_target_ordinal",
-		"target_sequence",
-		"pub fn load_into(",
-	} {
-		if strings.Contains(session+"\n"+context+"\n"+canonical, forbidden) {
-			t.Errorf("generic ABI retained superseded path %q", forbidden)
 		}
 	}
 	for _, forbidden := range []string{
