@@ -65,14 +65,21 @@ func TestSelfhostHostedCommandsShareParsedSemanticFacade(t *testing.T) {
 
 	executable := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	numeric := selfhostKizuFunctionBody(t, executable, "fn append_numeric_package_closure(")
+	externalRoots := selfhostKizuFunctionBody(t, executable, "fn append_external_abi_roots(")
 	manifest := readSelfhostFile(t, "../../selfhost/src/ir/external_abi_entrypoints.kizu")
 	requireSourceFragments(t, "semantic external ABI entrypoint", manifest, []string{
 		`"selfhost", "cli/check", "fast_diagnostics_parsed_file"`,
 	})
-	requireSourceFragments(t, "generic external ABI root consumption", numeric, []string{
+	// The closure owns the work queue and hands it to the manifest-driven root
+	// collector; the collector is the only place external roots enter that queue.
+	requireSourceFragments(t, "generic external ABI root delegation", numeric, []string{
+		"package_dependency_graph::function_target_queue(allocator, catalog)",
+		"append_external_abi_roots(out, catalog, &var pending, allocator)",
+	})
+	requireSourceFragments(t, "generic external ABI root consumption", externalRoots, []string{
 		"external_abi_entrypoints::collect(allocator)",
 		"package_exact_lookup::resolve_call(",
-		"package_dependency_graph::queue_append(&var pending, catalog, target)",
+		"package_dependency_graph::queue_append(pending, catalog, target)",
 	})
 
 	legacySources := gate + check + executable +
@@ -848,32 +855,55 @@ func TestSelfhostArgumentTypesUseParsedParams(t *testing.T) {
 
 // TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST rejects return-type token scans.
 func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
+	checkerBytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost types: %v", err)
 	}
-	content := string(bytes)
+	content := string(checkerBytes)
+	callBytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost function calls: %v", err)
+	}
+	callContent := string(callBytes)
+	localBytes, err := os.ReadFile("../../selfhost/src/types/local_facts.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost local facts: %v", err)
+	}
+	localContent := string(localBytes)
+	// Function return types are collected by walking the parsed AST: the
+	// collector dispatches on the FnDecl node variant and reads the declared
+	// type from the return_type NodeId. No source or token scan may stand in.
 	required := []string{
-		"collect_function_returns_from_ast(",
-		"FnDecl(fn_decl) => return collect_function_return(",
-		"ast_text::ast_return_type_text(file, ast, return_type)",
+		"pub fn collect_function_signatures_from_ast(",
+		"FnDecl(fn_decl) => return collect_function_signature_from_ast(",
+		"ast_return_type(file, ast, return_type)",
 	}
 	for _, fragment := range required {
-		if !strings.Contains(content, fragment) {
+		if !strings.Contains(callContent, fragment) {
 			t.Fatalf("selfhost semantic diagnostics missing %q", fragment)
 		}
+	}
+	returnTypeBody := selfhostKizuFunctionBody(t, callContent, "fn ast_return_type(")
+	if !strings.Contains(returnTypeBody, "let node = ast.get(return_type);") {
+		t.Fatal("selfhost return-type text is not read from the parsed return_type node")
+	}
+	if !strings.Contains(localContent, "ast_text::ast_return_type_text(file, ast, return_type)") {
+		t.Fatal("selfhost statement return type is not read from the parsed return_type node")
 	}
 	preASTBody := selfhostKizuFunctionBody(
 		t,
 		content,
-		"pub fn first_pre_move_check_diagnostic_ast_node(",
+		"pub fn first_pre_move_check_diagnostic_ast_node_with_types(",
 	)
 	postASTBody := selfhostKizuFunctionBody(
 		t,
 		content,
 		"pub fn first_post_move_check_diagnostic_ast_node(",
 	)
-	if !strings.Contains(preASTBody+postASTBody, "collect_function_returns_from_ast(") {
+	if !strings.Contains(
+		preASTBody+postASTBody,
+		"function_calls::collect_function_signatures_from_ast(",
+	) {
 		t.Fatal("shared diagnostic passes do not collect function returns from AST")
 	}
 	oldEntries := []string{
@@ -1169,14 +1199,35 @@ func TestSelfhostTypeCheckSkipsStdDiagnosticPass(t *testing.T) {
 	}
 	content := string(bytes)
 	body := selfhostKizuFunctionBody(t, content, "fn check_parsed_sources_core(")
-	if !strings.Contains(body, "if source::is_frontend_source(file.kind) {") {
-		t.Fatal("type checker second pass does not limit diagnostics to frontend sources")
-	}
-	if count := strings.Count(body, "while index < parsed_sources.len() {"); count != 2 {
+	const frontendGate = "if source::is_frontend_source(file.kind) {"
+	if count := strings.Count(body, frontendGate); count != 1 {
 		t.Fatalf(
-			"type checker has %d parsed-source passes, want declarations plus frontend diagnostics",
+			"type checker has %d frontend-gated passes, want exactly one diagnostic pass",
 			count,
 		)
+	}
+	passes := strings.Split(body, "while index < parsed_sources.len() {")[1:]
+	if len(passes) < 2 {
+		t.Fatalf(
+			"type checker has %d parsed-source passes, want declarations plus frontend diagnostics",
+			len(passes),
+		)
+	}
+	// Declaration collection may take any number of passes; what must hold is that
+	// diagnostics are only ever accumulated inside the frontend gate, so std stays
+	// declarations-only. Everything outside the gated block is scanned.
+	gated := selfhostKizuBlockAfter(t, body, frontendGate)
+	ungated := strings.Replace(body, gated, "", 1)
+	for _, accumulator := range []string{
+		"diagnostics = diagnostics +",
+		"typed_nodes = typed_nodes +",
+	} {
+		if strings.Contains(ungated, accumulator) {
+			t.Fatalf(
+				"type checker runs %q outside the frontend gate, so std is diagnosed",
+				accumulator,
+			)
+		}
 	}
 }
 
@@ -1521,8 +1572,15 @@ func assertHostedRunLLVMResponsibilities(
 			t.Fatalf("run LLVM path missing responsibility boundary %q", fragment)
 		}
 	}
+	// The define line is no longer a hardcoded type literal: the emitter writes
+	// "define " + the derived ParseResult ABI + the symbol. Pin the contiguous
+	// emitter sequence, which reproduces the same output line byte-for-byte.
+	const derivedParseValidatedAstDefine = "" +
+		"    try out.append_bytes(\"define \");\n" +
+		"    try out.append_bytes(parse_result_abi);\n" +
+		"    try append_line(out, \" @kizu_selfhost__cli_parse_validated_ast(\");\n"
 	requiredAstBoundary := []string{
-		"define %kizu.kizu.ast.parse_result @kizu_selfhost__cli_parse_validated_ast",
+		derivedParseValidatedAstDefine,
 		// The AST boundary delegates to the compiled parser and rejects its error edge
 		// explicitly; it must not manufacture a synthetic AST.
 		"@kizu_kizu__parser_parse_program",
@@ -1531,6 +1589,24 @@ func assertHostedRunLLVMResponsibilities(
 	for _, fragment := range requiredAstBoundary {
 		if !strings.Contains(cliAstBoundary, fragment) {
 			t.Fatalf("AST boundary LLVM path missing %q", fragment)
+		}
+	}
+	if strings.Contains(cliAstBoundary, "%kizu.kizu.ast.") {
+		t.Fatal("AST boundary LLVM path re-hardcodes an AST ABI type literal")
+	}
+	// The boundary only sees an opaque []u8, so the emitted type identity is pinned
+	// at its single call site: parse_result_abi must stay derived from the compiled
+	// facts for std::kizu::ast::ParseResult.
+	cliLLVM := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	cliAppendFunctions := selfhostKizuFunctionBody(t, cliLLVM, "pub fn append_functions(")
+	for _, fragment := range []string{
+		"let parse_result_abi = try compiled_type_lower::kizu_type_to_llvm_indexed(",
+		"\"std::kizu::ast::ParseResult\"",
+		"cli_ast_boundary_llvm::append_functions(",
+		"parse_result_abi,",
+	} {
+		if !strings.Contains(cliAppendFunctions, fragment) {
+			t.Fatalf("AST boundary define type is not derived from ParseResult facts: missing %q", fragment)
 		}
 	}
 	assertHostedRunLLVMForbiddenDetails(t, cliRun, cliCodegen)
@@ -1843,9 +1919,7 @@ func assertCompiledMirPaths(t *testing.T, compiled string) {
 func assertCompiledProgramPackageDefinitions(t *testing.T, programLLVM string) {
 	t.Helper()
 	consumer := selfhostKizuFunctionBody(t, programLLVM, "pub fn append_reachable_functions(")
-	if !strings.Contains(consumer, "out, lookup_index, canonical_facts, ir_bytes, name") {
-		t.Fatal("compiled_program_llvm package consumer does not emit reachable definitions")
-	}
+	assertPackageDefinitionEmissionForwardsIndexedFacts(t, consumer)
 	emitter := selfhostKizuFunctionBody(t, programLLVM, "fn emit_numeric_package_definition(")
 	if !strings.Contains(emitter, "compiled_llvm::append_compiled_function_auto_indexed(") {
 		t.Fatal("compiled_program_llvm generic package emitter does not lower definitions")
@@ -2014,7 +2088,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"cli_artifact_dir_llvm::append_globals(",
 		"cli_artifact_dir_llvm::append_functions(",
 		"cli_ast_boundary_llvm::append_functions(",
-		"compiled_llvm::append_compiled_function_auto_indexed(",
+		// Compiled-function emission moved to compiled_program_llvm; cli_llvm
+		// must still delegate it instead of hand-writing function bodies.
+		"compiled_program_llvm::append_reachable_functions(",
 	},
 	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
 		"pub fn append_globals(",
@@ -2089,6 +2165,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_compiled_function(",
 		"ir_contract::body_child_sequence_from(",
 		"ir_contract::body_node_kind_from(",
+	},
+	"../../selfhost/src/backend/compiled_program_llvm.kizu": {
+		"pub fn append_reachable_functions(",
+		"fn emit_numeric_package_definition(",
+		"compiled_llvm::append_compiled_function_auto_indexed(",
 	},
 	"../../selfhost/src/backend/compiled_mir.kizu": {
 		"pub struct MirFunction",
@@ -2174,7 +2255,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/ir/executable_functions.kizu": {
 		"pub fn append_facts(",
 		"package_catalog_collect::collect_from_parsed_files(",
-		"package_call_resolution::resolve_package_calls(",
+		"package_call_resolution::resolve_package_calls_with_types(",
 		"package_dependency_graph::dependency_graph(",
 		"fn append_numeric_package_closure(",
 		"external_abi_entrypoints::collect(allocator)",
@@ -3059,6 +3140,31 @@ func readSelfhostFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", filepath.Clean(path), err)
 	}
 	return string(bytes)
+}
+
+// selfhostKizuBlockAfter returns the brace-matched block introduced by the first
+// occurrence of opener (which must end in "{"), including both braces.
+func selfhostKizuBlockAfter(t *testing.T, content string, opener string) string {
+	t.Helper()
+	start := strings.Index(content, opener)
+	if start < 0 {
+		t.Fatalf("missing Kizu block opener %q", opener)
+	}
+	bodyStart := start + len(opener) - 1
+	depth := 0
+	for index := bodyStart; index < len(content); index++ {
+		switch content[index] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return content[bodyStart : index+1]
+			}
+		}
+	}
+	t.Fatalf("unterminated Kizu block for %q", opener)
+	return ""
 }
 
 // selfhostKizuFunctionBody extracts a simple Kizu function body for structural checks.
