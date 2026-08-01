@@ -66,19 +66,41 @@ func (e *emitter) usesArrayRuntime() bool {
 	return false
 }
 
-// writeArrayInstr dispatches runtime-backed Array operations.
+// writeArrayInstr dispatches the Array operations that act on the container as a
+// whole -- lifetime, size, and bulk views. Anything that reaches into a single
+// element falls through to writeArrayElementInstr, which also owns the error for
+// instructions neither half recognises.
 func (e *emitter) writeArrayInstr(instr *ir.Instr) error {
 	switch instr.Op {
 	case "array.new":
 		return e.writeArrayNew(instr)
-	case "array.append":
-		return e.writeArrayAppend(instr)
 	case "array.len":
 		return e.writeArrayLen(instr)
 	case "array.capacity":
 		return e.writeArrayCapacity(instr)
 	case "array.reserve":
 		return e.writeArrayReserve(instr)
+	case "array.truncate":
+		return e.writeArrayTruncate(instr)
+	case "array.clear":
+		return e.writeArrayClear(instr)
+	case "array.as_bytes":
+		return e.writeArrayAsBytes(instr)
+	case "array.deinit":
+		return e.writeArrayDeinit(instr)
+	default:
+		return e.writeArrayElementInstr(instr)
+	}
+}
+
+// writeArrayElementInstr dispatches the Array operations that move or borrow a
+// single element. All of them go through a pointer to one element slot -- built
+// on the stack for append and set, handed back by the runtime for the rest --
+// so they share the null-pointer trap and failure plumbing.
+func (e *emitter) writeArrayElementInstr(instr *ir.Instr) error {
+	switch instr.Op {
+	case "array.append":
+		return e.writeArrayAppend(instr)
 	case "array.pop":
 		return e.writeArrayPop(instr)
 	case "array.pop_or_panic":
@@ -91,14 +113,6 @@ func (e *emitter) writeArrayInstr(instr *ir.Instr) error {
 		return e.writeArrayAt(instr)
 	case "array.set":
 		return e.writeArraySet(instr)
-	case "array.truncate":
-		return e.writeArrayTruncate(instr)
-	case "array.clear":
-		return e.writeArrayClear(instr)
-	case "array.as_bytes":
-		return e.writeArrayAsBytes(instr)
-	case "array.deinit":
-		return e.writeArrayDeinit(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported array instruction `%s`", instr.Op)
 	}

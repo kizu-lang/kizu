@@ -776,17 +776,14 @@ func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (V
 	}
 }
 
-// lowerArrayMethod lowers runtime-backed std::array::Array<T> methods.
+// lowerArrayMethod lowers runtime-backed std::array::Array<T> methods. Only the
+// methods whose result mentions the element type need to be spelled out here;
+// the rest carry a fixed result type and go through arrayMethodResultType.
 func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Value, error) {
+	if result, ok := arrayMethodResultType(name); ok {
+		return l.emit("array."+name, result, args, elem), nil
+	}
 	switch name {
-	case "append":
-		return l.emit("array.append", "!void", args, elem), nil
-	case "len":
-		return l.emit("array.len", "i64", args, elem), nil
-	case "capacity":
-		return l.emit("array.capacity", "i64", args, elem), nil
-	case "reserve":
-		return l.emit("array.reserve", "!void", args, elem), nil
 	case "pop":
 		return l.emit("array.pop", "!"+elem, args, elem), nil
 	case "pop_or_panic":
@@ -799,18 +796,27 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 		return l.emit("array.at", "!&"+elem, args, elem), nil
 	case "at_mut":
 		return l.emit("array.at_mut", "!&var "+elem, args, elem), nil
-	case "set":
-		return l.emit("array.set", "!void", args, elem), nil
-	case "truncate":
-		return l.emit("array.truncate", "!void", args, elem), nil
-	case "clear":
-		return l.emit("array.clear", "void", args, elem), nil
-	case "as_bytes":
-		return l.emit("array.as_bytes", "[]u8", args, elem), nil
-	case "deinit":
-		return l.emit("array.deinit", "void", args, elem), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown array method `%s`", name)
+	}
+}
+
+// arrayMethodResultType gives the IR result type of the Array methods that do
+// not hand back an element, so their lowering is uniform. It reports false for
+// element-typed methods, which keeps unknown names on lowerArrayMethod's error
+// path rather than lowering them to an instruction.
+func arrayMethodResultType(name string) (string, bool) {
+	switch name {
+	case "append", "reserve", "set", "truncate":
+		return "!void", true
+	case "len", "capacity":
+		return "i64", true
+	case "clear", "deinit":
+		return "void", true
+	case "as_bytes":
+		return "[]u8", true
+	default:
+		return "", false
 	}
 }
 

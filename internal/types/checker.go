@@ -5660,6 +5660,9 @@ func (c *Checker) checkArrayMethod(
 	if isStdArrayStorageMethod(name) {
 		return c.checkStdArrayStorageMethod(elem, name, args, env, unsafe)
 	}
+	if typ, handled, err := checkArrayNullaryMethod(elem, name, args); handled {
+		return typ, err
+	}
 	switch name {
 	case "append":
 		return c.checkArrayAppendArg(elem, args, env, unsafe)
@@ -5668,21 +5671,6 @@ func (c *Checker) checkArrayMethod(
 			return "", err
 		}
 		return "!void", nil
-	case "pop":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
-		}
-		return Type("!" + string(elem)), nil
-	case "pop_or_panic":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.pop_or_panic` expects 0 args, got %d", len(args))
-		}
-		return elem, nil
-	case "len", "capacity":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
-		}
-		return typeI64, nil
 	case "get", "get_or_panic":
 		return c.checkArrayGet(elem, name, args, env, unsafe)
 	case "at", "at_mut":
@@ -5690,14 +5678,33 @@ func (c *Checker) checkArrayMethod(
 			name, name)
 	case "set":
 		return c.checkArraySet(elem, args, env, unsafe)
-	case "deinit":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
-		}
-		return typeVoid, nil
 	default:
 		return "", errorf("type error: Array has no method `%s`", name)
 	}
+}
+
+// checkArrayNullaryMethod validates the Array methods that take no arguments and
+// so differ only in the type they yield; folding them together keeps the arity
+// diagnostic spelled once instead of once per method. It reports handled=false
+// for everything else, leaving the argument-taking methods to the caller.
+func checkArrayNullaryMethod(elem Type, name string, args []ast.Expression) (Type, bool, error) {
+	var result Type
+	switch name {
+	case "pop":
+		result = Type("!" + string(elem))
+	case "pop_or_panic":
+		result = elem
+	case "len", "capacity":
+		result = typeI64
+	case "deinit":
+		result = typeVoid
+	default:
+		return "", false, nil
+	}
+	if len(args) != 0 {
+		return "", true, errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
+	}
+	return result, true, nil
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.
