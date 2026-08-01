@@ -857,7 +857,7 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 		t.Fatal("method resolver fell back to owner spelling instead of declaration identity")
 	}
 	for _, fragment := range []string{
-		"package_call_resolution::resolve_package_calls(",
+		"package_call_resolution::resolve_package_calls_with_types(",
 		"package_call_resolution::append_resolved_dependencies(",
 		"append_numeric_package_closure(",
 		"package_dependency_graph::queue_append_dependencies(",
@@ -868,14 +868,23 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 			t.Fatalf("append_facts does not consume resolver numeric targets: missing %q", fragment)
 		}
 	}
-	numericClosure := dependencyFunctionBody(t, executable, "append_numeric_package_closure")
+	closureEntry := dependencyFunctionBody(t, executable, "append_numeric_package_closure")
+	if !strings.Contains(closureEntry, "append_external_abi_roots(") {
+		t.Fatal("numeric package closure no longer seeds its queue from the external ABI manifest")
+	}
+	// The manifest walk lives in append_external_abi_roots; the closure and the
+	// helper it delegates to are audited as one unit so extracting code cannot
+	// move a name policy out of range of the forbidden-fragment scan below.
+	numericClosure := closureEntry + "\n" +
+		dependencyFunctionBody(t, executable, "append_external_abi_roots")
 	for _, fragment := range []string{
 		"external_abi_entrypoints::collect(allocator)",
 		"manifest_entries.at(entrypoint_index)",
 		"entrypoint.package_name",
 		"entrypoint.module_path",
 		"entrypoint.function_name",
-		"queue_append(&var pending, catalog, target)",
+		"package_exact_lookup::resolve_call(",
+		"package_dependency_graph::queue_append(pending, catalog, target)",
 	} {
 		if !strings.Contains(numericClosure, fragment) {
 			t.Fatalf("numeric package closure missing external ABI manifest flow %q", fragment)
