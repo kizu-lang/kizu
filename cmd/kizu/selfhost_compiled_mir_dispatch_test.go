@@ -99,17 +99,43 @@ func TestSelfhostPackageDefinitionConsumerUsesIrIndex(t *testing.T) {
 		"ir_index::first_entry_with_fact_prefix(lookup_index, ir_bytes, prefix)",
 		"ir_index::entry_key_starts_with(lookup_index, ir_bytes, entry, prefix)",
 		`let name_prefix = "package-definition-name ";`,
-		"out, lookup_index, canonical_facts, ir_bytes, name",
+		"let name = ir_bytes[try name_starts.get(definition_slot)..try name_ends.get(definition_slot)];",
 	} {
 		if !strings.Contains(consumer, fragment) {
 			t.Fatalf("generic package dependency consumer missing %q", fragment)
 		}
 	}
+	assertPackageDefinitionEmissionForwardsIndexedFacts(t, consumer)
 	emit := selfhostKizuFunctionBody(t, programLLVM, "fn emit_numeric_package_definition(")
 	if !strings.Contains(emit, "compiled_llvm::append_compiled_function_auto_indexed(") {
 		t.Fatal("generic package definition should lower through indexed compiled lowering")
 	}
 	if strings.Contains(programLLVM, "collect_component_compiled_body_callees") {
 		t.Fatal("backend-local component reachability collector should remain removed")
+	}
+}
+
+// assertPackageDefinitionEmissionForwardsIndexedFacts keeps the per-definition
+// emission call on the caller-owned index and canonical fact table, lowering the
+// name resolved from the package-definition-name table. Whitespace is normalised
+// so this pins the argument contract rather than the source line wrapping.
+func assertPackageDefinitionEmissionForwardsIndexedFacts(t *testing.T, consumer string) {
+	t.Helper()
+	start := strings.Index(consumer, "try emit_numeric_package_definition(")
+	if start < 0 {
+		t.Fatal("generic package dependency consumer does not emit each definition")
+	}
+	end := strings.Index(consumer[start:], ");")
+	if end < 0 {
+		t.Fatal("generic package definition emission call is unterminated")
+	}
+	call := strings.Join(strings.Fields(consumer[start:start+end]), " ")
+	const forwarded = "try emit_numeric_package_definition( " +
+		"out, lookup_index, canonical_facts, ir_bytes,"
+	if !strings.HasPrefix(call, forwarded) {
+		t.Fatalf("generic package definition emission does not forward the caller-owned index and canonical facts: %q", call)
+	}
+	if !strings.HasSuffix(call, ", name") {
+		t.Fatalf("generic package definition emission does not lower the indexed definition name: %q", call)
 	}
 }
