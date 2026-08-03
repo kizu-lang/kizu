@@ -99,7 +99,6 @@ func TestSelfhostPackageDefinitionConsumerUsesIrIndex(t *testing.T) {
 		"ir_index::first_entry_with_fact_prefix(lookup_index, ir_bytes, prefix)",
 		"ir_index::entry_key_starts_with(lookup_index, ir_bytes, entry, prefix)",
 		`let name_prefix = "package-definition-name ";`,
-		"let name = ir_bytes[try name_starts.get(definition_slot)..try name_ends.get(definition_slot)];",
 	} {
 		if !strings.Contains(consumer, fragment) {
 			t.Fatalf("generic package dependency consumer missing %q", fragment)
@@ -145,4 +144,97 @@ func assertPackageDefinitionEmissionForwardsIndexedFacts(t *testing.T, consumer 
 			call,
 		)
 	}
+	assertPackageDefinitionEmissionSharesOneDefinitionSlot(t, consumer, call)
+}
+
+// assertPackageDefinitionEmissionSharesOneDefinitionSlot pins what the prefix and
+// suffix above cannot see: the component id, the function id, and the name handed
+// to one emission call must all be read at the same definition slot. Constant ids,
+// or ids read at a different slot than the name, both emit a definition under
+// another definition's key while every other assertion here still passes.
+func assertPackageDefinitionEmissionSharesOneDefinitionSlot(
+	t *testing.T,
+	consumer string,
+	call string,
+) {
+	t.Helper()
+	slot := packageDefinitionNameSlotExpression(t, consumer)
+	args := selfhostCallArguments(t, call)
+	if len(args) != 7 {
+		t.Fatalf("generic package definition emission takes %d arguments, want 7: %q", len(args), call)
+	}
+	component, function := args[4], args[5]
+	read := ".get(" + slot + ")"
+	for _, arg := range []string{component, function} {
+		if !strings.Contains(arg, read) {
+			t.Fatalf(
+				"generic package definition emission passes %q, which is not read at the "+
+					"definition slot %q that resolved the name",
+				arg, slot,
+			)
+		}
+	}
+	if component == function {
+		t.Fatalf("component and function ids come from one table: %q", component)
+	}
+}
+
+// packageDefinitionNameSlotExpression returns the slot expression the consumer
+// uses to resolve one definition's name, and requires the start and end of that
+// name to be read at that one slot. Deriving the expression keeps the argument
+// assertion tied to the binding it has to agree with, so renaming the slot stays
+// legal while reading a different slot does not.
+func packageDefinitionNameSlotExpression(t *testing.T, consumer string) string {
+	t.Helper()
+	const marker = "let name = ir_bytes[try name_starts.get("
+	start := strings.Index(consumer, marker)
+	if start < 0 {
+		t.Fatal("generic package dependency consumer does not resolve a definition name by slot")
+	}
+	rest := consumer[start+len(marker):]
+	end := strings.Index(rest, ")")
+	if end <= 0 {
+		t.Fatal("generic package definition name slot expression is unterminated")
+	}
+	slot := rest[:end]
+	want := ")..try name_ends.get(" + slot + ")];"
+	if !strings.HasPrefix(rest[end:], want) {
+		t.Fatalf(
+			"generic package definition name is not the ir_bytes range between name_starts "+
+				"and name_ends at slot %q: %q",
+			slot, rest[end:min(end+len(want)+16, len(rest))],
+		)
+	}
+	return slot
+}
+
+// selfhostCallArguments splits a whitespace-normalised Kizu call at its top-level
+// commas. Nested calls keep their own commas, so an argument that is itself an
+// indexed read stays one argument.
+func selfhostCallArguments(t *testing.T, call string) []string {
+	t.Helper()
+	open := strings.Index(call, "(")
+	if open < 0 {
+		t.Fatalf("not a call: %q", call)
+	}
+	args := []string{}
+	depth := 0
+	current := strings.Builder{}
+	for _, r := range call[open+1:] {
+		switch {
+		case r == '(' || r == '[':
+			depth++
+		case r == ')' || r == ']':
+			depth--
+		case r == ',' && depth == 0:
+			args = append(args, strings.TrimSpace(current.String()))
+			current.Reset()
+			continue
+		}
+		current.WriteRune(r)
+	}
+	if trailing := strings.TrimSpace(current.String()); trailing != "" {
+		args = append(args, trailing)
+	}
+	return args
 }

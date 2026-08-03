@@ -1294,7 +1294,44 @@ func requiredLLVMFormatHelperFragments() []string {
 	fragments = append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
 	fragments = append(fragments, requiredLLVMFormatLineEndFragments()...)
 	fragments = append(fragments, requiredLLVMFormatCommentPreserveFragments()...)
+	fragments = append(fragments, requiredLLVMFormatClosureLeafFragments()...)
 	return append(fragments, requiredLLVMFormatTrailingCommaFragments()...)
+}
+
+// requiredLLVMFormatClosureLeafFragments locks the eleven selfhost::parser::format
+// members that no other fragment in this file names. They used to be pinned by the
+// emitter-side seed list that 1abebb90 removed when the hand-written catalog became
+// the package graph; since then they have been covered only transitively, as leaves
+// reachable from format_source, so the closure could drop any one of them and every
+// remaining assertion would still pass. The artifact is the honest place to pin them:
+// each entry requires the member to be emitted as a real compiled function with its
+// own return type, and to be reached by a call rather than left as an orphan define.
+func requiredLLVMFormatClosureLeafFragments() []string {
+	fragments := []string{}
+	for _, member := range []struct {
+		name       string
+		returnType string
+	}{
+		{"line_comment_is_full_line", "i1"},
+		{"line_comment_has_blank_after", "i1"},
+		{"line_comment_has_blank_before", "i1"},
+		{"should_insert_space", "i1"},
+		{"is_top_level_decl_start", "i1"},
+		{"starts_new_top_level_decl", "i1"},
+		{"has_line_comment_between", "i1"},
+		{"last_byte", "i8"},
+		{"lbrace_opens_enum_decl", "%kizu.error.bool"},
+		{"rbrace_closes_enum_decl", "%kizu.error.bool"},
+		{"rbrace_wants_newline", "%kizu.error.bool"},
+	} {
+		symbol := "@kizu_selfhost__parser_format_" + member.name + "("
+		fragments = append(
+			fragments,
+			"define "+member.returnType+" "+symbol,
+			"call "+member.returnType+" "+symbol,
+		)
+	}
+	return fragments
 }
 
 // requiredLLVMFormatTrailingCommaFragments locks the selfhost::parser::format is_trailing_comma
