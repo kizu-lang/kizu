@@ -4993,6 +4993,7 @@ fn grammar_branch_carried_name(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> ![]u8 {
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes(carried_var);
     try out.append_bytes("_b");
     try std::fmt::append_i64(&var out, index);
@@ -5903,6 +5904,7 @@ fn precedence_loop_suffixed_name(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> ![]u8 {
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes(name);
     try out.append_bytes(suffix);
     return call_arg_type_cache.name_store.own(out);
@@ -10030,6 +10032,7 @@ fn void_then_alias_name(
         return error("compiled mir: negative void then alias slot");
     }
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes("void.then.alias.");
     try std::fmt::append_i64(&var out, slot);
     return call_arg_type_cache.name_store.own(out);
@@ -10050,6 +10053,7 @@ fn shadow_binding_name(
         return error("compiled mir: negative shadow binding slot");
     }
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes(source_name);
     try out.append_bytes(".shadow.");
     try std::fmt::append_i64(&var out, slot);
@@ -10076,6 +10080,7 @@ fn dispatch_payload_binding_name(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> ![]u8 {
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes("dispatch.payload.");
     try std::fmt::append_i64(&var out, statement);
     try out.append_byte(cast<u8>(46));
@@ -10091,6 +10096,7 @@ fn dispatch_result_arm_name(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> ![]u8 {
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes("dispatch.result.");
     try std::fmt::append_i64(&var out, statement);
     try out.append_byte(cast<u8>(46));
@@ -10335,6 +10341,7 @@ fn loop_exit_carried_name(
         return error("compiled mir: negative loop index");
     }
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes("loop");
     try std::fmt::append_i64(&var out, loop_index);
     try out.append_bytes("_exit_");
@@ -10354,6 +10361,7 @@ fn loop_scoped_induction_phi_name(
         return error("compiled mir: negative loop index");
     }
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes(source_name);
     try out.append_bytes(".loop.head.");
     try std::fmt::append_i64(&var out, loop_index);
@@ -10566,6 +10574,7 @@ fn loop_carried_alias_name(
         return error("compiled mir: negative loop-carried assignment node");
     }
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes(source_name);
     try out.append_bytes(".loop.");
     try std::fmt::append_i64(&var out, statement);
@@ -10584,6 +10593,7 @@ fn carried_scalar_seed_name(
         return error("compiled mir: negative loop index");
     }
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes(source_name);
     try out.append_bytes(".loop.seed.");
     try std::fmt::append_i64(&var out, loop_index);
@@ -11423,6 +11433,7 @@ fn hoisted_try_arg_name(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> ![]u8 {
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes("__try_arg");
     try std::fmt::append_i64(&var out, slot);
     return call_arg_type_cache.name_store.own(out);
@@ -11907,6 +11918,7 @@ fn loop_seed_binding_name(
         return error("compiled mir: negative loop seed binding slot");
     }
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes(source_name);
     try out.append_bytes(".seed.");
     try std::fmt::append_i64(&var out, statement);
@@ -16147,7 +16159,12 @@ fn lower_void_if_body_statement(
                 return error("compiled mir: void if/else else arm must be a block");
             }
             if cond_short_circuit != 0 {
-                return error("compiled mir: void if/else short-circuit condition not yet supported");
+                // Name the function and node. A bare "not yet supported" costs a native
+                // rebuild per attempt to locate, and this is the message a source landing
+                // outside the lowered subset hits first.
+                return unsupported_lowering_shape(
+                    "void if/else short-circuit condition", function_name, statement
+                );
             }
             return try lower_void_if_else_statement(
                 ir_bytes,
@@ -18862,6 +18879,7 @@ fn branch_merge_carried_phi_name(
         return error("compiled mir: negative branch-merge carried scalar slot");
     }
     var out = std::string::String(std::mem::page_allocator());
+    errdefer out.deinit();
     try out.append_bytes("branch.carried.scalar.");
     try std::fmt::append_i64(&var out, loop_index);
     try out.append_bytes(".");
@@ -24657,6 +24675,7 @@ fn namespace_expression_name(
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> ![]u8 {
     var spelling = std::string::String(std::mem::page_allocator());
+    errdefer spelling.deinit();
     try append_namespace_expression_name(
         &var spelling,
         ir_lookup_index,
@@ -25045,4 +25064,25 @@ fn lower_expr_field_with_local_aliases(
         field.field_index
     ));
     return id;
+}
+
+// unsupported_lowering_shape reports a statement the MIR lowering has no shape for,
+// naming the function and node it sits in. The backend recognises an enumerated set of
+// statement shapes rather than a general IR, so this message is what a source written
+// outside that set hits; without the location every occurrence costs a native rebuild
+// to find.
+pub fn unsupported_lowering_shape(
+    shape: []u8,
+    function_name: []u8,
+    node: i64
+) -> !MultiIfLowerResult {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled mir: ");
+    try message.append_bytes(shape);
+    try message.append_bytes(" not yet supported: ");
+    try message.append_bytes(function_name);
+    try message.append_bytes(" node ");
+    try std::fmt::append_i64(&var message, node);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }

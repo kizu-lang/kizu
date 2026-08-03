@@ -224,29 +224,8 @@ func TestSelfhostGeneratedMIRNamesUseOneLifetimeStore(t *testing.T) {
 	// Assert the property that census stood in for: every name the lowering
 	// allocates is handed to the one cache-owned store, none is freed or
 	// returned locally, and no site builds a store of its own.
-	builders := strings.Count(
-		lowering,
-		"var out = std::string::String(std::mem::page_allocator());",
-	)
-	owned := strings.Count(lowering, "call_arg_type_cache.name_store.own(out)")
-	if builders == 0 {
-		t.Error("MIR lowering generates no names through MirNameStore at all")
-	}
-	if owned != builders {
-		t.Errorf(
-			"generated MIR names built = %d, handed to the shared name store = %d; "+
-				"every generated name must be owned by MirNameStore",
-			builders,
-			owned,
-		)
-	}
-	if got := regexp.MustCompile(`\bout\.deinit\(\)`).
-		FindAllString(lowering, -1); len(got) != 0 {
-		t.Errorf(
-			"generated MIR name released locally %d times; MirNameStore owns the lifetime",
-			len(got),
-		)
-	}
+	assertGeneratedMirNamesAreStoreOwned(t, lowering)
+
 	if escaped := regexp.MustCompile(
 		`return\s+[A-Za-z_][A-Za-z0-9_]*\.as_bytes\(\)`,
 	).FindAllString(lowering, -1); len(escaped) != 0 {
@@ -270,6 +249,134 @@ func TestSelfhostGeneratedMIRNamesUseOneLifetimeStore(t *testing.T) {
 	if strings.Contains(lowering, "var copied = std::map::Map<[]u8, []u8>") {
 		t.Error("generated MIR name helper retained a per-call Map lifetime workaround")
 	}
+}
+
+// assertGeneratedMirNamesAreStoreOwned requires each String the MIR lowering
+// allocates to reach exactly one of the two dispositions this file has: a
+// generated SSA name handed to the cache-owned store, or an error payload
+// returned to the caller. A String that reaches neither outlives its builder
+// inside the emitted MIR, which is a use-after-free rather than a leak.
+//
+// The disposition is read per allocation site and the local is captured rather
+// than spelled. An earlier form counted `var out = ...` against `own(out)`: it
+// could not see the one builder that binds `spelling`, and a future builder
+// binding any other local would drop out of both sides at once, leaving the
+// equality satisfied while the new name escaped the store entirely.
+func assertGeneratedMirNamesAreStoreOwned(t *testing.T, lowering string) {
+	t.Helper()
+	allocation := regexp.MustCompile(
+		`var ([A-Za-z_][A-Za-z0-9_]*) = std::string::String\(std::mem::page_allocator\(\)\);`,
+	)
+	sites := allocation.FindAllStringSubmatchIndex(lowering, -1)
+	if len(sites) == 0 {
+		t.Error("MIR lowering allocates no strings at all")
+		return
+	}
+	stored := 0
+	for index, site := range sites {
+		local := lowering[site[2]:site[3]]
+		end := len(lowering)
+		if index+1 < len(sites) {
+			end = sites[index+1][0]
+		}
+		if mirNameDisposition(t, lowering[site[1]:end], local, mirLoweringLine(lowering, site[0])) {
+			stored++
+		}
+	}
+	if stored == 0 {
+		t.Error("MIR lowering hands no generated name to MirNameStore")
+	}
+}
+
+// mirNameDisposition classifies one allocation's scope and reports whether the
+// String became a store-owned generated name. Both dispositions at once, or
+// neither, are defects: the first double-books the bytes, the second strands them.
+func mirNameDisposition(t *testing.T, scope string, local string, line int) bool {
+	t.Helper()
+	owned := strings.Contains(scope, "call_arg_type_cache.name_store.own("+local+")")
+	reported := false
+	for _, view := range mirLocalViewBindings(scope, local) {
+		if strings.Contains(scope, "return error("+view+");") {
+			reported = true
+			continue
+		}
+		if strings.Contains(scope, "return "+view+";") {
+			t.Errorf(
+				"string %q at compiled_mir_lower.kizu:%d returns its own bytes through %q; "+
+					"route the name through name_store.own",
+				local,
+				line,
+				view,
+			)
+		}
+	}
+	if released := mirUnconditionalReleases(scope, local); owned && len(released) != 0 {
+		t.Errorf(
+			"generated MIR name %q at compiled_mir_lower.kizu:%d is released on the success "+
+				"path %d times; MirNameStore owns the lifetime",
+			local,
+			line,
+			len(released),
+		)
+	}
+	switch {
+	case owned && reported:
+		t.Errorf(
+			"string %q at compiled_mir_lower.kizu:%d is both handed to MirNameStore and "+
+				"returned as an error payload",
+			local,
+			line,
+		)
+	case owned:
+		return true
+	case reported:
+	default:
+		t.Errorf(
+			"string %q at compiled_mir_lower.kizu:%d is neither handed to MirNameStore nor "+
+				"returned as an error payload; the emitted MIR would point at freed bytes",
+			local,
+			line,
+		)
+	}
+	return false
+}
+
+// mirUnconditionalReleases returns the releases of this string that run on the
+// success path. `errdefer <local>.deinit();` is excluded on purpose: it fires
+// only when a builder fails before handing the name over, which is the fix for
+// the allocation-failure leak these builders still have. A plain `deinit` or a
+// `defer` runs after the store took ownership, and that is a use-after-free.
+func mirUnconditionalReleases(scope string, local string) []string {
+	release := regexp.MustCompile(
+		`(errdefer\s+)?\b` + regexp.QuoteMeta(local) + `\.deinit\(\)`,
+	)
+	unconditional := []string{}
+	for _, match := range release.FindAllStringSubmatch(scope, -1) {
+		if match[1] == "" {
+			unconditional = append(unconditional, match[0])
+		}
+	}
+	return unconditional
+}
+
+// mirLocalViewBindings returns the locals bound to a borrowed view of this
+// string. Tying the disposition to a view of THIS local keeps an unrelated
+// `return error(...)` further down the scope from standing in as one.
+func mirLocalViewBindings(scope string, local string) []string {
+	binding := regexp.MustCompile(
+		`let ([A-Za-z_][A-Za-z0-9_]*) = ` + regexp.QuoteMeta(local) + `\.as_bytes\(\);`,
+	)
+	views := []string{}
+	for _, match := range binding.FindAllStringSubmatch(scope, -1) {
+		views = append(views, match[1])
+	}
+	return views
+}
+
+// mirLoweringLine converts a byte offset into the 1-based source line the
+// failure messages above quote.
+func mirLoweringLine(lowering string, offset int) int {
+	return 1 + strings.Count(lowering[:offset], "\n")
 }
 
 // assertMirNameStoreLifecycle pins the store's two halves: the structure that

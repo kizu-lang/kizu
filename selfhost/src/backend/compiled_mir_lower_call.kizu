@@ -604,6 +604,28 @@ pub fn lower_single_call_arg_with_aliases_cached(
                 call_arg_type_cache
             );
         }
+        // A negated integer literal is a constant the argument carries, not an operation
+        // the call performs, so it folds here the way it already folds in struct field
+        // position (compiled_mir_lower_struct.kizu). Without this a `f(-1)` argument --
+        // the shape a table of sentinel rows is written with -- reaches
+        // unsupported_call_arg and stops the stage.
+        if std::mem::equal_bytes(op, "neg") {
+            let operand_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, arg_node, "right", 0, sf
+            );
+            let operand_sf = compiled_mir_types::fn_node_line_start(
+                call_arg_type_cache, operand_node, bs
+            );
+            let operand_kind = try ir_contract::body_node_kind_from(
+                ir_bytes, function_name, operand_node, operand_sf
+            );
+            if std::mem::equal_bytes(operand_kind, "Int") {
+                let literal = try ir_contract::body_int_value_from(
+                    ir_bytes, function_name, operand_node, operand_sf
+                );
+                return compiled_mir::int_literal_call_arg(arg_type, 0 - literal);
+            }
+        }
     }
     if std::mem::equal_bytes(arg_kind, "CastExpr") {
         let value_node = try ir_contract::body_child_sequence_from(
