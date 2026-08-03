@@ -1,0 +1,182 @@
+import selfhost::source;
+import selfhost::type_spelling;
+import selfhost::types::ast_text;
+import selfhost::types::expression_facts;
+
+// A type parameter stands for whatever type the caller chose at the instantiation being
+// compiled. A declared spelling that mentions one of the declaration's own type parameters
+// therefore fixes no type at the declaration itself: `fn id<T>(v: T) -> T` returns `i64` at
+// `id<i64>` and `bool` at `id<bool>`, so comparing a value against the spelling `T` would
+// report the parameter's name where the reference checker reports the type the caller
+// passed -- it substitutes the type arguments before it compares
+// (internal/types/checker.go:1172), and it checks the body once per type-argument set a
+// call site supplies (internal/types/checker.go:4534).
+//
+// So this module answers one question in two scopes. Read at the declaration, a spelling
+// that mentions a parameter is unresolved and every position rule stands down on it. Read
+// at one instantiation, the same spelling names the type the arguments fix, and the rules
+// decide against that.
+
+// declared_type_text reads a spelling in the declaration's own scope, where a type
+// parameter binds no type.
+pub fn declared_type_text(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    spelling: []u8
+) -> ![]u8 borrows spelling {
+    if try mentions_type_parameter(file, ast, type_params, spelling) {
+        return "unknown";
+    }
+    return spelling;
+}
+
+// scoped_type_text reads a spelling in the scope one call site supplies: without type
+// arguments the declaration's own scope, and with them the instantiation, where each
+// parameter is replaced by the type argument written for it. The substituted spelling is
+// interned with the other collected type facts so it outlives this call the way every
+// other spelling the frontend builds does.
+pub fn scoped_type_text(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    type_args: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> ![]u8 {
+    if !binds_arguments(type_params, type_args) or
+        !try mentions_type_parameter(file, ast, type_params, spelling) {
+        return try declared_type_text(file, ast, type_params, spelling);
+    }
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try append_instantiation_key(key, file, ast, type_params, type_args, spelling);
+    let key_bytes = key.as_bytes();
+    if !facts.contains_source(&key_bytes) {
+        var resolved = std::string::String(allocator);
+        defer resolved.deinit();
+        try append_instantiated(&var resolved, file, ast, type_params, type_args, spelling);
+        try facts.insert_source_owned(&key_bytes, &resolved);
+    }
+    return try facts.get_source(&key_bytes);
+}
+
+// binds_arguments reports whether a type-argument list fixes this declaration's
+// parameters. A list of a different length names a different declaration's parameters, so
+// it binds nothing here.
+pub fn binds_arguments(
+    type_params: std::kizu::ast::ChildRange,
+    type_args: std::kizu::ast::ChildRange
+) -> bool {
+    return type_params.len > 0 and type_args.len == type_params.len;
+}
+
+fn append_instantiation_key(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    type_args: std::kizu::ast::ChildRange,
+    spelling: []u8
+) -> !void {
+    try out.append_bytes("ti ");
+    try out.append_bytes(spelling);
+    var index = 0;
+    while index < type_params.len {
+        let param = try ast.child_at(type_params, index);
+        let argument = try ast.child_at(type_args, index);
+        try out.append_bytes(" ");
+        try out.append_bytes(ast_text::ast_node_text(file, ast, param));
+        try out.append_bytes("=");
+        try out.append_bytes(ast_text::ast_node_text(file, ast, argument));
+        index = index + 1;
+    }
+    return;
+}
+
+// A spelling is rewritten name by name, on the identity mentions_type_parameter reads it
+// with: a standalone name that is not the tail of a module path.
+fn append_instantiated(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    type_args: std::kizu::ast::ChildRange,
+    spelling: []u8
+) -> !void {
+    var index = 0;
+    while index < std::mem::len(spelling) {
+        if !type_spelling::is_name_byte(spelling[index]) {
+            try out.append_bytes(spelling[index..index + 1]);
+            index = index + 1;
+        } else {
+            let end = name_end(spelling, index);
+            try out.append_bytes(try bound_type_text(
+                file, ast, type_params, type_args, spelling, index, end
+            ));
+            index = end;
+        }
+    }
+    return;
+}
+
+fn bound_type_text(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    type_args: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    start: i64,
+    end: i64
+) -> ![]u8 {
+    let name = spelling[start..end];
+    if follows_path_separator(spelling, start) {
+        return name;
+    }
+    var index = 0;
+    while index < type_params.len {
+        let param = try ast.child_at(type_params, index);
+        if std::mem::equal_bytes(name, ast_text::ast_node_text(file, ast, param)) {
+            let argument = try ast.child_at(type_args, index);
+            return ast_text::ast_node_text(file, ast, argument);
+        }
+        index = index + 1;
+    }
+    return name;
+}
+
+fn name_end(spelling: []u8, start: i64) -> i64 {
+    var cursor = start;
+    while cursor < std::mem::len(spelling) and type_spelling::is_name_byte(spelling[cursor]) {
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn follows_path_separator(spelling: []u8, start: i64) -> bool {
+    if start < 2 {
+        return false;
+    }
+    return spelling[start - 1] == cast<u8>(58) and spelling[start - 2] == cast<u8>(58);
+}
+
+fn mentions_type_parameter(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    spelling: []u8
+) -> !bool {
+    var index = 0;
+    while index < type_params.len {
+        let child = try ast.child_at(type_params, index);
+        if type_spelling::mentions_name(
+            spelling,
+            ast_text::ast_node_text(file, ast, child)
+        ) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}

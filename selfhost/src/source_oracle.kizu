@@ -17,13 +17,19 @@ pub fn gate() -> !void {
         0,
         0
     );
-    std::testing::expect_equal<i64>(183, summary.sources);
     std::testing::expect_equal<i64>(1, summary.manifest_sources);
-    std::testing::expect_equal<i64>(167, summary.selfhost_sources);
+    // The selfhost source count is the tree's size: splitting one module in two
+    // moves it without changing anything the loader does. Compare it against the
+    // tree itself rather than a literal, so what is pinned is the property the
+    // literal stood in for -- the loader reaches every selfhost source, and only
+    // those. A literal here has been renumbered twice already.
+    let tree_sources = try count_kizu_sources_under(io, "selfhost/src");
+    std::testing::expect_equal<i64>(tree_sources, summary.selfhost_sources);
+    // The std surface is different in kind. It grows only when the selfhost
+    // compiler starts importing another std module, which is a deliberate act,
+    // so a literal is right here: it makes widening the boundary an edit.
     std::testing::expect_equal<i64>(15, summary.std_sources);
-    // The counts above are the tree's size, so they move whenever a source file
-    // is added. This is the invariant they were standing in for: every loaded
-    // file lands in exactly one kind.
+    // Every loaded file lands in exactly one kind.
     std::testing::expect_equal<i64>(
         summary.sources,
         summary.manifest_sources + summary.selfhost_sources + summary.std_sources
@@ -33,10 +39,10 @@ pub fn gate() -> !void {
 
     try expect_diagnostics(allocator);
 
-    print("source-files");
-    print(summary.sources);
-    print("source-selfhost");
-    print(summary.selfhost_sources);
+    // The tape carries only what does not drift with the tree's shape. The total
+    // and the selfhost count are checked above, against the tree; printing them
+    // here as well made the Go golden a second source for one fact, and that is
+    // what went stale.
     print("source-std");
     print(summary.std_sources);
     print("source-diagnostics");
@@ -200,4 +206,38 @@ fn expect_diagnostic(
     std::testing::expect_equal<i64>(related, diagnostic.related_len());
     diagnostic.deinit();
     return;
+}
+
+// count_kizu_sources_under returns the number of `.kizu` files in a directory
+// tree. It is the independent oracle the selfhost source count is compared
+// against: the loader walks the manifest, this walks the filesystem, and a file
+// the loader stopped reaching shows up as a disagreement rather than as a
+// literal someone renumbered.
+fn count_kizu_sources_under(io: Io, path: []u8) -> !i64 {
+    var entries = try std::fs::read_dir(io, path);
+    defer entries.deinit();
+    var count = 0;
+    var index = 0;
+    while index < entries.len() {
+        let entry = try entries.get(index);
+        if entry.is_dir {
+            let nested = try count_kizu_sources_under(io, entry.path);
+            count = count + nested;
+        } else {
+            if has_kizu_suffix(entry.name) {
+                count = count + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// has_kizu_suffix reports whether a directory entry names a Kizu source.
+fn has_kizu_suffix(name: []u8) -> bool {
+    let length = std::mem::len(name);
+    if length < 5 {
+        return false;
+    }
+    return std::mem::equal_bytes(name[length - 5..length], ".kizu");
 }

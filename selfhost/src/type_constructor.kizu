@@ -15,3 +15,63 @@ pub fn is_builtin_name(name: []u8) -> bool {
     let kind = intrinsic_type_contract::from_source_name(name);
     return kind >= 0 and intrinsic_type_contract::arity(kind) > 0;
 }
+
+// applied_intrinsic_kind answers which intrinsic identity a written type spelling names,
+// or -1 for a spelling that names none.
+//
+// An identity of arity N is named by an application that writes its static arguments, so
+// `Task<i64>` names the intrinsic task and a bare `Task` does not: it names whatever the
+// program declares under that name, and nothing at all when no declaration does
+// (internal/ownership/checker.go:6398 reads `Task<T>` and nothing else, and the reference
+// checker answers `unknown type Task` for the bare spelling). Asking the registry about
+// the bare spelling of a constructor is what let a user's own `struct Task` be mistaken
+// for the intrinsic, so every semantic rule that holds a whole written spelling asks the
+// question here instead.
+pub fn applied_intrinsic_kind(spelling: []u8) -> !i64 {
+    if std::mem::len(spelling) == 0 {
+        return -1;
+    }
+    let layer = try type_spelling::parse(spelling);
+    if layer.kind != type_spelling::layer_named() {
+        return -1;
+    }
+    return applied_constructor_kind(
+        try type_spelling::constructor(&layer, spelling), layer.has_arguments
+    );
+}
+
+// applied_constructor_kind is the same question for a caller that has already split a
+// spelling into its constructor and whether that constructor was applied.
+pub fn applied_constructor_kind(constructor: []u8, applied: bool) -> i64 {
+    let kind = intrinsic_type_contract::from_source_name(constructor);
+    if kind < 0 {
+        return -1;
+    }
+    if applied != (intrinsic_type_contract::arity(kind) > 0) {
+        return -1;
+    }
+    return kind;
+}
+
+// The meta type is the type of a comptime type value. Both spellings that
+// denote one -- a `type<...>` application and a declared static type parameter
+// -- name this single identity, so the registry stays the only owner of the
+// keyword and no frontend layer repeats it as a literal.
+pub fn meta_type_name() -> ![]u8 {
+    return intrinsic_type_contract::canonical_name(
+        intrinsic_type_contract::kind_meta_type()
+    );
+}
+
+pub fn is_meta_type_name(name: []u8) -> bool {
+    return intrinsic_type_contract::from_source_name(name) ==
+        intrinsic_type_contract::kind_meta_type();
+}
+
+// `void` is the identity of "produces no value". It is a legal result spelling and never
+// a storage spelling, so the position rule asks the registry for the identity instead of
+// repeating the keyword.
+pub fn is_void_type_name(name: []u8) -> bool {
+    return intrinsic_type_contract::from_source_name(name) ==
+        intrinsic_type_contract::kind_void();
+}

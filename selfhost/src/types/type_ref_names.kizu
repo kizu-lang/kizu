@@ -1,3 +1,4 @@
+import selfhost::ir::intrinsic_type_contract;
 import selfhost::source;
 import selfhost::types::model;
 import selfhost::types::symbols;
@@ -11,7 +12,8 @@ pub fn type_error_for_name_text(
     text: []u8,
     next_index: i64,
     start: i64,
-    end: i64
+    end: i64,
+    under_dyn: bool
 ) -> !model::TypeReferenceSummary {
     var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
     var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
@@ -25,6 +27,7 @@ pub fn type_error_for_name_text(
         next_index,
         start,
         end,
+        under_dyn,
         import_alias_starts,
         import_alias_ends
     );
@@ -43,6 +46,7 @@ pub fn type_error_for_name_text_with_imports(
     next_index: i64,
     start: i64,
     end: i64,
+    under_dyn: bool,
     import_alias_starts: &std::map::Map<[]u8, i64>,
     import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
@@ -60,24 +64,67 @@ pub fn type_error_for_name_text_with_imports(
     // written spelling. They agree for a primitive, because resolution leaves a name the
     // decoder recognizes untouched. Keeping them apart also keeps `key`, which borrows
     // `resolved`, out of a call it would have to escape into.
-    let primitive = symbols::is_builtin_primitive_name(name);
-    let exists = kinds.contains(key) or primitive;
+    let builtin = symbols::is_builtin_primitive_name(name) or
+        symbols::is_language_type_name(name);
+    let declared = kinds.contains(key);
+    var declares_method_set = false;
+    if declared {
+        // The map is asked directly for the same reason the comment above gives: `key`
+        // borrows `resolved` and cannot escape into a helper.
+        declares_method_set = (try kinds.get(key)) == model::TypeKind::Contract;
+    }
+    // A contract declaration introduces its name into the declared-type namespace like
+    // every other type declaration, so an ordinary spelling resolves it. The contract
+    // namespace is the narrower question a `dyn` layer and an `impl Contract for Type`
+    // header ask: the name has to be the one kind of declaration that carries a method set
+    // to dispatch on (SPEC.md 16).
+    var exists = declared or builtin;
+    // Having an ABI identity is not the same question as being a legal written spelling,
+    // and the seeded namespace only answers the first one. A constructor path written
+    // where a type belongs names an identity the map holds and a namespace the type
+    // grammar never had, so it is asked of the spelling as written.
+    if is_constructor_path_spelling(name) {
+        exists = false;
+    }
+    if under_dyn {
+        exists = declares_method_set;
+    }
     var expected = -1;
     if exists and arities.contains(key) {
         expected = try arities.get(key);
     }
     resolved.deinit();
+    let observed = observed_type_arity_text(text, next_index);
     if exists {
-        let observed = observed_type_arity_text(text, next_index);
+        // `Self` is the receiver type of the enclosing impl or contract: one type, never a
+        // type constructor (SPEC.md 16). No declaration records an arity for it, so static
+        // arguments written on it name a generic type nothing declares rather than a count
+        // the language type namespace could disagree with.
+        if symbols::is_language_type_name(name) and observed > 0 {
+            return type_reference_summary(true, 4, start, end, 0, observed);
+        }
         if expected >= 0 and expected != observed {
             return type_reference_summary(true, 2, start, end, expected, observed);
         }
         return no_type_reference_error();
     }
+    if under_dyn {
+        return type_reference_summary(true, 3, start, end, 0, 0);
+    }
+    // A name nothing declares is still written as one of two different things. With static
+    // arguments it names a generic type constructor, without them a plain type, and the two
+    // get different diagnostics because a reader fixing the first has to supply a
+    // constructor and a reader fixing the second only a name.
+    if observed > 0 {
+        return type_reference_summary(true, 4, start, end, 0, observed);
+    }
     return type_reference_summary(true, 1, start, end, 0, 0);
 }
 
-fn append_resolved_type_reference_name(
+// The resolved name is the key every registry in the frontend is keyed by, so any rule
+// that has to ask the registry about a written spelling resolves it the same way the
+// reference checker does.
+pub fn append_resolved_type_reference_name(
     resolved: &var std::string::String,
     file: &source::SourceFile,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
@@ -85,6 +132,22 @@ fn append_resolved_type_reference_name(
     import_alias_starts: &std::map::Map<[]u8, i64>,
     import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !void {
+    // A declaration in this module shadows an intrinsic that happens to share its bare
+    // name. The intrinsic namespace is seeded under bare names while a declaration is
+    // recorded module-qualified, so asking the bare name first made `struct Task` resolve
+    // to the intrinsic `Task<T>` and report an arity the declaration never had. Ask the
+    // module for the name before the language does.
+    if is_unqualified_type_like(name) {
+        try append_module_name(resolved, file);
+        try resolved.append_bytes("::");
+        try resolved.append_bytes(name);
+        let qualified = resolved.as_bytes();
+        let declared = kinds.contains(qualified);
+        if declared {
+            return;
+        }
+        resolved.clear();
+    }
     if symbols::type_name_is_known(kinds, name) {
         try resolved.append_bytes(name);
         return;
@@ -116,6 +179,42 @@ fn append_resolved_type_reference_name(
     }
     try resolved.append_bytes(name);
     return;
+}
+
+// is_constructor_path_spelling reports whether a written name is an intrinsic's constructor
+// path rather than its type spelling. The registry resolves a concurrency intrinsic from
+// two source names: the unqualified one a type position writes, and the module path a
+// program calls to build the value: `std::channel::Channel<i64>()` builds a Channel<i64>.
+// The canonical of that pair is an ABI identity, picked so an emitted fact names the module
+// that owns the runtime representation, and the seeded namespace is keyed by that identity.
+// So having an ABI identity is not the same question as being a legal written spelling, and
+// the seeded key cannot tell the two spellings apart -- only the written name can. A
+// qualified name whose final segment already names the same identity is the constructor
+// path. An identity the registry knows only by a module path -- std::array::Array,
+// std::map::Map, std::mem::Box -- has no unqualified name to find and stays writable.
+fn is_constructor_path_spelling(name: []u8) -> bool {
+    let kind = intrinsic_type_contract::from_source_name(name);
+    if kind < 0 {
+        return false;
+    }
+    let tail_start = last_qualified_segment_start(name);
+    if tail_start == 0 {
+        return false;
+    }
+    let tail = name[tail_start..std::mem::len(name)];
+    return intrinsic_type_contract::from_source_name(tail) == kind;
+}
+
+fn last_qualified_segment_start(name: []u8) -> i64 {
+    var start = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            start = index + 2;
+        }
+        index = index + 1;
+    }
+    return start;
 }
 
 fn first_qualified_segment_end(name: []u8) -> i64 {

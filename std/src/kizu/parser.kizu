@@ -253,9 +253,73 @@ fn parse_ident_top_level_decl(
         return std::kizu::parser::parse_impl_decl(allocator, ast, text, token);
     }
     if try std::kizu::parser::is_token_text(text, token, "contract") {
-        return std::kizu::parser::parse_skipped_top_level_block(ast, text, token);
+        return std::kizu::parser::parse_contract_decl(allocator, ast, text, token, public, doc);
     }
     return error("expected declaration");
+}
+
+// parse_contract_decl parses `contract Name { <fn signature>; ... }`. SPEC.md 16 gives a
+// contract signatures only, so each method is parsed with no body.
+fn parse_contract_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    contract_token: std::kizu::lexer::Token,
+    public: bool,
+    doc: std::kizu::ast::Span
+) -> !ParseNode {
+    let name_token = std::kizu::lexer::next_token(text, contract_token);
+    if !std::kizu::parser::is_ident_kind(name_token) {
+        return error("expected contract name");
+    }
+    let name_node = std::kizu::parser::name_node(ast, name_token);
+    let open = std::kizu::lexer::next_token(text, name_token);
+    if !std::kizu::parser::is_left_brace_token(open) {
+        return error("expected left brace");
+    }
+    var methods = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    defer methods.deinit();
+    var current = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_right_brace_token(current) {
+        if std::kizu::parser::is_eof_token(current) {
+            return error("expected right brace");
+        }
+        if !std::mem::equal_bytes(text[current.start..current.end], "fn") {
+            return error("expected contract method");
+        }
+        let method = try std::kizu::parser::parse_fn_decl(
+            allocator,
+            ast,
+            text,
+            current,
+            false,
+            false,
+            ast.add_empty(current.start),
+            false,
+            std::kizu::parser::token_doc_span(current)
+        );
+        try methods.append(method.node);
+        current = method.next;
+        if std::mem::equal_bytes(text[current.start..current.end], ";") {
+            current = std::kizu::lexer::next_token(text, current);
+        }
+    }
+    let child_start = ast.begin_children();
+    var index = 0;
+    while index < methods.len() {
+        try ast.add_child(try methods.get(index));
+        index = index + 1;
+    }
+    let range = ast.finish_children(child_start);
+    let root = std::kizu::ast::add_contract_decl(
+        ast,
+        std::kizu::ast::span(contract_token.start, current.end),
+        public,
+        name_node,
+        range,
+        doc
+    );
+    return std::kizu::parser::parse_node(root, std::kizu::lexer::next_token(text, current));
 }
 
 fn parse_impl_decl(
@@ -264,17 +328,24 @@ fn parse_impl_decl(
     text: []u8,
     impl_token: std::kizu::lexer::Token
 ) -> !ParseNode {
-    let type_token = std::kizu::lexer::next_token(text, impl_token);
-    if !std::kizu::parser::is_ident_kind(type_token) {
+    let first_token = std::kizu::lexer::next_token(text, impl_token);
+    if !std::kizu::parser::is_ident_kind(first_token) {
         return error("expected impl type name");
     }
-    let type_node = ast.add_var(
-        std::kizu::ast::span(type_token.start, type_token.end),
-        std::kizu::ast::symbol_id(type_token.start)
-    );
-    let open = std::kizu::lexer::next_token(text, type_token);
+    let first_node = std::kizu::parser::name_node(ast, first_token);
+    // `impl Contract for Type` binds the leading name to the contract; a bare `impl Type`
+    // is an inherent impl and leaves the contract slot empty.
+    var contract_node = ast.add_empty(impl_token.start);
+    var type_node = first_node;
+    var open = std::kizu::lexer::next_token(text, first_token);
     if try std::kizu::parser::is_token_text(text, open, "for") {
-        return error("contract impl outside std parser subset");
+        let type_token = std::kizu::lexer::next_token(text, open);
+        if !std::kizu::parser::is_ident_kind(type_token) {
+            return error("expected impl type name");
+        }
+        contract_node = first_node;
+        type_node = std::kizu::parser::name_node(ast, type_token);
+        open = std::kizu::lexer::next_token(text, type_token);
     }
     if !std::kizu::parser::is_left_brace_token(open) {
         return error("expected left brace");
@@ -323,58 +394,14 @@ fn parse_impl_decl(
         index = index + 1;
     }
     let range = ast.finish_children(child_start);
-    let root = ast.add_impl_decl(
+    let root = std::kizu::ast::add_impl_decl(
+        ast,
         std::kizu::ast::span(impl_token.start, current.end),
+        contract_node,
         type_node,
         range
     );
     return std::kizu::parser::parse_node(root, std::kizu::lexer::next_token(text, current));
-}
-
-fn parse_skipped_top_level_block(
-    ast: std::kizu::ast::Ast,
-    text: []u8,
-    token: std::kizu::lexer::Token
-) -> !ParseNode {
-    var current = std::kizu::lexer::next_token(text, token);
-    while !std::kizu::parser::is_left_brace_token(current) {
-        if std::kizu::parser::is_eof_token(current) {
-            return error("expected left brace");
-        }
-        current = std::kizu::lexer::next_token(text, current);
-    }
-    let close = try std::kizu::parser::skip_balanced_block(text, current);
-    return std::kizu::parser::parse_node(
-        ast.add_empty(token.start),
-        std::kizu::lexer::next_token(text, close)
-    );
-}
-
-fn skip_balanced_block(
-    text: []u8,
-    open: std::kizu::lexer::Token
-) -> !std::kizu::lexer::Token {
-    var depth = 1;
-    var token = std::kizu::lexer::next_token(text, open);
-    while depth > 0 {
-        var handled = false;
-        if std::kizu::parser::is_left_brace_token(token) {
-            depth = depth + 1;
-            handled = true;
-        }
-        if !handled and std::kizu::parser::is_right_brace_token(token) {
-            depth = depth - 1;
-            if depth == 0 {
-                return token;
-            }
-            handled = true;
-        }
-        if !handled and std::kizu::parser::is_eof_token(token) {
-            return error("expected right brace");
-        }
-        token = std::kizu::lexer::next_token(text, token);
-    }
-    return error("expected right brace");
 }
 
 fn parse_public_decl(

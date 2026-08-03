@@ -1,0 +1,181 @@
+import selfhost::source;
+import selfhost::types::ast_text;
+import selfhost::types::model;
+
+// impl_methods owns the method namespace a type carries. Every `impl` block on a type
+// writes into that one namespace, however many blocks a file spells, so a method name
+// written twice on the same type names the same method twice and the second declaration
+// has nowhere to go (internal/types/checker.go:562). The rule reads declarations only,
+// so the whole question is settled from the AST before any body is looked at.
+
+pub fn first_impl_method_diagnostic_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !model::ImplMethodSummary {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return first_duplicate_impl_method(
+            file, ast, program.declarations
+        );,
+        _ => return no_impl_method_diagnostic();,
+    }
+    return no_impl_method_diagnostic();
+}
+
+fn first_duplicate_impl_method(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !model::ImplMethodSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_duplicate_in_declaration(
+            file, ast, declarations, index, child
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_impl_method_diagnostic();
+}
+
+fn first_duplicate_in_declaration(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    position: i64,
+    node_id: std::kizu::ast::NodeId
+) -> !model::ImplMethodSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        ImplDecl(impl_decl) => return first_duplicate_in_impl_block(
+            file, ast, declarations, position, impl_decl.type_name, impl_decl.methods
+        );,
+        _ => return no_impl_method_diagnostic();,
+    }
+    return no_impl_method_diagnostic();
+}
+
+fn first_duplicate_in_impl_block(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    position: i64,
+    type_name: std::kizu::ast::NodeId,
+    methods: std::kizu::ast::ChildRange
+) -> !model::ImplMethodSummary {
+    let type_text = ast_text::ast_node_text(file, ast, type_name);
+    var index = 0;
+    while index < methods.len {
+        let method = try ast.child_at(methods, index);
+        let name = ast_text::fn_decl_name_text(file, ast, method);
+        if std::mem::len(name) > 0 and
+            (try namespace_already_carries(
+                file, ast, declarations, position, index, type_text, name
+            )) {
+            let method_node = ast.get(method);
+            return impl_method_summary(
+                true, method_node.span.start, method_node.span.end, type_text, name
+            );
+        }
+        index = index + 1;
+    }
+    return no_impl_method_diagnostic();
+}
+
+// namespace_already_carries reports whether the type's method namespace already holds the
+// name at the point this declaration writes it: an earlier block on the same type, or an
+// earlier method of the block being read.
+fn namespace_already_carries(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    position: i64,
+    method_index: i64,
+    type_text: []u8,
+    name: []u8
+) -> !bool {
+    var index = 0;
+    while index <= position {
+        let child = try ast.child_at(declarations, index);
+        var limit = -1;
+        if index == position {
+            limit = method_index;
+        }
+        if try declaration_declares_method(file, ast, child, type_text, name, limit) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn declaration_declares_method(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    type_text: []u8,
+    name: []u8,
+    limit: i64
+) -> !bool {
+    let node = ast.get(node_id);
+    match node.data {
+        ImplDecl(impl_decl) => return impl_block_declares_method(
+            file, ast, impl_decl.type_name, impl_decl.methods, type_text, name, limit
+        );,
+        _ => return false;,
+    }
+    return false;
+}
+
+// impl_block_declares_method reads one block's method names. A negative limit reads the
+// whole block; a limit reads the methods written before the one being decided.
+fn impl_block_declares_method(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_name: std::kizu::ast::NodeId,
+    methods: std::kizu::ast::ChildRange,
+    type_text: []u8,
+    name: []u8,
+    limit: i64
+) -> !bool {
+    if !std::mem::equal_bytes(ast_text::ast_node_text(file, ast, type_name), type_text) {
+        return false;
+    }
+    var end = methods.len;
+    if limit >= 0 {
+        end = limit;
+    }
+    var index = 0;
+    while index < end {
+        let method = try ast.child_at(methods, index);
+        if std::mem::equal_bytes(ast_text::fn_decl_name_text(file, ast, method), name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn no_impl_method_diagnostic() -> model::ImplMethodSummary {
+    return impl_method_summary(false, 0, 0, "", "");
+}
+
+fn impl_method_summary(
+    found: bool,
+    start: i64,
+    end: i64,
+    type_name: []u8,
+    method: []u8
+) -> model::ImplMethodSummary {
+    return model::ImplMethodSummary {
+        found: found,
+        start: start,
+        end: end,
+        type_name: type_name,
+        method: method
+    };
+}

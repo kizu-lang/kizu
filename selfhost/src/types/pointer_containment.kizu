@@ -1,0 +1,181 @@
+import selfhost::source;
+import selfhost::type_spelling;
+import selfhost::types::ast_text;
+import selfhost::types::raw_pointer;
+
+// A raw pointer carries no lifetime, so the compiler cannot say when the memory it
+// names stops being valid. A value crossing a concurrency boundary therefore refuses to
+// hold one: the other side cannot observe the lifetime it would have to respect. The
+// question reaches through struct fields and type arguments, because a struct that holds
+// a raw pointer is a raw pointer as far as the boundary can tell.
+//
+// A container element asks a wider question -- a raw pointer is one of several
+// classifications an element cannot have -- and selfhost::types::container_storage owns
+// that one.
+
+pub fn holds_raw_pointer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !bool {
+    if raw_pointer::is_raw_pointer(spelling) {
+        return true;
+    }
+    // A recursive type reaches itself; having asked once is answer enough.
+    if visited.contains(spelling) {
+        return false;
+    }
+    try visited.insert(spelling, true);
+    let arguments_start = type_arguments_start(spelling);
+    if arguments_start >= 0 {
+        return try type_arguments_hold_raw_pointer(
+            file, ast, root,
+            spelling[arguments_start..std::mem::len(spelling) - 1],
+            visited
+        );
+    }
+    return try declared_fields_hold_raw_pointer(file, ast, root, spelling, visited);
+}
+
+// type_arguments_start reports where a generic application's arguments begin, or -1
+// when the spelling applies no type arguments.
+fn type_arguments_start(spelling: []u8) -> i64 {
+    let length = std::mem::len(spelling);
+    if length < 1 or spelling[length - 1] != cast<u8>(62) {
+        return -1;
+    }
+    var index = 0;
+    while index < length and spelling[index] != cast<u8>(60) {
+        index = index + 1;
+    }
+    if index >= length {
+        return -1;
+    }
+    return index + 1;
+}
+
+fn type_arguments_hold_raw_pointer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    arguments: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !bool {
+    var start = 0;
+    while start < std::mem::len(arguments) {
+        let argument = try type_spelling::next_argument(arguments, start);
+        if try holds_raw_pointer(file, ast, root, argument, visited) {
+            return true;
+        }
+        start = try type_spelling::next_argument_start(arguments, start);
+    }
+    return false;
+}
+
+// A nominal type holds a raw pointer when one of its declared fields does. Only the
+// declarations of the file being checked are visible here, so a struct declared in
+// another module answers no until the frontend resolves nominal types across modules.
+fn declared_fields_hold_raw_pointer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !bool {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return declarations_hold_raw_pointer(
+            file, ast, root, program.declarations, spelling, visited
+        );,
+        _ => return false;,
+    }
+}
+
+fn declarations_hold_raw_pointer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    declarations: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !bool {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if try declaration_holds_raw_pointer(file, ast, root, child, spelling, visited) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn declaration_holds_raw_pointer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !bool {
+    let node = ast.get(node_id);
+    match node.data {
+        StructDecl(struct_decl) => return try named_struct_holds_raw_pointer(
+            file, ast, root, struct_decl.name, struct_decl.fields, spelling, visited
+        );,
+        _ => return false;,
+    }
+}
+
+fn named_struct_holds_raw_pointer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !bool {
+    if !std::mem::equal_bytes(ast_text::ast_node_text(file, ast, name), spelling) {
+        return false;
+    }
+    return try fields_hold_raw_pointer(file, ast, root, fields, visited);
+}
+
+fn fields_hold_raw_pointer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !bool {
+    var index = 0;
+    while index < fields.len {
+        let child = try ast.child_at(fields, index);
+        if try field_holds_raw_pointer(file, ast, root, child, visited) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn field_holds_raw_pointer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !bool {
+    let node = ast.get(node_id);
+    match node.data {
+        Field(field_node) => return try holds_raw_pointer(
+            file, ast, root,
+            ast_text::ast_node_text(file, ast, field_node.type_node),
+            visited
+        );,
+        _ => return false;,
+    }
+}

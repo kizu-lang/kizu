@@ -96,12 +96,23 @@ fn scan_type_reference_ast_node(
             import_alias_starts,
             import_alias_ends
         );,
-        ImplDecl(impl_decl) => return scan_type_reference_node_and_range(
+        ImplDecl(impl_decl) => return scan_impl_type_references(
             allocator,
             file,
             ast,
             impl_decl.type_name,
+            impl_decl.contract_name,
             impl_decl.methods,
+            kinds,
+            arities,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        ContractDecl(contract_decl) => return scan_type_reference_range(
+            allocator,
+            file,
+            ast,
+            contract_decl.methods,
             kinds,
             arities,
             import_alias_starts,
@@ -517,6 +528,92 @@ fn scan_type_reference_three_nodes(
     return summary;
 }
 
+// scan_impl_type_references counts an impl header the way the diagnostic walker resolves
+// it: the implementing type in the declared-type namespace, and the contract -- when the
+// header names one -- in the contract namespace (SPEC.md 16).
+fn scan_impl_type_references(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    type_name: std::kizu::ast::NodeId,
+    contract_name: std::kizu::ast::NodeId,
+    methods: std::kizu::ast::ChildRange,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !TypeReferenceScan {
+    var summary = try scan_type_reference_type_node(allocator, file, ast, type_name, kinds, arities, import_alias_starts, import_alias_ends);
+    summary = merge_type_reference_scans(
+        summary,
+        try scan_contract_name_reference(allocator, file, ast, contract_name, kinds, arities, import_alias_starts, import_alias_ends)
+    );
+    summary = merge_type_reference_scans(
+        summary,
+        try scan_type_reference_range(allocator, file, ast, methods, kinds, arities, import_alias_starts, import_alias_ends)
+    );
+    return summary;
+}
+
+// scan_contract_name_reference counts one name resolved in the contract namespace. The
+// Empty node is an inherent impl, which names no contract and so counts nothing.
+fn scan_contract_name_reference(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    name_node: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !TypeReferenceScan {
+    let node = ast.get(name_node);
+    match node.data {
+        Empty => return type_reference_scan(0, 0, 0);,
+        _ => return scan_contract_name_text(
+            allocator,
+            file,
+            file.text[node.span.start..node.span.end],
+            node.span.start,
+            kinds,
+            arities,
+            import_alias_starts,
+            import_alias_ends
+        );,
+    }
+    return type_reference_scan(0, 0, 0);
+}
+
+fn scan_contract_name_text(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    text: []u8,
+    absolute_start: i64,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !TypeReferenceScan {
+    let found = try type_ref_names::type_error_for_name_text_with_imports(
+        allocator,
+        file,
+        kinds,
+        arities,
+        text,
+        text,
+        std::mem::len(text),
+        absolute_start,
+        absolute_start + std::mem::len(text),
+        true,
+        import_alias_starts,
+        import_alias_ends
+    );
+    if found.found {
+        return type_reference_scan(std::mem::len(text), 1, 1);
+    }
+    return type_reference_scan(std::mem::len(text), 1, 0);
+}
+
 fn scan_type_reference_node_and_range(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -655,30 +752,37 @@ fn scan_type_reference_text(
     var index = 0;
     var typed_nodes = 0;
     var diagnostics = 0;
+    var under_dyn = false;
     while index < std::mem::len(text) {
         let byte = text[index];
         if type_ref_ast::is_type_identifier_start_byte(byte) {
             let start = index;
             let end = type_ref_ast::type_path_end_in_text(text, index);
             let name = text[start..end];
-            if !type_ref_ast::should_ignore_type_name(name) {
-                typed_nodes = typed_nodes + 1;
-                let found = try type_ref_names::type_error_for_name_text_with_imports(
-                    allocator,
-                    file,
-                    kinds,
-                    arities,
-                    name,
-                    text,
-                    end,
-                    absolute_start + start,
-                    absolute_start + end,
-                    import_alias_starts,
-                    import_alias_ends
-                );
-                if found.found {
-                    diagnostics = diagnostics + 1;
+            if type_ref_ast::is_dynamic_type_keyword(name) {
+                under_dyn = true;
+            } else {
+                if !type_ref_ast::should_ignore_type_name(name) {
+                    typed_nodes = typed_nodes + 1;
+                    let found = try type_ref_names::type_error_for_name_text_with_imports(
+                        allocator,
+                        file,
+                        kinds,
+                        arities,
+                        name,
+                        text,
+                        end,
+                        absolute_start + start,
+                        absolute_start + end,
+                        under_dyn,
+                        import_alias_starts,
+                        import_alias_ends
+                    );
+                    if found.found {
+                        diagnostics = diagnostics + 1;
+                    }
                 }
+                under_dyn = false;
             }
             index = end;
         } else {

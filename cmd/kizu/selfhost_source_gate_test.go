@@ -8,11 +8,13 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
-const selfhostSourceOracleOutput = `source-files
-183
-source-selfhost
-167
-source-std
+// selfhostSourceOracleOutput is the tape the source oracle prints. It no longer
+// carries the total or the selfhost source count: those are the tree's size, and
+// pinning them here made this golden a second source for a fact the oracle
+// already owns, so it went stale every time a module was split. The oracle now
+// checks the selfhost count against a filesystem walk of selfhost/src, and what
+// stays here is what a tree reshuffle cannot move.
+const selfhostSourceOracleOutput = `source-std
 15
 source-diagnostics
 4

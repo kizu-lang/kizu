@@ -5,6 +5,7 @@ import selfhost::types::expression_facts;
 import selfhost::types::expression_infer;
 import selfhost::types::model;
 import selfhost::types::package_modules;
+import selfhost::types::pointer_builtin;
 
 pub fn first_package_function_call_error_ast_node(
     allocator: Allocator,
@@ -123,6 +124,13 @@ pub fn collect_function_signatures_from_ast(
             file,
             ast,
             impl_decl.methods,
+            returns
+        );,
+        ContractDecl(contract_decl) => return collect_method_param_type_facts_in_range(
+            allocator,
+            file,
+            ast,
+            contract_decl.methods,
             returns
         );,
         _ => return;,
@@ -919,6 +927,24 @@ fn function_call_error_for_ast_call(
         return function_call_summary(false, 0, 0, 0, 0, 0);
     }
     let name = function_call_name_text(file, ast, callee);
+    // A compiler builtin is not declared anywhere, so it resolves from its own
+    // signature table rather than the declared function table. Its arity is still
+    // checked here; the table is a signature, not an exemption.
+    let builtin = pointer_builtin::lookup(name);
+    if builtin.params >= 0 {
+        let callee_node = ast.get(callee);
+        if builtin.params != args.len {
+            return function_call_summary(
+                true,
+                2,
+                callee_node.span.start,
+                callee_node.span.end,
+                builtin.params,
+                args.len
+            );
+        }
+        return function_call_summary(false, 0, 0, 0, 0, 0);
+    }
     if should_skip_function_reference(name) or
         last_segment_starts_with_uppercase(name) or
         (try is_generic_constructor_text(name)) or

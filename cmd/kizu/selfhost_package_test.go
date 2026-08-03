@@ -1297,8 +1297,29 @@ func TestSelfhostTypeCheckerNormalizesBorrowProvenance(t *testing.T) {
 	if !strings.Contains(body, "type_text_has_error_marker(actual_type)") {
 		t.Fatal("selfhost type mismatch comparison does not use closed error-marker predicate")
 	}
-	if !strings.Contains(body, "return !std::mem::equal_bytes(expected_type, actual_type);") {
-		t.Fatal("selfhost type mismatch comparison does not use normalized type text")
+	assertTypeMismatchComparesNormalizedText(t, body)
+}
+
+// assertTypeMismatchComparesNormalizedText pins what the comparison answers, not
+// which predicate answers it: the verdict is the negation of a comparison of the
+// two NORMALIZED spellings, and the raw parameters never reach a comparison. The
+// earlier form spelled `std::mem::equal_bytes` here, so folding the qualified /
+// unqualified path rule into a named predicate looked like a regression when the
+// property it guarded was untouched.
+func assertTypeMismatchComparesNormalizedText(t *testing.T, body string) {
+	t.Helper()
+	verdict := regexp.MustCompile(
+		`return !\s*[A-Za-z_:][A-Za-z0-9_:]*\(\s*expected_type,\s*actual_type\s*\);`,
+	)
+	if !verdict.MatchString(body) {
+		t.Fatal(
+			"selfhost type mismatch verdict is not the negation of a comparison of the " +
+				"two normalized type texts",
+		)
+	}
+	raw := regexp.MustCompile(`\(\s*expected,\s*actual\s*\)`)
+	if raw.MatchString(body) {
+		t.Fatal("selfhost type mismatch comparison reaches the raw spellings, not the normalized text")
 	}
 }
 
