@@ -373,7 +373,15 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 	errorReturn := l.producesErrorValue(value)
 	if errorName, success, ok := errorUnionParts(l.current.Return); ok {
 		if value.Type == success {
-			value = l.emit("error.ok", l.current.Return, []Value{value}, "")
+			// A `!void` success carries no payload, so its wrap takes no operand.
+			// `return try f();` on a `!void` callee unwraps to a void value, and
+			// handing that to error.ok as a payload made the wrap reject its own
+			// arity ("error.ok !void expects 0 args") at emit time.
+			args := []Value{value}
+			if success == "void" {
+				args = nil
+			}
+			value = l.emit("error.ok", l.current.Return, args, "")
 		} else if errorName != "" && value.Type == errorName {
 			value = l.emit("error.error", l.current.Return, []Value{value}, "")
 			errorReturn = true
