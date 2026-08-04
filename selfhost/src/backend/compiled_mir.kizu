@@ -793,6 +793,14 @@ pub struct MirIfStmt {
 // when init_var is non-empty (a 'var right_index = right + 1' base-plus-offset initializer)
 // or from the init_literal otherwise, and a constant-step latch '%<var>_next = add i64
 // %<var>, step'.
+// Naming the phi after the variable is the whole of the naming scheme -- there is no field to
+// hold a different name -- so a secondary is only representable for a variable no other loop head
+// binds, neither another loop's in the function nor THIS loop's own carried-scalar phi over a
+// variable the body already reassigns ahead of the latch. The lowering enforces that rather than
+// emitting a second definition: such a latch-run member is demoted out of the run and carried as a
+// scalar instead, which is the population that knows how to take a scoped name and the only one of
+// the two that can hold both the body's writes and the tail advance
+// (while_demoted_secondary_latch_count).
 pub struct MirSecondaryInduction {
     pub var_name: []u8,
     pub init_literal: i64,
@@ -808,9 +816,24 @@ pub struct MirCarriedScalar {
     pub init_offset: i64,
     pub init_name: []u8,
     pub latch_var: []u8,
+    // exit_var names the value this scalar holds on a SECOND exit edge, one that leaves from inside
+    // the body rather than from the head. A loop whose exit block has one predecessor needs none
+    // and leaves it empty: the head phi is what every read after the loop resolves to. A
+    // branch-merge loop leaves through its terminal if as well as through its head, and the two
+    // edges carry different values, so no single existing name holds what the loop ended with --
+    // the exit block joins them into %loop<N>_exit_<var_name> and reads after the loop go there.
+    pub exit_var: []u8,
 }
 pub struct MirWhileStmt {
     pub loop_index: i64,
+    // induction_var names the counter the latch block advances by itself, and is empty when the
+    // loop has none. A loop has a counter only when its advance has a spelling the latch can
+    // render with no help from the body: a constant step, a try-call, a plain-call or field-read
+    // reseat, a validated copy-decrement. Any other advance -- 'start = end + 1;',
+    // 'index = next;' -- is an ordinary reassignment that happens to sit last, so it lowers in the
+    // body and the name it targets appears in carried_scalars instead. This is why the set of
+    // latches the compiler accepts is not enumerated anywhere: the latch grammar is the body's
+    // expression grammar, and only the counter fast path is a closed set.
     pub induction_var: []u8,
     pub induction_init: i64,
     pub induction_init_var: []u8,
@@ -841,11 +864,18 @@ pub struct MirWhileStmt {
     // 1165 / 1162).
     pub latch_copy_var: []u8,
     pub secondary_inductions: std::array::Array<MirSecondaryInduction>,
-    // carried_scalars are scalar locals conditionally mutated inside the loop body and threaded
-    // through loop-head phis. They are not induction counters, so the latch emits no add; each phi
-    // reads the final body SSA name (latch_var) on the latch edge. Older i64 carried scalars can
-    // seed from literal/copy/offset metadata; branch-merge carried aliases seed from init_name, the
+    // carried_scalars are scalar locals mutated inside the loop body and threaded through
+    // loop-head phis. They are not induction counters, so the latch emits no add; each phi reads
+    // the final body SSA name (latch_var) on the latch edge. Older i64 carried scalars can seed
+    // from literal/copy/offset metadata; branch-merge carried aliases seed from init_name, the
     // concrete SSA value that was current before the loop (issue 1162).
+    //
+    // Reading a body SSA name on the latch edge is also what carries a loop whose tail advance the
+    // latch block cannot spell. Such a loop has an empty induction_var and carries the tail target
+    // here: the assignment lowers as an ordinary body statement, so its value may be anything the
+    // body can compute and its phi takes the variable's own declared type rather than the counter's
+    // i64. Nothing about the value's shape is inspected, which is the point -- a loop may copy any
+    // value it can compute into the value it carries.
     pub carried_scalars: std::array::Array<MirCarriedScalar>,
     // init_insts / init_result_id back a call-seeded primary induction init ('var cursor =
     // line_end_including_break(source, comment_end)' for line_comment_has_blank_after, issue
@@ -870,6 +900,12 @@ pub struct MirWhileStmt {
     // slot per variable: the preheader allocates and seeds them, the head loads each one into the
     // same %<var> name the phi used to define, and each update stores. Nothing else in the
     // condition or body changes shape, because the name they read is defined either way.
+    //
+    // 'each update stores' is the whole contract and it is not restricted to the body's top level:
+    // an update inside an if arm, at any nesting depth, must reach the slot too. An arm that only
+    // merged through the if's own join reached the slot on no edge at all -- a continue or a break
+    // never passes through the join, and even a fall-through arm left the loop head reloading the
+    // value from before the arm.
     //
     // It is set when the body contains a 'continue'. A continue edge re-enters the head carrying
     // whatever the body had reached at that point, so a phi would need one incoming per continue
@@ -5602,7 +5638,8 @@ pub fn carried_scalar(
     init_var: []u8,
     init_offset: i64,
     init_name: []u8,
-    latch_var: []u8
+    latch_var: []u8,
+    exit_var: []u8
 ) -> MirCarriedScalar {
     return MirCarriedScalar {
         var_name: var_name,
@@ -5611,7 +5648,8 @@ pub fn carried_scalar(
         init_var: init_var,
         init_offset: init_offset,
         init_name: init_name,
-        latch_var: latch_var
+        latch_var: latch_var,
+        exit_var: exit_var
     };
 }
 

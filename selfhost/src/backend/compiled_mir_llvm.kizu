@@ -7272,6 +7272,34 @@ fn body_ends_with_return(
     }
 }
 
+// The rule: a basic block has exactly one terminator, and a continue or a break is one.
+// body_ends_with_return deliberately names only the returning terminators -- while_body_terminates
+// is a thin wrapper over it and asks a narrower question (does the loop body fall through into the
+// latch), so widening it would move the branch-merge and continue-latch error surfaces. An if arm
+// asks the general question instead: has this block already branched?
+//
+// Emitting the arm's fall-through 'br' after a continue's own 'br' is not merely dead text. LLVM's
+// parser ends the block at the first terminator and opens a fresh ANONYMOUS block for the second
+// one, and that block consumes an implicit value number -- so the first unnamed value anywhere in
+// the module then fails to parse. This backend names every value today, which is the only reason
+// the stray block has been survivable.
+fn body_ends_with_terminator(
+    body_stmts: &std::array::Array<compiled_mir::MirStmt>
+) -> !bool {
+    if try body_ends_with_return(body_stmts) {
+        return true;
+    }
+    if body_stmts.len() < 1 {
+        return false;
+    }
+    let last = try body_stmts.at(body_stmts.len() - 1);
+    match last {
+        LoopContinue(_) => return true;,
+        LoopBreak(_) => return true;,
+        _ => return false;,
+    }
+}
+
 fn append_void_then_body(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -7289,7 +7317,7 @@ fn append_void_then_body(
         );
         body_index = body_index + 1;
     }
-    if try body_ends_with_return(body) {
+    if try body_ends_with_terminator(body) {
         return;
     }
     try append_if_merge_then_stores(out, stmt);
@@ -7317,7 +7345,7 @@ fn append_void_else_body(
         );
         body_index = body_index + 1;
     }
-    if try body_ends_with_return(body) {
+    if try body_ends_with_terminator(body) {
         return;
     }
     try append_if_merge_else_stores(out, stmt);
@@ -7681,14 +7709,26 @@ fn append_while_branch_merge_latch(
     try out.append_bytes(", label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     if stmt.branch_latch_exit_on_true {
-        try out.append_bytes("_exit, label %loop");
+        try out.append_bytes("_branch_exit, label %loop");
         try std::fmt::append_i64(out, stmt.loop_index);
         try out.append_bytes("_branch_advance");
     } else {
         try out.append_bytes("_branch_advance, label %loop");
         try std::fmt::append_i64(out, stmt.loop_index);
-        try out.append_bytes("_exit");
+        try out.append_bytes("_branch_exit");
     }
+    try out.append_byte(cast<u8>(10));
+    // The exit arm leaves through a block of its own rather than branching straight to the loop
+    // exit. A phi names its predecessors, and the block the terminal branch sits in is whatever
+    // block the body statements left open -- the loop body, or an if's continuation. This block is
+    // the one label this lowering can state, so it is what the exit phis join against.
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_branch_exit:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  br label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_exit");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("loop");
     try std::fmt::append_i64(out, stmt.loop_index);
@@ -7898,6 +7938,11 @@ fn append_loop_break(
 // append_loop_continue renders a 'continue'. A loop that contains one carries its values in
 // slots rather than loop-head phis, so every update has already been stored by the time control
 // reaches here and the back edge is the whole statement: the head reloads them on arrival.
+// The premise holds because the lowering stores where the update happens rather than at the join --
+// an assignment in an arm writes the slot in the arm, and an update the arm produced through a
+// block of its own (a nested loop) is written by the arm's own jump edge
+// (append_loop_jump_carry_stores). Either way the block this branch ends is the last one on the
+// edge, and it has already stored (compiled_mir.kizu MirWhileStmt.memory_carried).
 fn append_loop_continue(
     out: &var std::string::String,
     stmt: &compiled_mir::MirLoopContinueStmt
@@ -8215,6 +8260,31 @@ fn append_multi_while(
             );
             exit_scalar_index = exit_scalar_index + 1;
         }
+    }
+    // A carried scalar that named a second exit edge is joined here. The head's edge carries the
+    // head phi; the body's edge carries the value that edge left with. A slot-carried loop reaches
+    // the same answer through the loads above -- memory is how it joins any number of exit edges --
+    // so only a phi-carried loop with a second edge reaches this.
+    var exit_join_index = 0;
+    while exit_join_index < carried.len() {
+        let entry = try carried.at(exit_join_index);
+        if std::mem::len(entry.exit_var) > 0 {
+            try out.append_bytes("  ");
+            try append_while_carry_exit_ref(out, stmt.loop_index, entry.var_name);
+            try out.append_bytes(" = phi ");
+            try out.append_bytes(entry.llvm_type);
+            try out.append_bytes(" [ %");
+            try out.append_bytes(entry.var_name);
+            try out.append_bytes(", %loop");
+            try std::fmt::append_i64(out, stmt.loop_index);
+            try out.append_bytes("_head ], [ %");
+            try out.append_bytes(entry.exit_var);
+            try out.append_bytes(", %loop");
+            try std::fmt::append_i64(out, stmt.loop_index);
+            try out.append_bytes("_branch_exit ]");
+            try out.append_byte(cast<u8>(10));
+        }
+        exit_join_index = exit_join_index + 1;
     }
     return;
 }
