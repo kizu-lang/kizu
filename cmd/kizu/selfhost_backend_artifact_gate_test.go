@@ -191,6 +191,46 @@ func appendSelfhostBackendArtifactReport(t *testing.T, out *strings.Builder) int
 	return failures
 }
 
+// countEmittedModuleRejections hands the staged module to LLVM and fails if LLVM
+// will not have it. The compiler reported `stage: ok` for a long time while emitting
+// three duplicate local names, because nothing between the emitter and the linker
+// ever read the whole module: this gate weighed it and searched it for substrings,
+// and the probe harnesses link an extracted closure rather than the module.
+//
+// Both readers are used when both are present because they answer different halves.
+// clang's IR reader catches the parse-level class -- a name defined twice -- and
+// accepts a dominance violation at -O0; opt runs the verifier, which is what rejects
+// one. Neither being present is reported rather than passed over: an unchecked module
+// is exactly how the defect survived, and this gate already needs clang to build the
+// artifact it is checking.
+func countEmittedModuleRejections(t *testing.T, path string) int {
+	t.Helper()
+	readers := []struct {
+		tool string
+		args []string
+	}{
+		{"opt", []string{"-passes=verify", "-disable-output", path}},
+		{"clang", []string{"-x", "ir", path, "-S", "-emit-llvm", "-o", os.DevNull}},
+	}
+	read := 0
+	for _, reader := range readers {
+		binary, err := exec.LookPath(reader.tool)
+		if err != nil {
+			continue
+		}
+		read++
+		if out, err := exec.Command(binary, reader.args...).CombinedOutput(); err != nil {
+			t.Errorf("%s rejected the staged module: %v\n%s", reader.tool, err, out)
+			return 1
+		}
+	}
+	if read == 0 {
+		t.Errorf("neither opt nor clang is on PATH, so the staged module went unread")
+		return 1
+	}
+	return 0
+}
+
 // countSelfhostBackendArtifactFileFailures validates deterministic LLVM artifacts.
 func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 	t.Helper()
@@ -203,6 +243,11 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 	if err != nil {
 		t.Errorf("read LLVM artifact: %v", err)
 		return 1
+	}
+	if failures := countEmittedModuleRejections(
+		t, "../../target/selfhost/selfhost.ll",
+	); failures > 0 {
+		return failures
 	}
 	metaBytes, err := os.ReadFile("../../target/selfhost/selfhost.ll.meta")
 	if err != nil {
