@@ -1000,6 +1000,10 @@ fn append_multi_statement_mir(
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("entry:");
     try out.append_byte(cast<u8>(10));
+    // Every if-merge slot in the function is reserved here, once, before any statement renders.
+    // Entry runs exactly once per call and dominates every block, so a slot reserved here is live
+    // and singly-allocated however deep inside a loop the if that uses it sits.
+    try append_multi_statement_merge_allocas(out, function);
     let stmts = &function.multi_stmts;
     var stmt_index = 0;
     while stmt_index < stmts.len() {
@@ -6713,6 +6717,125 @@ fn append_if_globals(
     }
     return;
 }
+
+// append_multi_statement_merge_allocas reserves every if-merge slot the function will use, in the
+// entry block, before the first statement renders. It walks the same nesting the string-globals
+// pre-pass above walks, for the same reason: an if can sit at any depth inside a loop body, an if
+// arm, or a dispatch arm, and every one of them must be reached. See append_if_merge_slot_allocas
+// for why the entry block is the placement.
+//
+// Missing a nesting here is not a silent wrong answer: the if would then store to and load from a
+// slot no instruction defines, and LLVM rejects the module by name.
+fn append_multi_statement_merge_allocas(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction
+) -> !void {
+    try append_stmts_merge_allocas(out, &function.multi_stmts);
+    return;
+}
+
+fn append_stmts_merge_allocas(
+    out: &var std::string::String,
+    stmts: &std::array::Array<compiled_mir::MirStmt>
+) -> !void {
+    var index = 0;
+    while index < stmts.len() {
+        let stmt = try stmts.at(index);
+        try append_stmt_merge_allocas(out, stmt);
+        index = index + 1;
+    }
+    return;
+}
+
+// Only the statement kinds that nest further statements appear here; every other kind renders no
+// if and so reserves nothing. A while's latch_stmts hold one call or field read, never an if, so
+// the globals pre-pass skips them and so does this one.
+fn append_stmt_merge_allocas(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirStmt
+) -> !void {
+    match stmt {
+        If(payload) => try append_if_merge_allocas_walk(out, payload);,
+        While(payload) => try append_while_merge_allocas_walk(out, payload);,
+        ValueCursorWhile(payload) => try append_stmts_merge_allocas(out, &payload.body_stmts);,
+        PrecedenceLoop(payload) => try append_stmts_merge_allocas(out, &payload.body_stmts);,
+        DualCursorLoop(payload) => try append_stmts_merge_allocas(out, &payload.body_stmts);,
+        TypeApplyLoop(payload) => try append_type_apply_loop_merge_allocas_walk(out, payload);,
+        WhileMatchLoop(payload) => try append_while_match_loop_merge_allocas_walk(out, payload);,
+        GuardedCursorLoop(payload) => try append_guarded_cursor_loop_merge_allocas_walk(out, payload);,
+        EnumDispatch(payload) => try append_enum_dispatch_merge_allocas_walk(out, payload);,
+        _ => return;,
+    }
+    return;
+}
+
+fn append_if_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    try append_if_merge_slot_allocas(out, stmt);
+    try append_stmts_merge_allocas(out, &stmt.then_body_stmts);
+    try append_stmts_merge_allocas(out, &stmt.else_body_stmts);
+    return;
+}
+
+fn append_while_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt
+) -> !void {
+    try append_stmts_merge_allocas(out, &stmt.body_stmts);
+    try append_stmts_merge_allocas(out, &stmt.branch_latch_advance_stmts);
+    return;
+}
+
+fn append_type_apply_loop_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirTypeApplyLoopStmt
+) -> !void {
+    try append_stmts_merge_allocas(out, &stmt.body_stmts);
+    try append_stmts_merge_allocas(out, &stmt.terminal_stmts);
+    try append_stmts_merge_allocas(out, &stmt.guard_stmts);
+    return;
+}
+
+fn append_while_match_loop_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileMatchLoopStmt
+) -> !void {
+    try append_stmts_merge_allocas(out, &stmt.body_stmts);
+    let arms = &stmt.arms;
+    var arm_index = 0;
+    while arm_index < arms.len() {
+        let arm = try arms.at(arm_index);
+        try append_stmts_merge_allocas(out, &arm.arm_stmts);
+        arm_index = arm_index + 1;
+    }
+    return;
+}
+
+fn append_guarded_cursor_loop_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirGuardedCursorLoopStmt
+) -> !void {
+    try append_stmts_merge_allocas(out, &stmt.body_stmts);
+    try append_stmts_merge_allocas(out, &stmt.else_stmts);
+    try append_stmts_merge_allocas(out, &stmt.exit_stmts);
+    return;
+}
+
+fn append_enum_dispatch_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirEnumDispatchStmt
+) -> !void {
+    let arms = &stmt.arms;
+    var arm_index = 0;
+    while arm_index < arms.len() {
+        let arm = try arms.at(arm_index);
+        try append_stmts_merge_allocas(out, &arm.arm_stmts);
+        arm_index = arm_index + 1;
+    }
+    return;
+}
 fn append_expr_return_value(
     out: &var std::string::String,
     return_type: []u8,
@@ -7163,10 +7286,33 @@ fn append_if_merge_slot_ref(
     return;
 }
 
-fn append_if_merge_allocas(
+// A merge slot is stack memory, and LLVM reclaims a function's stack only when the function
+// returns -- an 'alloca' executed N times reserves N slots. Emitted inline at the if, an if inside
+// a loop therefore grows the stack once per iteration until the process runs out of it, which is a
+// SIGSEGV at -O0 and merely invisible at -O2 (mem2reg promotes the slot and the growth disappears
+// with it). The loop CARRY slots have always avoided this by living in the loop preheader; the if
+// merge slots are reserved here instead, once, in the function's ENTRY block, by a pre-pass over
+// the whole statement tree (append_multi_statement_merge_allocas). Only the seeding store stays at
+// the if, so the slot is still re-initialized on every entry to the if -- hoisting the reservation
+// must not hoist the initialization.
+//
+// The entry block rather than the enclosing loop's preheader: entry dominates every block in the
+// function and runs exactly once per call, which holds for an if at any loop depth and for an if
+// in no loop at all, and it is the placement mem2reg needs to promote the slot away again under
+// optimization. A preheader would reserve less stack but has to name the RIGHT loop for an if
+// nested several loops deep, and has no answer at all for an if outside every loop. The cost of
+// the entry block is one slot per merge variable per if in the function text, which no execution
+// can multiply.
+//
+// Only a VoidBody if reads a merge slot (both append_multi_if call sites are under that kind), so
+// only a VoidBody if reserves one.
+fn append_if_merge_slot_allocas(
     out: &var std::string::String,
     stmt: &compiled_mir::MirIfStmt
 ) -> !void {
+    if stmt.if_then_kind != compiled_mir::MirIfThenKind::VoidBody {
+        return;
+    }
     let merge_vars = &stmt.merge_vars;
     var merge_index = 0;
     while merge_index < merge_vars.len() {
@@ -7176,6 +7322,22 @@ fn append_if_merge_allocas(
         try out.append_bytes(" = alloca ");
         try out.append_bytes(merge.llvm_type);
         try out.append_byte(cast<u8>(10));
+        merge_index = merge_index + 1;
+    }
+    return;
+}
+
+// append_if_merge_seed_stores writes each merge variable's incoming value into its slot on the way
+// into the if. It stays at the if -- the slot holds the value the fall-through continuation loads
+// when the then arm does not run, so it has to be rewritten on every entry.
+fn append_if_merge_seed_stores(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    let merge_vars = &stmt.merge_vars;
+    var merge_index = 0;
+    while merge_index < merge_vars.len() {
+        let merge = try merge_vars.at(merge_index);
         try out.append_bytes("  store ");
         try out.append_bytes(merge.llvm_type);
         try out.append_bytes(" %");
@@ -7376,7 +7538,7 @@ fn append_multi_if(
             &stmt.cond_call_args,
             local_prefix
         );
-        try append_if_merge_allocas(out, stmt);
+        try append_if_merge_seed_stores(out, stmt);
         try out.append_bytes("  br i1 ");
         try append_tryif_ref(out, local_prefix, "_success");
         if stmt.cond_try_then_on_success {
@@ -7405,7 +7567,7 @@ fn append_multi_if(
     } else {
         try append_expr_insts(out, function.name, &stmt.cond_insts);
         if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
-            try append_if_merge_allocas(out, stmt);
+            try append_if_merge_seed_stores(out, stmt);
         }
         if stmt.cond_short_circuit == 0 {
             try out.append_bytes("  br i1 ");
@@ -7492,8 +7654,28 @@ fn append_multi_if(
     try out.append_byte(cast<u8>(10));
     if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
         try append_if_merge_loads(out, stmt);
+        // Neither arm branches here, so nothing follows this join along any path the program can
+        // take. It is still opened as a block, and when the if is the last statement of its block
+        // -- 'if <cond> { return <x>; } else { return <y>; }' as a whole function body is the
+        // ordinary case -- no later statement renders into it. An empty trailing block is not a
+        // module LLVM will parse, so terminate it here with the terminator that states the fact.
+        if try if_both_arms_terminate(stmt) {
+            try append_ll_line(out, "  unreachable");
+        }
     }
     return;
+}
+
+// if_both_arms_terminate reports an if/else whose then and else arms each end in a return, a break
+// or a continue, so the join block the renderer opens after them has no predecessor.
+fn if_both_arms_terminate(stmt: &compiled_mir::MirIfStmt) -> !bool {
+    if !if_has_else_body(stmt) {
+        return false;
+    }
+    if !(try body_ends_with_terminator(&stmt.then_body_stmts)) {
+        return false;
+    }
+    return try body_ends_with_terminator(&stmt.else_body_stmts);
 }
 // append_multi_then_call_return returns a then-block call result: a callee sharing the
 // function's return type returns directly, while a success-typed callee inside an
