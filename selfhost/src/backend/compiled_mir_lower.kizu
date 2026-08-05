@@ -1901,6 +1901,7 @@ fn lower_multi_let_arena_add(
     string_counter: i64,
     temp_counter: i64,
     try_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
@@ -1977,8 +1978,8 @@ fn lower_multi_let_arena_add(
     if !std::mem::equal_bytes(element_kind, "StructLiteralExpr") {
         return error("compiled mir: Arena.add argument must be a struct literal");
     }
-    let fields = try compiled_mir_lower_struct::lower_struct_fields(
-        ir_bytes, function_name, module_prefix, locals_spec, element_node, bs,
+    let fields = try lower_struct_fields_with_local_aliases(
+        ir_bytes, function_name, module_prefix, locals_spec, element_node, aliases, bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     if fields.len() == 0 {
@@ -6850,6 +6851,7 @@ fn lower_precedence_loop(
         source_name: value_var,
         current_name: value_init_name,
         loop_phi_name: "",
+        branch_claim_name: "",
         carry_slot_loop: -1,
         carry_slot_name: "",
         carry_slot_type: ""
@@ -6979,6 +6981,7 @@ fn lower_precedence_loop(
         source_name: value_var,
         current_name: value_next_name,
         loop_phi_name: "",
+        branch_claim_name: "",
         carry_slot_loop: -1,
         carry_slot_name: "",
         carry_slot_type: ""
@@ -7080,6 +7083,7 @@ fn lower_dual_cursor_loop(
         source_name: value_var,
         current_name: value_source_var,
         loop_phi_name: "",
+        branch_claim_name: "",
         carry_slot_loop: -1,
         carry_slot_name: "",
         carry_slot_type: ""
@@ -7153,6 +7157,7 @@ fn lower_dual_cursor_loop(
         source_name: value_var,
         current_name: value_next_name,
         loop_phi_name: "",
+        branch_claim_name: "",
         carry_slot_loop: -1,
         carry_slot_name: "",
         carry_slot_type: ""
@@ -9503,6 +9508,12 @@ pub fn lower_multi_statement_function(
             &call_arg_type_cache, ir_bytes, function_name, statement, sf
         );
         if std::mem::equal_bytes(stmt_kind, "Let") {
+            // This block binds the name here, whatever the walk goes on to do with the
+            // declaration: what an enclosing scope holds under it stops reaching at this point.
+            try rebind_local_alias_to_own_declaration(
+                &var aliases,
+                try let_statement_bound_name(ir_bytes, function_name, statement, sf)
+            );
             // A 'var counter = <int>' that a later while increments is the loop
             // induction initializer: it is not emitted as a let because the loop-head
             // phi supplies the initial value on the preheader edge, so emitting it
@@ -10024,7 +10035,22 @@ pub struct LocalAliasState {
     // definition of %<var> exists ahead of this loop, so the head renames and seeds from it -- and
     // keeping them in one field is what makes 'one loop head per SSA name per function' a question
     // with one answer instead of two half-answers that disagree.
+    //
+    // Both of those readings need the definition to REACH this point, and every writer of this
+    // field is in a block that dominates it. A binding made on a path this scope has left is a
+    // different fact and lives in branch_claim_name.
     pub loop_phi_name: []u8,
+    // branch_claim_name records an SSA name a loop head bound inside an if arm the scope has since
+    // left. It is half of what loop_phi_name says, and the half that survives leaving the arm: the
+    // function has ONE register namespace, so no later head may bind that name again -- but the
+    // arm is conditional, so no value flows from it to here and nothing here may seed from it.
+    //
+    // The two facts need two fields because a reader that took the namespace claim for a reaching
+    // value would answer 'a definition of %<var> is live here' about a definition the enclosing
+    // block does not dominate, and seed a loop-head phi from it. That trades a collision the LLVM
+    // parser rejects outright for a phi the parser accepts and the verifier does not -- and, at the
+    // '-x ir' path clang takes, for a silently wrong answer.
+    pub branch_claim_name: []u8,
     // The rule at compiled_mir.kizu:869 is that a memory-carried loop stores every update to a
     // carried variable AT THE ASSIGNMENT, so the last store wins whichever edge control then takes:
     // the latch, a continue that skips it, or a break that leaves from inside the body. An
@@ -10149,6 +10175,50 @@ fn dispatch_result_arm_name(
     return call_arg_type_cache.name_store.own(out);
 }
 
+// block_binds_let_name_directly reports whether this block's OWN statement list holds a let/var
+// binding of 'name'. It descends into nothing, and that is the whole point: it answers a question
+// about the alias entry this block leaves behind for 'name', not about the function's namespace.
+//
+// A binding nested one block deeper never reaches this block's alias entry -- every join inside
+// this block already refuses to carry a name its own arm bound, so by the time control leaves a
+// nested if the entry under 'name' is again the enclosing binding's. Only a binding written here
+// makes this block's entry name a value that dies with the block. Asking the recursive question
+// instead would drop the assignment made by a block that merely nests a shadow somewhere.
+fn block_binds_let_name_directly(
+    ir_bytes: []u8,
+    function_name: []u8,
+    name: []u8,
+    block_node: i64,
+    bs: i64
+) -> !bool {
+    if block_node < 0 {
+        return false;
+    }
+    var stmt_index = 0;
+    while true {
+        let statement = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, block_node, "statement", stmt_index, bs
+        );
+        if statement < 0 {
+            return false;
+        }
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(stmt_kind, "Let") {
+            let name_node = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, statement, "name", 0, bs
+            );
+            let bound = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, name_node, bs
+            );
+            if std::mem::equal_bytes(bound, name) {
+                return true;
+            }
+        }
+        stmt_index = stmt_index + 1;
+    }
+    return false;
+}
+
 // count_let_bindings_in_block counts the let/var bindings of 'name' in one statement block,
 // descending into while bodies and if then/else blocks so a binding nested in a branch counts
 // alongside one at the enclosing level. Two or more bindings of the same name in a function
@@ -10216,36 +10286,6 @@ fn count_let_bindings_in_block(
 // the function body. A shadowed name cannot keep its source spelling as its SSA name: the inner
 // and outer bindings would define the same %name, which is invalid LLVM. The renamed binding is
 // redirected through the local-alias map so in-scope reads still resolve to it.
-// let_binding_is_local_to_branch reports whether every let/var binding of this name in the
-// function lives inside this if's arms. Such a binding is created and dies inside the arm, so the
-// enclosing scope holds no value of its own for it: merging one would seed the join slot from a
-// name that is only ever defined inside the branch.
-fn let_binding_is_local_to_branch(
-    ir_bytes: []u8,
-    function_name: []u8,
-    then_node: i64,
-    else_node: i64,
-    name: []u8,
-    bs: i64
-) -> !bool {
-    let total = try count_let_bindings_in_block(ir_bytes, function_name, name, 0, bs);
-    if total == 0 {
-        return false;
-    }
-    var inside = 0;
-    if then_node >= 0 {
-        inside = inside + try count_let_bindings_in_block(
-            ir_bytes, function_name, name, then_node, bs
-        );
-    }
-    if else_node >= 0 {
-        inside = inside + try count_let_bindings_in_block(
-            ir_bytes, function_name, name, else_node, bs
-        );
-    }
-    return inside == total;
-}
-
 fn let_binding_is_shadowed(
     ir_bytes: []u8,
     function_name: []u8,
@@ -10294,6 +10334,7 @@ fn set_local_alias(
             source_name: source_name,
             current_name: current_name,
             loop_phi_name: "",
+            branch_claim_name: "",
             carry_slot_loop: -1,
             carry_slot_name: "",
             carry_slot_type: ""
@@ -10306,6 +10347,7 @@ fn set_local_alias(
     // slot is kept for the same reason: rebinding a variable to a new SSA name does not change which
     // loop's memory holds it between iterations, so every later assignment must still store there.
     let existing_loop_phi_name = existing.loop_phi_name;
+    let existing_branch_claim_name = existing.branch_claim_name;
     let existing_carry_slot_loop = existing.carry_slot_loop;
     let existing_carry_slot_name = existing.carry_slot_name;
     let existing_carry_slot_type = existing.carry_slot_type;
@@ -10313,6 +10355,7 @@ fn set_local_alias(
         source_name: source_name,
         current_name: current_name,
         loop_phi_name: existing_loop_phi_name,
+        branch_claim_name: existing_branch_claim_name,
         carry_slot_loop: existing_carry_slot_loop,
         carry_slot_name: existing_carry_slot_name,
         carry_slot_type: existing_carry_slot_type
@@ -10337,6 +10380,7 @@ fn register_local_alias_carry_slot(
             source_name: source_name,
             current_name: source_name,
             loop_phi_name: "",
+            branch_claim_name: "",
             carry_slot_loop: loop_index,
             carry_slot_name: slot_name,
             carry_slot_type: slot_type
@@ -10346,10 +10390,12 @@ fn register_local_alias_carry_slot(
     let existing = try aliases.at(index);
     let existing_current_name = existing.current_name;
     let existing_loop_phi_name = existing.loop_phi_name;
+    let existing_branch_claim_name = existing.branch_claim_name;
     try aliases.set(index, LocalAliasState {
         source_name: source_name,
         current_name: existing_current_name,
         loop_phi_name: existing_loop_phi_name,
+        branch_claim_name: existing_branch_claim_name,
         carry_slot_loop: loop_index,
         carry_slot_name: slot_name,
         carry_slot_type: slot_type
@@ -10401,7 +10447,9 @@ fn local_alias_carry_slot_type(
 }
 
 // local_alias_loop_phi_name returns the SSA name a loop-head phi in this scope already took for
-// source_name, or the empty slice when no loop has claimed one yet.
+// source_name, or the empty slice when no loop has claimed one yet. It answers a question about
+// VALUES -- 'is a definition of this variable live on the edge into my preheader' -- so it reports
+// only bindings that reach here, never one made on a path this scope has left.
 fn local_alias_loop_phi_name(
     aliases: &std::array::Array<LocalAliasState>,
     source_name: []u8
@@ -10412,6 +10460,67 @@ fn local_alias_loop_phi_name(
     }
     let state = try aliases.at(index);
     return state.loop_phi_name;
+}
+
+// local_alias_head_name_is_taken answers the other question, the one about NAMES: may a loop head
+// about to spell its phi %<source_name> bind that name, or is it already bound somewhere in this
+// function? Both claims say 'taken', because LLVM reads the function and not the path -- a name an
+// if arm's loop head bound stays bound for every block after the join.
+//
+// A head that renames on this answer alone is always safe: the scoped spelling is unique per
+// function (loop_index is derived from the statement's position), so renaming where a bare name
+// would have done costs nothing. Seeding is the decision that must not be made from this answer --
+// see branch_claim_name.
+fn local_alias_head_name_is_taken(
+    aliases: &std::array::Array<LocalAliasState>,
+    source_name: []u8
+) -> !bool {
+    let index = try local_alias_index(aliases, source_name);
+    if index < 0 {
+        return false;
+    }
+    let state = try aliases.at(index);
+    return std::mem::len(state.loop_phi_name) > 0 or
+        std::mem::len(state.branch_claim_name) > 0;
+}
+
+// record_local_alias_branch_claim records that a loop head bound phi_name for source_name on a path
+// this scope has left. It writes neither current_name nor loop_phi_name: nothing about the value
+// live here changed, only the set of names still free.
+fn record_local_alias_branch_claim(
+    aliases: &var std::array::Array<LocalAliasState>,
+    source_name: []u8,
+    phi_name: []u8
+) -> !void {
+    let index = try local_alias_index(aliases, source_name);
+    if index < 0 {
+        try aliases.append(LocalAliasState {
+            source_name: source_name,
+            current_name: source_name,
+            loop_phi_name: "",
+            branch_claim_name: phi_name,
+            carry_slot_loop: -1,
+            carry_slot_name: "",
+            carry_slot_type: ""
+        });
+        return;
+    }
+    let existing = try aliases.at(index);
+    let existing_current_name = existing.current_name;
+    let existing_loop_phi_name = existing.loop_phi_name;
+    let existing_carry_slot_loop = existing.carry_slot_loop;
+    let existing_carry_slot_name = existing.carry_slot_name;
+    let existing_carry_slot_type = existing.carry_slot_type;
+    try aliases.set(index, LocalAliasState {
+        source_name: source_name,
+        current_name: existing_current_name,
+        loop_phi_name: existing_loop_phi_name,
+        branch_claim_name: phi_name,
+        carry_slot_loop: existing_carry_slot_loop,
+        carry_slot_name: existing_carry_slot_name,
+        carry_slot_type: existing_carry_slot_type
+    });
+    return;
 }
 
 // claim_local_alias_loop_phi records that a loop-head phi now owns phi_name for source_name, and
@@ -10428,6 +10537,7 @@ fn claim_local_alias_loop_phi(
             source_name: source_name,
             current_name: phi_name,
             loop_phi_name: phi_name,
+            branch_claim_name: "",
             carry_slot_loop: -1,
             carry_slot_name: "",
             carry_slot_type: ""
@@ -10436,12 +10546,14 @@ fn claim_local_alias_loop_phi(
     }
     let existing = try aliases.at(index);
     let existing_carry_slot_loop = existing.carry_slot_loop;
+    let existing_branch_claim_name = existing.branch_claim_name;
     let existing_carry_slot_name = existing.carry_slot_name;
     let existing_carry_slot_type = existing.carry_slot_type;
     try aliases.set(index, LocalAliasState {
         source_name: source_name,
         current_name: phi_name,
         loop_phi_name: phi_name,
+        branch_claim_name: existing_branch_claim_name,
         carry_slot_loop: existing_carry_slot_loop,
         carry_slot_name: existing_carry_slot_name,
         carry_slot_type: existing_carry_slot_type
@@ -10465,6 +10577,7 @@ fn record_local_alias_loop_phi(
             source_name: source_name,
             current_name: source_name,
             loop_phi_name: phi_name,
+            branch_claim_name: "",
             carry_slot_loop: -1,
             carry_slot_name: "",
             carry_slot_type: ""
@@ -10474,12 +10587,14 @@ fn record_local_alias_loop_phi(
     let existing = try aliases.at(index);
     let existing_current_name = existing.current_name;
     let existing_carry_slot_loop = existing.carry_slot_loop;
+    let existing_branch_claim_name = existing.branch_claim_name;
     let existing_carry_slot_name = existing.carry_slot_name;
     let existing_carry_slot_type = existing.carry_slot_type;
     try aliases.set(index, LocalAliasState {
         source_name: source_name,
         current_name: existing_current_name,
         loop_phi_name: phi_name,
+        branch_claim_name: existing_branch_claim_name,
         carry_slot_loop: existing_carry_slot_loop,
         carry_slot_name: existing_carry_slot_name,
         carry_slot_type: existing_carry_slot_type
@@ -10499,6 +10614,102 @@ fn record_local_alias_bare_binding(
     return;
 }
 
+// rebind_local_alias_to_own_declaration records that this block's own 'var <name> = <init>' rebinds
+// the name at this point. Whatever the enclosing scope holds under that name stops reaching here:
+// reads after this statement read this declaration, and a loop head after it seeds from this
+// declaration rather than from the enclosing binding's value.
+//
+// It is the writer that makes 'current_name != source_name' mean what its readers take it to mean.
+// That test asks whether an alias EXISTS, not whether the value it names reaches -- and a name
+// shadowed anywhere in the function makes the enclosing binding emit under a scoped name, so the
+// alias exists precisely in the case where the value does not reach. Without this the loop head of
+// a shadowing declaration seeds its phi from the enclosing binding's SSA name, which LLVM accepts
+// and mis-executes: the loop starts from a value its own scope never gave it.
+//
+// The NAME stays taken: the function has one register namespace and the enclosing definition is
+// still in it, so a head claim moves to branch_claim_name, the field that says 'bound somewhere in
+// this function, reaching nothing here'. The carry slot goes with the value, because it is the
+// enclosing binding's memory -- an assignment to this declaration must not store into the slot an
+// enclosing loop allocated for a different variable that happens to share the name.
+//
+// A declaration the walk EMITS calls this too, ahead of binding its own name: the emitted name is
+// this declaration's, and the claim and the slot of the binding it shadows are no more its own than
+// they are a folded seed's.
+fn rebind_local_alias_to_own_declaration(
+    aliases: &var std::array::Array<LocalAliasState>,
+    source_name: []u8
+) -> !void {
+    let index = try local_alias_index(aliases, source_name);
+    if index < 0 {
+        return;
+    }
+    let existing = try aliases.at(index);
+    let existing_loop_phi_name = existing.loop_phi_name;
+    let existing_branch_claim_name = existing.branch_claim_name;
+    var claimed = existing_branch_claim_name;
+    if std::mem::len(existing_loop_phi_name) > 0 {
+        claimed = existing_loop_phi_name;
+    }
+    try aliases.set(index, LocalAliasState {
+        source_name: source_name,
+        current_name: source_name,
+        loop_phi_name: "",
+        branch_claim_name: claimed,
+        carry_slot_loop: -1,
+        carry_slot_name: "",
+        carry_slot_type: ""
+    });
+    return;
+}
+
+// let_statement_bound_name spells the name a Let statement binds.
+fn let_statement_bound_name(
+    ir_bytes: []u8,
+    function_name: []u8,
+    let_statement: i64,
+    bs: i64
+) -> ![]u8 {
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_statement, "name", 0, bs
+    );
+    return try ir_contract::body_token_or_empty_from(ir_bytes, function_name, name_node, bs);
+}
+
+// merge_local_alias_claims_into carries the head claims an inner block made back out to the block
+// that contains it. A claim answers a question about the FUNCTION's SSA namespace -- '%<name> is
+// already bound somewhere in this function' -- not about a scope's values, so it is not the inner
+// block's to forget: the whole function shares one register namespace, and a loop head inside an if
+// arm binds %<name> for every block that follows the join, not only for the arm.
+//
+// Values stay scoped, and that difference is the point. The value merge at the join is conditional
+// (an arm that returns contributes nothing, a name the arm declares takes no merge slot) because it
+// answers 'what does this variable read as after the if'. This is unconditional and repoints no
+// read, because it lands in branch_claim_name: a name an arm bound and then abandoned is still a
+// name the next loop head may not bind again, and is still not a value anything here may seed from.
+// Writing it into loop_phi_name instead would say both at once, and the second half would be false
+// -- the arm does not run on every path, so its phi does not dominate the block after the join.
+fn merge_local_alias_claims_into(
+    aliases: &var std::array::Array<LocalAliasState>,
+    source_aliases: &std::array::Array<LocalAliasState>
+) -> !void {
+    var index = 0;
+    while index < source_aliases.len() {
+        let state = try source_aliases.at(index);
+        // Both of the arm's fields are the same fact once the arm is behind us: a name bound on a
+        // path that no longer reaches here. loop_phi_name is the arm's own head; branch_claim_name
+        // is one an if nested inside the arm already handed up.
+        var claimed = state.loop_phi_name;
+        if std::mem::len(claimed) == 0 {
+            claimed = state.branch_claim_name;
+        }
+        if std::mem::len(claimed) > 0 {
+            try record_local_alias_branch_claim(aliases, state.source_name, claimed);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
 // claim_local_alias_loop_exit makes the same head claim claim_local_alias_loop_phi does, then
 // points statements after the loop at exit_name instead of at the head. A slot-carried loop can be
 // left from inside its body, where the head's definition is already behind the slot, so what
@@ -10515,6 +10726,7 @@ fn claim_local_alias_loop_exit(
             source_name: source_name,
             current_name: exit_name,
             loop_phi_name: head_name,
+            branch_claim_name: "",
             carry_slot_loop: -1,
             carry_slot_name: "",
             carry_slot_type: ""
@@ -10523,12 +10735,14 @@ fn claim_local_alias_loop_exit(
     }
     let existing = try aliases.at(index);
     let existing_carry_slot_loop = existing.carry_slot_loop;
+    let existing_branch_claim_name = existing.branch_claim_name;
     let existing_carry_slot_name = existing.carry_slot_name;
     let existing_carry_slot_type = existing.carry_slot_type;
     try aliases.set(index, LocalAliasState {
         source_name: source_name,
         current_name: exit_name,
         loop_phi_name: head_name,
+        branch_claim_name: existing_branch_claim_name,
         carry_slot_loop: existing_carry_slot_loop,
         carry_slot_name: existing_carry_slot_name,
         carry_slot_type: existing_carry_slot_type
@@ -10640,6 +10854,7 @@ fn copy_local_aliases(
             source_name: state.source_name,
             current_name: state.current_name,
             loop_phi_name: state.loop_phi_name,
+            branch_claim_name: state.branch_claim_name,
             carry_slot_loop: state.carry_slot_loop,
             carry_slot_name: state.carry_slot_name,
             carry_slot_type: state.carry_slot_type
@@ -10647,6 +10862,63 @@ fn copy_local_aliases(
         index = index + 1;
     }
     return copied;
+}
+
+// local_alias_name_tables flattens the alias map into the source/current name pair the shared
+// name-rewriting lowerers take. Only entries that actually rename are carried: an identity entry
+// would make every lookup do the same work for the same answer.
+fn local_alias_name_tables(
+    aliases: &std::array::Array<LocalAliasState>,
+    alias_sources: &var std::array::Array<[]u8>,
+    alias_currents: &var std::array::Array<[]u8>
+) -> !void {
+    var index = 0;
+    while index < aliases.len() {
+        let state = try aliases.at(index);
+        if !std::mem::equal_bytes(state.source_name, state.current_name) {
+            try alias_sources.append(state.source_name);
+            try alias_currents.append(state.current_name);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// lower_struct_fields_with_local_aliases is the struct-literal counterpart of
+// lower_call_args_with_local_aliases_cached: a struct-literal field naming a local is an
+// expression position, so it must read the SSA name the enclosing block's renaming assigns that
+// local -- the if/else merge, the loop-head phi, the shadowed declaration -- and not the spelling
+// the variable happened to have when it was declared.
+fn lower_struct_fields_with_local_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    value_node: i64,
+    aliases: &std::array::Array<LocalAliasState>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !std::array::Array<compiled_mir::MirStructField> {
+    var alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_sources.deinit();
+    var alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer alias_currents.deinit();
+    try local_alias_name_tables(aliases, &var alias_sources, &var alias_currents);
+    return try compiled_mir_lower_struct::lower_struct_fields_with_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        value_node,
+        &alias_sources,
+        &alias_currents,
+        bs,
+        ir_lookup_index,
+        canonical_facts,
+        call_arg_type_cache
+    );
 }
 
 fn lower_call_args_with_local_aliases_cached(
@@ -12588,7 +12860,8 @@ fn lower_multi_let_statement_named(
             }
             return try lower_multi_let_arena_add(
                 ir_bytes, function_name, module_prefix, locals_spec,
-                let_name, let_value, string_counter, temp_counter, try_counter, stmts, bs,
+                let_name, let_value, string_counter, temp_counter, try_counter,
+                aliases, stmts, bs,
                 ir_lookup_index, canonical_facts, call_arg_type_cache
             );
         }
@@ -12835,27 +13108,38 @@ fn lower_multi_let_statement_named(
         };
     }
     if std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
-        let struct_type = try compiled_signature::resolve_struct_literal_type_indexed(
-            ir_lookup_index,
-            ir_bytes, function_name, module_prefix, let_value, bs
-        );
-        let fields = try compiled_mir_lower_struct::lower_struct_fields(
-            ir_bytes, function_name, module_prefix, locals_spec, let_value, bs,
-            ir_lookup_index, canonical_facts, call_arg_type_cache
-        );
-        let field_count = fields.len();
-        let new_locals = try compiled_signature::extend_locals_spec(
-            ir_bytes, locals_spec, let_name, struct_type
-        );
-        try stmts.append(compiled_mir::let_struct_stmt(
-            let_name, struct_type, string_counter, fields
-        ));
-        return MultiLowerResult {
-            locals_spec: new_locals,
-            string_counter: string_counter + field_count,
-            temp_counter: temp_counter,
-            try_counter: try_counter
-        };
+        // A literal whose fields are all shaped keeps the dedicated LetStruct statement, whose
+        // body is an insertvalue chain and nothing else. One carrying an expression-valued field
+        // needs an instruction stream to build that value in ahead of the chain, and only the
+        // generic let-expression path at the tail of this function owns one -- the same split the
+        // two return-position struct literals already make.
+        let needs_expr_value =
+            try compiled_mir_lower_struct::struct_literal_needs_expr_value(
+                ir_bytes, function_name, let_value, bs
+            );
+        if !needs_expr_value {
+            let struct_type = try compiled_signature::resolve_struct_literal_type_indexed(
+                ir_lookup_index,
+                ir_bytes, function_name, module_prefix, let_value, bs
+            );
+            let fields = try lower_struct_fields_with_local_aliases(
+                ir_bytes, function_name, module_prefix, locals_spec, let_value, aliases, bs,
+                ir_lookup_index, canonical_facts, call_arg_type_cache
+            );
+            let field_count = fields.len();
+            let new_locals = try compiled_signature::extend_locals_spec(
+                ir_bytes, locals_spec, let_name, struct_type
+            );
+            try stmts.append(compiled_mir::let_struct_stmt(
+                let_name, struct_type, string_counter, fields
+            ));
+            return MultiLowerResult {
+                locals_spec: new_locals,
+                string_counter: string_counter + field_count,
+                temp_counter: temp_counter,
+                try_counter: try_counter
+            };
+        }
     }
     var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     let result_id = try lower_expr_with_local_aliases(
@@ -14220,22 +14504,21 @@ fn lower_try_call_void_if(
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
+    // The branch's head claims are the function's, so they survive the branch even when its values
+    // do not -- see merge_local_alias_claims_into.
+    try merge_local_alias_claims_into(aliases, &branch_aliases);
     var branch_alias_index = 0;
     var merge_alias_counter = then_body.alias_counter;
     if !then_body.body_returns {
         while branch_alias_index < branch_aliases.len() {
             let branch_state = try branch_aliases.at(branch_alias_index);
-            // A shadowed name is handled by per-binding SSA rename, not by a join phi: each
-            // 'let <name>' inside a branch is an independent value that dies at the branch end, so
-            // its branch alias must never merge into the enclosing scope's binding of the same name.
-            if try let_binding_is_shadowed(ir_bytes, function_name, branch_state.source_name, bs) {
-                branch_alias_index = branch_alias_index + 1;
-                continue;
-            }
-            // A name this branch declares and no enclosing statement does has no incoming value to
-            // seed the join slot with, so it takes no merge either.
-            if try let_binding_is_local_to_branch(
-                ir_bytes, function_name, then_node, -1, branch_state.source_name, bs
+            // A name this branch BINDS ITSELF is handled by per-binding SSA rename, not by a join
+            // phi: that 'let <name>' is an independent value that dies at the branch end, and the
+            // branch holds no value of the enclosing scope's binding to merge back. A binding one
+            // block deeper is not this branch's -- the join inside the branch already refused to
+            // carry it out, so what stands here under the name is the enclosing binding's value.
+            if try block_binds_let_name_directly(
+                ir_bytes, function_name, branch_state.source_name, then_node, bs
             ) {
                 branch_alias_index = branch_alias_index + 1;
                 continue;
@@ -14298,6 +14581,7 @@ fn lower_return_struct_literal(
     locals_spec: []u8,
     value: i64,
     string_counter: i64,
+    aliases: &std::array::Array<LocalAliasState>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -14311,8 +14595,8 @@ fn lower_return_struct_literal(
             ir_lookup_index, ir_bytes, function_name, module_prefix, value, bs
         );
     }
-    let fields = try compiled_mir_lower_struct::lower_struct_fields(
-        ir_bytes, function_name, module_prefix, locals_spec, value, bs,
+    let fields = try lower_struct_fields_with_local_aliases(
+        ir_bytes, function_name, module_prefix, locals_spec, value, aliases, bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     return compiled_mir::return_struct_wrapped_stmt(
@@ -14564,7 +14848,8 @@ fn lower_multi_return_statement(
         if !needs_expr_value {
             return try lower_return_struct_literal(
                 ir_bytes, function_name, module_prefix, llvm_return_type, locals_spec,
-                value, string_counter, bs, ir_lookup_index, canonical_facts, call_arg_type_cache
+                value, string_counter, aliases, bs,
+                ir_lookup_index, canonical_facts, call_arg_type_cache
             );
         }
     }
@@ -15924,6 +16209,12 @@ fn lower_void_then_body(
             ir_bytes, function_name, statement, stmt_sf
         );
         if std::mem::equal_bytes(stmt_kind, "Let") {
+            // This arm binds the name here, whatever the walk goes on to do with the declaration:
+            // what the enclosing scope holds under it stops reaching at this point.
+            try rebind_local_alias_to_own_declaration(
+                aliases,
+                try let_statement_bound_name(ir_bytes, function_name, statement, stmt_sf)
+            );
             // A 'var counter = <init>' a while in this arm advances is that loop's seed: the loop
             // head supplies the value, through a phi or through a slot load, so emitting the let
             // would define the same SSA name twice. The function-body walk and the loop-body walk
@@ -16258,14 +16549,46 @@ fn lower_void_then_body(
     };
 }
 
+// copy_aliases_into makes one arm's state the enclosing scope's, for the join that arm is the only
+// predecessor of -- the other arm returned, broke or continued, so every value live at the join came
+// through this arm.
+//
+// A join carries out only what REACHES it, and the two-predecessor join already says so: a name the
+// arm bound itself does not exist outside the arm, so no value of it reaches the join and
+// append_void_if_else_merge_for_source gives it no merge slot. The single-predecessor join says
+// something stronger, and it says it because the arm dominates the join -- which is true, and is
+// why the VALUE of a name the arm did not bind may be carried here where two reaching arms would
+// need a phi. Dominance is not a licence to carry a name whose BINDING ended with the arm: the
+// enclosing scope's 'j' and the arm's 'var j' are two variables that happen to share a spelling,
+// and no amount of dominance makes the second one's value the first one's.
+//
+// What survives such a name is the namespace claim alone -- the function has one register namespace,
+// so a later loop head may not bind that name again -- and merge_local_alias_claims_into has already
+// recorded it in branch_claim_name before this runs. Copying current_name on top of that would make
+// the arm's dead value the enclosing variable's seed; copying loop_phi_name would promote the claim
+// to a REACHING definition, and the next loop over the name would seed its preheader edge from a phi
+// in a block the preheader does not reach.
 fn copy_aliases_into(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arm_node: i64,
     aliases: &var std::array::Array<LocalAliasState>,
-    source_aliases: &std::array::Array<LocalAliasState>
+    source_aliases: &std::array::Array<LocalAliasState>,
+    bs: i64
 ) -> !void {
     var index = 0;
     while index < source_aliases.len() {
         let state = try source_aliases.at(index);
-        try set_local_alias(aliases, state.source_name, state.current_name);
+        let source_name = state.source_name;
+        if try block_binds_let_name_directly(ir_bytes, function_name, source_name, arm_node, bs) {
+            index = index + 1;
+            continue;
+        }
+        try set_local_alias(aliases, source_name, state.current_name);
+        let state_loop_phi_name = state.loop_phi_name;
+        if std::mem::len(state_loop_phi_name) > 0 {
+            try record_local_alias_loop_phi(aliases, source_name, state_loop_phi_name);
+        }
         index = index + 1;
     }
     return;
@@ -16288,22 +16611,27 @@ fn append_void_if_else_merge_for_source(
     bs: i64,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !i64 {
-    // A shadowed name is handled by per-binding SSA rename, not by a join phi: a 'let <name>'
-    // inside either arm is an independent value that dies at the arm's end, so its branch alias
-    // must never merge into the enclosing scope's binding of the same name.
-    if try let_binding_is_shadowed(ir_bytes, function_name, source_name, bs) {
-        return alias_counter;
-    }
-    // A name this if's arms declare and no enclosing statement does has no incoming value to seed
-    // the join slot with, so it takes no merge either.
-    if try let_binding_is_local_to_branch(
-        ir_bytes, function_name, then_node, else_node, source_name, bs
-    ) {
-        return alias_counter;
-    }
+    // A name an arm BINDS is handled by per-binding SSA rename, not by a join phi: that
+    // 'let <name>' is an independent value that dies at the arm's end, so the alias the arm leaves
+    // under this name is not a value of the enclosing binding and this join must not read it. What
+    // that arm's edge carries for the enclosing binding is what reached the if.
+    //
+    // The question is per ARM, not per if. An arm that binds the name says nothing about its
+    // sibling, and the sibling's reassignment of the enclosing binding is exactly what this join
+    // exists to carry: dropping the whole merge because the OTHER arm shadowed the name loses it.
     let input_name = try local_alias_current_name(aliases, source_name);
-    let then_name = try local_alias_current_name(then_aliases, source_name);
-    let else_name = try local_alias_current_name(else_aliases, source_name);
+    var then_name = input_name;
+    if !(try block_binds_let_name_directly(
+        ir_bytes, function_name, source_name, then_node, bs
+    )) {
+        then_name = try local_alias_current_name(then_aliases, source_name);
+    }
+    var else_name = input_name;
+    if !(try block_binds_let_name_directly(
+        ir_bytes, function_name, source_name, else_node, bs
+    )) {
+        else_name = try local_alias_current_name(else_aliases, source_name);
+    }
     if std::mem::equal_bytes(input_name, then_name) and
         std::mem::equal_bytes(input_name, else_name) {
         return alias_counter;
@@ -16444,6 +16772,11 @@ fn lower_void_if_else_statement(
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
+    // Publish the then arm's head claims before the else arm copies the map. The two arms are
+    // exclusive in control flow but they share one SSA namespace, so a name the then arm's loop head
+    // bound is a name the else arm's loop head may not bind -- LLVM reads the function, not the
+    // path. Values are not published here: an else arm must still read what reached the if.
+    try merge_local_alias_claims_into(aliases, &then_aliases);
     var else_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var else_aliases = try copy_local_aliases(aliases);
     defer else_aliases.deinit();
@@ -16468,6 +16801,10 @@ fn lower_void_if_else_statement(
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
+    // The else arm's claims are the function's too, so they survive their arm whatever the join then
+    // does with the arms' values -- see merge_local_alias_claims_into. An arm that returns still
+    // bound every name its loops bound, and so does an arm whose values the join discards.
+    try merge_local_alias_claims_into(aliases, &else_aliases);
     var merge_alias_counter = else_body.alias_counter;
     // The join takes its values from whichever arms can reach it. One arm terminating (a return, a
     // break or a continue -- body_returns names all three) leaves the join with a single
@@ -16480,10 +16817,14 @@ fn lower_void_if_else_statement(
     // see if_both_arms_terminate in compiled_mir_llvm.
     if !then_body.body_returns or !else_body.body_returns {
         if then_body.body_returns {
-            try copy_aliases_into(aliases, &else_aliases);
+            try copy_aliases_into(
+                ir_bytes, function_name, else_node, aliases, &else_aliases, bs
+            );
         } else {
             if else_body.body_returns {
-                try copy_aliases_into(aliases, &then_aliases);
+                try copy_aliases_into(
+                    ir_bytes, function_name, then_node, aliases, &then_aliases, bs
+                );
             } else {
                 merge_alias_counter = try append_void_if_else_merge_vars(
                     ir_lookup_index,
@@ -16573,22 +16914,21 @@ fn lower_void_if_no_else_statement(
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
+    // The branch's head claims are the function's, so they survive the branch even when its values
+    // do not -- see merge_local_alias_claims_into.
+    try merge_local_alias_claims_into(aliases, &branch_aliases);
     var branch_alias_index = 0;
     var merge_alias_counter = then_body.alias_counter;
     if !then_body.body_returns {
         while branch_alias_index < branch_aliases.len() {
             let branch_state = try branch_aliases.at(branch_alias_index);
-            // A shadowed name is handled by per-binding SSA rename, not by a join phi: each
-            // 'let <name>' inside a branch is an independent value that dies at the branch end, so
-            // its branch alias must never merge into the enclosing scope's binding of the same name.
-            if try let_binding_is_shadowed(ir_bytes, function_name, branch_state.source_name, bs) {
-                branch_alias_index = branch_alias_index + 1;
-                continue;
-            }
-            // A name this branch declares and no enclosing statement does has no incoming value to
-            // seed the join slot with, so it takes no merge either.
-            if try let_binding_is_local_to_branch(
-                ir_bytes, function_name, then_node, -1, branch_state.source_name, bs
+            // A name this branch BINDS ITSELF is handled by per-binding SSA rename, not by a join
+            // phi: that 'let <name>' is an independent value that dies at the branch end, and the
+            // branch holds no value of the enclosing scope's binding to merge back. A binding one
+            // block deeper is not this branch's -- the join inside the branch already refused to
+            // carry it out, so what stands here under the name is the enclosing binding's value.
+            if try block_binds_let_name_directly(
+                ir_bytes, function_name, branch_state.source_name, then_node, bs
             ) {
                 branch_alias_index = branch_alias_index + 1;
                 continue;
@@ -17267,14 +17607,28 @@ fn lower_multi_if_statement(
                 }
                 }
             } else {
+                // A then-block literal whose fields are all shaped keeps the dedicated
+                // ReturnStruct then-kind, whose body is an insertvalue chain and nothing else.
+                // One carrying an expression-valued field needs an instruction stream to build
+                // that value in ahead of the chain, which only the ReturnExpr then-kind below
+                // owns -- the same split the let and return positions make.
+                var then_struct_is_shaped = false;
                 if std::mem::equal_bytes(resolved_ret_kind, "StructLiteralExpr") {
+                    let then_needs_expr_value =
+                        try compiled_mir_lower_struct::struct_literal_needs_expr_value(
+                            ir_bytes, function_name, then_return_value, bs
+                        );
+                    then_struct_is_shaped = !then_needs_expr_value;
+                }
+                if then_struct_is_shaped {
                     // A struct-literal then-block such as a return of PayloadSpan { .. }
                     // reuses the generic struct-field lowering. The struct SSA and global
                     // names are seeded from then_string_base, and the string counter then
                     // advances by the field count so a later then-block in the same
                     // function never reuses the same per-field SSA names.
-                    then_struct_fields = try compiled_mir_lower_struct::lower_struct_fields(
-                        ir_bytes, function_name, module_prefix, locals_spec, then_return_value, bs,
+                    then_struct_fields = try lower_struct_fields_with_local_aliases(
+                        ir_bytes, function_name, module_prefix, locals_spec,
+                        then_return_value, aliases, bs,
                         ir_lookup_index, canonical_facts, call_arg_type_cache
                     );
                     then_kind = compiled_mir::MirIfThenKind::ReturnStruct;
@@ -18179,6 +18533,15 @@ fn while_carries_body_scalar_var_deep(
     name: []u8,
     bs: i64
 ) -> !bool {
+    // A name the body itself declares is a different variable from the enclosing one that shares
+    // its spelling. Every assignment the scan below can reach resolved against the body's own
+    // binding, so the enclosing variable is never written and the loop carries nothing across the
+    // back edge for it. Answering yes would keep the enclosing 'var <name> = <init>' off the
+    // emitted-let path -- it would be read as this loop's seed -- and then nothing would define it
+    // at all.
+    if try block_binds_let_name_directly(ir_bytes, function_name, name, body_node, bs) {
+        return false;
+    }
     var index = 0;
     while index < body_boundary {
         let body_stmt = try ir_contract::body_child_sequence_from(
@@ -18887,6 +19250,177 @@ fn collect_loop_assigned_var_names(
     return;
 }
 
+// loop_body_path_terminates reports whether every path through this body statement leaves the loop
+// body rather than falling out of its bottom. A return leaves the function, a break leaves by the
+// loop's exit edge and a continue leaves by its back edge: all three are the same fact here --
+// control does not arrive at the statement after this one, and it does not arrive at the latch
+// through this statement. It is the IR-level reading of the body_returns the arm lowering computes,
+// asked before anything is lowered.
+//
+// A block terminates when any statement in it does (a terminator is required to be final, so that
+// statement is its last reachable one), and an if terminates only when BOTH arms do -- a missing
+// else arm is a path that falls through. Anything else, a while or a match among them, is reported
+// as falling through: over-reporting fall-through only makes the caller's guard fire where it need
+// not, which is loud, while under-reporting it would make the guard miss a dropped write.
+fn loop_body_path_terminates(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    bs: i64
+) -> !bool {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+    if std::mem::equal_bytes(kind, "Return") or
+        std::mem::equal_bytes(kind, "Break") or
+        std::mem::equal_bytes(kind, "Continue") {
+        return true;
+    }
+    if std::mem::equal_bytes(kind, "Block") {
+        var child_index = 0;
+        while true {
+            let child = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, statement, "statement", child_index, bs
+            );
+            if child < 0 {
+                return false;
+            }
+            let child_terminates = try loop_body_path_terminates(
+                ir_bytes, function_name, child, bs
+            );
+            if child_terminates {
+                return true;
+            }
+            child_index = child_index + 1;
+        }
+        return false;
+    }
+    if std::mem::equal_bytes(kind, "If") {
+        let then_node = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, statement, "then", 0, bs
+        );
+        let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, statement, "else", 0, bs
+        );
+        if then_node < 0 or else_node < 0 {
+            return false;
+        }
+        let then_terminates = try loop_body_path_terminates(
+            ir_bytes, function_name, then_node, bs
+        );
+        if !then_terminates {
+            return false;
+        }
+        return try loop_body_path_terminates(ir_bytes, function_name, else_node, bs);
+    }
+    return false;
+}
+
+// collect_loop_latch_reaching_assigned_var_names is collect_loop_assigned_var_names restricted to
+// the writes whose value is live at the latch. It differs in one rule: a block no path falls out of
+// contributes nothing, because a write it made is followed by a return, a break or a continue and
+// so never arrives at the back edge.
+//
+// The two scans answer different questions and both are needed. The wider one decides what the loop
+// CARRIES -- a variable written only on a returning path is still read at the head on the paths
+// that did not return, so it still needs the head phi. This one decides what the body OWES the
+// latch, which is what tells a dropped merge apart from a write that legitimately left the loop.
+fn collect_loop_latch_reaching_assigned_var_names(
+    ir_bytes: []u8,
+    function_name: []u8,
+    statement: i64,
+    out: &var std::array::Array<[]u8>,
+    bs: i64
+) -> !void {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+    if std::mem::equal_bytes(kind, "Assign") {
+        let target = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, statement, "target", 0, bs
+        );
+        let target_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, target, bs
+        );
+        if !std::mem::equal_bytes(target_kind, "Var") {
+            return error("compiled mir: loop-carried assignment target must be a local");
+        }
+        let name = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, target, bs
+        );
+        try out.append(name);
+        return;
+    }
+    if std::mem::equal_bytes(kind, "Block") {
+        let block_terminates = try loop_body_path_terminates(
+            ir_bytes, function_name, statement, bs
+        );
+        if block_terminates {
+            return;
+        }
+        var child_index = 0;
+        while true {
+            let child = try ir_contract::body_child_sequence_or_minus_one_from(
+                ir_bytes, function_name, statement, "statement", child_index, bs
+            );
+            if child < 0 {
+                return;
+            }
+            try collect_loop_latch_reaching_assigned_var_names(
+                ir_bytes, function_name, child, out, bs
+            );
+            child_index = child_index + 1;
+        }
+        return;
+    }
+    if std::mem::equal_bytes(kind, "If") {
+        let then_node = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, statement, "then", 0, bs
+        );
+        if then_node >= 0 {
+            try collect_loop_latch_reaching_assigned_var_names(
+                ir_bytes, function_name, then_node, out, bs
+            );
+        }
+        let else_node = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, statement, "else", 0, bs
+        );
+        if else_node >= 0 {
+            try collect_loop_latch_reaching_assigned_var_names(
+                ir_bytes, function_name, else_node, out, bs
+            );
+        }
+        return;
+    }
+    // A nested loop leaves its body's value behind for the enclosing latch exactly as a top-level
+    // assignment does, so its body is scanned under the same rule -- including the pruning, since a
+    // write the nested body follows with a return reaches no latch either.
+    if std::mem::equal_bytes(kind, "While") {
+        let nested_body = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, statement, "body", 0, bs
+        );
+        if nested_body < 0 {
+            return;
+        }
+        try collect_loop_latch_reaching_assigned_var_names(
+            ir_bytes, function_name, nested_body, out, bs
+        );
+        return;
+    }
+    return;
+}
+
+fn assigned_var_name_list_contains(
+    names: &std::array::Array<[]u8>,
+    name: []u8
+) -> !bool {
+    var index = 0;
+    while index < names.len() {
+        let candidate = try names.get(index);
+        if std::mem::equal_bytes(candidate, name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 // parse_induction_step validates the trailing 'name = name + <int>' increment for
 // the induction variable and returns the integer step. Only this simple counter
 // increment shape is accepted; anything else is rejected so the restricted loop
@@ -19286,8 +19820,11 @@ fn while_demoted_secondary_latch_count(
             ir_bytes, function_name, target, bs
         );
         if std::mem::len(target_name) > 0 {
-            var bound_elsewhere =
-                std::mem::len(try local_alias_loop_phi_name(aliases, target_name)) > 0;
+            // A latch advance spells its phi %<target_name>, so it needs the name free -- and the
+            // name is no freer for the binding that took it having been made inside an if arm. The
+            // demotion is what routes the variable into the carried-scalar run, which is where the
+            // scoped rename lives; leaving it in the latch would emit a second %<target_name>.
+            var bound_elsewhere = try local_alias_head_name_is_taken(aliases, target_name);
             if !bound_elsewhere {
                 bound_elsewhere = try while_carries_body_scalar_var_deep(
                     ir_bytes, function_name, body_node, index, target_name, bs
@@ -19898,15 +20435,20 @@ fn lower_multi_while_branch_merge_latch(
     // scoped spelling instead. The counted-loop path has followed the rule since
     // loop_scoped_induction_phi_name existed; this path never consulted the registry, so two loops
     // over one counter defined %<var> twice and LLVM rejected the module (issue 1165 / 1162).
+    // Renaming asks only whether the NAME is free, so a binding made inside an if arm counts.
+    let induction_name_is_taken = try local_alias_head_name_is_taken(aliases, induction_var);
     let claimed_induction_phi = try local_alias_loop_phi_name(aliases, induction_var);
     var induction_phi = induction_var;
-    if std::mem::len(claimed_induction_phi) > 0 {
+    if induction_name_is_taken {
         induction_phi = try loop_scoped_induction_phi_name(
             induction_var, loop_index, call_arg_type_cache
         );
     }
     // A claimed counter is carried in by that loop's head phi, so the preheader edge seeds by name
     // from it -- the declaration is only the seed when nothing carries the counter in at all.
+    // Seeding asks whether a VALUE reaches here, so an arm's abandoned binding does not count: it
+    // leaves the declaration as the seed, which is what a fresh 'var <var> = <init>' in this scope
+    // means.
     if std::mem::len(claimed_induction_phi) > 0 or
         !std::mem::equal_bytes(induction_alias, induction_var) {
         induction_init_literal = 0;
@@ -20359,18 +20901,22 @@ fn lower_multi_while_statement(
     // single function would define %<var> twice. When an earlier loop in this scope already claimed
     // the name, this loop takes a scoped phi name and seeds from the value that loop left live
     // ('var divisor = 1; while <scan> {} while divisor > 0 {}', std::fmt::append_i64).
+    // Renaming asks only whether the NAME is free, so a binding made inside an if arm counts.
+    let induction_name_is_taken = try local_alias_head_name_is_taken(aliases, induction_var);
     let claimed_induction_phi = try local_alias_loop_phi_name(aliases, induction_var);
     var induction_phi = induction_var;
-    if std::mem::len(claimed_induction_phi) > 0 {
+    if induction_name_is_taken {
         induction_phi = try loop_scoped_induction_phi_name(
             induction_var, loop_index, call_arg_type_cache
         );
     }
     let induction_phi_is_renamed = !std::mem::equal_bytes(induction_phi, induction_var);
-    // A renamed phi always seeds by name from the incoming value; so does an induction variable an
-    // earlier statement rebound to an alias.
+    // Seeding asks the other question: does a VALUE reach this preheader? A claim from a loop that
+    // ran ahead of this one in this scope does; an alias an earlier statement bound does; a name an
+    // if arm's head bound and abandoned does not, and there the declaration is still the seed.
     let induction_seeds_from_alias =
-        induction_phi_is_renamed or !std::mem::equal_bytes(induction_alias, induction_var);
+        std::mem::len(claimed_induction_phi) > 0 or
+        !std::mem::equal_bytes(induction_alias, induction_var);
     // A loop whose induction variable is also reassigned by the body ahead of the latch plays two
     // roles at once: the body carries it as a scalar and the tail advances it. Modelling those
     // separately would emit two loop-head phis for one name, so fold the tail into the carried run --
@@ -20422,6 +20968,18 @@ fn lower_multi_while_statement(
             )) < 0 {
                 continue;
             }
+            // The enclosing scope bound the name and so does this body: the body's binding is the
+            // one those assignments were resolved in, so they write a variable that dies with the
+            // body and the enclosing one is never written. Carrying it would latch the body
+            // binding's last value into the enclosing variable, and would keep the enclosing 'var
+            // <name> = <init>' off the emitted-let path -- read as this loop's seed -- so nothing
+            // would define it at all. while_carries_body_scalar_var_deep refuses the same shape,
+            // and the two scans have to agree.
+            if try block_binds_let_name_directly(
+                ir_bytes, function_name, carried_name, body_node, bs
+            ) {
+                continue;
+            }
             // The induction variable already owns the loop-head phi the latch advances. It joins
             // the carried run only through induction_is_carried, which folds the advance into it;
             // registering it here as well would define its phi twice.
@@ -20460,7 +21018,11 @@ fn lower_multi_while_statement(
                 // A loop-head phi an enclosing or earlier loop bound under the BARE variable name
                 // leaves current_name == source_name while a live SSA definition exists, so name
                 // equality alone cannot tell 'nothing carries it in' from 'a loop head owns it'.
-                // The claim is the fact that separates the two.
+                // The claim is the fact that separates the two -- the claim that reaches here. A
+                // name an if arm's head bound is taken but carries nothing in, so it renames the
+                // head below without making the declaration stop being the seed.
+                let carried_name_is_taken =
+                    try local_alias_head_name_is_taken(aliases, carried_name);
                 let carried_is_claimed =
                     std::mem::len(try local_alias_loop_phi_name(aliases, carried_name)) > 0;
                 let carried_has_incoming =
@@ -20529,8 +21091,9 @@ fn lower_multi_while_statement(
                     // An enclosing loop that carries this same scalar has already bound %<name> at
                     // its own head, so this loop cannot bind it again. It takes a scoped name for
                     // the same reason a nested induction counter does -- the reads inside this
-                    // body then resolve to it through the body alias map.
-                    if carried_is_claimed {
+                    // body then resolve to it through the body alias map. A head inside an if arm
+                    // took the name just as firmly, whether or not its value reaches here.
+                    if carried_name_is_taken {
                         carried_current_name = try loop_scoped_induction_phi_name(
                             carried_name, loop_index, call_arg_type_cache
                         );
@@ -20790,6 +21353,12 @@ fn lower_multi_while_statement(
         );
         let body_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, body_stmt, bs);
         if std::mem::equal_bytes(body_kind, "Let") {
+            // This body binds the name here, whatever the walk goes on to do with the declaration:
+            // what the enclosing scope holds under it stops reaching at this point.
+            try rebind_local_alias_to_own_declaration(
+                &var body_aliases,
+                try let_statement_bound_name(ir_bytes, function_name, body_stmt, bs)
+            );
             // A 'var counter = <init>' a nested while in this body advances is that loop's
             // induction seed. Its loop-head phi supplies the value on the preheader edge, so
             // emitting the let would define the same SSA name twice -- the rule the top-level
@@ -21138,6 +21707,59 @@ fn lower_multi_while_statement(
         }
         carried_sync_index = carried_sync_index + 1;
     }
+    // The latch incoming of a loop-head phi IS the value the body left in the carried scalar,
+    // under whatever name that value ended up holding -- a top-level assign's alias, an if join's
+    // output, a nested loop's exit reload. Renaming the head changes the name the head DEFINES; it
+    // never changes which value the back edge carries, so the two names are never the same one.
+    //
+    // A state still holding the head name here means no name the sync above could read carries the
+    // body's value. That is a dropped write -- and a phi reading itself on the back edge -- only if
+    // the body owed the latch a value at all. A write the body makes and then returns from owes it
+    // nothing: that path left the function, the loop continues only on the paths that did not take
+    // it, and on those the head name IS the value the back edge should carry. The scalar is in this
+    // list because collect_loop_assigned_var_names counts such a write -- it must, since the head
+    // phi still feeds the reads on the paths that fall through -- so the question the check asks is
+    // the narrower one: does a write of this scalar REACH the latch. Asking the wider one refused
+    // loops that lower correctly.
+    //
+    // A module with a self-referential phi passes the LLVM verifier and returns a wrong answer, so
+    // the genuine case is refused here instead. A slot-carried loop is exempt because it has no
+    // such phi -- its head reloads the slot every store already wrote.
+    if !memory_carried {
+        var latch_reaching_names = std::array::Array<[]u8>(std::mem::page_allocator());
+        defer latch_reaching_names.deinit();
+        var latch_reaching_index = 0;
+        while latch_reaching_index < body_boundary {
+            let latch_reaching_statement = try ir_contract::body_child_sequence_from(
+                ir_bytes, function_name, body_node, "statement", latch_reaching_index, bs
+            );
+            try collect_loop_latch_reaching_assigned_var_names(
+                ir_bytes, function_name, latch_reaching_statement,
+                &var latch_reaching_names, bs
+            );
+            latch_reaching_index = latch_reaching_index + 1;
+        }
+        var carried_check_index = 0;
+        while carried_check_index < carried_scalar_states.len() {
+            let check_state = try carried_scalar_states.at(carried_check_index);
+            let check_owes_latch = try assigned_var_name_list_contains(
+                &latch_reaching_names, check_state.source_name
+            );
+            if check_owes_latch and
+                std::mem::equal_bytes(check_state.current_name, check_state.head_name) {
+                var carried_message = std::string::String(std::mem::page_allocator());
+                try carried_message.append_bytes(
+                    "compiled mir: loop-carried scalar has no latch value: function "
+                );
+                try carried_message.append_bytes(function_name);
+                try carried_message.append_bytes(" variable ");
+                try carried_message.append_bytes(check_state.source_name);
+                let carried_message_bytes = carried_message.as_bytes();
+                return error(carried_message_bytes);
+            }
+            carried_check_index = carried_check_index + 1;
+        }
+    }
     var induction_op = "add";
     var step = 0;
     var latch_copy_var = "";
@@ -21438,6 +22060,14 @@ fn lower_multi_while_statement(
             phi_carried_index = phi_carried_index + 1;
         }
     }
+    // The body is a statement list like an if arm, and a loop head inside it binds its phi name in
+    // the one register namespace the function has. The claims above are this loop's own; a nested
+    // loop's -- or one made under a declaration the body shadows, whose name this loop therefore
+    // never carried -- reach the enclosing scope only here. Without it a later loop over the same
+    // name spells a head this function already defined and LLVM rejects the module. It lands in
+    // branch_claim_name for the same reason the if-arm merge does: the name is taken, and the value
+    // is not one anything after the loop may seed from.
+    try merge_local_alias_claims_into(aliases, &body_aliases);
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
         induction_phi,
@@ -21800,6 +22430,7 @@ fn append_leading_decrement_carried_scalar(
     // scalar in. A leading-decrement loop is no less re-enterable than any other, so seeding it
     // from the declaration would restart the carrier (issue 1165 / 1162).
     let alias = try local_alias_current_name(aliases, target_name);
+    let name_is_taken = try local_alias_head_name_is_taken(aliases, target_name);
     let is_claimed = std::mem::len(try local_alias_loop_phi_name(aliases, target_name)) > 0;
     if is_claimed or !std::mem::equal_bytes(alias, target_name) {
         init_name = alias;
@@ -21812,9 +22443,11 @@ fn append_leading_decrement_carried_scalar(
     // One loop head per SSA name per function: this head spells the carried phi %<name>, so an
     // enclosing or earlier loop that already bound that name forces this one onto the scoped
     // spelling -- the same move the counted path's carried scalars make. Nothing else here reads
-    // the bare name, because the reserved leading.decrement.head phi owns the counter.
+    // the bare name, because the reserved leading.decrement.head phi owns the counter. This is the
+    // namespace question, so an if arm's abandoned head takes the name too -- and takes only the
+    // name, which is why the seed above asks the reaching claim instead.
     var head_name = target_name;
-    if is_claimed {
+    if name_is_taken {
         head_name = try loop_scoped_induction_phi_name(
             target_name, loop_index, call_arg_type_cache
         );
@@ -24998,8 +25631,8 @@ fn lower_expr_into_local_aliases(
                 ir_lookup_index, canonical_facts, call_arg_type_cache
             );
         }
-        let shaped_fields = try compiled_mir_lower_struct::lower_struct_fields(
-            ir_bytes, function_name, module_prefix, params_spec, expr_node, bs,
+        let shaped_fields = try lower_struct_fields_with_local_aliases(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, aliases, bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
         // Field values the shapes cannot represent lower into this same stream first, so their
