@@ -1731,7 +1731,16 @@ func (c *Checker) defineSpecialLetInitializer(
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParam(stmt.Name, typ, true, mutable)
+		// `Array.at` is declared `-> !&T borrows self`, so the element view is backed by
+		// whatever backs the array. Binding it without that provenance made
+		// `self.parts.at(index)` read as a fresh owner and refused a view off the element
+		// that is in fact tied to `self`. Falling back to the bound name keeps the older,
+		// owner-of-itself answer whenever the initializer names no single source.
+		source := c.singleBorrowSource(stmt.Value, env, unsafe)
+		if source == "" {
+			source = stmt.Name
+		}
+		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, source)
 	}
 	typ, mutable, ok, err = c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {

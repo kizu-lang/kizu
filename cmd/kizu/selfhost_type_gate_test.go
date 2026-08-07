@@ -87,19 +87,22 @@ func TestSelfhostFastDiagnosticsUsePackageExpressionFacts(t *testing.T) {
 }
 
 // TestSelfhostExpressionFactsSeparateSourceAndOwnedFieldStorage prevents
-// source-backed slices from sharing a getter contract with owned field spellings.
+// source-backed slices from sharing a getter contract with owned field spellings,
+// and pins one interned spelling to one owned buffer. A single shared, growable
+// storage moves every earlier spelling each time it reallocates, and the views
+// callers park in local type maps then read the freed block: the same file
+// answered "check: ok" or "unbalanced type delimiters" run to run.
 func TestSelfhostExpressionFactsSeparateSourceAndOwnedFieldStorage(t *testing.T) {
 	content := readSelfhostFile(t, "../../selfhost/src/types/expression_facts.kizu")
 	required := []string{
 		"source_indexes: std::map::Map<[]u8, i64>",
 		"field_indexes: std::map::Map<[]u8, i64>",
-		"ranges: std::array::Array<FactRange>",
+		"spellings: std::array::Array<std::string::String>",
 		"fn contains_source(",
 		"fn get_source(",
 		"fn insert_source(",
 		"fn contains_field(",
 		") -> ![]u8 borrows self",
-		"spelling_storage: std::string::String",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
@@ -109,6 +112,7 @@ func TestSelfhostExpressionFactsSeparateSourceAndOwnedFieldStorage(t *testing.T)
 	forbidden := []string{
 		"fn get(self: &ExpressionTypeFacts",
 		"pub source_values:",
+		"spelling_storage",
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(content, fragment) {

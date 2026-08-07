@@ -1920,7 +1920,18 @@ fn lower_multi_let_arena_add(
         ir_bytes, function_name, callee_node, "field", cf
     );
     if !std::mem::equal_bytes(method_name, "add") {
-        return error("compiled mir: only Arena.add method let is supported");
+        // Name the function and the method the refusal is about. A bare refusal here
+        // says only that some method let in the whole module is unlowerable, which
+        // leaves the blocking shape to be found by bisecting the source.
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled mir: only Arena.add method let is supported: ");
+        try message.append_bytes(function_name);
+        try message.append_bytes(" let ");
+        try message.append_bytes(let_name);
+        try message.append_bytes(" method ");
+        try message.append_bytes(method_name);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
     }
     let arg_count = try compiled_mir_types::count_call_args_cached(
         ir_bytes, function_name, call_node, cf, call_arg_type_cache
@@ -4132,6 +4143,32 @@ pub fn lower_struct_return_function(
         call_arg_type_cache, ir_lookup_index, ir_bytes, function_name
     );
     let module_prefix = compiled_util::module_prefix_of(function_name);
+    // Inside an error-union function ('fn mk(..) -> !Inner { return Inner { .. }; }') the literal
+    // builds in the SUCCESS struct type and that whole value goes into the union at field 1 --
+    // the same wrap append_multi_return_struct and append_multi_then_struct already do for the
+    // multi-statement and then-block return positions. Building it in the union type instead
+    // writes the literal's fields over the union's own: it is loud for a two-i64 struct, which
+    // LLVM rejects, and silent for a one-field bool struct, whose first field lines up with the
+    // union's ok flag and whose returned value is then garbage.
+    if std::mem::starts_with(llvm_return_type, "%kizu.error.") {
+        let wrapped_fields = try compiled_mir_lower_struct::lower_struct_fields(
+            ir_bytes, function_name, module_prefix, params_spec, value_node, bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+        let success_llvm = try compiled_signature::resolve_struct_literal_type_indexed(
+            ir_lookup_index, ir_bytes, function_name, module_prefix, value_node, bs
+        );
+        var wrapped_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+        try wrapped_stmts.append(compiled_mir::return_struct_wrapped_stmt(
+            0, llvm_return_type, success_llvm, wrapped_fields
+        ));
+        return compiled_mir_function::multi_statement_function(
+            llvm_symbol,
+            llvm_return_type,
+            params_spec,
+            wrapped_stmts
+        );
+    }
     let fields = try compiled_mir_lower_struct::lower_struct_fields(
         ir_bytes, function_name, module_prefix, params_spec, value_node, bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
@@ -24403,8 +24440,19 @@ fn lower_multi_while_continue_latch(
     var body_try_counter = loop_index * 1000;
     var body_alias_counter = alias_counter;
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-    var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
+    // The body sees the enclosing scope's current SSA names, the way every other body walk in this
+    // file does: a variable an if arm ahead of the loop reassigned reads that merged value inside
+    // the body, not the one its declaration bound. Starting empty made every body read resolve to
+    // the declaration spelling, so 'return total * 100 + scan;' after 'if limit > 0 { total =
+    // total + 30; }' answered with total's initial value.
+    var body_aliases = try copy_local_aliases(aliases);
     defer body_aliases.deinit();
+    // The counter this head binds is reseated onto the head's own phi: a rename the enclosing
+    // scope gave that name is behind the head now, and a nested loop over the same variable must
+    // take a scoped name rather than redefine this one.
+    if std::mem::len(induction_var) > 0 {
+        try claim_local_alias_loop_phi(&var body_aliases, induction_var, head_phi_name);
+    }
     var body_index = 0;
     while body_index < body_count {
         let body_stmt = try ir_contract::body_child_sequence_from(

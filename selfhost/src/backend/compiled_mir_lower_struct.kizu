@@ -1,5 +1,6 @@
 import selfhost::abi::fixed_abi_contract;
 import selfhost::backend::compiled_canonical_facts;
+import selfhost::backend::compiled_fact_lookup;
 import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_mir_lower_call;
 import selfhost::backend::compiled_mir_types;
@@ -86,6 +87,14 @@ pub fn lower_struct_fields(
 // current-SSA-name map, the same tables the shared call-argument lowering already takes. Types stay
 // resolved from the SOURCE name -- locals_spec is keyed by it and a rename never changes a
 // variable's type -- and only the emitted register spelling is rewritten.
+//
+// The lowered fields come out in DECLARATION order, not in the order the literal wrote them. A
+// field's slot in the layout is the index its declaration gives it, so 'P3 { c: .., a: .., b: .. }'
+// must still store a at 0; walking the literal's own order writes c there instead, and when the
+// slots happen to share a type nothing downstream can see it. The renderer's insertvalue chain also
+// reads this array positionally -- each line feeds %v<prefix>_<n-1> into %v<prefix>_<n> and the
+// finished value is the last element's -- so declaration order has to be the array's order rather
+// than only its .index values.
 pub fn lower_struct_fields_with_aliases(
     ir_bytes: []u8,
     function_name: []u8,
@@ -99,12 +108,16 @@ pub fn lower_struct_fields_with_aliases(
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !std::array::Array<compiled_mir::MirStructField> {
-    let field_count = try count_struct_fields(ir_bytes, function_name, value_node, bs);
+    var literal_positions = try struct_literal_declaration_order(
+        ir_bytes, function_name, module_prefix, value_node, bs, ir_lookup_index
+    );
+    defer literal_positions.deinit();
     var fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
     var field_index = 0;
-    while field_index < field_count {
+    while field_index < literal_positions.len() {
+        let literal_position = try literal_positions.get(field_index);
         let field_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, value_node, "field", field_index, bs
+            ir_bytes, function_name, value_node, "field", literal_position, bs
         );
         let field_value = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, field_node, "value", 0, bs
@@ -130,6 +143,103 @@ pub fn lower_struct_fields_with_aliases(
         field_index = field_index + 1;
     }
     return fields;
+}
+
+// struct_literal_declaration_order returns, for each declared field index of the struct this
+// literal builds, the position that field was written at in the literal. It resolves the literal's
+// declaration and matches every written field to a declared one BY NAME -- the only thing the two
+// orders share.
+//
+// A literal that omits a declared field, names a field the struct does not declare, or writes one
+// field twice leaves this mapping incomplete, and there is no index to fall back on that is not a
+// guess. Each of those is refused by name. The type checker rejects all three ahead of lowering, so
+// reaching one here means the checker and the backend disagree about the declaration, which is
+// exactly the disagreement that must not silently pick a slot.
+fn struct_literal_declaration_order(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    value_node: i64,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
+) -> !std::array::Array<i64> {
+    let literal_count = try count_struct_fields(ir_bytes, function_name, value_node, bs);
+    let declaration = try compiled_signature::resolve_struct_literal_declaration_indexed(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, value_node, bs
+    );
+    let identity = declaration.canonical_identity;
+    let declared_count = try compiled_fact_lookup::validate_struct_field_owner_indexed(
+        ir_lookup_index, ir_bytes, identity
+    );
+    var positions = std::array::Array<i64>(std::mem::page_allocator());
+    var slot = 0;
+    while slot < declared_count {
+        try positions.append(-1);
+        slot = slot + 1;
+    }
+    var literal_position = 0;
+    while literal_position < literal_count {
+        let field_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, value_node, "field", literal_position, bs
+        );
+        let field_name = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-field-init ", function_name, field_node, bs
+        );
+        let declared = try compiled_fact_lookup::lookup_struct_field_exact_indexed(
+            ir_lookup_index, ir_bytes, identity, field_name
+        );
+        if !declared.found {
+            return try struct_literal_field_error(
+                "compiled mir: struct literal names a field the struct does not declare: ",
+                function_name, identity, field_name, value_node
+            );
+        }
+        if try positions.get(declared.index) >= 0 {
+            return try struct_literal_field_error(
+                "compiled mir: struct literal writes a field twice: ",
+                function_name, identity, field_name, value_node
+            );
+        }
+        try positions.set(declared.index, literal_position);
+        literal_position = literal_position + 1;
+    }
+    var check = 0;
+    while check < declared_count {
+        if try positions.get(check) < 0 {
+            let missing = try compiled_fact_lookup::lookup_struct_field_at_index_exact_indexed(
+                ir_lookup_index, ir_bytes, identity, check
+            );
+            return try struct_literal_field_error(
+                "compiled mir: struct literal omits a declared field: ",
+                function_name, identity, missing.field_name, value_node
+            );
+        }
+        check = check + 1;
+    }
+    return positions;
+}
+
+// struct_literal_field_error names the function, the struct declaration, the field and the literal's
+// body node, so a refusal points at the one literal that produced it rather than at a field index
+// that is meaningless without knowing which struct it indexes.
+fn struct_literal_field_error(
+    reason: []u8,
+    function_name: []u8,
+    identity: []u8,
+    field_name: []u8,
+    value_node: i64
+) -> !std::array::Array<i64> {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes(reason);
+    try message.append_bytes(function_name);
+    try message.append_bytes(" struct ");
+    try message.append_bytes(identity);
+    try message.append_bytes(" field ");
+    try message.append_bytes(field_name);
+    try message.append_bytes(" node ");
+    try std::fmt::append_i64(&var message, value_node);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }
 
 fn count_struct_fields(
