@@ -354,6 +354,8 @@ pub fn short_circuit_condition_renderer_gate() -> !void {
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
         0,
+        "",
+        "",
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator())
     ));
@@ -9035,25 +9037,64 @@ fn append_multi_then_call(
 }
 // append_multi_then_struct renders a ReturnStruct then-block: it builds the struct
 // value with the generic struct-body helper (seeded from then_struct_string_index)
-// and returns it. This mirrors append_multi_return_struct for the top-level case.
+// and returns it. This mirrors append_multi_return_struct for the top-level case,
+// error-union wrap included: inside an error-union function the literal builds in the
+// SUCCESS struct type and that whole value goes into the union at field 1. Building it
+// in the union type instead would write the literal's fields over the union's own -- it
+// type-checks only when the two happen to line up, and answers wrongly when they do.
 fn append_multi_then_struct(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirIfStmt
 ) -> !void {
+    var struct_llvm = function.return_type.llvm_name;
+    if std::mem::len(stmt.then_struct_wrap_error_union) > 0 {
+        struct_llvm = stmt.then_struct_success_llvm;
+    }
     var stream = no_expr_insts();
     defer stream.deinit();
     try append_struct_body_at(
         out,
         function.name,
-        function.return_type.llvm_name,
+        struct_llvm,
         &stmt.then_struct_fields,
         stmt.then_struct_string_index,
         &stream
     );
+    let return_fields = &stmt.then_struct_fields;
+    if std::mem::len(stmt.then_struct_wrap_error_union) > 0 {
+        try out.append_bytes("  %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try out.append_bytes("_wrap0 = insertvalue ");
+        try out.append_bytes(stmt.then_struct_wrap_error_union);
+        try append_ll_line(out, " zeroinitializer, i1 true, 0");
+        try out.append_bytes("  %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try out.append_bytes("_wrap1 = insertvalue ");
+        try out.append_bytes(stmt.then_struct_wrap_error_union);
+        try out.append_bytes(" %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try out.append_bytes("_wrap0, ");
+        try out.append_bytes(stmt.then_struct_success_llvm);
+        if return_fields.len() == 0 {
+            try out.append_bytes(" poison");
+        } else {
+            let wrap_last_field = try return_fields.at(return_fields.len() - 1);
+            try out.append_bytes(" %v");
+            try std::fmt::append_i64(out, stmt.then_struct_string_index);
+            try out.append_bytes("_");
+            try std::fmt::append_i64(out, wrap_last_field.index);
+        }
+        try append_ll_line(out, ", 1");
+        try out.append_bytes("  ret ");
+        try out.append_bytes(stmt.then_struct_wrap_error_union);
+        try out.append_bytes(" %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try append_ll_line(out, "_wrap1");
+        return;
+    }
     try out.append_bytes("  ret ");
     try out.append_bytes(function.return_type.llvm_name);
-    let return_fields = &stmt.then_struct_fields;
     if return_fields.len() == 0 {
         try out.append_bytes(" poison");
     } else {

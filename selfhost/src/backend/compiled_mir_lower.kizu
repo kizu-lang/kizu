@@ -4438,6 +4438,8 @@ fn append_short_circuit_or_operand_ifs(
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
         string_counter + cond_strings,
+        "",
+        "",
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator())
     ));
@@ -10559,6 +10561,34 @@ fn local_alias_head_name_is_taken(
         std::mem::len(state.branch_claim_name) > 0;
 }
 
+// local_alias_phi_name_is_bound asks the same NAME question as local_alias_head_name_is_taken, but
+// about one spelling rather than about one variable: has some loop head in this function already
+// bound %<phi_name>, whatever variable it was the head of? A head that spells its phi with a
+// reserved name -- leading.decrement.head, nested.loop.induction, names no source variable can be
+// called -- is filed under the source variable it stands for, so it cannot be found by looking that
+// spelling up as a source name. Two heads binding one spelling is a module LLVM rejects outright,
+// so the paths that use a reserved head ask here before they take it.
+fn local_alias_phi_name_is_bound(
+    aliases: &std::array::Array<LocalAliasState>,
+    phi_name: []u8
+) -> !bool {
+    if std::mem::len(phi_name) == 0 {
+        return false;
+    }
+    var index = 0;
+    while index < aliases.len() {
+        let state = try aliases.at(index);
+        if std::mem::equal_bytes(state.loop_phi_name, phi_name) {
+            return true;
+        }
+        if std::mem::equal_bytes(state.branch_claim_name, phi_name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 // record_local_alias_branch_claim records that a loop head bound phi_name for source_name on a path
 // this scope has left. It writes neither current_name nor loop_phi_name: nothing about the value
 // live here changed, only the set of names still free.
@@ -14833,6 +14863,39 @@ fn lower_return_struct_literal(
     );
 }
 
+// then_struct_success_type names the struct a 'return <Struct> { .. };' builds when the
+// enclosing function returns an error union over it -- the value that goes into the union
+// at field 1. It answers with an empty name when the function returns the struct itself,
+// which is the marker the renderer reads for 'no wrap'.
+fn then_struct_success_type(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    value: i64,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
+) -> ![]u8 {
+    if !std::mem::starts_with(llvm_return_type, "%kizu.error.") {
+        return ir_bytes[0..0];
+    }
+    let success_llvm = try compiled_signature::resolve_struct_literal_type_indexed(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, value, bs
+    );
+    return success_llvm;
+}
+
+// then_struct_wrap_type names the error union a then-block struct literal wraps into,
+// or nothing when there is no wrap. It reads the success name then_struct_success_type
+// answered with rather than re-testing the return type, so the two markers can never
+// disagree about whether this return wraps.
+fn then_struct_wrap_type(llvm_return_type: []u8, success_llvm: []u8) -> []u8 {
+    if std::mem::len(success_llvm) == 0 {
+        return success_llvm;
+    }
+    return llvm_return_type;
+}
+
 fn lower_multi_return_statement(
     ir_bytes: []u8,
     function_name: []u8,
@@ -17238,6 +17301,8 @@ fn lower_void_if_no_else_statement(
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
         then_string_base,
+        "",
+        "",
         then_body_stmts,
         merge_vars
     ));
@@ -17816,6 +17881,8 @@ fn lower_multi_if_statement(
     var then_result = -1;
     var then_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var then_struct_fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
+    var then_struct_wrap_error_union = "";
+    var then_struct_success_llvm = "";
     var then_body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var merge_vars = std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator());
     var then_struct_strings = 0;
@@ -17959,6 +18026,16 @@ fn lower_multi_if_statement(
                     // names are seeded from then_string_base, and the string counter then
                     // advances by the field count so a later then-block in the same
                     // function never reuses the same per-field SSA names.
+                    // Inside an error-union function the literal is the SUCCESS value, so
+                    // it builds in its own struct type and wraps into the union; the same
+                    // split the top-level 'return <Struct> { .. };' position makes.
+                    then_struct_success_llvm = try then_struct_success_type(
+                        ir_bytes, function_name, module_prefix, llvm_return_type,
+                        then_return_value, bs, ir_lookup_index
+                    );
+                    then_struct_wrap_error_union = then_struct_wrap_type(
+                        llvm_return_type, then_struct_success_llvm
+                    );
                     then_struct_fields = try lower_struct_fields_with_local_aliases(
                         ir_bytes, function_name, module_prefix, locals_spec,
                         then_return_value, aliases, bs,
@@ -18018,6 +18095,8 @@ fn lower_multi_if_statement(
             then_insts,
             then_struct_fields,
             then_string_base,
+            then_struct_wrap_error_union,
+            then_struct_success_llvm,
             then_body_stmts,
             merge_vars
     ));
@@ -21129,8 +21208,9 @@ fn lower_multi_while_statement(
     // through a dedicated path (line_comment_has_blank_after, issue 1165 / 1162).
     if try while_is_continue_latch(ir_bytes, function_name, statement, bs) {
         // A top-level continue-latch loop resolves its 'var <induction> = <init>' seed from the
-        // function body and keeps the induction variable's own name (no rename): "" / "" leave the
-        // seed and rename to lower_multi_while_continue_latch's defaults (issue 1165 / 1162).
+        // block this loop sits in and keeps the induction variable's own name (no rename): "" / ""
+        // leave the seed and rename to lower_multi_while_continue_latch's defaults (issue 1165 /
+        // 1162).
         return try lower_multi_while_continue_latch(
             ir_bytes,
             function_name,
@@ -21142,8 +21222,11 @@ fn lower_multi_while_statement(
             temp_counter,
             alias_counter,
             loop_index,
+            scope_node,
+            scope_stmt_index,
             "",
             "",
+            aliases,
             stmts,
             bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
@@ -21169,6 +21252,8 @@ fn lower_multi_while_statement(
             temp_counter,
             alias_counter,
             loop_index,
+            scope_node,
+            scope_stmt_index,
             aliases,
             stmts,
             bs,
@@ -22798,6 +22883,11 @@ fn append_leading_decrement_carried_scalar(
     function_name: []u8,
     target_name: []u8,
     loop_index: i64,
+    // The loop's enclosing block and its index in it. A carried scalar's declaration is looked up
+    // from where the LOOP sits, not from the function root: the root does not have the loop's
+    // ordinal, and a same-named declaration in an outer block is not the one this loop carries.
+    scope_node: i64,
+    scope_stmt_index: i64,
     aliases: &std::array::Array<LocalAliasState>,
     states: &var std::array::Array<CarriedScalarState>,
     bs: i64,
@@ -22823,7 +22913,9 @@ fn append_leading_decrement_carried_scalar(
     if is_claimed or !std::mem::equal_bytes(alias, target_name) {
         init_name = alias;
     } else {
-        let init = try find_induction_init(ir_bytes, function_name, target_name, 0, loop_index, bs);
+        let init = try find_induction_init(
+            ir_bytes, function_name, target_name, scope_node, scope_stmt_index, bs
+        );
         init_literal = init.literal;
         init_var = init.var_name;
         init_offset = init.offset;
@@ -22858,6 +22950,8 @@ fn collect_leading_decrement_carried_scalars(
     function_name: []u8,
     body_node: i64,
     loop_index: i64,
+    scope_node: i64,
+    scope_stmt_index: i64,
     aliases: &std::array::Array<LocalAliasState>,
     bs: i64,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
@@ -22880,8 +22974,8 @@ fn collect_leading_decrement_carried_scalars(
                 );
                 if std::mem::len(target) > 0 {
                     try append_leading_decrement_carried_scalar(
-                        ir_bytes, function_name, target, loop_index, aliases, &var states, bs,
-                        call_arg_type_cache
+                        ir_bytes, function_name, target, loop_index, scope_node, scope_stmt_index,
+                        aliases, &var states, bs, call_arg_type_cache
                     );
                 }
             }
@@ -23088,6 +23182,8 @@ fn lower_carried_return_if_from_cond(
             std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
             std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
             then_string_base,
+            "",
+            "",
             std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
             std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator())
         ));
@@ -23133,6 +23229,8 @@ fn lower_carried_return_if_from_cond(
             std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
             std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
             then_string_base,
+            "",
+            "",
             std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
             std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator())
         ));
@@ -23178,6 +23276,8 @@ fn lower_carried_return_if_from_cond(
         then_insts,
         std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
         then_string_base,
+        "",
+        "",
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator())
     ));
@@ -23407,6 +23507,14 @@ fn lower_multi_while_leading_decrement(
     temp_counter: i64,
     alias_counter: i64,
     loop_index: i64,
+    // scope_node / scope_stmt_index locate this loop inside its enclosing block, exactly as
+    // lower_multi_while_statement's do. The counter's 'var <counter> = <init>' declaration and the
+    // carried scalars' are lexical questions about the block the loop sits in; passing the function
+    // root and the loop's label bucket asked them of a statement ordinal the root does not have, so
+    // a loop in an if arm either failed its seed lookup outright or resolved a same-named
+    // declaration from an outer block (issue 1165 / 1162).
+    scope_node: i64,
+    scope_stmt_index: i64,
     // The enclosing scope's alias map: read for what value each carried scalar holds at this loop's
     // preheader (its loop-head phi seeds from that) and for which names other loop heads in this
     // function have already bound; written back with what this loop leaves live.
@@ -23435,6 +23543,21 @@ fn lower_multi_while_leading_decrement(
         }
         existing_index = existing_index + 1;
     }
+    // The statement scan above sees only the block this loop sits in. A leading-decrement loop in an
+    // if arm lowers into that arm's statement list, so a second one anywhere else in the function is
+    // invisible to it -- and both would bind %leading.decrement.head. The claim registry is the
+    // function-wide answer: it is where every head that ran already published the name it took, arms
+    // included. Refusing by name here keeps the one-loop rule loud instead of letting the second head
+    // become a module LLVM rejects.
+    if try local_alias_phi_name_is_bound(aliases, head_var) {
+        var head_message = std::string::String(std::mem::page_allocator());
+        try head_message.append_bytes(
+            "compiled mir: only one leading-decrement loop per function is supported: "
+        );
+        try head_message.append_bytes(function_name);
+        let head_message_bytes = head_message.as_bytes();
+        return error(head_message_bytes);
+    }
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
     );
@@ -23447,7 +23570,8 @@ fn lower_multi_while_leading_decrement(
     );
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
     var carried_states = try collect_leading_decrement_carried_scalars(
-        ir_bytes, function_name, body_node, loop_index, aliases, bs, call_arg_type_cache
+        ir_bytes, function_name, body_node, loop_index, scope_node, scope_stmt_index, aliases, bs,
+        call_arg_type_cache
     );
     let decrement_stmt = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, body_node, "statement", 0, bs
@@ -23473,7 +23597,7 @@ fn lower_multi_while_leading_decrement(
         return error(counter_message_bytes);
     }
     let induction_init = try find_induction_init(
-        ir_bytes, function_name, induction_var, 0, loop_index, bs
+        ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
     );
     // The synthesized decrement binds %<var> in the body. That is a definition like any other, so
     // it must ask the registry the same question every other counter path asks: is %<var> already
@@ -24121,8 +24245,21 @@ fn lower_multi_while_continue_latch(
     temp_counter: i64,
     alias_counter: i64,
     loop_index: i64,
+    // scope_node / scope_stmt_index locate this loop inside its enclosing block, exactly as
+    // lower_multi_while_statement's do. Only the top-level seed path reads them -- a nested loop
+    // takes explicit_seed_var -- but that path asks a lexical question, so it must ask it of the
+    // block the loop sits in rather than of the function root (issue 1165 / 1162).
+    scope_node: i64,
+    scope_stmt_index: i64,
     explicit_seed_var: []u8,
     rename_to: []u8,
+    // The enclosing scope's claim registry. This head spells its phi %<induction> (or %<rename_to>
+    // for a nested scan) with no scoped fallback, so it is the one head in this file that cannot
+    // rename its way out of a collision: it asks whether that spelling is already bound and refuses
+    // by name when it is, then publishes its own. Before it asked, a second continue-latch loop over
+    // the same counter -- two if arms each scanning with 'cursor' -- defined %cursor twice and LLVM
+    // rejected the module (issue 1165 / 1162).
+    aliases: &var std::array::Array<LocalAliasState>,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
@@ -24154,6 +24291,24 @@ fn lower_multi_while_continue_latch(
         return error("compiled mir: continue-latch loop body must end with a return");
     }
     let induction_var = try while_continue_induction_var(ir_bytes, function_name, statement, bs);
+    // The name this head is about to bind. Nothing here renames on a collision -- the body reads,
+    // the latch and the seed all spell it -- so a spelling some other head already took is refused
+    // by name, with the function in the message, rather than emitted twice.
+    var head_phi_name = induction_var;
+    if std::mem::len(rename_to) > 0 {
+        head_phi_name = rename_to;
+    }
+    if try local_alias_phi_name_is_bound(aliases, head_phi_name) {
+        var head_message = std::string::String(std::mem::page_allocator());
+        try head_message.append_bytes(
+            "compiled mir: continue-latch loop head name is already bound in this function: "
+        );
+        try head_message.append_bytes(function_name);
+        try head_message.append_bytes(" name ");
+        try head_message.append_bytes(head_phi_name);
+        let head_message_bytes = head_message.as_bytes();
+        return error(head_message_bytes);
+    }
     let increment_assign = try while_continue_increment_assign(ir_bytes, function_name, statement, bs);
     // The continue-if's induction advance is a constant-step increment or a copy-decrement. A
     // copy-decrement drives the latch through latch_copy_var (validated as a '<induction> - <int>'
@@ -24196,7 +24351,7 @@ fn lower_multi_while_continue_latch(
         induction_init_var = explicit_seed_var;
     } else {
         let init_node = try find_induction_init_value_node(
-            ir_bytes, function_name, induction_var, 0, loop_index, bs
+            ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
         );
         let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
         if std::mem::equal_bytes(init_kind, "Call") {
@@ -24216,7 +24371,7 @@ fn lower_multi_while_continue_latch(
             body_temp_counter = temp_counter + init_insts.len();
         } else {
             let resolved_init = try find_induction_init(
-                ir_bytes, function_name, induction_var, 0, loop_index, bs
+                ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
             );
             induction_init = resolved_init.literal;
             induction_init_var = resolved_init.var_name;
@@ -24389,8 +24544,14 @@ fn lower_multi_while_continue_latch(
                                 body_temp_counter,
                                 body_alias_counter,
                                 inner_loop_index,
+                                // The nested loop sits in this loop's body at body_index. It seeds
+                                // from explicit_seed_var, so nothing reads these today; naming the
+                                // real block keeps them true if it ever does.
+                                body_node,
+                                body_index,
                                 seed_var,
                                 "nested.loop.induction",
+                                &var body_aliases,
                                 &var body_stmts,
                                 bs,
                                 ir_lookup_index, canonical_facts, call_arg_type_cache
@@ -24407,10 +24568,14 @@ fn lower_multi_while_continue_latch(
         }
         body_index = body_index + 1;
     }
-    var induction_field = induction_var;
-    if std::mem::len(rename_to) > 0 {
-        induction_field = rename_to;
-    }
+    let induction_field = head_phi_name;
+    // Publish the name this head bound, and only the name. record_local_alias_loop_phi is the
+    // 'binds %<name>, states no value' record: no later head in this function may take the spelling,
+    // and nothing here repoints reads of the counter, because this lowering never established a
+    // single SSA name for what the loop leaves live. Claims an inner scan made are the function's
+    // too, so they ride out with it.
+    try record_local_alias_loop_phi(aliases, induction_var, induction_field);
+    try merge_local_alias_claims_into(aliases, &body_aliases);
     try stmts.append(compiled_mir::while_stmt(
         loop_index,
         induction_field,
