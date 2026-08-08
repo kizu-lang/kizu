@@ -81,8 +81,18 @@ selfhost-bootstrap:
 selfhost-production-gate:
     KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1 -v
 
+# Run the differential probe gate: every probe in selfhost/tests/probes through both
+# selfhost backends against the Go reference, diffed against the checked-in baseline.
+selfhost-probe-gate:
+    KIZU_RUN_SELFHOST_PROBES=1 go test -timeout=30m ./cmd/kizu -run 'TestSelfhostProbeDifferentialGate$' -count=1 -v
+
+# Run the differential probe gate against a selfhost compiler built elsewhere.
+selfhost-probe-gate-with runner:
+    KIZU_RUN_SELFHOST_PROBES=1 KIZU_SELFHOST_PROBE_RUNNER='{{runner}}' go test -timeout=30m ./cmd/kizu -run 'TestSelfhostProbeDifferentialGate$' -count=1 -v
+
 # Run the daily hosted artifact production, corpus, and CLI parity loop without rebuilding.
 selfhost-fast-gate:
+    just selfhost-probe-gate
     just selfhost-production-gate
     just selfhost-corpus-gate
     just selfhost-parse-parity-gate
