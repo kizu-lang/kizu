@@ -685,6 +685,7 @@ pub fn lower_call_return_function(
         return compiled_mir_function::single_call_return_function(
             llvm_symbol,
             owned_constructor.result_type.abi,
+            owned_constructor.result_type.abi,
             params_spec,
             "",
             constructor_runtime.symbol,
@@ -704,9 +705,18 @@ pub fn lower_call_return_function(
             call_node
     );
     let call_result_type = call_info.return_llvm_type;
+    // The signature is the DECLARATION, not the callee's return type: a '-> !T' function whose
+    // whole body is 'return g(x);' with 'g() -> T' must still be emitted returning !T, because
+    // every call site in the module already calls it as !T. The declared type is what gets
+    // emitted; the one legal difference (the declaration wrapping the callee's value) is wrapped
+    // by the renderer, and anything else is refused there by name. llvm_return_type is empty only
+    // on the untyped gate entry points, which have no declaration to honour.
+    let declared_return_type = declared_or_call_return_type(
+        llvm_return_type, call_result_type
+    );
     if instance.found and !std::mem::equal_bytes(
-        call_result_type, llvm_return_type
-    ) {
+        call_result_type, declared_return_type
+    ) and !compiled_error_abi::wraps_success(declared_return_type, call_result_type) {
         return error("compiled instance call return ABI mismatch");
     }
     let args = try compiled_mir_lower_call::lower_call_args_instance(
@@ -716,12 +726,26 @@ pub fn lower_call_return_function(
     );
     return compiled_mir_function::single_call_return_function(
         llvm_symbol,
+        declared_return_type,
         call_result_type,
         params_spec,
         call_info.module_prefix,
         call_info.callee_name,
         args
     );
+}
+// declared_or_call_return_type picks the type the emitted signature must carry. Every typed entry
+// point derives llvm_return_type from the function's declaration, and that is the signature its
+// call sites already agreed on. Only the untyped gate entry points hand this an empty declaration;
+// there, and only there, the callee's return type is all the information available.
+fn declared_or_call_return_type(
+    llvm_return_type: []u8,
+    call_result_type: []u8
+) -> []u8 {
+    if std::mem::len(llvm_return_type) == 0 {
+        return call_result_type;
+    }
+    return llvm_return_type;
 }
 // callee_is_field_expr reports whether the value node is a Call whose callee is a
 // field-mode FieldExpr, i.e. a struct-field method call (receiver.method()) rather
@@ -2038,7 +2062,8 @@ pub fn lower_array_method_return(
     );
     if std::mem::equal_bytes(method_name, "len") {
         return try lower_array_len_method_return(
-            ir_lookup_index, ir_bytes, function_name, llvm_symbol, params_spec, call_node, bs
+            ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type,
+            params_spec, call_node, bs
         );
     }
     if std::mem::equal_bytes(method_name, "get") {
@@ -3941,12 +3966,17 @@ fn match_union_arm_expr(
 // lands the Ast struct value as a parameter, lowers the self.children field access
 // as an extractvalue, and lowers Array.len() to the array_len builtin runtime call
 // (@kizu_array_len). It deliberately does NOT touch the AstNode/AstData union,
-// Arena.get, array_get, or error-union return; those remain blocked in tracker 961.
+// Arena.get or array_get; those remain blocked in tracker 961. The runtime helper hands back a
+// bare i64, so the declared return type is threaded through here too: a '-> !i64' accessor is
+// emitted returning !i64 with the length wrapped, and a declaration that is neither i64 nor its
+// error union is refused by name at the renderer rather than emitted as a bare i64 the call sites
+// do not use.
 pub fn lower_array_len_method_return(
     ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     llvm_symbol: []u8,
+    llvm_return_type: []u8,
     params_spec: []u8,
     call_node: i64,
     bs: i64
@@ -4018,6 +4048,7 @@ pub fn lower_array_len_method_return(
     ));
     return compiled_mir_function::single_call_return_function(
         llvm_symbol,
+        declared_or_call_return_type(llvm_return_type, "i64"),
         "i64",
         params_spec,
         "",
@@ -23994,12 +24025,18 @@ fn rename_induction_in_insts(
         };
         var do_rename = false;
         var hold_id = 0;
+        // Renaming changes which value a read names, never what that value IS. The operand keeps
+        // the type it was lowered with: an induction counter is i64 either way, but this is also
+        // the alias resolver for a loop guard, and a guard reading a rebound slice or struct would
+        // otherwise come back out of here retyped as an integer.
+        var hold_type = "i64";
         if std::mem::len(name) > 0 and std::mem::equal_bytes(name, from) {
             do_rename = true;
             hold_id = compiled_mir::expr_inst_id(inst);
+            hold_type = compiled_mir::expr_inst_llvm_type(inst);
         }
         if do_rename {
-            try insts.set(index, compiled_mir::var_expr_inst(hold_id, "i64", to));
+            try insts.set(index, compiled_mir::var_expr_inst(hold_id, hold_type, to));
         }
         index = index + 1;
     }
@@ -24384,15 +24421,37 @@ fn lower_multi_while_continue_latch(
     var init_result_id = -1;
     var body_string_counter = string_counter;
     var body_temp_counter = temp_counter;
+    // Everything this loop emits ahead of its head sits at the same point in the program the body
+    // does -- after every statement of the enclosing scope -- so it wants the same answer the body
+    // gets, and until now it had no alias map at all and read declaration spellings. Three edges
+    // are there: the counter's own seed, the name that seed copies, and a hoisted seed call's
+    // arguments. The guard, one block later, is the fourth.
+    let induction_alias = try local_alias_current_name(aliases, induction_var);
+    let claimed_induction_phi = try local_alias_loop_phi_name(aliases, induction_var);
+    // Seeding the counter asks about VALUES: what does the edge into this preheader carry for it?
+    // An earlier loop's head phi and an if ahead of this loop that rebound the counter both carry
+    // one, and either way the declaration's literal is not what reaches here. The declaration is
+    // the seed only when nothing carries the counter in at all.
+    let induction_seeds_from_alias = std::mem::len(claimed_induction_phi) > 0 or
+        !std::mem::equal_bytes(induction_alias, induction_var);
     if std::mem::len(explicit_seed_var) > 0 {
-        induction_init_var = explicit_seed_var;
+        induction_init_var = try local_alias_current_name(aliases, explicit_seed_var);
+    } else {
+    if induction_seeds_from_alias {
+        induction_init_var = induction_alias;
     } else {
         let init_node = try find_induction_init_value_node(
             ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
         );
         let init_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, init_node, bs);
         if std::mem::equal_bytes(init_kind, "Call") {
-            init_result_id = try lower_expr_into(
+            // The hoisted seed call runs in the preheader, which is a position in the enclosing
+            // scope, so its argument reads resolve there. A call's arguments are spelled inside the
+            // call instruction rather than emitted as separate operands, so renaming afterwards
+            // cannot reach them -- 'var scan = pick(base)' after an if arm rebound base has to be
+            // LOWERED with the alias map, not repaired once it is lowered. The counter's own name
+            // is not special here: it is the one name that cannot appear in its own initializer.
+            init_result_id = try lower_expr_into_local_aliases(
                 ir_bytes,
                 function_name,
                 module_prefix,
@@ -24401,6 +24460,7 @@ fn lower_multi_while_continue_latch(
                 string_counter,
                 temp_counter,
                 &var init_insts,
+                aliases,
                 bs,
                 ir_lookup_index, canonical_facts, call_arg_type_cache
             );
@@ -24411,35 +24471,14 @@ fn lower_multi_while_continue_latch(
                 ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
             );
             induction_init = resolved_init.literal;
-            induction_init_var = resolved_init.var_name;
+            // A copy or base-plus-offset seed names another local, and that name is emitted into
+            // the preheader verbatim. It is a read like any other: 'var scan = base;' after an if
+            // arm rebound base must seed from the merged value, not from base's declaration.
+            induction_init_var = try local_alias_current_name(aliases, resolved_init.var_name);
             induction_init_offset = resolved_init.offset;
         }
     }
-    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let cond_result = try lower_expr_into(
-        ir_bytes,
-        function_name,
-        module_prefix,
-        locals_spec,
-        cond_node,
-        body_string_counter,
-        body_temp_counter,
-        &var cond_insts,
-        bs,
-        ir_lookup_index, canonical_facts, call_arg_type_cache
-    );
-    body_string_counter = body_string_counter + try count_strings_in_insts(&cond_insts);
-    body_temp_counter = body_temp_counter + cond_insts.len();
-    if std::mem::len(rename_to) > 0 {
-        try rename_induction_in_insts(&var cond_insts, induction_var, rename_to);
     }
-    // Every body statement lowers; there is no trailing latch assign to strip. The continue-if
-    // lowers to a ContinueLatch if, the trailing return to a return statement, and -- for a nested
-    // scan -- a '<induction> = <local>' re-seed assign is consumed (it emits no instruction) and
-    // its following nested while lowers through a recursive continue-latch call.
-    var body_try_counter = loop_index * 1000;
-    var body_alias_counter = alias_counter;
-    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     // The body sees the enclosing scope's current SSA names, the way every other body walk in this
     // file does: a variable an if arm ahead of the loop reassigned reads that merged value inside
     // the body, not the one its declaration bound. Starting empty made every body read resolve to
@@ -24453,6 +24492,36 @@ fn lower_multi_while_continue_latch(
     if std::mem::len(induction_var) > 0 {
         try claim_local_alias_loop_phi(&var body_aliases, induction_var, head_phi_name);
     }
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    // The guard stands at the head, one edge past the seed and one edge before the body, and every
+    // name in it wants exactly what the body's first statement would get: the enclosing scope's
+    // current binding, with the counter reseated onto this head's phi. That is body_aliases before
+    // the body has changed anything, so the guard lowers through it. Lowering with the map rather
+    // than renaming afterwards is what reaches a name spelled inside a call instruction -- 'while
+    // scan < width_of(bound)' carries bound in the call's own argument list, where no pass over the
+    // emitted operands can see it.
+    let cond_result = try lower_expr_into_local_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        body_string_counter,
+        body_temp_counter,
+        &var cond_insts,
+        &body_aliases,
+        bs,
+        ir_lookup_index, canonical_facts, call_arg_type_cache
+    );
+    body_string_counter = body_string_counter + try count_strings_in_insts(&cond_insts);
+    body_temp_counter = body_temp_counter + cond_insts.len();
+    // Every body statement lowers; there is no trailing latch assign to strip. The continue-if
+    // lowers to a ContinueLatch if, the trailing return to a return statement, and -- for a nested
+    // scan -- a '<induction> = <local>' re-seed assign is consumed (it emits no instruction) and
+    // its following nested while lowers through a recursive continue-latch call.
+    var body_try_counter = loop_index * 1000;
+    var body_alias_counter = alias_counter;
+    var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var body_index = 0;
     while body_index < body_count {
         let body_stmt = try ir_contract::body_child_sequence_from(

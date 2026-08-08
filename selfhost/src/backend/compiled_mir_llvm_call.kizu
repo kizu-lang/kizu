@@ -1,3 +1,4 @@
+import selfhost::backend::compiled_error_abi;
 import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_util;
@@ -70,7 +71,7 @@ pub fn append_call_return(
     try out.append_bytes("  %");
     try out.append_bytes(inst.result.payload);
     try out.append_bytes(" = call ");
-    try out.append_bytes(function.return_type.llvm_name);
+    try out.append_bytes(inst.result.ty.llvm_name);
     try out.append_bytes(" @");
     try append_callee_symbol(
         out,
@@ -81,13 +82,78 @@ pub fn append_call_return(
     try append_call_args(out, &function.call_args);
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  ret ");
-    try out.append_bytes(function.return_type.llvm_name);
-    try out.append_bytes(" %");
-    try out.append_bytes(function.entry.terminator.value.payload);
-    try out.append_byte(cast<u8>(10));
+    try append_call_return_value(
+        out,
+        function.name,
+        function.return_type.llvm_name,
+        inst.result.ty.llvm_name,
+        function.entry.terminator.value.payload
+    );
     try out.append_bytes("}");
     try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// append_call_return_value returns the callee's result under the DECLARED return type. When the
+// declaration is the error union that carries the callee's value ('-> !T' around 'g() -> T') the
+// value is wrapped as the success arm, exactly as the expression-return path wraps it; when the
+// two types are neither equal nor that one legal wrap, the shape is refused by name rather than
+// emitted with a signature its call sites do not use.
+fn append_call_return_value(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    return_type: []u8,
+    call_result_type: []u8,
+    result_name: []u8
+) -> !void {
+    if std::mem::equal_bytes(return_type, call_result_type) {
+        try out.append_bytes("  ret ");
+        try out.append_bytes(return_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(result_name);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if !compiled_error_abi::wraps_success(return_type, call_result_type) or
+        std::mem::equal_bytes(call_result_type, "void") {
+        // The error carries a view into this buffer, so the buffer outlives the call: releasing it
+        // here (a defer, or a deinit before the return) hands the diagnostic freed bytes and the
+        // refusal prints as garbage. The same bounded leak every other message-building refusal
+        // in this backend takes.
+        var message = std::string::String(std::mem::page_allocator());
+        try message.append_bytes("compiled mir llvm: call return ABI mismatch in ");
+        try message.append_bytes(llvm_symbol);
+        try message.append_bytes(": declared ");
+        try message.append_bytes(return_type);
+        try message.append_bytes(", callee returns ");
+        try message.append_bytes(call_result_type);
+        let message_bytes = message.as_bytes();
+        return error(message_bytes);
+    }
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_wrap0 = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" zeroinitializer, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_wrap1 = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_wrap0, ");
+    try out.append_bytes(call_result_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(result_name);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_wrap1");
     try out.append_byte(cast<u8>(10));
     return;
 }

@@ -4958,6 +4958,11 @@ func (c *Checker) checkArenaNewExpr(
 }
 
 // checkStructLiteralExpr validates field names and initializer types.
+//
+// A literal names each declared field exactly once (ADR-0079). A repeated name is
+// reported where it is written, before the declared fields are measured, because a
+// literal that writes one field twice carries two initializers for one slot and no
+// rule picks between them.
 func (c *Checker) checkStructLiteralExpr(
 	expr *ast.StructLiteralExpr,
 	env *scope,
@@ -4970,6 +4975,9 @@ func (c *Checker) checkStructLiteralExpr(
 	values := map[string]Type{}
 	exprs := map[string]ast.Expression{}
 	for _, field := range expr.Fields {
+		if _, written := values[field.Name]; written {
+			return "", errorf("type error: duplicate field `%s.%s`", expr.TypeName, field.Name)
+		}
 		got, err := c.checkExpr(field.Value, env, unsafe)
 		if err != nil {
 			return "", err

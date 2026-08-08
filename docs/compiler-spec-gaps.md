@@ -50,6 +50,18 @@ Source: [ADR-0050](adr/0050-visibility-diagnostics.md) and
 - external modules may not construct or access private fields
 - public enum tags and union variants are visible when their type is public
 
+### Struct Literals
+
+Source: [ADR-0079](adr/0079-struct-literal-field-initializers.md).
+
+- a struct literal names each declared field exactly once
+- an undeclared field name is an error
+- an omitted declared field is an error
+- a repeated field name is an error; last-wins is not the rule
+- written order is free; fields match the declaration by name
+- `examples/negative/duplicate_struct_field.kizu` carries the repeated-name case
+  in the reusable conformance manifest
+
 ### Diagnostics
 
 Source: [ADR-0050](adr/0050-visibility-diagnostics.md) and

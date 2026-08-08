@@ -480,6 +480,22 @@ struct User {
 }
 ```
 
+struct literal は、その struct が宣言する field をちょうど一度ずつ書きます
+([ADR-0079](docs/adr/0079-struct-literal-field-initializers.md))。
+
+```kizu
+let user = User { name: "alice", age: 30 };
+```
+
+* 宣言されていない field 名は compile error です
+* 宣言された field を書かないのは compile error です
+* 同じ field を二度書くのは compile error です。後勝ちにはしません
+* 書く順序は自由です。field は名前で宣言に対応づけます
+
+```kizu
+let user = User { name: "alice", age: 30, age: 31 }; // error: duplicate field `User.age`
+```
+
 ### 6.5 namespace access
 
 Kizu は型や名前空間に属する item lookup に `::` を使います。
@@ -1169,7 +1185,7 @@ assignment のルール:
 
 ```kizu
 fn main() -> void {
-    var user = User { name: "alice" };
+    var user = User { name: "alice", age: 30 };
     user.name = "bob";
 }
 ```
