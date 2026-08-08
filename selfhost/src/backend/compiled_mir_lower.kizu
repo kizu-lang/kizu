@@ -11027,61 +11027,6 @@ fn loop_scoped_induction_phi_name(
     return call_arg_type_cache.name_store.own(out);
 }
 
-// loop_head_defines_phi_for reports whether this loop's head defines the SSA name a source variable
-// resolves to inside the loop: its induction counter or one of its carried scalars. Those names must
-// not be rewritten to an enclosing statement's alias -- the loop head, not that statement, supplies
-// the value on the preheader edge.
-fn loop_head_defines_phi_for(
-    states: &std::array::Array<CarriedScalarState>,
-    induction_var: []u8,
-    name: []u8
-) -> !bool {
-    if std::mem::equal_bytes(name, induction_var) {
-        return true;
-    }
-    return (try carried_scalar_index(states, name)) >= 0;
-}
-
-// rename_loop_cond_reads resolves a loop condition's variable reads against the enclosing scope. The
-// condition lowers with no alias map, so a variable an earlier statement rebound to a fresh SSA name
-// ('current = 0 - current;' ahead of 'while ... current <= ...' in std::fmt::append_i64) would read
-// the pre-assignment value. The induction counter is rewritten last, to this loop's head phi.
-fn rename_loop_cond_reads(
-    insts: &var std::array::Array<compiled_mir::MirExprInst>,
-    aliases: &std::array::Array<LocalAliasState>,
-    states: &std::array::Array<CarriedScalarState>,
-    induction_var: []u8,
-    induction_phi: []u8
-) -> !void {
-    var index = 0;
-    while index < aliases.len() {
-        let state = try aliases.at(index);
-        let source_name = state.source_name;
-        let current_name = state.current_name;
-        if !std::mem::equal_bytes(source_name, current_name) and
-            !(try loop_head_defines_phi_for(states, induction_var, source_name)) {
-            try rename_induction_in_insts(insts, source_name, current_name);
-        }
-        index = index + 1;
-    }
-    // A carried scalar whose head name is scoped -- this loop is nested inside one carrying the
-    // same variable -- is read in the condition under that scoped name, the one this head binds.
-    var carried_index = 0;
-    while carried_index < states.len() {
-        let carried_state = try states.at(carried_index);
-        if !std::mem::equal_bytes(carried_state.source_name, carried_state.head_name) {
-            try rename_induction_in_insts(
-                insts, carried_state.source_name, carried_state.head_name
-            );
-        }
-        carried_index = carried_index + 1;
-    }
-    if !std::mem::equal_bytes(induction_phi, induction_var) {
-        try rename_induction_in_insts(insts, induction_var, induction_phi);
-    }
-    return;
-}
-
 fn copy_local_aliases(
     aliases: &std::array::Array<LocalAliasState>
 ) -> !std::array::Array<LocalAliasState> {
@@ -21575,7 +21520,13 @@ fn lower_multi_while_statement(
                             scope_stmt_index, bs
                         );
                         carried_init_literal = carried_init.literal;
-                        carried_init_var = carried_init.var_name;
+                        // Nothing carries THIS name in, so its declaration is the seed -- but the
+                        // declaration names ANOTHER local, and that name is emitted into the
+                        // preheader verbatim. 'var total = base;' after an if arm rebound base
+                        // seeds from the merged value, not from base's declaration, the same rule
+                        // the primary counter's copy seed follows.
+                        carried_init_var =
+                            try local_alias_current_name(aliases, carried_init.var_name);
                         carried_init_offset = carried_init.offset;
                     } else {
                         var seed_insts =
@@ -21672,7 +21623,12 @@ fn lower_multi_while_statement(
         !std::mem::equal_bytes(init_kind, "Var") and
         !init_is_base_plus_offset and
         !induction_seeds_from_alias {
-        init_result_id = try lower_expr_into(
+        // The seed expression runs in the preheader, a position in the ENCLOSING scope, so every
+        // name in it resolves there. A call spells its arguments inside the call instruction and a
+        // field read spells its base inside the field instruction, so neither is reachable by a
+        // pass over the emitted operands afterwards: 'var i = pick(base)' and 'var i = c.lo' after
+        // an if arm rebound base or c have to be LOWERED through the map.
+        init_result_id = try lower_expr_into_local_aliases(
             ir_bytes,
             function_name,
             module_prefix,
@@ -21681,6 +21637,7 @@ fn lower_multi_while_statement(
             seed_string_counter,
             seed_temp_counter,
             &var init_insts,
+            aliases,
             bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
@@ -21691,7 +21648,10 @@ fn lower_multi_while_statement(
             ir_bytes, function_name, induction_var, scope_node, scope_stmt_index, bs
         );
         induction_init_literal = induction_init.literal;
-        induction_init_var = induction_init.var_name;
+        // A copy or base-plus-offset seed names another local, emitted into the preheader
+        // verbatim. It is a read like any other: 'var i = base;' after an if arm rebound base
+        // seeds from the merged value, not from base's declaration.
+        induction_init_var = try local_alias_current_name(aliases, induction_init.var_name);
         induction_init_offset = induction_init.offset;
         if induction_seeds_from_alias {
             induction_init_literal = 0;
@@ -21699,6 +21659,33 @@ fn lower_multi_while_statement(
             induction_init_offset = 0;
         }
     }
+    }
+    // The body sees the enclosing scope's current SSA names: a variable an earlier statement
+    // rebound reads that value inside the loop, not the one it had before. The names this loop's
+    // head defines are then reseated onto their phis, which own the value in the body.
+    //
+    // The guard stands at the head, one edge past the seed and one edge before the body, and every
+    // name in it wants exactly what the body's first statement would get. That is body_aliases
+    // before the body has changed anything, so it is built here and the guard lowers through it.
+    // Lowering with the map rather than renaming afterwards is what reaches a name spelled inside
+    // a call instruction, a field read, or an index target -- 'while i < width_of(bound)' carries
+    // bound in the call's own argument list, where no pass over the emitted operands can see it.
+    var body_aliases = try copy_local_aliases(aliases);
+    defer body_aliases.deinit();
+    // Claimed rather than merely set: the head has defined these names, so a nested loop in this
+    // body over the same variable must take a scoped phi name instead of redefining one of them.
+    if std::mem::len(induction_var) > 0 {
+        try claim_local_alias_loop_phi(&var body_aliases, induction_var, induction_phi);
+    }
+    var carried_reset_index = 0;
+    while carried_reset_index < carried_scalar_states.len() {
+        let carried_reset_state = try carried_scalar_states.at(carried_reset_index);
+        let carried_reset_source = carried_reset_state.source_name;
+        let carried_reset_current = carried_reset_state.current_name;
+        try claim_local_alias_loop_phi(
+            &var body_aliases, carried_reset_source, carried_reset_current
+        );
+        carried_reset_index = carried_reset_index + 1;
     }
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
     var cond_rhs_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
@@ -21728,7 +21715,7 @@ fn lower_multi_while_statement(
         let first_node = first_leaf.node;
         let first_true = first_leaf.true_target;
         let first_false = first_leaf.false_target;
-        cond_result = try lower_expr_into(
+        cond_result = try lower_expr_into_local_aliases(
             ir_bytes,
             function_name,
             module_prefix,
@@ -21737,11 +21724,9 @@ fn lower_multi_while_statement(
             cond_string_base,
             cond_temp_base,
             &var cond_insts,
+            &body_aliases,
             bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
-        );
-        try rename_loop_cond_reads(
-            &var cond_insts, aliases, &carried_scalar_states, induction_var, induction_phi
         );
         try cond_targets.append(compiled_mir::cond_target(first_true, first_false));
         var acc_strings = try count_strings_in_insts(&cond_insts);
@@ -21750,7 +21735,7 @@ fn lower_multi_while_statement(
         let second_node = second_leaf.node;
         let second_true = second_leaf.true_target;
         let second_false = second_leaf.false_target;
-        cond_rhs_result = try lower_expr_into(
+        cond_rhs_result = try lower_expr_into_local_aliases(
             ir_bytes,
             function_name,
             module_prefix,
@@ -21759,11 +21744,9 @@ fn lower_multi_while_statement(
             cond_string_base + acc_strings,
             acc_temp,
             &var cond_rhs_insts,
+            &body_aliases,
             bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
-        );
-        try rename_loop_cond_reads(
-            &var cond_rhs_insts, aliases, &carried_scalar_states, induction_var, induction_phi
         );
         try cond_targets.append(compiled_mir::cond_target(second_true, second_false));
         acc_strings = acc_strings + try count_strings_in_insts(&cond_rhs_insts);
@@ -21775,7 +21758,7 @@ fn lower_multi_while_statement(
             let leaf_node = leaf.node;
             let leaf_true = leaf.true_target;
             let leaf_false = leaf.false_target;
-            let operand_result = try lower_expr_into(
+            let operand_result = try lower_expr_into_local_aliases(
                 ir_bytes,
                 function_name,
                 module_prefix,
@@ -21784,11 +21767,9 @@ fn lower_multi_while_statement(
                 cond_string_base + acc_strings,
                 acc_temp,
                 &var operand_insts,
+                &body_aliases,
                 bs,
                 ir_lookup_index, canonical_facts, call_arg_type_cache
-            );
-            try rename_loop_cond_reads(
-                &var operand_insts, aliases, &carried_scalar_states, induction_var, induction_phi
             );
             acc_strings = acc_strings + try count_strings_in_insts(&operand_insts);
             acc_temp = acc_temp + operand_insts.len();
@@ -21802,7 +21783,7 @@ fn lower_multi_while_statement(
         body_temp_counter = acc_temp;
         leaves.deinit();
     } else {
-        cond_result = try lower_expr_into(
+        cond_result = try lower_expr_into_local_aliases(
             ir_bytes,
             function_name,
             module_prefix,
@@ -21811,11 +21792,9 @@ fn lower_multi_while_statement(
             cond_string_base,
             cond_temp_base,
             &var cond_insts,
+            &body_aliases,
             bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
-        );
-        try rename_loop_cond_reads(
-            &var cond_insts, aliases, &carried_scalar_states, induction_var, induction_phi
         );
         body_string_counter = cond_string_base + try count_strings_in_insts(&cond_insts);
         body_temp_counter = cond_temp_base + cond_insts.len();
@@ -21829,26 +21808,6 @@ fn lower_multi_while_statement(
     // is the last increment; earlier increments in the run become secondary inductions
     // rendered alongside it (issue 1165 / 1162).
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
-    // The body sees the enclosing scope's current SSA names: a variable an earlier statement
-    // rebound reads that value inside the loop, not the one it had before. The names this loop's
-    // head defines are then reseated onto their phis, which own the value in the body.
-    var body_aliases = try copy_local_aliases(aliases);
-    defer body_aliases.deinit();
-    // Claimed rather than merely set: the head has defined these names, so a nested loop in this
-    // body over the same variable must take a scoped phi name instead of redefining one of them.
-    if std::mem::len(induction_var) > 0 {
-        try claim_local_alias_loop_phi(&var body_aliases, induction_var, induction_phi);
-    }
-    var carried_reset_index = 0;
-    while carried_reset_index < carried_scalar_states.len() {
-        let carried_reset_state = try carried_scalar_states.at(carried_reset_index);
-        let carried_reset_source = carried_reset_state.source_name;
-        let carried_reset_current = carried_reset_state.current_name;
-        try claim_local_alias_loop_phi(
-            &var body_aliases, carried_reset_source, carried_reset_current
-        );
-        carried_reset_index = carried_reset_index + 1;
-    }
     // A memory-carried loop's carried scalars each own a stack slot, keyed by the loop's head name
     // for the variable. Publishing the slot onto the body's alias map is what lets an assignment
     // nested inside an if arm honour compiled_mir.kizu:869 -- store where the update happens, so the
@@ -22478,7 +22437,10 @@ fn lower_multi_while_statement(
             ir_bytes, function_name, secondary_var, scope_node, scope_stmt_index, bs
         );
         var secondary_init_literal = secondary_init.literal;
-        var secondary_init_var = secondary_init.var_name;
+        // A declaration that copies another local emits that name into the preheader verbatim, so
+        // it resolves there like every other read: 'var j = base;' after an if arm rebound base
+        // seeds from the merged value.
+        var secondary_init_var = try local_alias_current_name(aliases, secondary_init.var_name);
         var secondary_init_offset = secondary_init.offset;
         // A secondary counter's preheader edge obeys the same rule as the primary counter's and
         // the carried scalars': it carries the value live at the preheader, and the 'var <name> =
@@ -22677,7 +22639,11 @@ fn lower_multi_while_condition_only(
         return error("compiled mir: condition-only loop header must fold into a single branch");
     }
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let cond_result = try lower_expr_into(
+    // The header reads the enclosing scope's current SSA names, and this loop defines no phi, so
+    // the enclosing map is the whole answer. It lowers with that map rather than being renamed
+    // after the fact, because a name spelled inside a call instruction, a field read, or an index
+    // target is not an operand any later pass can reach.
+    let cond_result = try lower_expr_into_local_aliases(
         ir_bytes,
         function_name,
         module_prefix,
@@ -22686,16 +22652,10 @@ fn lower_multi_while_condition_only(
         string_counter,
         temp_counter,
         &var cond_insts,
+        aliases,
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
-    // The header reads the enclosing scope's current SSA names. This loop defines no phi, so there
-    // is nothing for the rename to hold back: the empty carried set and empty induction names leave
-    // only the enclosing aliases to apply.
-    var carried_scalar_states =
-        std::array::Array<CarriedScalarState>(std::mem::page_allocator());
-    defer carried_scalar_states.deinit();
-    try rename_loop_cond_reads(&var cond_insts, aliases, &carried_scalar_states, "", "");
     var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
     var body_temp_counter = temp_counter + cond_insts.len();
     var body_try_counter = loop_index * 1000;

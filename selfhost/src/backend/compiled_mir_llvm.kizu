@@ -5685,9 +5685,16 @@ fn append_dispatch_return_call(
             out, function.name, &stmt.call_args, scope.numeric_scope
         );
     }
-    try out.append_bytes("  %");
-    try append_dispatch_call_result_name(out, scope);
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM.
+    let produces_value = compiled_mir_llvm_call::call_produces_value(stmt.llvm_type);
+    if produces_value {
+        try out.append_bytes("  %");
+        try append_dispatch_call_result_name(out, scope);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -5706,6 +5713,20 @@ fn append_dispatch_return_call(
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
     let own_return = function.return_type.llvm_name;
+    if !produces_value {
+        // Nothing was named, so the DECLARATION alone decides the return. The wrap name keeps
+        // append_dispatch_call_result_name's per-scope disambiguation.
+        if scope.enum_dispatch {
+            return compiled_mir_llvm_call::append_void_call_return(
+                out, function.name, own_return, "enumdispatchcall",
+                scope.match_index, scope.arm_index, "_wrap0"
+            );
+        }
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, own_return, "dispatchcall",
+            scope.numeric_scope, -1, "_wrap0"
+        );
+    }
     if std::mem::starts_with(own_return, "%kizu.error.") and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
         try out.append_bytes("  %");
@@ -5754,6 +5775,19 @@ fn append_dispatch_return_expr(
     try append_expr_insts(out, function.name, &stmt.expr_insts);
     let return_type = function.return_type.llvm_name;
     let value_type = try expr_inst_type_by_id(&stmt.expr_insts, stmt.expr_result_id);
+    if !compiled_mir_llvm_call::call_produces_value(value_type) {
+        // The returned expression is a void call, emitted as a statement with no name to return.
+        if scope.enum_dispatch {
+            return compiled_mir_llvm_call::append_void_call_return(
+                out, function.name, return_type, "enumdispatchret",
+                scope.match_index, scope.arm_index, "_ok"
+            );
+        }
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, return_type, "dispatchret",
+            scope.numeric_scope, -1, "_ok"
+        );
+    }
     let needs_wrap = is_error_union_type(return_type) and
         std::mem::len(value_type) > 0 and
         !std::mem::equal_bytes(value_type, return_type);
@@ -6058,9 +6092,16 @@ fn append_multi_return_call(
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
         out, function.name, &stmt.call_args, local_prefix
     );
-    try out.append_bytes("  %");
-    try append_return_call_result_name(out, stmt, local_prefix);
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM.
+    let produces_value = compiled_mir_llvm_call::call_produces_value(stmt.llvm_type);
+    if produces_value {
+        try out.append_bytes("  %");
+        try append_return_call_result_name(out, stmt, local_prefix);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -6074,6 +6115,13 @@ fn append_multi_return_call(
     // success-typed callee: wrap the plain result into the function's error union.
     // A callee sharing the function's return type returns its value directly.
     let own_return = function.return_type.llvm_name;
+    if !produces_value {
+        // Nothing was named, so the DECLARATION alone decides the return. The wrap name matches
+        // append_return_call_result_name's '<stmt.name>_<local_prefix>'.
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, own_return, stmt.name, local_prefix, -1, "_wrap0"
+        );
+    }
     if std::mem::starts_with(own_return, "%kizu.error.") and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
         try out.append_bytes("  %");
@@ -6179,8 +6227,8 @@ fn append_multi_return_expr(
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.expr_insts);
     try append_expr_return_value(
-        out, function.return_type.llvm_name, &stmt.expr_insts, stmt.expr_result_id,
-        stmt.expr_result_id
+        out, function.name, function.return_type.llvm_name, &stmt.expr_insts,
+        stmt.expr_result_id, stmt.expr_result_id
     );
     return;
 }
@@ -6841,12 +6889,19 @@ fn append_enum_dispatch_merge_allocas_walk(
 }
 fn append_expr_return_value(
     out: &var std::string::String,
+    llvm_symbol: []u8,
     return_type: []u8,
     insts: &std::array::Array<compiled_mir::MirExprInst>,
     result_id: i64,
     local_prefix: i64
 ) -> !void {
     let value_type = try expr_inst_type_by_id(insts, result_id);
+    if !compiled_mir_llvm_call::call_produces_value(value_type) {
+        // The returned expression is a void call, emitted as a statement with no name to return.
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, llvm_symbol, return_type, "retwrap", local_prefix, -1, "_ok"
+        );
+    }
     let needs_wrap = is_error_union_type(return_type) and
         std::mem::len(value_type) > 0 and
         !std::mem::equal_bytes(value_type, return_type);
@@ -7140,9 +7195,16 @@ fn append_call_inst(
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
         out, llvm_symbol, call_args, local_prefix
     );
-    try out.append_bytes("  %");
-    try out.append_bytes(name);
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM. The only expression position a void call can hold is the returned value itself, and
+    // the return emitters read the void type rather than this name.
+    if compiled_mir_llvm_call::call_produces_value(llvm_type) {
+        try out.append_bytes("  %");
+        try out.append_bytes(name);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -7692,6 +7754,12 @@ fn append_multi_then_call_return(
 ) -> !void {
     let temp_base = try then_temp_base(stmt);
     let own_return = function.return_type.llvm_name;
+    if !compiled_mir_llvm_call::call_produces_value(stmt.llvm_type) {
+        // Nothing was named, so the DECLARATION alone decides the return.
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, own_return, "if", stmt.if_index, -1, "_retcall_ok"
+        );
+    }
     if is_error_union_type(own_return) and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
         try out.append_bytes("  %if");
@@ -7807,6 +7875,12 @@ fn append_multi_if_return_expr(
     try append_expr_insts(out, function.name, &stmt.then_expr_insts);
     let return_type = function.return_type.llvm_name;
     let value_type = try expr_inst_type_by_id(&stmt.then_expr_insts, stmt.then_expr_result_id);
+    if !compiled_mir_llvm_call::call_produces_value(value_type) {
+        // The returned expression is a void call, emitted as a statement with no name to return.
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, return_type, "if", stmt.if_index, -1, "_retexpr_ok"
+        );
+    }
     let needs_wrap = is_error_union_type(return_type) and
         std::mem::len(value_type) > 0 and
         !std::mem::equal_bytes(value_type, return_type);
@@ -9021,9 +9095,15 @@ fn append_multi_then_call(
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
         out, llvm_symbol, &stmt.then_call_args, local_prefix
     );
-    try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, try then_temp_base(stmt));
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM. append_multi_then_call_return reads the void type rather than this name.
+    if compiled_mir_llvm_call::call_produces_value(stmt.llvm_type) {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, try then_temp_base(stmt));
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -9128,6 +9208,7 @@ fn append_expr_return(
     // '!bool' function) wraps it instead of returning a bare i1 typed as the union.
     try append_expr_return_value(
         out,
+        function.name,
         function.return_type.llvm_name,
         &function.expr_insts,
         function.entry.terminator.value.id,
@@ -9881,9 +9962,16 @@ fn append_call_expr(
         try append_ll_line(out, "_storage_failure ]");
         return;
     }
-    try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM. The only expression position a void call can hold is the returned value itself, and
+    // the return emitters read the void type rather than this name.
+    if compiled_mir_llvm_call::call_produces_value(inst.llvm_type) {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(inst.llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
