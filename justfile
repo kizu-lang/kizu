@@ -44,8 +44,13 @@ selfhost-oracle-budget:
     GOGC=1000 KIZU_RUN_SELFHOST_ORACLE=1 KIZU_ENFORCE_SELFHOST_ORACLE_BUDGET=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -count=1 -v
 
 # Run the stage0-native backend artifact contract gate.
+#
+# The gate hands the staged module to an LLVM reader that it first PROVES is a verifier,
+# by making it reject a dominance violation. Apple clang -- what an unadorned PATH
+# resolves on macOS -- accepts one, so a keg-only Homebrew LLVM is put ahead of it when
+# brew has one. On a machine without brew the substitution is empty and PATH is unchanged.
 selfhost-backend-artifact-gate:
-    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=40m ./cmd/kizu -run 'TestSelfhostBackendArtifactGate$' -count=1 -v
+    PATH="$(brew --prefix llvm 2>/dev/null)/bin:$PATH" KIZU_RUN_SELFHOST_GATES=1 go test -timeout=40m ./cmd/kizu -run 'TestSelfhostBackendArtifactGate$' -count=1 -v
 
 # Execute selfhost-emitted control-flow LLVM: each gate is clang-compiled with a driver and run,
 # so a wrong branch edge, arm merge, or field hop fails by exit code rather than by text diff.

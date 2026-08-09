@@ -191,42 +191,154 @@ func appendSelfhostBackendArtifactReport(t *testing.T, out *strings.Builder) int
 	return failures
 }
 
-// countEmittedModuleRejections hands the staged module to LLVM and fails if LLVM
-// will not have it. The compiler reported `stage: ok` for a long time while emitting
-// three duplicate local names, because nothing between the emitter and the linker
-// ever read the whole module: this gate weighed it and searched it for substrings,
-// and the probe harnesses link an extracted closure rather than the module.
-//
-// Both readers are used when both are present because they answer different halves.
-// clang's IR reader catches the parse-level class -- a name defined twice -- and
-// accepts a dominance violation at -O0; opt runs the verifier, which is what rejects
-// one. Neither being present is reported rather than passed over: an unchecked module
-// is exactly how the defect survived, and this gate already needs clang to build the
-// artifact it is checking.
-func countEmittedModuleRejections(t *testing.T, path string) int {
-	t.Helper()
-	readers := []struct {
+// dominanceViolationModule is a module LLVM's verifier must reject: %x is defined
+// only on the `a` path, so it does not dominate its use in `join`. It is the smallest
+// spelling of the defect family the MIR lowering rewrite exists to eliminate -- a name
+// denoting a value that does not reach the place the name is read.
+const dominanceViolationModule = `define i64 @f(i1 %c) {
+entry:
+  br i1 %c, label %a, label %b
+a:
+  %x = add i64 1, 2
+  br label %join
+b:
+  br label %join
+join:
+  %r = add i64 %x, 3
+  ret i64 %r
+}
+`
+
+// moduleReaders lists the tools that can be asked to read a module, in the order the
+// gate reports them.
+func moduleReaders(path string) []struct {
+	tool string
+	args []string
+} {
+	return []struct {
 		tool string
 		args []string
 	}{
 		{"opt", []string{"-passes=verify", "-disable-output", path}},
 		{"clang", []string{"-x", "ir", path, "-S", "-emit-llvm", "-o", os.DevNull}},
 	}
-	read := 0
-	for _, reader := range readers {
+}
+
+// wellFormedModule is the same function with the definition moved where it dominates
+// its use. A reader that rejects this rejects everything, and a tool that rejects
+// everything would otherwise pass for a verifier.
+const wellFormedModule = `define i64 @f(i1 %c) {
+entry:
+  %x = add i64 1, 2
+  br i1 %c, label %a, label %b
+a:
+  br label %join
+b:
+  br label %join
+join:
+  %r = add i64 %x, 3
+  ret i64 %r
+}
+`
+
+// verifyingModuleReaders returns the readers on PATH that PROVE they run the LLVM
+// verifier: they reject dominanceViolationModule and accept wellFormedModule.
+//
+// Naming a tool is not enough, because the answer depends on the vendor rather than on
+// the name. Measured on this repo's own machine: `clang -x ir <bad.ll> -c -o /dev/null`
+// exits 1 under Homebrew LLVM 21 and exits 0 -- accepting the violation -- under Apple
+// clang, and `/usr/bin/clang` is what an unadorned PATH resolves. A gate that counted
+// "clang was present" would therefore report a verified module on one machine and an
+// unread one on another, with no way to tell which from the output.
+//
+// So the reader is asked both questions first. A reader that cannot reject a module
+// LLVM's verifier rejects is not verifying anything, and its acceptance of the staged
+// module carries no information; a reader that also rejects the well-formed twin is
+// broken rather than strict, and counting it would turn a missing toolchain into a
+// gate that always fails for the wrong reason.
+func verifyingModuleReaders(t *testing.T) []string {
+	t.Helper()
+	dir := t.TempDir()
+	probes := []struct {
+		name     string
+		module   string
+		rejected bool
+	}{
+		{"dominance-violation.ll", dominanceViolationModule, true},
+		{"well-formed.ll", wellFormedModule, false},
+	}
+	for i, probe := range probes {
+		path := filepath.Join(dir, probe.name)
+		if err := os.WriteFile(path, []byte(probe.module), 0o600); err != nil {
+			t.Errorf("write verifier probe module %s: %v", probe.name, err)
+			return nil
+		}
+		probes[i].name = path
+	}
+	verifying := []string{}
+	for _, reader := range moduleReaders("") {
 		binary, err := exec.LookPath(reader.tool)
 		if err != nil {
 			continue
 		}
-		read++
-		if out, err := exec.Command(binary, reader.args...).CombinedOutput(); err != nil {
-			t.Errorf("%s rejected the staged module: %v\n%s", reader.tool, err, out)
-			return 1
+		answers := true
+		for _, probe := range probes {
+			args := moduleReaderArgs(reader.tool, probe.name)
+			if (exec.Command(binary, args...).Run() != nil) != probe.rejected {
+				answers = false
+			}
+		}
+		if answers {
+			verifying = append(verifying, reader.tool)
 		}
 	}
-	if read == 0 {
-		t.Errorf("neither opt nor clang is on PATH, so the staged module went unread")
+	return verifying
+}
+
+// moduleReaderArgs spells one reader's argument list for a given module path.
+func moduleReaderArgs(tool string, path string) []string {
+	for _, reader := range moduleReaders(path) {
+		if reader.tool == tool {
+			return reader.args
+		}
+	}
+	return nil
+}
+
+// countEmittedModuleRejections hands the staged module to LLVM and fails if LLVM
+// will not have it. The compiler reported `stage: ok` for a long time while emitting
+// three duplicate local names, because nothing between the emitter and the linker
+// ever read the whole module: this gate weighed it and searched it for substrings,
+// and the probe harnesses link an extracted closure rather than the module.
+//
+// Only readers that verifyingModuleReaders proved are verifiers are run, and at least
+// one is required. Reporting "no verifier is on PATH" is the point: a silent skip is
+// how the unread module survived, and a module nobody verified is not a module this
+// gate can call good.
+func countEmittedModuleRejections(t *testing.T, path string) int {
+	t.Helper()
+	verifying := verifyingModuleReaders(t)
+	if len(verifying) == 0 {
+		t.Errorf("no LLVM verifier on PATH: the staged module went unread. " +
+			"Install LLVM's `opt` (brew install llvm) or put a clang whose IR reader " +
+			"rejects a dominance violation ahead of Apple clang on PATH")
 		return 1
+	}
+	// Say which readers earned the right to answer. Which tools verified is the whole
+	// weight of this check, and a run whose log does not name them cannot be told apart
+	// from one where the strict reader had quietly dropped off PATH.
+	t.Logf("module verified by: %s", strings.Join(verifying, ", "))
+	for _, tool := range verifying {
+		binary, err := exec.LookPath(tool)
+		if err != nil {
+			t.Errorf("%s left PATH between the probe and the read", tool)
+			return 1
+		}
+		out, err := exec.Command(binary, moduleReaderArgs(tool, path)...).CombinedOutput()
+		if err != nil {
+			t.Errorf("%s rejected the staged module: %v\n%s", tool, err, out)
+			return 1
+		}
 	}
 	return 0
 }
@@ -919,7 +1031,13 @@ func requiredLLVMNodeCountTypeFragments() []string {
 		"%kizu.kizu.ast.union_decl_node = type { i1, %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, " +
 			"%kizu.kizu.ast.span }",
-		"%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
+		// Three fields since 07c0c094 prepended contract_name to ImplDeclNode. The two
+		// leading node_ids are distinct fields, not a duplicated one: the ImplDecl arm of
+		// collect_nominal_resolution_facts_from_ast extracts index 0 and index 1 and passes
+		// them as the separate contract_name / type_name arguments of
+		// insert_contract_conformance_fact, and the methods reader moved from index 1 to 2.
+		"%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
 		"%kizu.kizu.ast.union_variant_node = type { %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.span }",
 		"%kizu.kizu.ast.match_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
@@ -936,7 +1054,7 @@ func requiredLLVMNodeCountTypeFragments() []string {
 }
 
 // requiredLLVMNodeCountLoweringFragments returns the tracker-961 node_count recursive
-// AST-traversal cluster compiled into stage2: node_count (the 45-arm match-over-AstData
+// AST-traversal cluster compiled into stage2: node_count (the 46-arm match-over-AstData
 // traversal), count_range (the two-phi accumulator loop calling Ast.child_at + node_count),
 // and the count_* helpers (let-try / return-try arithmetic). The whole mutually-recursive
 // cluster is defined so selfhost.ll links with no undefined symbol; every arm returns a real
@@ -956,16 +1074,23 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_ranges(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_fn_decl_parts(",
 		// node_count: bind the AstNode via Ast.get, extract the union tag, and dispatch over
-		// the 45-arm icmp/br chain (Program tag 0 first, FnDecl tag 43 second, ...). The
-		// chain is exhaustive over AstData, so the last test is elided: dispatch1_check_44
-		// falls through unconditionally to the Empty arm, which returns 1. No 'unreachable'.
+		// the 46-arm icmp/br chain (Program tag 0 first, FnDecl tag 43 second, ...). The
+		// last arm's test is elided unconditionally, so dispatch1_check_45 falls through to
+		// the Empty arm, which returns 1. No 'unreachable'.
+		//
+		// The chain was 45 arms until 07c0c094 added the ContractDecl variant. Its tag was
+		// appended, so no earlier variant's tag moved and the two tag pins below still hold;
+		// its match arm was inserted at index 7, so every arm index from 7 up rose by one.
+		// The Empty-arm pin moved 44 -> 45 with it. It did NOT fail on the way: Bool also
+		// lowers to `=> 1`, so at 44 the pin went on matching while silently guarding a
+		// different arm than the one this comment names.
 		"%node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %node_id)",
 		"%dispatch1_is_1 = icmp eq i64 %dispatch1_tag0, 43",
 		"br i1 %dispatch1_is_1, label %dispatch1_arm_1, label %dispatch1_check_2",
-		"dispatch1_check_44:\n  br label %dispatch1_arm_44",
-		"%enumdispatchret1_44_val = insertvalue %kizu.error.i64 " +
-			"%enumdispatchret1_44_ok, i64 1, 1",
+		"dispatch1_check_45:\n  br label %dispatch1_arm_45",
+		"%enumdispatchret1_45_val = insertvalue %kizu.error.i64 " +
+			"%enumdispatchret1_45_ok, i64 1, 1",
 		// node_count Program arm: load the ProgramNode payload, forward declarations to
 		// count_with_range, then try-unwrap that error union and re-wrap the i64 as this
 		// function's own success. The argument is named from the call-argument namespace
@@ -1322,7 +1447,21 @@ func requiredLLVMFormatHelperFragments() []string {
 		// format.kizu imports selfhost::lexer, so the compiled driver calls the selfhost
 		// tokenizer; the pin follows the source rather than the std::kizu spelling it had.
 		"%format_tokens_call = call %kizu.error.owned @kizu_selfhost__lexer_tokenize(",
-		"%index = phi i64 [ %void.then.alias.13, %loop13_preheader ], [ %index_next, %loop13_latch ]",
+		// format_source's tokenizer loop seeds %index from the value that reaches the if11
+		// join -- next_index on the leading-import fast path, 0 otherwise -- and takes its
+		// latch operand from %loop13_latch. Seeding from the raw initializer instead, or
+		// from a value published inside the arm that does not dominate the join, is the
+		// defect family this backend keeps producing, and it shows up exactly here.
+		//
+		// Split in two so neither half spells a generated index. It read
+		// `[ %void.then.alias.13, %loop13_preheader ]` until aac4c283 moved `var index = 0`
+		// off the void-alias supply onto its own scoped seed name, which shifted every later
+		// alias in the function down by one and left the pin asserting that the loop seeds
+		// its counter from `cursor`. The mint number is not a property worth pinning; that
+		// the seed is a join result and the latch operand arrives from the latch is.
+		// Measured on the staged module: the first fragment occurs once, the second twice.
+		"%index = phi i64 [ %void.then.alias.",
+		", %loop13_preheader ], [ %index_next, %loop13_latch ]",
 		"%t24 = icmp slt i64 %index, %t23",
 		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +
 			"%kizu.owned %format_tokens, i64 %index)",

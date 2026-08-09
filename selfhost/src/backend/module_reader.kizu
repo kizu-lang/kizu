@@ -3,13 +3,31 @@
 // `stage: ok` meant "the emitter returned" for as long as anyone had looked, and a
 // module carrying three duplicate local names passed under it: nothing between the
 // emitter and the linker ever read the whole thing. Both readers are used when both
-// are present because they answer different halves -- clang's IR reader rejects the
-// parse-level class (a name defined twice) and accepts a dominance violation at -O0,
-// while opt runs the verifier, which rejects one.
+// are present because they answer different halves.
+//
+// How much the clang half answers depends on WHICH clang, which is why this reports a
+// count rather than claiming the module was verified. Measured against a module whose
+// `%x` is defined on only one path into its use:
+//
+//   opt -passes=verify           rejects it
+//   Homebrew LLVM 21 clang -x ir rejects it
+//   Apple clang -x ir            ACCEPTS it
+//
+// and an unadorned PATH on macOS resolves `clang` to Apple's. Both spellings reject the
+// parse-level class (a name defined twice). So clang alone establishes that the module
+// parses; only a run that included `opt` establishes that it verifies, and the two are
+// exactly the difference between a name that is spelled twice and a name that denotes a
+// value which does not reach it -- the second being the defect family the MIR lowering
+// keeps producing.
+//
+// Requiring a verifier is therefore the backend artifact gate's job, where the readers
+// are made to prove they reject a dominance violation before their acceptance counts;
+// see verifyingModuleReaders in cmd/kizu/selfhost_backend_artifact_gate_test.go.
+// Staging keeps the weaker contract on purpose: it must stay runnable on a toolchain
+// that has only the clang it already needs in order to link what it emits.
 //
 // Neither reader being on PATH is an error rather than a skip. A silent skip is
-// exactly how the unread module survived, and staging already spawns clang to link
-// what it emits, so a toolchain that cannot read a module cannot link one either.
+// exactly how the unread module survived.
 
 pub fn module_reader_missing_code() -> i64 {
     return 127;
