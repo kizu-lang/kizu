@@ -8300,6 +8300,13 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_head:");
     try out.append_byte(cast<u8>(10));
+    // A loop whose lowering built its phis says so, and then this is the whole of the head: one
+    // phi per carried name, each with one operand per edge, exactly as recorded. Nothing here
+    // derives an operand or a predecessor label -- that derivation is what the two-edge
+    // description below has to do, and what a loop with a break or a continue cannot survive.
+    if stmt.header_phis.len() > 0 {
+        try append_generic_header_phis(out, stmt);
+    } else {
     // The primary loop-head phi, then one phi per secondary lockstep counter. Each phi is
     // named after its variable so plain Var reads in the condition and body resolve to it.
     // A condition-only loop carries no counter, so the head defines no primary phi: the header is
@@ -8351,6 +8358,7 @@ fn append_multi_while(
         }
         }
         carried_phi_index = carried_phi_index + 1;
+    }
     }
     try append_expr_insts(out, function.name, &stmt.cond_insts);
     if stmt.cond_short_circuit == 0 {
@@ -8717,6 +8725,53 @@ fn append_while_counter_preheader_init(
 // call-seeded ('var cursor = line_end_including_break(source, comment_end)'), so the phi reads the
 // preheader call's result temp instead of %<init_var> / the literal. It is -1 for a literal,
 // plain-copy, or base-plus-offset seed and for every secondary counter (issue 1165 / 1162).
+// append_generic_header_phis writes one phi per carried name, each with the operands its lowering
+// recorded. It is the whole of a loop head, and it is short for the reason the pair below is long:
+// it spells what it was given instead of working out what to spell.
+//
+// append_while_counter_phi has to choose between init_result_id, init_var plus init_offset, and
+// init_literal for the preheader operand, between latch_copy_var and <var>_next for the latch one,
+// and then ask append_while_latch_pred_label to derive the latch block's LABEL from the shape of
+// the latch statement -- because MirCarriedScalar does not carry it. Three derivations, all of
+// which exist only because the operand count is fixed at two.
+fn append_generic_header_phis(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt
+) -> !void {
+    let phis = &stmt.header_phis;
+    var phi_index = 0;
+    while phi_index < phis.len() {
+        let phi = try phis.at(phi_index);
+        let incomings = &phi.incomings;
+        if incomings.len() < 2 {
+            // A phi with one operand is not a phi, and LLVM's verifier requires one operand per
+            // predecessor. Emitting it would produce a module that parses and does not verify, so
+            // the lowering that built it is wrong and says so here rather than downstream.
+            return error("compiled mir llvm: a loop header phi has fewer than two incoming edges");
+        }
+        try out.append_bytes("  %");
+        try out.append_bytes(phi.name);
+        try out.append_bytes(" = phi ");
+        try out.append_bytes(phi.llvm_type);
+        var incoming_index = 0;
+        while incoming_index < incomings.len() {
+            let incoming = try incomings.at(incoming_index);
+            if incoming_index > 0 {
+                try out.append_bytes(",");
+            }
+            try out.append_bytes(" [ ");
+            try out.append_bytes(incoming.value);
+            try out.append_bytes(", %");
+            try out.append_bytes(incoming.block);
+            try out.append_bytes(" ]");
+            incoming_index = incoming_index + 1;
+        }
+        try out.append_byte(cast<u8>(10));
+        phi_index = phi_index + 1;
+    }
+    return;
+}
+
 fn append_while_counter_phi(
     out: &var std::string::String,
     stmt: &compiled_mir::MirWhileStmt,

@@ -816,6 +816,76 @@ pub struct MirSecondaryInduction {
     pub init_offset: i64,
     pub step: i64,
 }
+// MirPhiIncoming is one operand of a header phi: the value, and the block it arrives from.
+pub struct MirPhiIncoming {
+    pub block: []u8,
+    pub value: []u8,
+}
+
+// MirHeaderPhi is a loop-header phi with as many operands as the loop has edges into its header.
+//
+// It replaces MirCarriedScalar, and the difference is the whole of why break and continue could
+// not be lowered. A carried scalar spells TWO edges and only two: init_literal / init_var +
+// init_offset / init_name are three mutually exclusive ways to say the preheader operand,
+// latch_var says the latch one, exit_var says a second exit edge, and the latch edge's
+// PREDECESSOR LABEL is not carried at all -- append_while_latch_pred_label derives it from the
+// shape of the latch statement. A loop with a continue has three edges into its header and a loop
+// with a break has two into its exit, so neither was representable, and memory_carried -- storing
+// every update into a stack slot so the last store wins whichever edge control takes -- is what
+// this backend does instead. That is a correct answer to the wrong question.
+//
+// A phi takes N operands by definition, and mir_env_loop.kizu already builds them that way: one
+// incoming per edge, each recorded with the block it came from. This is that, carried to the
+// renderer unchanged.
+pub struct MirHeaderPhi {
+    pub name: []u8,
+    pub llvm_type: []u8,
+    pub incomings: std::array::Array<MirPhiIncoming>,
+}
+
+pub fn phi_incoming(block: []u8, value: []u8) -> MirPhiIncoming {
+    return MirPhiIncoming { block: block, value: value };
+}
+
+pub fn header_phi(
+    name: []u8,
+    llvm_type: []u8,
+    incomings: std::array::Array<MirPhiIncoming>
+) -> MirHeaderPhi {
+    return MirHeaderPhi { name: name, llvm_type: llvm_type, incomings: incomings };
+}
+
+pub fn copy_phi_incomings(
+    incomings: &std::array::Array<MirPhiIncoming>
+) -> !std::array::Array<MirPhiIncoming> {
+    var copied = std::array::Array<MirPhiIncoming>(std::mem::page_allocator());
+    errdefer copied.deinit();
+    var index = 0;
+    while index < incomings.len() {
+        let incoming = try incomings.at(index);
+        try copied.append(MirPhiIncoming { block: incoming.block, value: incoming.value });
+        index = index + 1;
+    }
+    return copied;
+}
+
+pub fn copy_header_phis(
+    phis: &std::array::Array<MirHeaderPhi>
+) -> !std::array::Array<MirHeaderPhi> {
+    var copied = std::array::Array<MirHeaderPhi>(std::mem::page_allocator());
+    errdefer copied.deinit();
+    var index = 0;
+    while index < phis.len() {
+        let phi = try phis.at(index);
+        let incomings = try copy_phi_incomings(&phi.incomings);
+        try copied.append(MirHeaderPhi {
+            name: phi.name, llvm_type: phi.llvm_type, incomings: incomings
+        });
+        index = index + 1;
+    }
+    return copied;
+}
+
 pub struct MirCarriedScalar {
     pub var_name: []u8,
     pub llvm_type: []u8,
@@ -885,6 +955,11 @@ pub struct MirWhileStmt {
     // i64. Nothing about the value's shape is inspected, which is the point -- a loop may copy any
     // value it can compute into the value it carries.
     pub carried_scalars: std::array::Array<MirCarriedScalar>,
+    // header_phis is the replacement for induction_var / secondary_inductions / carried_scalars,
+    // and a loop uses one or the other, never both. When it is non-empty the renderer emits these
+    // phis verbatim and reads none of the two-edge fields; when it is empty the shape lowerings'
+    // two-edge description is what renders. The empty case goes when they do.
+    pub header_phis: std::array::Array<MirHeaderPhi>,
     // init_insts / init_result_id back a call-seeded primary induction init ('var cursor =
     // line_end_including_break(source, comment_end)' for line_comment_has_blank_after, issue
     // 1165 / 1162). When init_insts is non-empty the preheader renders the call instructions and
@@ -2381,6 +2456,13 @@ impl MirCondOperand {
     }
 }
 
+impl MirHeaderPhi {
+    fn deinit(self: MirHeaderPhi) -> void {
+        self.incomings.deinit();
+        return;
+    }
+}
+
 impl MirIfStmt {
     fn deinit(self: MirIfStmt) -> void {
         self.cond_insts.deinit();
@@ -2412,6 +2494,7 @@ impl MirWhileStmt {
         self.latch_stmts.deinit();
         self.secondary_inductions.deinit();
         self.carried_scalars.deinit();
+        self.header_phis.deinit();
         self.init_insts.deinit();
         self.branch_latch_cond_insts.deinit();
         self.branch_latch_advance_stmts.deinit();
@@ -5526,6 +5609,7 @@ pub fn while_stmt(
     latch_copy_var: []u8,
     secondary_inductions: std::array::Array<MirSecondaryInduction>,
     carried_scalars: std::array::Array<MirCarriedScalar>,
+    header_phis: std::array::Array<MirHeaderPhi>,
     init_insts: std::array::Array<MirExprInst>,
     init_result_id: i64,
     branch_latch_exit_on_true: bool,
@@ -5556,6 +5640,7 @@ pub fn while_stmt(
         latch_copy_var: latch_copy_var,
         secondary_inductions: secondary_inductions,
         carried_scalars: carried_scalars,
+        header_phis: header_phis,
         init_insts: init_insts,
         init_result_id: init_result_id,
         branch_latch_exit_on_true: branch_latch_exit_on_true,
