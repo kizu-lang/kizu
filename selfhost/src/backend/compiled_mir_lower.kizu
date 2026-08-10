@@ -69,17 +69,30 @@ import selfhost::ir::builtin_contract;
 // path where induction_init_needs_prewhile_alias is false the Let emits nothing and binds nothing
 // in either, and the loop head's phi is what later binds the name.
 //
-// TWO POPULATIONS OF ALIAS WRITE HAVE NO ENVIRONMENT COUNTERPART YET, both because the operation
-// that replaces them is not one this stage installs:
-//   - the if-join merge variables: append_void_if_else_merge_for_source, its driver
-//     append_void_if_else_merge_vars, the inline merge loops in lower_void_if_no_else_statement
-//     and lower_try_call_void_if, and copy_aliases_into. The pair of merge operations mir_env.kizu
-//     exports IS that join, and the next commit calls them here; an assign written now would
-//     install a join rule those calls then delete.
-//   - the loop-exit publishes: claim_local_alias_loop_phi, claim_local_alias_loop_exit, and the
-//     carried-scalar publish in lower_multi_while_branch_merge_latch, all writing into the
-//     ENCLOSING map once a while is finished. Those are control.go's finishLoopExitPhis, which the
-//     loop-side module beside mir_env.kizu owns and which nothing here threads yet.
+// ONE POPULATION OF ALIAS WRITE HAS NO ENVIRONMENT COUNTERPART YET, because the operation that
+// replaces it is not one this stage installs: the if-join merge variables --
+// append_void_if_else_merge_for_source, its driver append_void_if_else_merge_vars, the inline merge
+// loops in lower_void_if_no_else_statement and lower_try_call_void_if, and copy_aliases_into. The
+// pair of merge operations mir_env.kizu exports IS that join, and the next commit calls them here;
+// an assign written now would install a join rule those calls then delete.
+//
+// THE LOOP-EXIT PUBLISHES ARE MIRRORED, and they are the one population where WHICH alias write
+// gets an environment write had to be decided rather than read off. A while finishing writes two
+// different facts into its ENCLOSING map, and only one of them is a value:
+//   - a publish that repoints current_name says a read of the name after the loop resolves to the
+//     value the loop leaves live. That is mir_env::assign into the enclosing environment -- assign
+//     and not declare, because the loop hands the enclosing variable a new SSA value rather than
+//     introducing a variable. They are every call of claim_local_alias_loop_phi and of
+//     claim_local_alias_loop_exit that writes an ENCLOSING map -- the six in
+//     lower_multi_while_statement, the two in lower_multi_while_leading_decrement, the one in
+//     lower_multi_while_branch_merge_latch -- plus that same function's carried-scalar publish,
+//     which spells a loop_exit_carried_name through set_local_alias.
+//   - a publish that writes only loop_phi_name or branch_claim_name says a name is spoken for in
+//     the function's one register namespace, with no value reaching here. It gets NO environment
+//     write: record_local_alias_loop_phi (whose own doc draws this line, and which is what
+//     lower_multi_while_continue_latch publishes because it never established a single SSA name for
+//     what its loop leaves live) and merge_local_alias_claims_into. An assign for either would seed
+//     a later join from a definition the join's block does not dominate.
 // Every other alias write -- every declaration, every assignment, every fork, every block scope,
 // and the loop-head reseatings a body's own map opens with -- is mirrored where it is made.
 
@@ -21340,6 +21353,12 @@ fn lower_multi_while_branch_merge_latch(
     try claim_local_alias_loop_exit(
         aliases, induction_var, induction_phi, induction_exit_name
     );
+    // The environment takes the repoint and not the claim: mir_env::assign says the ENCLOSING
+    // variable is now held by a different SSA value, which is exactly what the loop hands back,
+    // while the claim on %<phi> is a fact about register names the environment does not model.
+    // Declare would be wrong here -- the loop introduced no variable of its own.
+    let induction_exit = mir_env::named_value(induction_exit_name, "");
+    try mir_env::assign(space, env, induction_var, &induction_exit);
     var published_carried_index = 0;
     while published_carried_index < carried_aliases.len() {
         let published_carried = try carried_aliases.at(published_carried_index);
@@ -21351,6 +21370,8 @@ fn lower_multi_while_branch_merge_latch(
         try set_local_alias(
             aliases, published_carried.source_name, published_exit_name
         );
+        let published_exit = mir_env::named_value(published_exit_name, "");
+        try mir_env::assign(space, env, published_carried.source_name, &published_exit);
         published_carried_index = published_carried_index + 1;
     }
     try stmts.append(compiled_mir::while_stmt(
@@ -21489,7 +21510,7 @@ fn lower_multi_while_statement(
             loop_index,
             scope_node,
             scope_stmt_index,
-            aliases, space,
+            aliases, space, env,
             stmts,
             bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
@@ -22713,6 +22734,11 @@ fn lower_multi_while_statement(
     // block reloads every slot for exactly that reason, so the reads after the loop go there --
     // while the head keeps its claim on %<phi>, which is still a definition a later loop must not
     // collide with.
+    // Each of these publishes repoints what a read of the source name resolves to after the loop,
+    // so each takes a mir_env::assign into the ENCLOSING environment: the same variable, held by
+    // the value the loop leaves live. Assign and not declare -- the loop introduced no variable --
+    // and only where the publish moves current_name, since a claim that only marks a register name
+    // taken states no value reaching here.
     if std::mem::len(induction_var) > 0 {
         if memory_carried {
             let induction_exit_name = try loop_exit_carried_name(
@@ -22721,8 +22747,12 @@ fn lower_multi_while_statement(
             try claim_local_alias_loop_exit(
                 aliases, induction_var, induction_phi, induction_exit_name
             );
+            let induction_exit = mir_env::named_value(induction_exit_name, "");
+            try mir_env::assign(space, env, induction_var, &induction_exit);
         } else {
             try claim_local_alias_loop_phi(aliases, induction_var, induction_phi);
+            let induction_head = mir_env::named_value(induction_phi, "");
+            try mir_env::assign(space, env, induction_var, &induction_head);
         }
     }
     let carried_scalars = try materialize_carried_scalars(
@@ -22743,6 +22773,8 @@ fn lower_multi_while_statement(
             try claim_local_alias_loop_exit(
                 aliases, exit_secondary_name, exit_secondary_name, secondary_exit_name
             );
+            let secondary_exit = mir_env::named_value(secondary_exit_name, "");
+            try mir_env::assign(space, env, exit_secondary_name, &secondary_exit);
             exit_secondary_index = exit_secondary_index + 1;
         }
         // Keyed by the source name, valued by the exit reload of the head name: the two differ for
@@ -22761,6 +22793,8 @@ fn lower_multi_while_statement(
                 try claim_local_alias_loop_exit(
                     aliases, exit_carried_source, exit_carried_head, carried_exit_name
                 );
+                let carried_exit = mir_env::named_value(carried_exit_name, "");
+                try mir_env::assign(space, env, exit_carried_source, &carried_exit);
             }
             exit_carried_index = exit_carried_index + 1;
         }
@@ -22774,6 +22808,8 @@ fn lower_multi_while_statement(
             let phi_secondary = try secondary_inductions.at(phi_secondary_index);
             let phi_secondary_name = phi_secondary.var_name;
             try claim_local_alias_loop_phi(aliases, phi_secondary_name, phi_secondary_name);
+            let phi_secondary_head = mir_env::named_value(phi_secondary_name, "");
+            try mir_env::assign(space, env, phi_secondary_name, &phi_secondary_head);
             phi_secondary_index = phi_secondary_index + 1;
         }
         // A phi-carried loop leaves each carried scalar live in its head phi, so statements after
@@ -22789,6 +22825,8 @@ fn lower_multi_while_statement(
                 try claim_local_alias_loop_phi(
                     aliases, phi_carried_source, phi_carried_head
                 );
+                let phi_carried_value = mir_env::named_value(phi_carried_head, "");
+                try mir_env::assign(space, env, phi_carried_source, &phi_carried_value);
             }
             phi_carried_index = phi_carried_index + 1;
         }
@@ -23790,11 +23828,12 @@ fn lower_multi_while_leading_decrement(
     // preheader (its loop-head phi seeds from that) and for which names other loop heads in this
     // function have already bound; written back with what this loop leaves live.
     aliases: &var std::array::Array<LocalAliasState>,
-    // No enclosing environment id, unlike every other shape here: this one lowers its body against
-    // a FRESH alias map, so it opens a fresh environment to match and never asks what the enclosing
-    // environment holds. It takes the space alone, which is all "a fresh map takes a fresh
-    // environment" needs.
     space: &var mir_env::EnvSpace,
+    // env is the ENCLOSING environment, and this shape uses it for one thing only: the publishes
+    // below, which hand the enclosing scope's variables the values the loop leaves live. It is
+    // never what the body is lowered against -- the body starts from a FRESH alias map, so it opens
+    // a fresh environment to match and asks this one nothing.
+    env: i64,
     stmts: &var std::array::Array<compiled_mir::MirStmt>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
@@ -24137,6 +24176,12 @@ fn lower_multi_while_leading_decrement(
         let published_source = published_state.source_name;
         let published_head = published_state.head_name;
         try claim_local_alias_loop_phi(aliases, published_source, published_head);
+        // The enclosing environment takes the repoint, not the claim: the same variable, now held
+        // by the head phi. An assign, since the loop introduced no variable of its own -- and into
+        // env rather than body_env, because these are the ENCLOSING scope's variables and the body
+        // environment is a fresh one that ends with the body.
+        let published_value = mir_env::named_value(published_head, "");
+        try mir_env::assign(space, env, published_source, &published_value);
         published_index = published_index + 1;
     }
     // The counter obeys the same rule as the carried scalars, and it was the one exception: the only
@@ -24146,6 +24191,8 @@ fn lower_multi_while_leading_decrement(
     // loop either a dominance violation or, where the declaration still held the name, the value
     // from before the first iteration.
     try claim_local_alias_loop_phi(aliases, induction_var, head_var);
+    let induction_head = mir_env::named_value(head_var, "");
+    try mir_env::assign(space, env, induction_var, &induction_head);
     // A loop head inside a body if arm binds its phi in the one register namespace the function has.
     // Those claims reach the enclosing scope only here, so a later loop over the same name renames
     // instead of spelling a head this function already defined.
