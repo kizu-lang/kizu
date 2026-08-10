@@ -16635,6 +16635,88 @@ fn sync_loop_carry_slots(
     return;
 }
 
+// emit_loop_seed_alias lowers a loop-seed declaration's initializer where the CALLER stands and
+// binds the result to output_name, leaving the alias map and the environment both pointing at it.
+// What it produces is a definition the loop's preheader edge can read: an SSA name the enclosing
+// block holds, in place of a declaration whose own '%<name>' the loop head is going to take.
+//
+// It does not DECLARE, and that is the reason it is separate from its first caller. Whether this
+// statement INTRODUCES the variable is not the same question as what value it leaves behind:
+// lower_induction_init_alias is standing on the declaration and declares before it calls here,
+// while lower_while_statement runs long after the walker already declared the name and skipped the
+// statement, so it has a row to repoint rather than one to add. A declare there would append a
+// second row for one declaration.
+//
+// A Call or TryExpr initializer is the caller's to refuse before calling: lower_expr_with_local_aliases
+// is the expression path, and neither caller has a try counter to give a failing call its fail
+// block.
+fn emit_loop_seed_alias(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    output_name: []u8,
+    string_counter: i64,
+    temp_counter: i64,
+    alias_counter: i64,
+    aliases: &var std::array::Array<LocalAliasState>,
+    space: &var mir_env::EnvSpace,
+    env: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !VoidAssignLowerResult {
+    let name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "name", 0, bs
+    );
+    let target_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, name_node, bs
+    );
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
+        ir_lookup_index,
+        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs, call_arg_type_cache
+    );
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let result_id = try lower_expr_with_local_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        value,
+        string_counter,
+        temp_counter,
+        &var insts,
+        aliases,
+        bs,
+        ir_lookup_index, canonical_facts, call_arg_type_cache
+    );
+    let value_type = try expr_inst_llvm_type_by_id(&insts, result_id);
+    if !std::mem::equal_bytes(value_type, target_type) {
+        return error("compiled mir: induction alias init type mismatch");
+    }
+    let expr_strings = try count_strings_in_insts(&insts);
+    let expr_len = insts.len();
+    try stmts.append(compiled_mir::alias_assign_stmt(
+        target_name, output_name, target_type, result_id, insts
+    ));
+    try set_local_alias(aliases, target_name, output_name);
+    // The name now denotes the value this statement produced. Assign, not declare: see the header.
+    let bound = mir_env::named_value(output_name, "");
+    try mir_env::assign(space, env, target_name, &bound);
+    return VoidAssignLowerResult {
+        string_counter: string_counter + expr_strings,
+        temp_counter: temp_counter + expr_len,
+        try_counter: 0,
+        alias_counter: alias_counter
+    };
+}
+
 fn lower_induction_init_alias(
     ir_bytes: []u8,
     function_name: []u8,
@@ -16678,44 +16760,29 @@ fn lower_induction_init_alias(
             alias_counter: alias_counter
         };
     }
-    let target_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
-        ir_lookup_index,
-        ir_bytes, function_name, module_prefix, locals_spec, target_name, bs, call_arg_type_cache
-    );
-    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let result_id = try lower_expr_with_local_aliases(
+    let output_name = try void_then_alias_name(call_arg_type_cache);
+    let emitted = try emit_loop_seed_alias(
         ir_bytes,
         function_name,
         module_prefix,
         locals_spec,
-        value,
+        statement,
+        output_name,
         string_counter,
         temp_counter,
-        &var insts,
-        aliases,
+        alias_counter,
+        aliases, space, env,
+        stmts,
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
-    let value_type = try expr_inst_llvm_type_by_id(&insts, result_id);
-    if !std::mem::equal_bytes(value_type, target_type) {
-        return error("compiled mir: induction alias init type mismatch");
-    }
-    let output_name = try void_then_alias_name(call_arg_type_cache);
-    let expr_strings = try count_strings_in_insts(&insts);
-    let expr_len = insts.len();
-    try stmts.append(compiled_mir::alias_assign_stmt(
-        target_name, output_name, target_type, result_id, insts
-    ));
-    try set_local_alias(aliases, target_name, output_name);
-    // The declaration was made above; this says which SSA name it took, so it repoints that row
-    // rather than appending a second one for the same statement.
-    let bound = mir_env::named_value(output_name, "");
-    try mir_env::assign(space, env, target_name, &bound);
+    // One void-alias slot was minted above, which is what this counter records; emit_loop_seed_alias
+    // mints nothing and hands the counter back unchanged.
     return VoidAssignLowerResult {
-        string_counter: string_counter + expr_strings,
-        temp_counter: temp_counter + expr_len,
+        string_counter: emitted.string_counter,
+        temp_counter: emitted.temp_counter,
         try_counter: 0,
-        alias_counter: alias_counter + 1
+        alias_counter: emitted.alias_counter + 1
     };
 }
 fn return_body_advance(
@@ -21710,10 +21777,10 @@ fn generic_while_body_declares(
     return false;
 }
 
-// generic_while_seed_is_off_the_emitted_path repeats, for ONE carried name, the decision the
-// enclosing statement walker already made about that name's declaration, and it reads the same
-// three predicates in the same order the walker reads them in (see the Let arm of
-// lower_multi_statement_function and of lower_void_then_body).
+// generic_while_folded_seed_statement answers, for ONE carried name, WHICH declaration in this
+// loop's own scope the enclosing statement walker left off the emitted path, or -1 when it emitted
+// one. It repeats the decision that walker already made, reading the same three predicates in the
+// same order (see the Let arm of lower_multi_statement_function and of lower_void_then_body).
 //
 // It has to, because a 'var <counter> = <init>' whose while stands in the same statement list is
 // NOT emitted: statement_is_induction_init keeps it off the emitted path so the loop head can
@@ -21721,53 +21788,113 @@ fn generic_while_body_declares(
 // declare_folded_loop_seed tells the environment the binding happened. The alias map is then left
 // at the identity -- current_name is the source spelling -- and the environment holds a ValueRef
 // whose name is that same spelling. Neither says "there is no register here", so a header phi
-// seeded from either would name a value the module never defines. This is the one refusal that
-// cannot be read off the tables and has to be recomputed.
+// seeded from either would name a value the module never defines. That is what the caller emits
+// the declaration for, and it needs the declaration's node to emit it and to name it.
 //
 // induction_init_needs_prewhile_alias resolves its scope against body node 0, so it is only asked
 // for a loop whose scope IS the function body; a declaration in any other scope that reaches the
-// second test is refused rather than guessed at.
-fn generic_while_seed_is_off_the_emitted_path(
+// second test is folded, which is what the Let arm of lower_void_then_body does with it.
+//
+// The scan keeps the LAST match rather than answering at the first. A block may declare one
+// spelling twice ahead of the loop, and the one the loop carries is the nearest -- the rule
+// scope_chain_init_value_node resolves a seed by and the rule live_binding reads the environment
+// by. Answering at the first would let a re-declaration the walker folded go unemitted.
+//
+// One declaration, one definition. statement_is_induction_init folds a declaration for EVERY while
+// in the scope that advances the name, so two loops over one counter both arrive here holding the
+// same declaration node, and both emitting it defines %<name>.seed.<node> twice, which LLVM rejects
+// outright. Measured: selfhost::cli::check::collect_package_struct_resolution_facts declares
+// 'var index = 0' once, resets it with 'index = 0;' and runs a second while over it, and staging it
+// failed with "multiple definition of local value named 'index.seed.1'". The loop that materialises
+// the declaration is the first one to need it, and a later loop over the same name seeds from
+// WHATEVER THE ENVIRONMENT HOLDS AT ITS PREHEADER -- not, as an earlier draft of this comment
+// claimed, from the first loop's head phi. In the measured example above it is neither: the
+// `index = 0;` reset between the two loops is emitted in loop1_exit, and that is what loop3 reads.
+// The head phi is only what it reads when nothing rewrites the name in between.
+//
+// Related fragility, worth knowing before it bites: in std::fmt::append_i64 a shape-lowered loop
+// precedes a generic one over `divisor`, and the value the generic loop's preheader reads is the
+// shape's head phi -- but only because that shape spelled its head phi with the bare source
+// spelling, which is also what declare_folded_loop_seed left in the environment. Had
+// loop_scoped_induction_phi_name fired for it, the environment's %divisor would name nothing.
+// That is loud rather than silent -- the verifier rejects a use of an undefined name -- so it is a
+// coincidence to be aware of, not a defect standing here.
+fn generic_while_folded_seed_statement(
     ir_bytes: []u8,
     function_name: []u8,
     scope_node: i64,
     scope_stmt_index: i64,
     name: []u8,
     bs: i64
-) -> !bool {
+) -> !i64 {
     let statement_count = try while_body_statement_count(
         ir_bytes, function_name, scope_node, bs
     );
+    var folded = -1;
     var index = 0;
     while index < scope_stmt_index {
         let statement = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, scope_node, "statement", index, bs
         );
         let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(kind, "While") {
+            if folded >= 0 {
+                if try while_carries_induction_var(
+                    ir_bytes, function_name, statement, name, bs
+                ) {
+                    folded = -1;
+                }
+            }
+        }
         if std::mem::equal_bytes(kind, "Let") {
             let bound = try let_statement_bound_name(ir_bytes, function_name, statement, bs);
             if std::mem::equal_bytes(bound, name) {
-                if !(try statement_is_induction_init(
-                    ir_bytes, function_name, scope_node, statement, statement_count, bs
-                )) {
-                    return false;
-                }
-                if try loop_seed_must_stay_in_place(
+                folded = -1;
+                if try statement_is_induction_init(
                     ir_bytes, function_name, scope_node, statement, statement_count, bs
                 ) {
-                    return false;
+                    if !(try loop_seed_must_stay_in_place(
+                        ir_bytes, function_name, scope_node, statement, statement_count, bs
+                    )) {
+                        if scope_node != 0 {
+                            folded = statement;
+                        } else {
+                            if !(try induction_init_needs_prewhile_alias(
+                                ir_bytes, function_name, statement, index, statement_count, bs
+                            )) {
+                                folded = statement;
+                            }
+                        }
+                    }
                 }
-                if scope_node != 0 {
-                    return true;
-                }
-                return !(try induction_init_needs_prewhile_alias(
-                    ir_bytes, function_name, statement, index, statement_count, bs
-                ));
             }
         }
         index = index + 1;
     }
-    return false;
+    return folded;
+}
+
+// generic_while_folded_seed_is_emittable reports whether emit_loop_seed_alias can produce the
+// preheader definition this folded declaration owes the header phi. It cannot for a call: that path
+// lowers an EXPRESSION through lower_expr_with_local_aliases, and lower_while_statement takes no
+// try counter, so a failing call would have no fail block to branch to. lower_induction_init_alias
+// refuses the same two kinds for the same reason. What the shapes do with a call-seeded counter
+// declaration instead is lower it into the loop's own init_insts, which append_multi_while renders
+// at the top of loop<N>_preheader -- a preheader statement list this lowering leaves empty.
+fn generic_while_folded_seed_is_emittable(
+    ir_bytes: []u8,
+    function_name: []u8,
+    let_statement: i64,
+    bs: i64
+) -> !bool {
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, let_statement, "value", 0, bs
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if std::mem::equal_bytes(value_kind, "Call") {
+        return false;
+    }
+    return !std::mem::equal_bytes(value_kind, "TryExpr");
 }
 
 // generic_while_refusal is the whole of it: "" when lower_while_statement lowers this loop, and
@@ -21859,10 +21986,18 @@ fn generic_while_refusal(
             if declares {
                 return "compiled mir: a generic while body has no scope of its own for a name it both declares and carries";
             }
-            if try generic_while_seed_is_off_the_emitted_path(
+            // A declaration the enclosing walk folded into a loop head is emitted by this lowering
+            // itself, in the block the loop statement goes into, so the header phi has a register to
+            // seed from. What it cannot emit that way is refused here, before anything is written.
+            let folded_seed = try generic_while_folded_seed_statement(
                 ir_bytes, function_name, scope_node, scope_stmt_index, name, bs
-            ) {
-                return "compiled mir: a generic while has no preheader definition for a carried name whose declaration was folded into a loop head";
+            );
+            if folded_seed >= 0 {
+                if !(try generic_while_folded_seed_is_emittable(
+                    ir_bytes, function_name, folded_seed, bs
+                )) {
+                    return "compiled mir: a generic while has no preheader statement list for a call-seeded carried declaration";
+                }
             }
             // An ENCLOSING memory-carried loop keeps this variable in a stack slot, and every
             // assignment reached from that loop's body owes a store to it -- that is what makes
@@ -22054,6 +22189,65 @@ fn lower_while_statement(
         }
         scan_index = scan_index + 1;
     }
+    // THE PREHEADER DEFINITION.
+    //
+    // A carried name whose declaration the enclosing walk folded into a loop head denotes no
+    // register at this point: the walker emitted nothing for it and told the environment the
+    // binding happened under the bare source spelling (declare_folded_loop_seed). create_loop_phis
+    // seeds a header phi from what the environment holds at the preheader, so seeded from that it
+    // would name a value the module never defines.
+    //
+    // So the declaration is emitted HERE, before the loop statement is appended -- into the block
+    // that ends in 'br label %loop<N>_preheader' -- under a name keyed by its own declaration node.
+    // Then the environment holds a register, the phi seeds from it like any other carried name, and
+    // no name is defined twice: the head phi is %<var>.while.head.<while node>, not %<var>. That
+    // last part is why this path can emit what the walker had to fold and the shapes cannot: a
+    // shape's head phi takes the variable's own spelling -- induction_phi starts as induction_var
+    // and only becomes loop_scoped_induction_phi_name when an enclosing head already claimed it --
+    // so emitting the declaration ahead of one would define %<var> twice.
+    //
+    // The value is the one the shapes would have seeded from. They rebuild the seed at the
+    // preheader too -- find_induction_init plus local_alias_current_name at the loop's position, or
+    // the initializer lowered into init_insts there -- so lowering it here through the same alias
+    // map at the same position reads the same names and computes the same value. What is emitted is
+    // one 'select i1 true' binding rather than a phi operand.
+    var seed_string_counter = string_counter;
+    var seed_temp_counter = temp_counter;
+    var seed_index = 0;
+    while seed_index < carried_names.len() {
+        let seed_source = try carried_names.get(seed_index);
+        let seed_statement = try generic_while_folded_seed_statement(
+            ir_bytes, function_name, scope_node, scope_stmt_index, seed_source, bs
+        );
+        if seed_statement >= 0 {
+            // The declaration's own node keys the name, so it is unique in the function and cannot
+            // collide with the loop head's phi or with a second declaration of the same spelling.
+            // It is the same speller lower_loop_seed_binding_in_place uses for the declarations it
+            // keeps in place, and the two populations are disjoint: one declaration is either
+            // folded or kept, never both.
+            let seed_output = try loop_seed_binding_name(
+                seed_source, seed_statement, call_arg_type_cache
+            );
+            let seed_result = try emit_loop_seed_alias(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                seed_statement,
+                seed_output,
+                seed_string_counter,
+                seed_temp_counter,
+                alias_counter,
+                aliases, space, env,
+                stmts,
+                bs,
+                ir_lookup_index, canonical_facts, call_arg_type_cache
+            );
+            seed_string_counter = seed_result.string_counter;
+            seed_temp_counter = seed_result.temp_counter;
+        }
+        seed_index = seed_index + 1;
+    }
     // control.go: 179  loop := l.pushLoop(stmt.Label, exit.Name, header.Name)
     //
     // No break or continue reaches this row -- generic_while_refusal turned every one of them away,
@@ -22102,15 +22296,15 @@ fn lower_while_statement(
         module_prefix,
         locals_spec,
         cond_node,
-        string_counter,
-        temp_counter,
+        seed_string_counter,
+        seed_temp_counter,
         &var cond_insts,
         &body_aliases,
         bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
-    var body_string_counter = string_counter + try count_strings_in_insts(&cond_insts);
-    var body_temp_counter = temp_counter + cond_insts.len();
+    var body_string_counter = seed_string_counter + try count_strings_in_insts(&cond_insts);
+    var body_temp_counter = seed_temp_counter + cond_insts.len();
     var body_try_counter = loop_index * 1000;
     var body_alias_counter = alias_counter;
     // control.go: 180  if err := l.lowerBlock(stmt.Body); err != nil
@@ -22282,8 +22476,10 @@ fn lower_while_statement(
         }
         // init_name and not the literal/copy metadata: this seed is a value some earlier block
         // computed and left in a register, which is exactly what init_name spells. The three
-        // literal fields back the counter seeds the shapes fold out of a declaration, and a loop
-        // whose carried name has no register at its preheader is refused rather than seeded here.
+        // literal fields back the counter seeds the shapes rebuild out of a folded declaration --
+        // teaching this phi about literals is the alternative to a preheader definition, and it is
+        // the one that puts a second derivation of the seed beside the phi's own incoming row. This
+        // path emits the declaration instead, so every carried name reaches here with a register.
         try carried_scalars.append(compiled_mir::carried_scalar(
             head_name, carried_type, 0, "", 0, seed.name, latch.name, ""
         ));

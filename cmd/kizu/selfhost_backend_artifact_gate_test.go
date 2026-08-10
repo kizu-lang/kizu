@@ -1135,15 +1135,32 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		// the accumulated count wrapped as the success. Both phis take their back edge from
 		// the latch, and the exit reads the head phi, so the returned count is the one the
 		// last completed iteration produced.
-		"%t1 = extractvalue %kizu.kizu.ast.child_range %range, 1",
-		"%count = phi i64 [ 0, %loop2_preheader ], [ %count.loop.24, %loop2_latch ]",
-		"%index = phi i64 [ 0, %loop2_preheader ], [ %index_next, %loop2_latch ]",
+		//
+		// This loop is now lowered by the generic while path, so its two declarations --
+		// 'var count = 0' and 'var index = 0', which the walk used to fold into the head -- are
+		// emitted in the entry block as %<var>.seed.<declaration node> and the head phis seed
+		// from them. The seven fragments this replaces spelled %count / %index bare and mint
+		// temps around them; six stopped matching, and the seventh -- the %index phi -- went on
+		// matching once, in source_manifest_quoted_marker_value, saying nothing about this one.
+		// (The %t1 extractvalue stopped matching too: the 20 occurrences measured for it belong
+		// to its replacement below, which drops the %t1.) So each fragment below either
+		// names this function's own values (%range, %child, %child_call) or a %<var>.while.head.
+		// name, and none spells a mint index. Measured on the staged module: the child_at call
+		// and the node_count call occur once each, the entry-block seed pair twice, the %count
+		// phi and the accumulator add three times, the exit wrap twice, and the range-length
+		// extractvalue -- which names no counter and is kept for the loop bound it reads -- 20.
+		" = extractvalue %kizu.kizu.ast.child_range %range, 1",
+		"entry:\n  %count.seed.1 = select i1 true, i64 0, i64 0\n" +
+			"  %index.seed.4 = select i1 true, i64 0, i64 0",
+		"%count.while.head.7 = phi i64 [ %count.seed.1, %loop2_preheader ]",
+		"%index.while.head.7 = phi i64 [ %index.seed.4, %loop2_preheader ]",
 		"%child_call = call %kizu.error.kizu.kizu.ast.node_id @kizu_kizu__ast_ast_child_at(" +
-			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %range, i64 %index)",
-		"%t4 = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %range, " +
+			"i64 %index.while.head.7)",
+		" = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %child)",
-		"%t6 = add i64 %count, %t5",
-		"loop2_exit:\n  %retwrap7_ok = insertvalue %kizu.error.i64 zeroinitializer, i1 true, 0",
+		" = add i64 %count.while.head.7, ",
+		", i64 %count.while.head.7, 1\n  ret %kizu.error.i64 %retwrap",
 		// count_two: let-try the recursive node_count, propagate failure, bind the success,
 		// then return the arithmetic wrapped as the error-union success.
 		"%first_count_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
@@ -1200,14 +1217,30 @@ func requiredLLVMMemStartsWithFragments() []string {
 		"%prefix_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %prefix)",
 		"%t1 = call i64 @kizu_std__mem_len(%kizu.slice.u8 %bytes)",
 		"%t2 = icmp sgt i64 %prefix_len, %t1",
-		"%index = phi i64 [ 0, %loop3_preheader ], [ %index_next, %loop3_latch ]",
-		"%t5 = icmp slt i64 %index, %prefix_len",
-		"%t7_bad = or i1 %t7_neg, %t7_high",
-		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
-		"%t9_bad = or i1 %t9_neg, %t9_high",
-		"br i1 %t9_bad, label %t9_idx_oob, label %t9_idx_ok",
-		"%t10 = icmp ne i8 %t7, %t9",
-		"%index_next = add i64 %index, 1",
+		// The prefix scan is now lowered by the generic while path: 'var index = 0' is emitted in
+		// if1_cont, the block that branches to the preheader, and the head phi takes its own
+		// %index.while.head.<node> name. Eight fragments spelled %index bare or named a mint temp
+		// around it. One failed; the other seven went on matching elsewhere -- the phi in four
+		// unrelated functions, '%t10 = icmp ne i8 %t7, %t9' in owned_string_equal_bytes, and
+		// '%index_next = add i64 %index, 1' in nineteen functions -- so they had stopped checking
+		// this body. Measured on the staged module: the guard against %prefix_len occurs once and
+		// is what ties the group to this function; the seed line and the mismatch arm twice; the
+		// head phi and the advance three times, over this function, std::mem::equal_bytes and
+		// type_spelling::next_argument; the two bounds tests five times, because the first two of
+		// those read an element twice per body; the head-phi-seed line 18 and the if3001 branch
+		// nine, both of which are group members rather than anchors.
+		//
+		// Of these only if3001 spells a generated index, and it is a body position rather than a
+		// mint counter -- loop_index * 1000 plus the if's index in the body -- which is the same
+		// thing the if1002_ and try1001_ fragments elsewhere in this file already pin.
+		"if1_cont:\n  %index.seed.24 = select i1 true, i64 0, i64 0",
+		"%index.while.head.27 = phi i64 [ %index.seed.24, %loop3_preheader ]",
+		"%index.while.head.27, %prefix_len",
+		"_neg = icmp slt i64 %index.while.head.27, 0",
+		"_high = icmp sge i64 %index.while.head.27, ",
+		", label %if3001_then, label %if3001_cont",
+		"if3001_then:\n  ret i1 false",
+		" = add i64 %index.while.head.27, 1",
 		"loop3_exit:\n  ret i1 true",
 	}
 }
@@ -1436,39 +1469,61 @@ func requiredLLVMFormatHelperFragments() []string {
 		"define %kizu.slice.u8 @kizu_selfhost__parser_format_token_text(",
 		"define %kizu.error.bool @kizu_selfhost__parser_format_next_token_text_equals(",
 		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_import(",
-		// Pin the parameter-seeded induction phi: the loop counter seeds from the
-		// %import_index parameter SSA value on the preheader edge, not a literal, so a
-		// regression back to a literal seed is caught here (issue 1165).
-		"%index = phi i64 [ %import_index, %loop1_preheader ]",
-		// Pin the i64 error-union early-return wrap: 'return index + 1;' inside the loop
-		// wraps the i64 into %kizu.error.i64 with an if-index-suffixed SSA name rather than
-		// returning a raw i64 as the error union (issue 1165).
-		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %t7, 1",
+		// Pin the parameter-seeded counter: 'var index = import_index' is a declaration the walk
+		// folds into the loop head, and the generic while path emits it before the loop instead,
+		// so the value the head phi seeds from is the %import_index parameter and not a literal.
+		// A regression back to a literal seed is caught here (issue 1165). It replaces
+		// "%index = phi i64 [ %import_index, %loop1_preheader ]", which named the counter %index.
+		// Measured on the staged module: this line occurs once.
+		"%index.seed.1 = select i1 true, i64 %import_index, i64 %import_index",
+		// Pin the i64 error-union early-return wrap: 'return index + 1;' inside the loop computes
+		// the sum off the head phi and wraps it into %kizu.error.i64 rather than returning a raw
+		// i64 (issue 1165). The fragment this replaces spelled the sum's mint temp, %t7, and went
+		// on matching in parser::validation::skip_fn_param_type after the temp became %t8.
+		// Measured: once.
+		" = add i64 %index.while.head.4, 1\n  %if1002_retexpr_ok",
 		// index_after_leading_imports is the first scan-while whose loop latch is a
 		// loop-carried try-call: 'var index = 0; while index < tokens.len() { let token =
 		// try tokens.get(index); if !is_import_token(token) { return index; } index = try
 		// index_after_import(tokens, index); } return index;' (issue 1165).
 		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_leading_imports(",
-		// Pin the generic loop-carried latch: the phi seeds from the literal 0 on the
-		// preheader edge and takes its latch operand %index_next from the try-call
-		// continuation block %try1001_cont (the real predecessor), not %loop1_latch, so a
-		// regression to a constant-step latch or a wrong phi predecessor is caught.
-		"%index = phi i64 [ 0, %loop1_preheader ], [ %index_next, %try1001_cont ]",
-		// Pin that the latch update is the index_after_import try-call (resolved through the
-		// catalog/BFS, not a literal step) producing the loop-carried %kizu.error.i64.
-		"%index_next_call = call %kizu.error.i64 " +
-			"@kizu_selfhost__parser_format_index_after_import(%kizu.owned %tokens, i64 %index)",
-		// Pin that the phi's latch operand is the try-call success value (field 1), so the
-		// loop-carried counter advances by the callee result rather than a raw step.
-		"%index_next = extractvalue %kizu.error.i64 %index_next_call, 1",
+		// Pin that the loop's advance is the index_after_import try-call (resolved through the
+		// catalog/BFS, not a literal step) reading the head phi. This is the fragment that ties
+		// the four below to this function: measured on the staged module, it occurs once.
+		//
+		// The call's result no longer takes the source spelling %index_next. The generic while
+		// path lowers 'index = try index_after_import(tokens, index)' as an ordinary body
+		// assignment, so the value is bound under the assignment's own alias name and the head phi
+		// reads it on the latch edge; the four fragments this group used to carry all spelled
+		// %index or %index_next and stopped matching with it.
+		"_call = call %kizu.error.i64 " +
+			"@kizu_selfhost__parser_format_index_after_import(" +
+			"%kizu.owned %tokens, i64 %index.while.head.4)",
+		// Pin that the value the loop carries back is the try-call's success field and that it is
+		// bound in the try continuation, which branches to the latch -- so the counter advances by
+		// the callee result rather than a raw step. Measured: the continuation pair occurs in
+		// three functions and the success-field-then-latch line in six; the call above is what
+		// says which loop this is.
+		"try1001_cont:\n  %void.then.alias.",
+		"_call, 1\n  br label %loop1_latch",
 		// Pin the latch failure propagation: a try-call failure rewraps the callee message
 		// into this function's own %kizu.error.i64 and returns it, never a raw i64 or an
 		// 'unreachable', so a broken error-union propagation is caught (issue 1165).
-		"%index_next_fail_val = insertvalue %kizu.error.i64 %index_next_fail_flag, " +
-			"%kizu.slice.u8 %index_next_msg, 2",
-		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64
-		// wraps into %kizu.error.i64 rather than returning a raw i64 as the error union.
-		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
+		//
+		// The rewrap itself is what is pinned, not the block label. The fragment this replaced
+		// was "try1001_fail:\n  %void.then.alias." -- a label followed by a line that begins with
+		// the alias prefix, which is satisfied by the message extract alone and says nothing about
+		// the insertvalue chain, the error type or the return. Its predecessor DID check the
+		// rewrap; swapping them kept the pin count whole while the property quietly left, which is
+		// the failure ca2d7a52 was written to remove. Measured on the staged module: this line
+		// occurs once, and the ret below once.
+		"_fail_val = insertvalue %kizu.error.i64 %void.then.alias.",
+		"ret %kizu.error.i64 %void.then.alias.0_fail_val",
+		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64 wraps
+		// into %kizu.error.i64 rather than returning a raw i64 as the error union, and the i64 it
+		// wraps is the head phi. Measured: two functions.
+		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, " +
+			"i64 %index.while.head.4, 1",
 		// format_source is the compiled formatter driver used by the hosted fmt command. Pin the
 		// tokenizer call and owned String return shape so the artifact cannot silently fall back to
 		// the old parse_format_alloc emitter.
