@@ -16,15 +16,17 @@ func TestSelfhostCompiledMIRGuardsParserOnlyLoopProbes(t *testing.T) {
 		t.Fatalf("compiled MIR lowerer missing parser component guard %q", guard)
 	}
 
+	// The four probes that remain. This list was eight until the generic while path
+	// took over the loops behind grammar_postfix, type_apply, value_cursor_append and
+	// guarded_cursor_return and those shapes were deleted. The property is unchanged --
+	// a shape detector must not run on a component it was never written for -- and it
+	// is asserted over whatever population is left; when the last of these goes, the
+	// guard and compiled_mir_lower_is_parser_component go with it, and so does this test.
 	for _, probe := range []string{
-		"is_grammar_postfix_loop_shape(",
-		"is_type_apply_loop_shape(",
 		"is_while_match_loop_shape(",
 		"is_precedence_loop_shape(",
 		"is_dual_cursor_loop_shape(",
 		"is_trailing_token_loop_shape(",
-		"is_value_cursor_append_loop_shape(",
-		"is_guarded_cursor_return_loop_shape(",
 	} {
 		probeIndex := strings.Index(body, probe)
 		if probeIndex < 0 {

@@ -788,7 +788,12 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 			"@kizu_selfhost__ir_codegen_empty_payload_span",
 		"define i1 @kizu_selfhost__ir_codegen_is_payload_supported",
 		"%index = phi i64 [ 0, %loop4_preheader ], [ %index_next, %loop4_latch ]",
-		"%t5 = icmp slt i64 %index, %t4",
+		// The bound test of parse_int_literal's digit scan. It used to be spelled
+		// "%t5 = icmp slt i64 %index, %t4", which no define in the artifact carries any more: that
+		// string had drifted onto std::kizu::parser::parse_type_apply_expr_with_args' inner
+		// type-argument loop, and it left with lower_type_apply_nested_counted_while. This spelling
+		// is the one parse_int_literal actually emits, and it occurs in that define alone.
+		"%t8 = icmp slt i64 %index.while.head.26, %length",
 		", label %loop4_body, label %loop4_exit",
 		"%index_next = add i64 %index, 1",
 		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
@@ -1431,17 +1436,29 @@ func requiredLLVMTokenizerFragments() []string {
 		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_next_token(",
 		"%nt_next = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_position(",
 		// tokenize: build a dynamic Token array via the runtime helpers and fold first/next_token
-		// into it, returning the array as the error-union-owned success. It lowers through the
-		// generic ArrayNew + ValueWhile path (issue 1165): the element width comes from the element
-		// type (ptrtoint), the carried Token threads through a value phi, and the seed/iteration
-		// appends propagate failure as the error-union-owned failure.
+		// into it, returning the array as the error-union-owned success. The element width still
+		// comes from the element type (ptrtoint).
+		//
+		// The four fragments below replace the %vw0_* ones this list used to carry. Those came from
+		// lower_value_array_loop, a whole-function shape that emitted the loop as a single opaque
+		// ValueWhile MIR statement and never lowered its body; that shape is gone and tokenize now
+		// goes through the ordinary multi-statement walker. The observable difference is what is
+		// being pinned here: the carried Token is reloaded from a loop-carried slot at the head
+		// rather than threaded through a value phi, and BOTH appends -- the seed one before the
+		// loop and the one inside the body -- are now real emitted array_append calls, so the body
+		// append can be pinned at all. The %loop3 / %voidtry0 / %voidtry3000 / %retwrap4 numbers are
+		// lowering counters, not source names; each of these four strings occurs in exactly one
+		// define in the artifact, which is this one.
 		"define %kizu.error.owned @kizu_kizu__lexer_tokenize(",
 		"%tokens = call %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, " +
 			"i64 ptrtoint (ptr getelementptr (%kizu.kizu.lexer.token, ptr null, i32 1) to i64))",
-		"%current = phi %kizu.kizu.lexer.token [ %current_init, %entry ], " +
-			"[ %current_next, %vw0_after ]",
-		"%vw0_seed_app = call %kizu.error.void @kizu_rt_array_append(",
-		"%vw0_ok1 = insertvalue %kizu.error.owned %vw0_ok0, %kizu.owned %tokens, 1",
+		"%current = load %kizu.kizu.lexer.token, ptr %loop3_carry_current",
+		"%voidtry0_call = call %kizu.error.void @kizu_rt_array_append(" +
+			"%kizu.owned %tokens, ",
+		"%voidtry3000_call = call %kizu.error.void @kizu_rt_array_append(" +
+			"%kizu.owned %tokens, ",
+		"%retwrap4_val = insertvalue %kizu.error.owned %retwrap4_ok, " +
+			"%kizu.owned %tokens, 1",
 	}
 }
 
