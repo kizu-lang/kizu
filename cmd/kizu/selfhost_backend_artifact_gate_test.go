@@ -1738,38 +1738,48 @@ func requiredLLVMFormatLineEndFragments() []string {
 		"  %kizu.slice.u8 %source",
 		"  i64 %start",
 		"%length = call i64 @kizu_std__mem_len(%kizu.slice.u8 %source)",
-		"%index = phi i64 [ %start, %loop2_preheader ], [ %index_next, %loop2_latch ]",
+		// The counter, seeded from %start rather than a literal. Both spellings moved when this
+		// loop passed from the shape lowering to the generic while walker: the declaration is
+		// materialised in the block that branches to the preheader as %<var>.seed.<node>, and the
+		// head phi is %<var>.while.head.<node>. Same two edges, same values.
+		"%index.seed.1 = select i1 true, i64 %start, i64 %start",
+		"%index.while.head.13 = phi i64 [ %index.seed.1, %loop2_preheader ], " +
+			"[ %void.then.alias.0, %loop2_latch ]",
 		// Operand 0 in the loop head: the 'index < length' guard branching into the guarded
 		// loop2_head_rhs block on success and short-circuiting to loop2_exit on failure. This pins
 		// the short-circuit while header block layout: the byte load never runs unless the guard
-		// holds.
-		"%t2 = icmp slt i64 %index, %length",
-		"br i1 %t2, label %loop2_head_rhs, label %loop2_exit",
-		// Operand 1 in the guarded loop2_head_rhs block: the checked source[index] byte load (the
-		// single-element index argument hoisted into temp %t4), the is_line_break call, and the
-		// prefix-not xor, branching into the loop body on a non-break byte and to loop2_exit on a
-		// break byte.
+		// holds. It is the property the generic walker had to reproduce to take this loop at all --
+		// it refused every short-circuit header until it could emit the operand chain -- so this
+		// fragment is what says it reproduced it rather than flattening the guard away.
+		"%t3 = icmp slt i64 %index.while.head.13, %length",
+		"br i1 %t3, label %loop2_head_rhs, label %loop2_exit",
+		// Operand 1 in the guarded loop2_head_rhs block: the checked source[index] byte load, the
+		// is_line_break call, and the prefix-not xor, branching into the loop body on a non-break
+		// byte and to loop2_exit on a break byte. Every read of the counter here is the head phi,
+		// not the preheader value -- a leaf reading the seed would test the same byte forever.
 		"loop2_head_rhs:",
-		"%t4_bad = or i1 %t4_neg, %t4_high",
-		"%t4 = load i8, ptr %t4_gep",
-		"%t5 = call i1 @kizu_selfhost__parser_format_is_line_break(i8 %t4)",
-		"%t6 = xor i1 %t5, true",
-		"br i1 %t6, label %loop2_body, label %loop2_exit",
-		"%index_next = add i64 %index, 1",
+		"%t5_bad = or i1 %t5_neg, %t5_high",
+		"%t5_gep = getelementptr i8, ptr %t5_ptr, i64 %index.while.head.13",
+		"%t5 = load i8, ptr %t5_gep",
+		"%t6 = call i1 @kizu_selfhost__parser_format_is_line_break(i8 %t5)",
+		"%t7 = xor i1 %t6, true",
+		"br i1 %t7, label %loop2_body, label %loop2_exit",
+		"%t10 = add i64 %index.while.head.13, 1",
 		"loop2_exit:",
 		// line_end_including_break: the same short-circuit while header plus the trailing 'if index
 		// < length { return after_line_break(source, index); } return index;' that folds a CRLF/LF
 		// into the line. The then-block is a 'return after_line_break(..)' ReturnCall returning a
 		// plain i64 (no error-union wrap on this scalar helper); the fall-through returns index.
 		"define i64 @kizu_selfhost__parser_format_line_end_including_break(",
-		"%t9 = icmp slt i64 %index, %length",
-		"br i1 %t9, label %if3_then, label %if3_cont",
+		"br i1 %t13, label %if3_then, label %if3_cont",
 		"if3_then:",
-		"%t10 = call i64 @kizu_selfhost__parser_format_after_line_break(" +
-			"%kizu.slice.u8 %source, i64 %index)",
-		"  ret i64 %t10",
+		"%t14 = call i64 @kizu_selfhost__parser_format_after_line_break(" +
+			"%kizu.slice.u8 %source, i64 %index.while.head.13)",
+		"  ret i64 %t14",
 		"if3_cont:",
-		"  ret i64 %index",
+		// Both exits read the head phi. The loop leaves its counter through the phi that dominates
+		// loop2_exit, so nothing after the loop reads the preheader seed.
+		"  ret i64 %index.while.head.13",
 	}
 }
 
@@ -1985,33 +1995,50 @@ func requiredLLVMFormatImportSortFragments() []string {
 		// bound to the named length locals the loop header reads.
 		"%left_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %left)",
 		"%right_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %right)",
-		// Pin the short-circuit `and` while header: the two `index < *_len` comparisons lower
-		// to an eager `and i1` over the comparison results (their operands are side-effect
-		// free), so a regression that rejects an `and` header or mis-lowers it is caught.
-		"%t6 = and i1 %t2, %t5",
+		// Pin the `and` while header: the two `index < *_len` comparisons lower to an EAGER
+		// `and i1` over the comparison results, because their operands are side-effect free and
+		// condition_eager_safe says so. That is the half of the header story the guarded chain in
+		// requiredLLVMFormatLineEndFragments does not tell, and it has to keep being told
+		// separately: a lowering that turned every `and` into a chain of guarded blocks would
+		// still be correct and would still pass that group.
+		//
+		// Both comparisons name the head phi, so a leaf reading the preheader seed is caught here.
+		// The fragments name %left_len and %right_len for a reason: the pin this replaces was
+		// "%t6 = and i1 %t2, %t5", which named none of this function's values, matched four
+		// functions at HEAD and three others now -- including lexer_is_alpha and path_join -- and
+		// went on passing while compare_bytes moved to %t7 = and i1 %t3, %t6. It had stopped
+		// checking what its comment claimed long before this commit.
+		"%t3 = icmp slt i64 %index.while.head.22, %left_len",
+		"%t6 = icmp slt i64 %index.while.head.22, %right_len",
 		// import_path_less is the first multi-counter import-sort helper on the compiled path:
 		// two lockstep token cursors with base-plus-offset inits advanced under a short-circuit
 		// `and` header, with a nested-call compare_bytes let and a prefix-not call return
 		// (issue 1165 / 1162).
 		"define %kizu.error.bool @kizu_selfhost__parser_format_import_path_less(",
-		// Pin the base-plus-offset preheader seeds ('var left_index = left + 1; var right_index
-		// = right + 1;'): each lockstep counter materializes %<var>_init in the preheader so the
-		// loop-head phi seeds from it instead of a literal or a plain copy.
-		"%right_index_init = add i64 %right, 1",
-		"%left_index_init = add i64 %left, 1",
-		// Pin the two lockstep loop-head phis seeded from the preheader inits and advanced from
-		// the shared latch, so a regression to a single induction counter is caught.
-		"%right_index = phi i64 [ %right_index_init, %loop2_preheader ], " +
-			"[ %right_index_next, %loop2_latch ]",
-		"%left_index = phi i64 [ %left_index_init, %loop2_preheader ], " +
-			"[ %left_index_next, %loop2_latch ]",
-		// Pin the two-counter constant-step latch: both cursors advance by one in the same
-		// latch block.
-		"%right_index_next = add i64 %right_index, 1",
-		"%left_index_next = add i64 %left_index, 1",
-		// Pin the prefix-not call return ('return !is_semicolon_token(right_token);'): the bool
-		// call result is negated with 'xor i1 %call, true' before the error-union wrap.
-		"%t11 = xor i1 %t10, true",
+		// Pin the base-plus-offset seeds ('var left_index = left + 1; var right_index = right + 1;'):
+		// each lockstep counter is materialised before the preheader so the head phi seeds from a
+		// register rather than from a literal or a plain copy. Both declarations are folded out of
+		// the emitted path by the walker, so their being here at all is what says the generic while
+		// gave a folded declaration a definition instead of refusing the loop.
+		"%left_index.seed.1 = select i1 true, i64 %t2, i64 %t2",
+		"%right_index.seed.6 = select i1 true, i64 %t5, i64 %t5",
+		// Pin the two lockstep loop-head phis, seeded from those and advanced from the shared
+		// latch, so a regression to a single induction counter is caught. Two carried names, two
+		// phis: the generic while opens one per assigned name rather than one induction variable
+		// plus threaded scalars.
+		"%left_index.while.head.11 = phi i64 [ %left_index.seed.1, %loop2_preheader ], " +
+			"[ %void.then.alias.0, %loop2_latch ]",
+		"%right_index.while.head.11 = phi i64 [ %right_index.seed.6, %loop2_preheader ], " +
+			"[ %void.then.alias.1, %loop2_latch ]",
+		// Pin the two-counter constant-step advance: both cursors advance by one, each reading its
+		// own head phi and not its seed.
+		"%t30 = add i64 %left_index.while.head.11, 1",
+		"%t33 = add i64 %right_index.while.head.11, 1",
+		// Pin the eager `and` header over the two `index < len(tokens)` guards. Measured: this
+		// fragment occurs once in the module, so it names this function and no other -- unlike the
+		// `%t11 = xor i1 %t10, true` it replaces, which occurs nine times and pinned the prefix-not
+		// return of whatever function happened to number its temps that way.
+		"%t12 = and i1 %t8, %t11",
 	}
 }
 

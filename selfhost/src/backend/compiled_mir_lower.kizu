@@ -18615,17 +18615,6 @@ fn generic_while_refusal(
     let cond_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "condition", 0, bs
     );
-    // A genuine short-circuit header is a chain of guarded operand BLOCKS: leaf 0 in loop<N>_head,
-    // leaf 1 in a guarded loop<N>_head_rhs, any further leaves in cond_extra_operands, and
-    // cond_targets saying where each leaf branches. This lowering fills cond_insts and leaves
-    // cond_short_circuit at 0, which is the single "br i1" the eager path renders -- so a guarded
-    // header lowered here would evaluate the leaf its guard exists to prevent. An 'and' or 'or'
-    // whose operands are all eager-safe folds into that single branch and answers 0, so it is not
-    // this refusal.
-    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
-    if cond_kind != 0 {
-        return "compiled mir: a generic while header has no operand chain for a short-circuit condition";
-    }
     let body_node = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, statement, "body", 0, bs
     );
@@ -18986,22 +18975,131 @@ fn lower_while_statement(
     // control.go: 173  cond, err := l.lowerExpr(stmt.Condition)
     //
     // In the header, against the body's tables: a condition reading a carried name reads the phi.
+    // That is why this runs after the reseating above and not before -- every leaf below inherits
+    // it, so a short-circuit chain reads the phi in each of its blocks and not the preheader value.
+    //
+    // `a and b` is TWO questions when b may not be asked. An eager-safe pair folds into one branch
+    // and lowers here as any other condition does; a guarded one is a chain of operand BLOCKS, and
+    // MirWhileStmt has carried the fields for it all along -- cond_short_circuit, cond_rhs_insts,
+    // cond_extra_operands, cond_targets -- with append_while_short_circuit_branches rendering them.
+    // Only this walker had no way to fill them, so it refused instead, and the refusal was written
+    // wider than the fault: it turned away every `and` and `or`, including the eager-safe ones the
+    // single branch handles correctly, and its comment claimed short_circuit_kind answered 0 for
+    // those. It does not; condition_eager_safe is the question that does.
     var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
-    let cond_result = try lower_expr_into_local_aliases(
-        ir_bytes,
-        function_name,
-        module_prefix,
-        locals_spec,
-        cond_node,
-        seed_string_counter,
-        seed_temp_counter,
-        &var cond_insts,
-        &body_aliases,
-        bs,
-        ir_lookup_index, canonical_facts, call_arg_type_cache
-    );
-    var body_string_counter = seed_string_counter + try count_strings_in_insts(&cond_insts);
-    var body_temp_counter = seed_temp_counter + cond_insts.len();
+    var cond_rhs_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    var cond_extra_operands =
+        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator());
+    var cond_targets = std::array::Array<compiled_mir::MirCondTarget>(std::mem::page_allocator());
+    var cond_result = -1;
+    var cond_rhs_result = -1;
+    var cond_short_circuit = 0;
+    var body_string_counter = seed_string_counter;
+    var body_temp_counter = seed_temp_counter;
+    let cond_kind = try short_circuit_kind(ir_bytes, function_name, cond_node, bs);
+    if cond_kind != 0 and
+        !(try condition_eager_safe(ir_bytes, function_name, cond_node, bs)) {
+        // Leaf 0 fills cond_insts, which the renderer emits in loop<N>_head; leaf 1 fills
+        // cond_rhs_insts, the first guarded block; the rest fill cond_extra_operands. Each leaf
+        // carries the two destinations its i1 selects, so nesting is structural: collect_cond_leaves
+        // descends `and` and `or` alike and only the recorded edges differ.
+        cond_short_circuit = 1;
+        var leaves = std::array::Array<CondLeaf>(std::mem::page_allocator());
+        defer leaves.deinit();
+        try collect_cond_leaves(
+            ir_bytes, function_name, cond_node, 0,
+            compiled_mir::cond_target_condition_true(),
+            compiled_mir::cond_target_condition_false(),
+            &var leaves, bs
+        );
+        let first_leaf = try leaves.at(0);
+        let first_node = first_leaf.node;
+        let first_true = first_leaf.true_target;
+        let first_false = first_leaf.false_target;
+        cond_result = try lower_expr_into_local_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            first_node,
+            seed_string_counter,
+            seed_temp_counter,
+            &var cond_insts,
+            &body_aliases,
+            bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+        try cond_targets.append(compiled_mir::cond_target(first_true, first_false));
+        var acc_strings = try count_strings_in_insts(&cond_insts);
+        var acc_temp = seed_temp_counter + cond_insts.len();
+        let second_leaf = try leaves.at(1);
+        let second_node = second_leaf.node;
+        let second_true = second_leaf.true_target;
+        let second_false = second_leaf.false_target;
+        cond_rhs_result = try lower_expr_into_local_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            second_node,
+            seed_string_counter + acc_strings,
+            acc_temp,
+            &var cond_rhs_insts,
+            &body_aliases,
+            bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+        try cond_targets.append(compiled_mir::cond_target(second_true, second_false));
+        acc_strings = acc_strings + try count_strings_in_insts(&cond_rhs_insts);
+        acc_temp = acc_temp + cond_rhs_insts.len();
+        var leaf_index = 2;
+        while leaf_index < leaves.len() {
+            var operand_insts =
+                std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+            let leaf = try leaves.at(leaf_index);
+            let leaf_node = leaf.node;
+            let leaf_true = leaf.true_target;
+            let leaf_false = leaf.false_target;
+            let operand_result = try lower_expr_into_local_aliases(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                leaf_node,
+                seed_string_counter + acc_strings,
+                acc_temp,
+                &var operand_insts,
+                &body_aliases,
+                bs,
+                ir_lookup_index, canonical_facts, call_arg_type_cache
+            );
+            acc_strings = acc_strings + try count_strings_in_insts(&operand_insts);
+            acc_temp = acc_temp + operand_insts.len();
+            try cond_extra_operands.append(
+                compiled_mir::cond_operand(operand_result, operand_insts)
+            );
+            try cond_targets.append(compiled_mir::cond_target(leaf_true, leaf_false));
+            leaf_index = leaf_index + 1;
+        }
+        body_string_counter = seed_string_counter + acc_strings;
+        body_temp_counter = acc_temp;
+    } else {
+        cond_result = try lower_expr_into_local_aliases(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            locals_spec,
+            cond_node,
+            seed_string_counter,
+            seed_temp_counter,
+            &var cond_insts,
+            &body_aliases,
+            bs,
+            ir_lookup_index, canonical_facts, call_arg_type_cache
+        );
+        body_string_counter = seed_string_counter + try count_strings_in_insts(&cond_insts);
+        body_temp_counter = seed_temp_counter + cond_insts.len();
+    }
     var body_try_counter = loop_index * 1000;
     var body_alias_counter = alias_counter;
     // control.go: 180  if err := l.lowerBlock(stmt.Body); err != nil
@@ -19205,11 +19303,11 @@ fn lower_while_statement(
         0,
         cond_result,
         cond_insts,
-        0,
-        -1,
-        std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirCondOperand>(std::mem::page_allocator()),
-        std::array::Array<compiled_mir::MirCondTarget>(std::mem::page_allocator()),
+        cond_short_circuit,
+        cond_rhs_result,
+        cond_rhs_insts,
+        cond_extra_operands,
+        cond_targets,
         body_stmts,
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         "",
