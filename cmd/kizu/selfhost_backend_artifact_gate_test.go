@@ -1476,24 +1476,33 @@ func requiredLLVMFormatHelperFragments() []string {
 		// format.kizu imports selfhost::lexer, so the compiled driver calls the selfhost
 		// tokenizer; the pin follows the source rather than the std::kizu spelling it had.
 		"%format_tokens_call = call %kizu.error.owned @kizu_selfhost__lexer_tokenize(",
-		// format_source's tokenizer loop seeds %index from the value that reaches the if11
-		// join -- next_index on the leading-import fast path, 0 otherwise -- and takes its
-		// latch operand from %loop13_latch. Seeding from the raw initializer instead, or
-		// from a value published inside the arm that does not dominate the join, is the
-		// defect family this backend keeps producing, and it shows up exactly here.
+		// format_source's tokenizer loop is the one loop in the staged module that the generic
+		// while lowering takes. Its header no longer binds a single %index counter with the
+		// other mutated locals threaded around it: it opens one phi per name the body assigns,
+		// each named %<var>.while.head.<node>, and %index is one of eight.
 		//
-		// Split in two so neither half spells a generated index. It read
-		// `[ %void.then.alias.13, %loop13_preheader ]` until aac4c283 moved `var index = 0`
-		// off the void-alias supply onto its own scoped seed name, which shifted every later
-		// alias in the function down by one and left the pin asserting that the loop seeds
-		// its counter from `cursor`. The mint number is not a property worth pinning; that
-		// the seed is a join result and the latch operand arrives from the latch is.
-		// Measured on the staged module: the first fragment occurs once, the second twice.
-		"%index = phi i64 [ %void.then.alias.",
-		", %loop13_preheader ], [ %index_next, %loop13_latch ]",
-		"%t24 = icmp slt i64 %index, %t23",
+		// The property being pinned is unchanged -- the counter is a header phi seeded on the
+		// preheader edge from the value that reaches the if11 join (next_index on the
+		// leading-import fast path, 0 otherwise) and taking its latch operand from
+		// %loop13_latch, and every read of the counter inside the loop resolves to that phi
+		// rather than to a value from before it. Seeding from the raw initializer, or from a
+		// value published inside an arm that does not dominate the join, is the defect family
+		// this backend keeps producing, and it shows up exactly here.
+		//
+		// The four fragments this replaces all spelled %index bare. Three stopped matching
+		// when the phi took its own name; the fourth, "%index = phi i64 [ %void.then.alias.",
+		// went on matching -- in types::raw_pointer_pointee_start, a function it says nothing
+		// about. That is the same silent repointing the node_count pin suffered, so none of
+		// the five below spells a mint index or a node number: %<var>.while.head. is a
+		// prefix, and %loop13_ is the loop's own label. Measured on the staged module:
+		// %index.while.head. occurs 9 times, %cursor.while.head. 4, the preheader-and-join
+		// pair 8 (one per header phi), and the icmp and the array read once each.
+		"%index.while.head.",
+		"%cursor.while.head.",
+		", %loop13_preheader ], [ %void.then.alias.",
+		" = icmp slt i64 %index.while.head.",
 		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +
-			"%kizu.owned %format_tokens, i64 %index)",
+			"%kizu.owned %format_tokens, i64 %index.while.head.",
 		"%retwrap0_ok = insertvalue %kizu.error.owned zeroinitializer, i1 true, 0",
 		"%retwrap0_val = insertvalue %kizu.error.owned %retwrap0_ok, %kizu.owned %out, 1",
 	}
