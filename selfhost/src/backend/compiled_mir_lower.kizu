@@ -19243,8 +19243,8 @@ fn lower_while_statement(
     // THE PAYLOAD IS THE PHI, read back out of the environment. Both operand names come from the
     // phi's own incoming rows -- the preheader edge create_loop_phis added first, the latch edge
     // finish_loop_phis added second -- so there is no second derivation of them to disagree with.
-    var carried_scalars =
-        std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator());
+    var header_phis =
+        std::array::Array<compiled_mir::MirHeaderPhi>(std::mem::page_allocator());
     var payload_index = 0;
     while payload_index < carried_names.len() {
         let name = try carried_names.get(payload_index);
@@ -19254,30 +19254,39 @@ fn lower_while_statement(
         if phi < 0 {
             return error("compiled mir: a generic while header opened no phi for a carried name");
         }
-        // MirCarriedScalar holds exactly two operand slots. A third incoming would be an edge the
-        // payload cannot carry and the module would silently lose, so it is checked rather than
-        // assumed -- this is the measured limit the accepted population is drawn to fit.
-        let incomings = try mir_env::phi_incoming_count(space, phi);
-        if incomings != 2 {
-            return error("compiled mir: a generic while header phi has an edge the carried-scalar payload cannot hold");
+        // Every edge the construction recorded, in the order it recorded them: create_loop_phis
+        // added the preheader operand, finish_loop_phis the body's fall-through and then one per
+        // continue edge. Nothing is chosen or dropped here, which is the whole difference from the
+        // carried-scalar payload this replaces -- that one held two slots, so a third edge had to
+        // be refused, and refusing it is what sent every loop with a continue to the shapes.
+        let incoming_count = try mir_env::phi_incoming_count(space, phi);
+        if incoming_count < 2 {
+            return error("compiled mir: a generic while header phi has fewer than two incoming edges");
         }
-        let seed = try mir_env::phi_incoming_at(space, phi, 0);
-        let latch = try mir_env::phi_incoming_at(space, phi, 1);
-        if seed.phi >= 0 or latch.phi >= 0 {
-            return error("compiled mir: a generic while header phi edge carries an unnamed value");
+        var incomings =
+            std::array::Array<compiled_mir::MirPhiIncoming>(std::mem::page_allocator());
+        var incoming_index = 0;
+        while incoming_index < incoming_count {
+            let edge = try mir_env::phi_incoming_at(space, phi, incoming_index);
+            // A phi as an operand would have no spelling the renderer could write: mir_env mints no
+            // names, so a phi is an id until something renders it, and every join in this file
+            // replaces its own phis with a minted name before an enclosing one can see them.
+            if edge.phi >= 0 {
+                return error("compiled mir: a generic while header phi edge carries an unnamed value");
+            }
+            if std::mem::len(edge.name) == 0 {
+                return error("compiled mir: a generic while header phi edge carries no name");
+            }
+            let edge_block = try mir_env::phi_incoming_block_at(space, phi, incoming_index);
+            if std::mem::len(edge_block) == 0 {
+                return error("compiled mir: a generic while header phi edge names no block");
+            }
+            try incomings.append(compiled_mir::phi_incoming(edge_block, edge.name));
+            incoming_index = incoming_index + 1;
         }
-        if std::mem::len(seed.name) == 0 or std::mem::len(latch.name) == 0 {
-            return error("compiled mir: a generic while header phi edge carries no name");
-        }
-        // init_name and not the literal/copy metadata: this seed is a value some earlier block
-        // computed and left in a register, which is exactly what init_name spells. The three
-        // literal fields back the counter seeds the shapes rebuild out of a folded declaration --
-        // teaching this phi about literals is the alternative to a preheader definition, and it is
-        // the one that puts a second derivation of the seed beside the phi's own incoming row. This
-        // path emits the declaration instead, so every carried name reaches here with a register.
-        try carried_scalars.append(compiled_mir::carried_scalar(
-            head_name, carried_type, 0, "", 0, seed.name, latch.name, ""
-        ));
+        try header_phis.append(
+            compiled_mir::header_phi(head_name, carried_type, incomings)
+        );
         // Reads after the loop resolve to the header phi, which dominates loop<N>_exit. Both
         // tables are told, and they are told the same thing: finish_loop_phis left the name
         // denoting the phi in the environment, and this replaces that with the phi's register.
@@ -19312,10 +19321,10 @@ fn lower_while_statement(
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         "",
         std::array::Array<compiled_mir::MirSecondaryInduction>(std::mem::page_allocator()),
-        carried_scalars,
-        // header_phis: empty while this walker still describes its head as two-edge carried
-        // scalars. Filling it is what lets a break or a continue add a third edge.
-        std::array::Array<compiled_mir::MirHeaderPhi>(std::mem::page_allocator()),
+        // No carried scalars: this walker describes its head as phis with one operand per edge,
+        // which is the description below and the only one the renderer reads when it is non-empty.
+        std::array::Array<compiled_mir::MirCarriedScalar>(std::mem::page_allocator()),
+        header_phis,
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         -1,
         false,
