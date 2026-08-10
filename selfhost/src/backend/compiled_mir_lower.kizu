@@ -20,8 +20,9 @@ import selfhost::ir::builtin_contract;
 // ALIAS MAP AND ENVIRONMENT TRAVEL IN PAIRS
 //
 // This file is part way through replacing the alias map (LocalAliasState below) with the SSA
-// environment mir_env.kizu builds. Both are carried; the environment is written and never read, so
-// the emitted module is still exactly what the alias map produces.
+// environment mir_env.kizu builds. Both are carried, and the environment has taken over its first
+// question: append_if_join_merge_vars asks it what an if-join carries out, and every other read is
+// still the alias map's.
 //
 // The rule that makes the two agree: an alias map a statement lowering writes through is created
 // together with the environment that travels with it, and the child is lowered against that
@@ -36,8 +37,14 @@ import selfhost::ir::builtin_contract;
 // The names are the check a reader can run: every argument list that carries a `space` spells the
 // map and the environment with the same prefix, so `&var body_aliases, space, env` -- a body handed
 // a private map and its parent's environment -- reads as wrong on sight. A fresh map takes a fresh
-// environment for the reason the map is fresh: an empty map says this body sees nothing of the
-// enclosing scope, and an empty environment says the same thing.
+// environment for the reason the map is fresh.
+//
+// AN EMPTY MAP DOES NOT SAY THIS BODY SEES NOTHING, and reading it that way is what made the
+// environment wrong. local_alias_current_name returns the source spelling for a name with no entry,
+// so an empty map says every outer variable is back at %<name> -- a total statement, not an absence
+// of one. An empty environment says something else entirely, and mir_env has no total form to say
+// it in. The nine loop-shape lowerings that open a fresh pair therefore fill the environment in,
+// name by name, before lowering anything against it: seed_env_with_outer_names.
 //
 // An alias map that only reaches expression lowering (lower_expr_with_local_aliases and the
 // precedence-loop call helpers) binds no name and is never passed to a lowering that takes a
@@ -69,12 +76,17 @@ import selfhost::ir::builtin_contract;
 // path where induction_init_needs_prewhile_alias is false the Let emits nothing and binds nothing
 // in either, and the loop head's phi is what later binds the name.
 //
-// ONE POPULATION OF ALIAS WRITE HAS NO ENVIRONMENT COUNTERPART YET, because the operation that
-// replaces it is not one this stage installs: the if-join merge variables --
-// append_void_if_else_merge_for_source, its driver append_void_if_else_merge_vars, the inline merge
-// loops in lower_void_if_no_else_statement and lower_try_call_void_if, and copy_aliases_into. The
-// pair of merge operations mir_env.kizu exports IS that join, and the next commit calls them here;
-// an assign written now would install a join rule those calls then delete.
+// THE IF-JOINS NOW COME OUT OF THE ENVIRONMENT. mir_env::merge_branches decides which arms reach a
+// join and merge_envs opens a phi per name they disagree about; append_if_join_merge_vars turns that
+// into the MirIfMergeVar quadruples the renderer already consumed, and writes the join's outputs
+// back into both tables. lower_void_if_else_statement, lower_void_if_no_else_statement and
+// lower_try_call_void_if all reach it -- the last two by handing merge_branches the ENCLOSING
+// environment as the arm that skips the branch, which is what a no-else if means.
+//
+// ONE POPULATION OF ALIAS WRITE STILL HAS NO JOIN AT ALL, and it is not one this stage changes:
+// lower_multi_match_statement forks a copy_env per arm and never merges them, so an arm's assignment
+// to an enclosing variable does not reach past the match. Giving it a join is a behaviour change and
+// belongs with the change that makes it, not with this one.
 //
 // THE LOOP-EXIT PUBLISHES ARE MIRRORED, and they are the one population where WHICH alias write
 // gets an environment write had to be decided rather than read off. A while finishing writes two
@@ -5957,6 +5969,12 @@ fn lower_value_cursor_append_loop(
     var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer body_aliases.deinit();
     let body_env = try mir_env::new_env(&var space);
+    // The body is lowered against a fresh alias map, so it reads every outer variable at its own
+    // spelling. The environment beside it holds the same, or a join inside the body merges nothing
+    // for a name the body assigns -- see seed_env_with_outer_names.
+    try seed_env_with_outer_names(
+        ir_bytes, function_name, body_node, 0, &var space, body_env, bs
+    );
     var body_alias_counter = 0;
     var body_index = 0;
     while body_index < body_boundary {
@@ -7067,6 +7085,12 @@ fn lower_precedence_loop(
     var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer body_aliases.deinit();
     let body_env = try mir_env::new_env(&var space);
+    // The body is lowered against a fresh alias map, so it reads every outer variable at its own
+    // spelling. The environment beside it holds the same, or a join inside the body merges nothing
+    // for a name the body assigns -- see seed_env_with_outer_names.
+    try seed_env_with_outer_names(
+        ir_bytes, function_name, body_node, 0, &var space, body_env, bs
+    );
     var body_alias_counter = 0;
     var body_index = 0;
     while body_index < body_boundary {
@@ -7287,6 +7311,12 @@ fn lower_dual_cursor_loop(
     var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer body_aliases.deinit();
     let body_env = try mir_env::new_env(&var space);
+    // The body is lowered against a fresh alias map, so it reads every outer variable at its own
+    // spelling. The environment beside it holds the same, or a join inside the body merges nothing
+    // for a name the body assigns -- see seed_env_with_outer_names.
+    try seed_env_with_outer_names(
+        ir_bytes, function_name, body_node, 0, &var space, body_env, bs
+    );
     var body_alias_counter = 0;
     var body_index = 0;
     while body_index < body_boundary {
@@ -7466,6 +7496,12 @@ fn lower_trailing_token_loop(
     var post_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer post_aliases.deinit();
     let post_env = try mir_env::new_env(&var space);
+    // These statements are lowered against a fresh alias map, which reads every name still in scope
+    // -- both loop cursors and the pre-loop lets -- at its own spelling. The environment beside it
+    // holds the same for the names they assign. See seed_env_with_outer_names.
+    try seed_env_with_outer_names(
+        ir_bytes, function_name, 0, 3, &var space, post_env, bs
+    );
     var post_locals = loop_locals;
     var post_string_counter = latch_string_counter;
     var post_temp_counter = cond_inst_count;
@@ -8162,6 +8198,12 @@ fn lower_type_apply_loop(
     var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer body_aliases.deinit();
     let body_env = try mir_env::new_env(&var space);
+    // The body is lowered against a fresh alias map, so it reads every outer variable at its own
+    // spelling. The environment beside it holds the same, or a join inside the body merges nothing
+    // for a name the body assigns -- see seed_env_with_outer_names.
+    try seed_env_with_outer_names(
+        ir_bytes, function_name, body_node, 0, &var space, body_env, bs
+    );
     let append_stmt = try ir_contract::body_child_sequence_from(
         ir_bytes, function_name, body_node, "statement", 1, bs
     );
@@ -8479,6 +8521,12 @@ fn lower_while_match_loop(
     var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer body_aliases.deinit();
     let body_env = try mir_env::new_env(&var space);
+    // The body is lowered against a fresh alias map, so it reads every outer variable at its own
+    // spelling. The environment beside it holds the same, or a join inside the body merges nothing
+    // for a name the body assigns -- see seed_env_with_outer_names.
+    try seed_env_with_outer_names(
+        ir_bytes, function_name, body_node, 0, &var space, body_env, bs
+    );
     var body_locals = loop_locals;
     var body_string_counter = init_string_counter;
     var body_temp_counter = 0;
@@ -8850,6 +8898,12 @@ fn lower_guarded_cursor_return_loop(
         ir_bytes, function_name, while_statement, "body", 0, bs
     );
     let body_count = try while_body_statement_count(ir_bytes, function_name, body_node, bs);
+    // The body is lowered against a fresh alias map, so it reads every outer variable at its own
+    // spelling. The environment beside it holds the same, or a join inside the body merges nothing
+    // for a name the body assigns -- see seed_env_with_outer_names.
+    try seed_env_with_outer_names(
+        ir_bytes, function_name, body_node, 0, &var space, body_env, bs
+    );
     var body_stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
     var body_locals = loop_locals;
     var body_index = 0;
@@ -9257,6 +9311,12 @@ fn lower_embedded_value_cursor_append_loop(
     var body_aliases = std::array::Array<LocalAliasState>(std::mem::page_allocator());
     defer body_aliases.deinit();
     let body_env = try mir_env::new_env(&var space);
+    // The body is lowered against a fresh alias map, so it reads every outer variable at its own
+    // spelling. The environment beside it holds the same, or a join inside the body merges nothing
+    // for a name the body assigns -- see seed_env_with_outer_names.
+    try seed_env_with_outer_names(
+        ir_bytes, function_name, body_node, 0, &var space, body_env, bs
+    );
     var body_alias_counter = 0;
     // Body-local lets ('let statement = try parse_statement(...)') must be tracked so later body
     // statements and the loop latch resolve their struct types; the outer locals_spec lacks them.
@@ -9790,6 +9850,14 @@ pub fn lower_multi_statement_function(
                     string_counter = init_alias.string_counter;
                     temp_counter = init_alias.temp_counter;
                     alias_counter = init_alias.alias_counter;
+                } else {
+                    // Nothing is emitted for this declaration, so nothing below tells the
+                    // environment the name was bound here. See declare_folded_loop_seed.
+                    try declare_folded_loop_seed(
+                        &var space,
+                        env,
+                        try let_statement_bound_name(ir_bytes, function_name, statement, sf)
+                    );
                 }
                 stmt_index = stmt_index + 1;
                 continue;
@@ -10404,57 +10472,13 @@ fn dispatch_result_arm_name(
     return call_arg_type_cache.name_store.own(out);
 }
 
-// block_binds_let_name_directly reports whether this block's OWN statement list holds a let/var
-// binding of 'name'. It descends into nothing, and that is the whole point: it answers a question
-// about the alias entry this block leaves behind for 'name', not about the function's namespace.
-//
-// A binding nested one block deeper never reaches this block's alias entry -- every join inside
-// this block already refuses to carry a name its own arm bound, so by the time control leaves a
-// nested if the entry under 'name' is again the enclosing binding's. Only a binding written here
-// makes this block's entry name a value that dies with the block. Asking the recursive question
-// instead would drop the assignment made by a block that merely nests a shadow somewhere.
-fn block_binds_let_name_directly(
-    ir_bytes: []u8,
-    function_name: []u8,
-    name: []u8,
-    block_node: i64,
-    bs: i64
-) -> !bool {
-    if block_node < 0 {
-        return false;
-    }
-    var stmt_index = 0;
-    while true {
-        let statement = try ir_contract::body_child_sequence_or_minus_one_from(
-            ir_bytes, function_name, block_node, "statement", stmt_index, bs
-        );
-        if statement < 0 {
-            return false;
-        }
-        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
-        if std::mem::equal_bytes(stmt_kind, "Let") {
-            let name_node = try ir_contract::body_child_sequence_from(
-                ir_bytes, function_name, statement, "name", 0, bs
-            );
-            let bound = try ir_contract::body_token_or_empty_from(
-                ir_bytes, function_name, name_node, bs
-            );
-            if std::mem::equal_bytes(bound, name) {
-                return true;
-            }
-        }
-        stmt_index = stmt_index + 1;
-    }
-    return false;
-}
-
-// block_first_let_index_or_minus_one answers the same question block_binds_let_name_directly does,
-// but as a POSITION: the index of the first statement in this block that is a 'let/var <name>', or
-// -1 when the block declares no such name. The position is what separates the two variables that
-// share the spelling. Statements ahead of it resolved their reads and writes against the ENCLOSING
-// binding; the declaration and everything after it belong to this block's own. A reader that only
-// asked whether the block declares the name somewhere judged the whole statement list by its last
-// word, and lost the assignments that came before it.
+// block_first_let_index_or_minus_one reports the index of the first statement in this block that is
+// a 'let/var <name>', or -1 when the block declares no such name. It descends into nothing: a
+// binding nested one block deeper is that block's, not this one's. The position is what separates
+// the two variables that share the spelling. Statements ahead of it resolved their reads and writes
+// against the ENCLOSING binding; the declaration and everything after it belong to this block's own.
+// A reader that only asked whether the block declares the name somewhere judged the whole statement
+// list by its last word, and lost the assignments that came before it.
 fn block_first_let_index_or_minus_one(
     ir_bytes: []u8,
     function_name: []u8,
@@ -10940,6 +10964,159 @@ fn record_local_alias_bare_binding(
     source_name: []u8
 ) -> !void {
     try record_local_alias_loop_phi(aliases, source_name, source_name);
+    return;
+}
+
+// declare_folded_loop_seed gives the ENVIRONMENT the binding a walk is about to leave off the
+// emitted path. A 'var <counter> = <init>' whose while stands in the same statement list is not
+// lowered -- the loop head supplies the value on the preheader edge, so emitting the let would
+// define the same SSA name twice -- but the DECLARATION still happened: from here on the block's
+// own variable is what the name means, and the enclosing one is a different variable.
+//
+// The value is the name itself, which is what the alias map says too: every caller sits directly
+// below the rebind_local_alias_to_own_declaration that writes current_name = source_name for the
+// same statement. Nothing between the declaration and the loop reads it -- that is exactly what
+// loop_seed_must_stay_in_place tests for, and a source that fails the test takes the other path.
+//
+// Without this the environment never learns the block rebound the name, so the publish the loop
+// makes when it finishes rewrites the row of the ENCLOSING binding. Measured: the four arm-shadow
+// probes -- bm_shadow, bm_arm_nested_shadow, structlit_after_shadow_arm, structlit_shadow_and_merge
+// -- each carried the arm's loop value out of the if under the enclosing variable's name.
+fn declare_folded_loop_seed(
+    space: &var mir_env::EnvSpace,
+    env: i64,
+    source_name: []u8
+) -> !void {
+    let bound = mir_env::named_value(source_name, "");
+    try mir_env::declare(space, env, source_name, &bound);
+    return;
+}
+
+// seed_env_with_outer_names puts into a FRESH environment what the fresh alias map beside it
+// already says: every outer variable is at its own spelling. A fresh Array<LocalAliasState> is not
+// "this body sees nothing" -- local_alias_current_name returns the source spelling for a name with
+// no entry -- so a body lowered against one reads an outer variable as %<name>, and the environment
+// has to hold that or the two disagree about the same block.
+//
+// The disagreement is not cosmetic, because mir_env::merge_envs walks the RIGHT environment's rows
+// and looks up the left. A name the enclosing environment does not hold is a name neither arm's
+// copy holds either, so an arm that assigns it produces a row the join finds on ONE side only, and
+// merge_envs carries that side's value out unconditionally -- control.go's rule for a declaration
+// an arm left standing, applied to an outer variable it must instead choose for. Measured in
+// kizu::parser::type_apply_has_valid_static_arguments, whose body is lowered by
+// lower_embedded_value_cursor_append_loop against a fresh environment: the no-else if that writes
+// `depth = depth - 1` got no merge variable at all, and the enclosing if then took the arm's own
+// %void.then.alias.1 as its else value and stored it in a block that value does not reach. That
+// module is the one the LLVM verifier rejects with "Instruction does not dominate all uses".
+//
+// THE SET IS THE NAMES THESE STATEMENTS ASSIGN. A row for a name appears in a child environment
+// only through mir_env::declare or mir_env::assign. A declare is the body's own `let`, a different
+// variable that shadows the seed and dies at its own leave_scope. So the seed has to cover every
+// assign, and collect_loop_assigned_var_names is what finds them. A name only READ never gets a
+// row and never reaches a join, so seeding it would add nothing.
+//
+// THE SCAN IS NOT TOTAL, and the gap is worth naming rather than describing as coverage.
+// collect_loop_assigned_var_names descends through Block, both If arms and a While body, and stops
+// at everything else -- in particular it does not enter MATCH ARMS. A match arm is forked with
+// copy_env plus enter_scope / leave_scope like any other block, and an if inside one forks and
+// merges against the arm's environment, so a name assigned only there would be missed and would
+// reproduce exactly the failure above. Measured: a seeded body in this corpus does contain a match
+// (std::kizu::parser::parse_generic_type_end), but no name assigned only inside one -- giving the
+// scan a hard error on Match makes staging fail in that function, while the module it produces
+// today is accepted by the verifier and carries the merge variables the alias map produces.
+//
+// So this holds because of what the corpus contains, not because the scan is complete. Teaching it
+// Match arms is the fix, and it belongs with whatever next needs the scan to be total; a reader who
+// finds this comment because a match arm miscompiled has been told where to look.
+//
+// Seeding a name the statements also declare is inert rather than wrong: the declaration appends a
+// second row that shadows the seed, and every later read, assign and merge finds that one.
+// Seeding a name no child environment ever binds is inert too -- the row is copied into both arms
+// unchanged, so the join sees it equal on every edge and emits nothing.
+//
+// It is declare and not assign because the binding is real: the variable exists here, from the
+// first statement, and it is not a value some earlier statement of this scope produced.
+fn seed_env_with_outer_names(
+    ir_bytes: []u8,
+    function_name: []u8,
+    block_node: i64,
+    first_index: i64,
+    space: &var mir_env::EnvSpace,
+    env: i64,
+    bs: i64
+) -> !void {
+    var index = first_index;
+    while true {
+        let statement = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes, function_name, block_node, "statement", index, bs
+        );
+        if statement < 0 {
+            return;
+        }
+        var assigned = std::array::Array<[]u8>(std::mem::page_allocator());
+        defer assigned.deinit();
+        try collect_loop_assigned_var_names(
+            ir_bytes, function_name, statement, &var assigned, bs
+        );
+        var name_index = 0;
+        while name_index < assigned.len() {
+            let name = try assigned.get(name_index);
+            // A repeated assignment names one variable, and a second row for it would shadow the
+            // first with the same value -- inert, but it would make the row count say there are
+            // two variables here.
+            if !(try mir_env::has_name(space, env, name)) {
+                let outer = mir_env::named_value(name, "");
+                try mir_env::declare(space, env, name, &outer);
+            }
+            name_index = name_index + 1;
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+// promote_arm_loop_phi_claims moves an arm's head claims up one step, from 'this function binds
+// %<name> somewhere' to 'a definition of it REACHES here'. It is only ever right for the arm that is
+// the join's SOLE predecessor -- that arm dominates every block after the join -- and the call sites
+// read that from merge_branches' answer rather than re-deciding it.
+//
+// The difference is what a later loop over the same variable does: with the claim in loop_phi_name
+// it seeds from what the arm's loop left live, and with it only in branch_claim_name it re-lowers
+// the declaration the arm's loop already consumed. Measured: sp_promote_head and sp_promote_nested
+// restart their second loop from the declaration's 0 without this.
+//
+// A name the arm DECLARED of its own is skipped: that head is the arm's private variable's, and the
+// enclosing variable of the same spelling has no definition from it. shadowed_outer_block is where
+// the arm's own 'let/var <name>' took the spelling over.
+//
+// It does not name that case exactly, and the gap is the one the IR predicate it replaced --
+// block_binds_let_name_directly, which rescanned the arm's statements -- was total about.
+// rebind_local_alias_to_own_declaration returns early when the name has no alias entry yet, so an
+// arm declaring a spelling the ENCLOSING scope never bound leaves shadowed_outer_block at -1, the
+// filter passes, and this promotes that arm's private head into the enclosing map. What the
+// deleted copy_aliases_into warned of is exactly that: a claim promoted to a reaching definition
+// makes the next loop over the name seed its preheader edge from a phi in a block the preheader
+// does not reach. Nothing in the corpus reaches it today, because any later enclosing use of the
+// spelling needs its own let or var and that rebind demotes the claim again.
+//
+// It is a claim and not a value, which is why it is here and not in the environment: mir_env holds
+// what a name DENOTES, and this says which register a definition of it already occupies.
+fn promote_arm_loop_phi_claims(
+    aliases: &var std::array::Array<LocalAliasState>,
+    arm_aliases: &std::array::Array<LocalAliasState>,
+    arm_node: i64
+) -> !void {
+    var index = 0;
+    while index < arm_aliases.len() {
+        let state = try arm_aliases.at(index);
+        let claimed = state.loop_phi_name;
+        if std::mem::len(claimed) > 0 {
+            if state.shadowed_outer_block != arm_node {
+                try record_local_alias_loop_phi(aliases, state.source_name, claimed);
+            }
+        }
+        index = index + 1;
+    }
     return;
 }
 
@@ -14933,56 +15110,30 @@ fn lower_try_call_void_if(
     // The branch's head claims are the function's, so they survive the branch even when its values
     // do not -- see merge_local_alias_claims_into.
     try merge_local_alias_claims_into(aliases, &branch_aliases);
-    var branch_alias_index = 0;
-    var merge_alias_counter = then_body.alias_counter;
-    if !then_body.body_returns {
-        while branch_alias_index < branch_aliases.len() {
-            let branch_state = try branch_aliases.at(branch_alias_index);
-            let branch_source_name = branch_state.source_name;
-            // A name this branch BINDS ITSELF is handled by per-binding SSA rename, not by a join
-            // phi: that 'let <name>' is an independent value that dies at the branch end. What the
-            // branch holds of the ENCLOSING binding is what stood under the name where that
-            // declaration took the spelling over -- an assignment the branch made ahead of it, or
-            // else the value the branch was handed. A binding one block deeper is not this
-            // branch's -- the join inside the branch already refused to carry it out, so what
-            // stands here under the name is the enclosing binding's value.
-            var branch_value_name = branch_state.current_name;
-            if try block_binds_let_name_directly(
-                ir_bytes, function_name, branch_source_name, then_node, bs
-            ) {
-                branch_value_name = try local_alias_block_outer_name(
-                    &branch_aliases, branch_source_name, then_node
-                );
-                if std::mem::len(branch_value_name) == 0 {
-                    branch_alias_index = branch_alias_index + 1;
-                    continue;
-                }
-            }
-            let input_name = try local_alias_current_name(aliases, branch_source_name);
-            if !std::mem::equal_bytes(input_name, branch_value_name) {
-                let output_name = try void_then_alias_name(call_arg_type_cache);
-                let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
-                    ir_lookup_index,
-                    ir_bytes,
-                    function_name,
-                    module_prefix,
-                    locals_spec,
-                    branch_source_name,
-                    bs, call_arg_type_cache
-                );
-                try merge_vars.append(compiled_mir::if_merge_var(
-                    branch_source_name,
-                    input_name,
-                    branch_value_name,
-                    output_name,
-                    merge_type
-                ));
-                try set_local_alias(aliases, branch_source_name, output_name);
-                merge_alias_counter = merge_alias_counter + 1;
-            }
-            branch_alias_index = branch_alias_index + 1;
-        }
-    }
+    // The join of a try-call if is the no-else join: the enclosing environment is the edge that
+    // skips the branch, and it always reaches. See append_if_join_merge_vars.
+    let phi_mark = mir_env::phi_count(space);
+    let merged_env = try mir_env::merge_branches(
+        space,
+        "if.join",
+        branch_env, "if.then", !then_body.body_returns,
+        env, "if.skip", true
+    );
+    let merge_alias_counter = try append_if_join_merge_vars(
+        ir_lookup_index,
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        merged_env,
+        phi_mark,
+        false,
+        then_body.alias_counter,
+        aliases, space, env,
+        &var merge_vars,
+        bs,
+        call_arg_type_cache
+    );
     try stmts.append(compiled_mir::if_try_call_void_body_stmt(
         if_index,
         string_counter,
@@ -16495,6 +16646,12 @@ fn lower_induction_init_alias(
         ir_bytes, function_name, statement, "value", 0, bs
     );
     let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    // The statement this lowers is the declaration itself -- the 'var <counter> = <expr>' the loop
+    // ahead will carry -- so the environment declares rather than assigns: a name the enclosing
+    // scope also holds is a different variable from this point, and leaving this scope brings the
+    // enclosing one back. It is declared before the exit below, because that exit emits nothing and
+    // the binding happened either way (see declare_folded_loop_seed).
+    try declare_folded_loop_seed(space, env, target_name);
     if std::mem::equal_bytes(value_kind, "Call") or
         std::mem::equal_bytes(value_kind, "TryExpr") {
         return VoidAssignLowerResult {
@@ -16533,12 +16690,10 @@ fn lower_induction_init_alias(
         target_name, output_name, target_type, result_id, insts
     ));
     try set_local_alias(aliases, target_name, output_name);
-    // The statement this lowers is the declaration itself -- the 'var <counter> = <expr>' the loop
-    // ahead will carry -- so the environment declares rather than assigns: a name the enclosing
-    // scope also holds is a different variable from this point, and leaving this scope brings the
-    // enclosing one back.
+    // The declaration was made above; this says which SSA name it took, so it repoints that row
+    // rather than appending a second one for the same statement.
     let bound = mir_env::named_value(output_name, "");
-    try mir_env::declare(space, env, target_name, &bound);
+    try mir_env::assign(space, env, target_name, &bound);
     return VoidAssignLowerResult {
         string_counter: string_counter + expr_strings,
         temp_counter: temp_counter + expr_len,
@@ -16750,6 +16905,14 @@ fn lower_void_then_body(
                     ),
                     bs
                 )) {
+                    // Nothing is emitted for this declaration, so nothing below tells the
+                    // environment the arm bound the name here -- and this is the arm walk, whose
+                    // environment the join reads. See declare_folded_loop_seed.
+                    try declare_folded_loop_seed(
+                        space,
+                        env,
+                        try let_statement_bound_name(ir_bytes, function_name, statement, stmt_sf)
+                    );
                     body_index = body_index + 1;
                     continue;
                 }
@@ -17059,198 +17222,149 @@ fn lower_void_then_body(
     };
 }
 
-// copy_aliases_into makes one arm's state the enclosing scope's, for the join that arm is the only
-// predecessor of -- the other arm returned, broke or continued, so every value live at the join came
-// through this arm.
+// append_if_join_merge_vars turns the environment merge_branches produced into what the renderer
+// consumes. It is the one place in this file that READS the environment, and it is the whole of the
+// if-join: the three hand-written merges it replaces asked, per name, which arms reach this join and
+// what each of them leaves the name worth, which is exactly what merge_branches has already decided
+// and mir_env::merge_envs has already recorded as a phi per disagreeing name.
 //
-// A join carries out only what REACHES it, and the two-predecessor join already says so: a name the
-// arm bound itself does not exist outside the arm, so no value of it reaches the join and
-// append_void_if_else_merge_for_source gives it no merge slot. The single-predecessor join says
-// something stronger, and it says it because the arm dominates the join -- which is true, and is
-// why the VALUE of a name the arm did not bind may be carried here where two reaching arms would
-// need a phi. Dominance is not a licence to carry a name whose BINDING ended with the arm: the
-// enclosing scope's 'j' and the arm's 'var j' are two variables that happen to share a spelling,
-// and no amount of dominance makes the second one's value the first one's.
+// Walking the merged environment therefore meets two kinds of row, and they are the two things the
+// alias map used to write by hand:
 //
-// What survives such a name is the namespace claim alone -- the function has one register namespace,
-// so a later loop head may not bind that name again -- and merge_local_alias_claims_into has already
-// recorded it in branch_claim_name before this runs. Copying current_name on top of that would make
-// the arm's dead value the enclosing variable's seed; copying loop_phi_name would promote the claim
-// to a REACHING definition, and the next loop over the name would seed its preheader edge from a phi
-// in a block the preheader does not reach.
-fn copy_aliases_into(
+//   - a row whose value IS a phi. Two arms reach the join and hand the name different values, so the
+//     join has to choose, and it becomes one MirIfMergeVar. Its then and else names are the phi's
+//     two incoming edges in the order merge_envs added them -- the left environment first, which is
+//     the then arm at every call below. The renderer does not lower a merge variable as an LLVM phi:
+//     append_if_merge_slot_ref in compiled_mir_llvm.kizu gives it a stack slot whose alloca a
+//     whole-tree pre-pass hoists into the entry block, because an alloca executed once per iteration
+//     grows the stack until the process faults at -O0. The quadruple is the output, not the phi.
+//   - a row whose value merely differs from what the enclosing environment holds. Every edge that
+//     reaches this join at all carries that one value -- a single surviving arm, or two arms that
+//     produced the same name -- so nothing has to be chosen and the name is repointed with no slot.
+//
+// What the enclosing environment holds is asked of that environment, with no fallback for a name it
+// does not hold: mir_env::value_of errors instead. A join whose enclosing environment has never
+// heard of a name it is merging is an environment that could not have merged correctly either --
+// merge_envs walks the right side's rows, so a name only one arm holds is carried out with no phi
+// -- so the error names the real fault instead of papering over it with the name's own spelling.
+// The environments that used to hold nothing are seeded now; see seed_env_with_outer_names.
+//
+// A name an ARM DECLARED of its own is neither, and that is what makes this shorter than what it
+// replaces: the reader that rescanned the arm's statement list for a 'let <name>', once per name at
+// each of the three merges, is gone. lower_void_then_body brackets each arm with
+// mir_env::enter_scope / leave_scope, so the arm's own binding is already dead when merge_branches
+// runs and no row of it reaches here. That holds for every declaration the arm walk records, which
+// is why the one it used to record in the alias map alone now reaches the environment too -- see
+// declare_folded_loop_seed.
+//
+// The count check below is the one failure this shape can produce silently. %if<N>_merge<K> is the
+// merge variable's ARRAY POSITION, so a dropped variable does not go missing -- it renumbers every
+// later slot of the same if, and a module that still parses can store through the wrong slot.
+fn append_if_join_merge_vars(
+    ir_lookup_index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
-    arm_node: i64,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    merged_env: i64,
+    phi_mark: i64,
+    // has_else_arm picks the constructor. A no-else if keeps if_merge_var, which hard-codes
+    // else_name to input_name -- the value the skipping edge carries -- and whose else_name the
+    // renderer never reads on that path, since the seed store already left it in the slot. Folding
+    // the two into one constructor would make that field look like a choice the join made.
+    has_else_arm: bool,
+    alias_counter: i64,
     aliases: &var std::array::Array<LocalAliasState>,
-    source_aliases: &std::array::Array<LocalAliasState>,
-    bs: i64
-) -> !void {
-    var index = 0;
-    while index < source_aliases.len() {
-        let state = try source_aliases.at(index);
-        let source_name = state.source_name;
-        if try block_binds_let_name_directly(ir_bytes, function_name, source_name, arm_node, bs) {
-            // The arm's declaration ended one binding; it did not undo an assignment the arm made
-            // to the enclosing one before declaring. That assignment reaches here for the same
-            // reason every other value of this arm does -- the arm dominates the join.
-            let arm_outer = try local_alias_block_outer_name(source_aliases, source_name, arm_node);
-            if std::mem::len(arm_outer) > 0 {
-                try set_local_alias(aliases, source_name, arm_outer);
-            }
-            index = index + 1;
-            continue;
+    space: &var mir_env::EnvSpace,
+    env: i64,
+    merge_vars: &var std::array::Array<compiled_mir::MirIfMergeVar>,
+    bs: i64,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !i64 {
+    if merged_env < 0 {
+        // No arm reaches the join. Nothing after the if could be right about either arm's values, so
+        // the enclosing environment and the enclosing alias map stand exactly as they were; the
+        // renderer closes the empty block with 'unreachable' (if_both_arms_terminate in
+        // compiled_mir_llvm.kizu).
+        if mir_env::phi_count(space) != phi_mark {
+            return error("compiled mir: an unreachable if join opened a phi");
         }
-        try set_local_alias(aliases, source_name, state.current_name);
-        let state_loop_phi_name = state.loop_phi_name;
-        if std::mem::len(state_loop_phi_name) > 0 {
-            try record_local_alias_loop_phi(aliases, source_name, state_loop_phi_name);
+        return alias_counter;
+    }
+    var merge_alias_counter = alias_counter;
+    var emitted = 0;
+    var index = 0;
+    let rows = mir_env::binding_row_count(space);
+    while index < rows {
+        let current = try mir_env::binding_row_is_current(space, index, merged_env);
+        if current {
+            let source_name = try mir_env::binding_row_name(space, index);
+            let merged_value = try mir_env::binding_row_value(space, index);
+            let input_value = try mir_env::value_of(space, env, source_name);
+            if !mir_env::same_value(&input_value, &merged_value) {
+                if merged_value.phi >= 0 {
+                    let then_value = try mir_env::phi_incoming_at(space, merged_value.phi, 0);
+                    let else_value = try mir_env::phi_incoming_at(space, merged_value.phi, 1);
+                    // A merge variable is spelled as three SSA names the renderer stores and loads,
+                    // so an edge that carried another phi instead of a name would have nothing to
+                    // write. It cannot happen while every join replaces its own phis with the
+                    // output names below before its enclosing join runs, and this says so.
+                    if then_value.phi >= 0 or else_value.phi >= 0 {
+                        return error("compiled mir: if join edge carries an unnamed value");
+                    }
+                    let output_name = try void_then_alias_name(call_arg_type_cache);
+                    // One join site forces one resolver. The two-armed merge called
+                    // resolve_value_llvm_type_indexed and the one-armed ones the _cached variant,
+                    // whose doc claims the two are byte-identical; a temporary hard error on
+                    // disagreement, carried through the probe differential gate and the backend
+                    // artifact gate in this working tree, found none, so the cached one takes every
+                    // join. The uncached one keeps its other two callers.
+                    let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
+                        ir_lookup_index,
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        locals_spec,
+                        source_name,
+                        bs, call_arg_type_cache
+                    );
+                    if has_else_arm {
+                        try merge_vars.append(compiled_mir::if_else_merge_var(
+                            source_name,
+                            input_value.name,
+                            then_value.name,
+                            else_value.name,
+                            output_name,
+                            merge_type
+                        ));
+                    } else {
+                        try merge_vars.append(compiled_mir::if_merge_var(
+                            source_name,
+                            input_value.name,
+                            then_value.name,
+                            output_name,
+                            merge_type
+                        ));
+                    }
+                    try set_local_alias(aliases, source_name, output_name);
+                    // The join's own output is what the name denotes from here on, in both tables.
+                    // Writing it back over the phi is also what keeps an enclosing join's edges
+                    // spellable: it never sees a phi this one opened, only the name it loaded into.
+                    let joined = mir_env::named_value(output_name, "");
+                    try mir_env::assign(space, env, source_name, &joined);
+                    merge_alias_counter = merge_alias_counter + 1;
+                    emitted = emitted + 1;
+                } else {
+                    try set_local_alias(aliases, source_name, merged_value.name);
+                    try mir_env::assign(space, env, source_name, &merged_value);
+                }
+            }
         }
         index = index + 1;
     }
-    return;
-}
-
-fn append_void_if_else_merge_for_source(
-    ir_lookup_index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    function_name: []u8,
-    module_prefix: []u8,
-    locals_spec: []u8,
-    source_name: []u8,
-    then_node: i64,
-    else_node: i64,
-    alias_counter: i64,
-    aliases: &var std::array::Array<LocalAliasState>,
-    then_aliases: &std::array::Array<LocalAliasState>,
-    else_aliases: &std::array::Array<LocalAliasState>,
-    merge_vars: &var std::array::Array<compiled_mir::MirIfMergeVar>,
-    bs: i64,
-    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
-) -> !i64 {
-    // A name an arm BINDS is handled by per-binding SSA rename, not by a join phi: that
-    // 'let <name>' is an independent value that dies at the arm's end, so the alias the arm leaves
-    // under this name is not a value of the enclosing binding and this join must not read it. What
-    // that arm's edge carries for the enclosing binding is what reached the if.
-    //
-    // The question is per ARM, not per if. An arm that binds the name says nothing about its
-    // sibling, and the sibling's reassignment of the enclosing binding is exactly what this join
-    // exists to carry: dropping the whole merge because the OTHER arm shadowed the name loses it.
-    let input_name = try local_alias_current_name(aliases, source_name);
-    var then_name = input_name;
-    if try block_binds_let_name_directly(
-        ir_bytes, function_name, source_name, then_node, bs
-    ) {
-        // The arm both assigned the enclosing binding and then declared its own: the assignment
-        // happened, so its value reaches this join, and only the declaration dies with the arm.
-        // An arm that declared without assigning first records the value it was handed, which is
-        // input_name, so this stays a no-op for the plain shadow.
-        let then_outer = try local_alias_block_outer_name(then_aliases, source_name, then_node);
-        if std::mem::len(then_outer) > 0 {
-            then_name = then_outer;
-        }
-    } else {
-        then_name = try local_alias_current_name(then_aliases, source_name);
-    }
-    var else_name = input_name;
-    if try block_binds_let_name_directly(
-        ir_bytes, function_name, source_name, else_node, bs
-    ) {
-        let else_outer = try local_alias_block_outer_name(else_aliases, source_name, else_node);
-        if std::mem::len(else_outer) > 0 {
-            else_name = else_outer;
-        }
-    } else {
-        else_name = try local_alias_current_name(else_aliases, source_name);
-    }
-    if std::mem::equal_bytes(input_name, then_name) and
-        std::mem::equal_bytes(input_name, else_name) {
-        return alias_counter;
-    }
-    let output_name = try void_then_alias_name(call_arg_type_cache);
-    let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed(
-        ir_lookup_index,
-        ir_bytes,
-        function_name,
-        module_prefix,
-        locals_spec,
-        source_name,
-        bs
-    );
-    try merge_vars.append(compiled_mir::if_else_merge_var(
-        source_name,
-        input_name,
-        then_name,
-        else_name,
-        output_name,
-        merge_type
-    ));
-    try set_local_alias(aliases, source_name, output_name);
-    return alias_counter + 1;
-}
-
-fn append_void_if_else_merge_vars(
-    ir_lookup_index: &ir_index::IrIndex,
-    ir_bytes: []u8,
-    function_name: []u8,
-    module_prefix: []u8,
-    locals_spec: []u8,
-    then_node: i64,
-    else_node: i64,
-    alias_counter: i64,
-    aliases: &var std::array::Array<LocalAliasState>,
-    then_aliases: &std::array::Array<LocalAliasState>,
-    else_aliases: &std::array::Array<LocalAliasState>,
-    merge_vars: &var std::array::Array<compiled_mir::MirIfMergeVar>,
-    bs: i64,
-    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
-) -> !i64 {
-    var merge_alias_counter = alias_counter;
-    var then_index = 0;
-    while then_index < then_aliases.len() {
-        let state = try then_aliases.at(then_index);
-        merge_alias_counter = try append_void_if_else_merge_for_source(
-            ir_lookup_index,
-            ir_bytes,
-            function_name,
-            module_prefix,
-            locals_spec,
-            state.source_name,
-            then_node,
-            else_node,
-            merge_alias_counter,
-            aliases,
-            then_aliases,
-            else_aliases,
-            merge_vars,
-            bs,
-            call_arg_type_cache
-        );
-        then_index = then_index + 1;
-    }
-    var else_index = 0;
-    while else_index < else_aliases.len() {
-        let state = try else_aliases.at(else_index);
-        if (try local_alias_index(then_aliases, state.source_name)) < 0 {
-            merge_alias_counter = try append_void_if_else_merge_for_source(
-                ir_lookup_index,
-                ir_bytes,
-                function_name,
-                module_prefix,
-                locals_spec,
-                state.source_name,
-                then_node,
-                else_node,
-                merge_alias_counter,
-                aliases,
-                then_aliases,
-                else_aliases,
-                merge_vars,
-                bs,
-                call_arg_type_cache
-            );
-        }
-        else_index = else_index + 1;
+    let opened = mir_env::phi_count(space) - phi_mark;
+    if emitted != opened {
+        return error("compiled mir: if join emitted a different number of merge variables than phis");
     }
     return merge_alias_counter;
 }
@@ -17340,46 +17454,49 @@ fn lower_void_if_else_statement(
     // does with the arms' values -- see merge_local_alias_claims_into. An arm that returns still
     // bound every name its loops bound, and so does an arm whose values the join discards.
     try merge_local_alias_claims_into(aliases, &else_aliases);
-    var merge_alias_counter = else_body.alias_counter;
-    // The join takes its values from whichever arms can reach it. One arm terminating (a return, a
-    // break or a continue -- body_returns names all three) leaves the join with a single
-    // predecessor, so the surviving arm's aliases simply become the enclosing scope's; only two
-    // reaching arms need merge slots.
+    // The join takes its values from whichever arms can reach it, and merge_branches is that whole
+    // decision: two reaching arms merge and disagreements become phis; one arm terminating (a
+    // return, a break or a continue -- body_returns names all three) leaves the join a single
+    // predecessor and the surviving arm's environment IS the join's; both terminating leaves it no
+    // predecessor at all, which merge_branches answers with -1.
     //
-    // Both arms terminating leaves the join with NO predecessor. There is nothing to merge and
-    // nothing after this if that reading the arms' values would be right about, so the enclosing
-    // aliases stay exactly as they were. The renderer closes the empty join with 'unreachable' --
-    // see if_both_arms_terminate in compiled_mir_llvm.
-    if !then_body.body_returns or !else_body.body_returns {
-        if then_body.body_returns {
-            try copy_aliases_into(
-                ir_bytes, function_name, else_node, aliases, &else_aliases, bs
-            );
-        } else {
-            if else_body.body_returns {
-                try copy_aliases_into(
-                    ir_bytes, function_name, then_node, aliases, &then_aliases, bs
-                );
-            } else {
-                merge_alias_counter = try append_void_if_else_merge_vars(
-                    ir_lookup_index,
-                    ir_bytes,
-                    function_name,
-                    module_prefix,
-                    locals_spec,
-                    then_node,
-                    else_node,
-                    else_body.alias_counter,
-                    aliases,
-                    &then_aliases,
-                    &else_aliases,
-                    &var merge_vars,
-                    bs,
-                    call_arg_type_cache
-                );
-            }
-        }
+    // The block names are what a phi is filed under. Nothing in this file renders a phi -- the
+    // merge variables append_if_join_merge_vars emits are what reaches the renderer -- so they are
+    // spelled as the three edges of an if for a reader of mir_env::render_phis and are not the
+    // labels compiled_mir_llvm.kizu emits for these blocks.
+    let phi_mark = mir_env::phi_count(space);
+    let merged_env = try mir_env::merge_branches(
+        space,
+        "if.join",
+        then_env, "if.then", !then_body.body_returns,
+        else_env, "if.else", !else_body.body_returns
+    );
+    // merge_branches hands back an ARM's environment, by identity, exactly when that arm is the
+    // join's only predecessor -- copy_env mints a fresh id, so a merge of two arms is neither of
+    // them. That is the test for promoting the arm's head claims: a sole predecessor dominates the
+    // join, so its heads are definitions that reach past it, while two reaching arms promote
+    // nothing and leave both sets in branch_claim_name where merge_local_alias_claims_into put them.
+    if merged_env == then_env {
+        try promote_arm_loop_phi_claims(aliases, &then_aliases, then_node);
     }
+    if merged_env == else_env {
+        try promote_arm_loop_phi_claims(aliases, &else_aliases, else_node);
+    }
+    let merge_alias_counter = try append_if_join_merge_vars(
+        ir_lookup_index,
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        merged_env,
+        phi_mark,
+        true,
+        else_body.alias_counter,
+        aliases, space, env,
+        &var merge_vars,
+        bs,
+        call_arg_type_cache
+    );
     try stmts.append(compiled_mir::if_else_void_body_stmt(
         if_index,
         string_counter,
@@ -17455,56 +17572,32 @@ fn lower_void_if_no_else_statement(
     // The branch's head claims are the function's, so they survive the branch even when its values
     // do not -- see merge_local_alias_claims_into.
     try merge_local_alias_claims_into(aliases, &branch_aliases);
-    var branch_alias_index = 0;
-    var merge_alias_counter = then_body.alias_counter;
-    if !then_body.body_returns {
-        while branch_alias_index < branch_aliases.len() {
-            let branch_state = try branch_aliases.at(branch_alias_index);
-            let branch_source_name = branch_state.source_name;
-            // A name this branch BINDS ITSELF is handled by per-binding SSA rename, not by a join
-            // phi: that 'let <name>' is an independent value that dies at the branch end. What the
-            // branch holds of the ENCLOSING binding is what stood under the name where that
-            // declaration took the spelling over -- an assignment the branch made ahead of it, or
-            // else the value the branch was handed. A binding one block deeper is not this
-            // branch's -- the join inside the branch already refused to carry it out, so what
-            // stands here under the name is the enclosing binding's value.
-            var branch_value_name = branch_state.current_name;
-            if try block_binds_let_name_directly(
-                ir_bytes, function_name, branch_source_name, then_node, bs
-            ) {
-                branch_value_name = try local_alias_block_outer_name(
-                    &branch_aliases, branch_source_name, then_node
-                );
-                if std::mem::len(branch_value_name) == 0 {
-                    branch_alias_index = branch_alias_index + 1;
-                    continue;
-                }
-            }
-            let input_name = try local_alias_current_name(aliases, branch_source_name);
-            if !std::mem::equal_bytes(input_name, branch_value_name) {
-                let output_name = try void_then_alias_name(call_arg_type_cache);
-                let merge_type = try compiled_mir_types::resolve_value_llvm_type_indexed_cached(
-                    ir_lookup_index,
-                    ir_bytes,
-                    function_name,
-                    module_prefix,
-                    locals_spec,
-                    branch_source_name,
-                    bs, call_arg_type_cache
-                );
-                try merge_vars.append(compiled_mir::if_merge_var(
-                    branch_source_name,
-                    input_name,
-                    branch_value_name,
-                    output_name,
-                    merge_type
-                ));
-                try set_local_alias(aliases, branch_source_name, output_name);
-                merge_alias_counter = merge_alias_counter + 1;
-            }
-            branch_alias_index = branch_alias_index + 1;
-        }
-    }
+    // A no-else if is the same two-armed join with the ENCLOSING environment standing in for the
+    // missing arm: control that skips the branch reaches the join holding exactly what reached the
+    // if, and that edge always reaches. The branch contributes its edge only when it falls through.
+    // See append_if_join_merge_vars for what the block names are and are not.
+    let phi_mark = mir_env::phi_count(space);
+    let merged_env = try mir_env::merge_branches(
+        space,
+        "if.join",
+        branch_env, "if.then", !then_body.body_returns,
+        env, "if.skip", true
+    );
+    let merge_alias_counter = try append_if_join_merge_vars(
+        ir_lookup_index,
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        merged_env,
+        phi_mark,
+        false,
+        then_body.alias_counter,
+        aliases, space, env,
+        &var merge_vars,
+        bs,
+        call_arg_type_cache
+    );
     try stmts.append(compiled_mir::if_stmt(
         if_index,
         string_counter,
@@ -22108,6 +22201,13 @@ fn lower_multi_while_statement(
                 if !(try loop_seed_must_stay_in_place(
                     ir_bytes, function_name, body_node, body_stmt, body_boundary, bs
                 )) {
+                    // Nothing is emitted for this declaration, so nothing below tells the
+                    // environment the body bound the name here. See declare_folded_loop_seed.
+                    try declare_folded_loop_seed(
+                        space,
+                        body_env,
+                        try let_statement_bound_name(ir_bytes, function_name, body_stmt, bs)
+                    );
                     body_index = body_index + 1;
                     continue;
                 }
@@ -23973,6 +24073,10 @@ fn lower_multi_while_leading_decrement(
     // Fresh, not copied: this body starts from an empty map, so it starts from an empty
     // environment. The names it goes on to see are the ones the head binds just below.
     let body_env = try mir_env::new_env(space);
+    // The empty map reads an outer variable at its own spelling, and the environment has to say the
+    // same before the head's own reseating below repoints the ones the head renamed. Seeding first
+    // and reseating second is the order the body reads them in; see seed_env_with_outer_names.
+    try seed_env_with_outer_names(ir_bytes, function_name, body_node, 0, space, body_env, bs);
     // A carried scalar this head had to rename is read in the body under the name the head bound,
     // not under the source spelling -- the same reseating the counted path does before it lowers
     // its body. Claimed rather than merely set, so a nested loop over the same scalar would know

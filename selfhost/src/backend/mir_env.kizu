@@ -5,8 +5,10 @@
 // be read side by side: copy_env / merge_envs / add_phi here are copyEnv / mergeEnvs / addPhi there.
 // mir_env_loop.kizu carries the loop half (createLoopPhis / finishLoopPhis / finishLoopExitPhis).
 //
-// Nothing calls this yet. It answers the same questions the per-shape lowering in
-// compiled_mir_lower.kizu answers once per statement shape, in one place instead of sixty-five.
+// It answers the same questions the per-shape lowering in compiled_mir_lower.kizu answers once per
+// statement shape, in one place instead of sixty-five. The environment half is built there at every
+// point the alias map is written; the merge pair below is what the if-joins there ask; the loop half
+// in mir_env_loop.kizu is still reached only from mir_env_gate.kizu.
 //
 // WHERE KIZU FORCED A DIVERGENCE
 //
@@ -271,6 +273,14 @@ pub fn value_of(space: &EnvSpace, env: i64, name: []u8) -> !ValueRef {
 // assign is `l.env[name] = value`: the name goes on denoting the same variable, now held by a
 // different SSA value. A name not yet bound is bound at the current depth, as assigning to a
 // fresh key in a Go map is.
+//
+// Binding an unbound name at depth ZERO instead was tried, to keep an assignment an arm makes to a
+// variable this environment does not hold alive past the arm's leave_scope. It is the wrong repair
+// and it is not needed: an environment that does not hold the variable cannot merge for it either
+// -- merge_envs walks the right environment's rows, so a row only one side has is carried out with
+// no phi -- and the caller that opens such an environment now puts the outer names in it
+// (seed_env_with_outer_names in compiled_mir_lower.kizu). Measured: with the seeding in place,
+// depth-zero and current-depth produce the same staged module, byte for byte.
 pub fn assign(space: &var EnvSpace, env: i64, name: []u8, value: &ValueRef) -> !void {
     let row = try live_binding(space, env, name);
     if row < 0 {
@@ -492,6 +502,63 @@ pub fn merge_branches(
         return else_env;
     }
     return -1;
+}
+
+// ---------------------------------------------------------------------------
+// reading a merge back out
+// ---------------------------------------------------------------------------
+//
+// merge_envs answers a caller's question by leaving an environment behind, and the caller has to
+// walk it. Kizu has no closures, so the walk cannot be handed in as a callback and the iteration
+// lives at the caller: binding_row_count bounds it, binding_row_is_current filters it, and the two
+// accessors read the row. The row INDEX is the cursor rather than a per-env position because the
+// arena is flat -- one array for every environment -- so an environment's rows are a subsequence of
+// it and not a contiguous run.
+//
+// Walking forward visits an environment's names in the order they were bound, which is the order
+// merge_envs opens phis in, so a caller that emits one thing per row emits them in phi order.
+
+pub fn binding_row_count(space: &EnvSpace) -> i64 {
+    return space.binding_env.len();
+}
+
+// binding_row_is_current reports whether this row is what env denotes for its name right now: owned
+// by env, live, and the last such row. It is the same test merge_envs selects the right arm's rows
+// with, so the two walks visit the same rows in the same order.
+pub fn binding_row_is_current(space: &EnvSpace, index: i64, env: i64) -> !bool {
+    return try topmost_live(space, index, env);
+}
+
+pub fn binding_row_name(space: &EnvSpace, index: i64) -> ![]u8 {
+    return try space.binding_name.get(index);
+}
+
+pub fn binding_row_value(space: &EnvSpace, index: i64) -> !ValueRef {
+    return try binding_value_at(space, index);
+}
+
+// phi_incoming_at reads back the position-th edge add_incoming recorded for this phi, in the order
+// it was recorded: merge_envs adds the LEFT environment's edge first and the right one's second.
+// Asking for an edge the phi does not have is an error rather than an empty value, so a caller that
+// expects two and finds one stops instead of merging from a name nothing defines.
+pub fn phi_incoming_at(space: &EnvSpace, phi: i64, position: i64) -> !ValueRef {
+    var seen = 0;
+    var index = 0;
+    let rows = space.incoming_phi.len();
+    while index < rows {
+        let owner = try space.incoming_phi.get(index);
+        if owner == phi {
+            if seen == position {
+                let name = try space.incoming_value.get(index);
+                let source = try space.incoming_source.get(index);
+                let value_type = try space.phi_type.get(phi);
+                return ValueRef { name: name, phi: source, value_type: value_type };
+            }
+            seen = seen + 1;
+        }
+        index = index + 1;
+    }
+    return error("mir env: phi has no incoming at this position");
 }
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import (
 )
 
 // selfhostMirEnvGateOutput is the phi set the SSA environment construction in
-// selfhost/src/backend/mir_env.kizu and mir_env_loop.kizu produces for seven
+// selfhost/src/backend/mir_env.kizu and mir_env_loop.kizu produces for eight
 // hand-built control-flow graphs: the shapes that produced the alias defects the
 // per-statement-shape lowering in compiled_mir_lower.kizu keeps re-deriving.
 //
@@ -23,6 +23,8 @@ const selfhostMirEnvGateOutput = "loop-with-continue\n" +
 	"jump-out-of-arm\n" +
 	"if2.end join.0 i64 <- x3@if2.then x4@if2.else\n" +
 	"arm-binds-its-own-name\n" +
+	"join-needs-the-name-in-the-environment\n" +
+	"if.end join.0 i64 <- a@if.then x@if.else\n" +
 	"loop-over-shadowed-name\n" +
 	"while.header loop.0 i64 <- n1@entry add@while.body\n" +
 	"two-loops-over-one-name\n" +
@@ -34,9 +36,10 @@ const selfhostMirEnvGateOutput = "loop-with-continue\n" +
 
 // TestSelfhostMirEnvGate runs the environment construction over a loop with a
 // continue, a loop with a break, a jump out of an if arm, a name an arm binds
-// itself, a loop over a shadowed name, two loops over one name, and a nested
-// loop. Nothing in the lowering calls the construction yet; this is the proof
-// that it answers those shapes before anything does.
+// itself, a join over a name the environment does or does not hold, a loop over
+// a shadowed name, two loops over one name, and a nested loop. The if-joins in
+// compiled_mir_lower.kizu now go through this construction, so these are the
+// answers the emitted module rests on.
 func TestSelfhostMirEnvGate(t *testing.T) {
 	out, err := runSelfhostMirEnvGate(t, "selfhost::backend::mir_env_gate::gate")
 	if err != nil {

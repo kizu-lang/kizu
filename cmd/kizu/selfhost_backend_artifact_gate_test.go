@@ -449,7 +449,36 @@ func requiredLLVMFragments() []string {
 	fragments = append(fragments, requiredLLVMExecutableFragments()...)
 	fragments = append(fragments, requiredLLVMMemStartsWithFragments()...)
 	fragments = append(fragments, requiredLLVMSourceAbsoluteNameFragments()...)
+	fragments = append(fragments, requiredLLVMNestedArmJoinFragments()...)
 	return fragments
+}
+
+// requiredLLVMNestedArmJoinFragments pins the join of an if nested inside another
+// if's arm, inside a loop body that is lowered against a fresh environment.
+//
+// It is here because nothing else in the repo witnesses it. The lowering has to tell
+// that environment which outer variables exist -- a fresh alias map beside it means
+// "every name is back at its own spelling", not "no names", and an SSA environment has
+// no total form to say that in -- and when it does not, the inner join emits no merge
+// variable at all. Both halves of that are silent: the probe corpus stages
+// byte-identically either way, and the module still verifies, because the inner arm's
+// value is simply carried out as though the arm had declared it.
+//
+// It only became loud in passing: the OUTER join then took that value, defined inside
+// the inner arm, as its else-arm edge, and stored it in a block the definition does not
+// dominate -- which opt rejects. Depth alone decides which of the two wrong answers
+// appears, so a change to the environment's scope rule can move this from broken module
+// to quiet wrong answer without touching what is actually missing.
+//
+// The seed store is what is pinned rather than the load or the arm store: it is the one
+// line that has no counterpart at all when the merge variable is not created, and it
+// names a source variable and a statement-derived index rather than a mint counter, so
+// unrelated churn does not move it.
+func requiredLLVMNestedArmJoinFragments() []string {
+	return []string{
+		"store i64 %depth, ptr %if2002500001_merge0",
+		"%if2002500001_merge0 = alloca i64",
+	}
 }
 
 // requiredLLVMRuntimeFragments returns mandatory hosted runtime declarations.

@@ -2,10 +2,11 @@ import selfhost::backend::mir_env;
 import selfhost::backend::mir_env_loop;
 
 // mir_env_gate builds control-flow graphs by hand and asserts the phi set the construction in
-// mir_env.kizu / mir_env_loop.kizu produces for each. The seven shapes here are the ones that
+// mir_env.kizu / mir_env_loop.kizu produces for each. The eight shapes here are the ones that
 // produced the twenty-five alias defects fixed over the past week and the fourteen an enumeration
 // then found: a loop with a continue, a loop with a break, a jump out of an if arm, a name an arm
-// binds itself, a loop over a shadowed name, two loops over one name, and a nested loop.
+// binds itself, a join over a name the environment does and does not hold, a loop over a shadowed
+// name, two loops over one name, and a nested loop.
 //
 // There is no AST and no lowering here on purpose. Each gate is the sequence of environment
 // operations the lowering of that source shape would make, so what is asserted is the
@@ -375,6 +376,65 @@ i.header loop.1 i64 <- loop.0@o.body add@i.body"
     return;
 }
 
+// if p { x = a; } -- one arm assigns a variable declared outside the if, twice: once against an
+// environment that HOLDS x, and once against one that has never heard of it.
+//
+// The first is the ordinary join and it opens a phi. The second opens none, and the merged
+// environment carries the arm's own value out as though every edge into the join had it. That is
+// not a bug in merge_envs -- it is the reference's rule, mergeEnvs walking the right environment's
+// rows and looking each name up on the left, where a name only the left side holds can only be a
+// declaration the arm left standing. It becomes a wrong answer only when the environment is
+// INCOMPLETE, because then a one-sided name is an assignment to an outer variable instead.
+//
+// So this pins the precondition every if-join in compiled_mir_lower.kizu now depends on: the
+// environment an arm is forked from holds the variables the arm assigns. The nine loop-shape
+// lowerings that open a body against a fresh environment satisfy it by seeding
+// (seed_env_with_outer_names); before they did, the inner no-else if of
+// kizu::parser::type_apply_has_valid_static_arguments lost its merge variable exactly as the second
+// half here does, and the enclosing if then stored that arm's own %void.then.alias.1 on an edge the
+// value does not reach -- the module the LLVM verifier rejects.
+//
+// An earlier reading of the same failure had assign bind an unknown name at depth zero so it would
+// outlive the arm. That case stood here and is gone: it made the arm's value survive to be carried
+// out one-sided, which is the leak above rather than a repair of it.
+pub fn gate_join_needs_the_name_in_the_environment() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+
+    // The environment holds x, as a seeded one does. The join has two values for it and chooses.
+    let held = try mir_env::new_env(&var space);
+    try declare_i64(&var space, held, "x", "x");
+    let held_then = try mir_env::copy_env(&var space, held);
+    try mir_env::enter_scope(&var space, held_then);
+    try bind(&var space, held_then, "x", "a");
+    try mir_env::leave_scope(&var space, held_then);
+    let held_else = try mir_env::copy_env(&var space, held);
+    let held_join = try mir_env::merge_branches(
+        &var space, "if.end", held_then, "if.then", true, held_else, "if.else", true
+    );
+    std::testing::expect_equal<i64>(1, mir_env::phi_count(&space));
+    try expect_value(&space, held_join, "x", "join.0");
+
+    // The same arm against an environment with no row for x. Nothing is merged, and what the join
+    // carries out is the arm's value alone.
+    let absent = try mir_env::new_env(&var space);
+    let absent_then = try mir_env::copy_env(&var space, absent);
+    try bind(&var space, absent_then, "x", "a");
+    let absent_else = try mir_env::copy_env(&var space, absent);
+    let absent_join = try mir_env::merge_branches(
+        &var space, "if.end", absent_then, "if.then", true, absent_else, "if.else", true
+    );
+    std::testing::expect_equal<i64>(1, mir_env::phi_count(&space));
+    try expect_value(&space, absent_join, "x", "a");
+
+    try report(
+        "join-needs-the-name-in-the-environment",
+        &space,
+        "if.end join.0 i64 <- a@if.then x@if.else"
+    );
+    return;
+}
+
 pub fn gate() -> !void {
     let probe_phis = try lowering_probe();
     std::testing::expect_equal<i64>(2, probe_phis);
@@ -382,6 +442,7 @@ pub fn gate() -> !void {
     try gate_loop_with_break();
     try gate_jump_out_of_arm();
     try gate_arm_binds_its_own_name();
+    try gate_join_needs_the_name_in_the_environment();
     try gate_loop_over_shadowed_name();
     try gate_two_loops_over_one_name();
     try gate_nested_loops();
