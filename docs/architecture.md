@@ -95,13 +95,15 @@ parity gate 群はこれを Go 実装と突き合わせます。
 
 ### selfhost コードを書くときの注意
 
-selfhost のソースは **selfhost backend 自身でコンパイル可能な範囲(subset)** に
-収める必要があります。checker が通っても backend が拒否する形があり、拒否は
-`compiled mir: ...` の関数名付きエラーで返ります。代表的な制約:
-match arm の body は Return/ExprStmt のみ、if の then 内で field 代入しない、
-index/slice の対象は Var、式を call 引数に直接書かず let で束縛する、など。
-新しいループ形状は `selfhost/tests/probes/` に probe を足してから使うのが安全です。
-また、**emit 側に関数名決め打ちの静的分岐を足すことは禁止**です(AGENTS.md)。
+selfhost のソースは**フル Kizu で書きます**(ADR-0080)。必須要件は
+Go backend(stage0)でコンパイル・検査が通ることです。
+
+selfhost backend の自己コンパイル(bootstrap)は flip-readiness の指標であり、
+backend が受けない形(`compiled mir: ...` の関数名付き refusal)に出会っても
+ソースを subset に書き下げず、`docs/selfhost-backend-generalization.md` に
+gap として記録します。backend 側は一般 lowering の拡張でのみ成長させ、
+形状 lowering・関数名分岐の追加は禁止です(AGENTS.md / ADR-0080)。
+新しいループ形状の挙動確認には `selfhost/tests/probes/` を使います。
 
 ## 5. std の二層構造
 
@@ -159,4 +161,5 @@ baseline.tsv が既知の一致/不一致を記録します。
 | メモリ安全モデル | docs/memory-safety.md |
 | stdlib の設計 | docs/stdlib.md |
 | 性能作業の記録 | docs/perf.md |
-| 主要な設計判断(IR/型/所有権/comptime …) | docs/adr/(特に 0006 comptime、0009 IR、0011 phase 順、0014 typed SSA) |
+| backend 一般化の台帳(shapes 棚卸し・gap 記録) | docs/selfhost-backend-generalization.md |
+| 主要な設計判断(IR/型/所有権/comptime …) | docs/adr/(特に 0006 comptime、0009 IR、0011 phase 順、0014 typed SSA、0080 full-Kizu selfhost) |

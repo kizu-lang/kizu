@@ -4,6 +4,18 @@ This document defines the test tiers for Kizu-owned selfhost compiler work.
 The goal is to keep daily development fast while preserving explicit,
 bootstrap-critical selfhost checks.
 
+## Policy update (2026-08-11, ADR-0080)
+
+Selfhost sources are written in full Kizu. The REQUIRED selfhost gate is that
+the Go backend (stage0) compiles and checks them: `just selfhost-native-source-gate`
+covers this, and the daily `go test ./...` covers the interpreted surface.
+
+The stage0→stage1→stage2 self-compilation comparison (`just selfhost-bootstrap`)
+is a FLIP-READINESS gate. A red caused by a recorded backend-subset gap
+(see docs/selfhost-backend-generalization.md §3) does not block frontend work;
+a red with no recorded gap is a regression. CI runs the daily suite on every
+push and bootstrap + parity nightly.
+
 ## Gate Taxonomy
 
 Use the smallest gate that proves the changed boundary. Do not chain oracle or
