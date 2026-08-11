@@ -1,3 +1,4 @@
+import selfhost::comptime_eval;
 import selfhost::source;
 import selfhost::type_constructor;
 import selfhost::types::model;
@@ -62,6 +63,7 @@ fn first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.return_type,
             fn_decl.body,
@@ -281,7 +283,7 @@ fn first_type_error_in_ast_with_imports(
             import_alias_starts,
             import_alias_ends
         );,
-        ComptimeIf(comptime_if_node) => return first_type_error_in_three_ast(
+        ComptimeIf(comptime_if_node) => return first_type_error_in_comptime_if(
             allocator,
             file,
             ast,
@@ -472,6 +474,7 @@ fn first_type_error_in_fn_ast(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     return_type: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
@@ -506,6 +509,11 @@ fn first_type_error_in_fn_ast(
     if return_error.found {
         return return_error;
     }
+    // Generic bodies are checked only after their type parameters have been
+    // instantiated, when static type conditions have a concrete environment.
+    if type_params.len > 0 {
+        return type_ref_names::no_type_reference_error();
+    }
     return first_type_error_in_ast_with_imports(
         allocator,
         file,
@@ -515,6 +523,30 @@ fn first_type_error_in_fn_ast(
         arities,
         import_alias_starts,
         import_alias_ends
+    );
+}
+
+fn first_type_error_in_comptime_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return type_ref_names::no_type_reference_error();
+    }
+    return first_type_error_in_ast_with_imports(
+        allocator, file, ast, selected.node_id, kinds, arities,
+        import_alias_starts, import_alias_ends
     );
 }
 

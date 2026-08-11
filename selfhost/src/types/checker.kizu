@@ -1,3 +1,5 @@
+import selfhost::comptime_eval;
+import selfhost::comptime_diagnostic;
 import selfhost::diagnostic;
 import selfhost::parser;
 import selfhost::resolver;
@@ -45,6 +47,148 @@ struct MatchArmScanSummary {
     diagnostic_kind: i64,
     diagnostic_name: []u8,
     diagnostic_tag: []u8,
+}
+
+fn first_argument_type_mismatch_in_comptime_if(
+    allocator: Allocator, file: &source::SourceFile, ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId, then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId, local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::ArgumentTypeSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return diagnostic_summary::no_argument_type_mismatch();
+    }
+    return first_argument_type_mismatch_in_statement(
+        allocator, file, ast, selected.node_id, local_types,
+        function_param_types, function_returns
+    );
+}
+
+fn first_binary_operand_type_mismatch_in_comptime_if(
+    allocator: Allocator, file: &source::SourceFile, ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId, then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId, local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::ArgumentTypeSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return diagnostic_summary::no_argument_type_mismatch();
+    }
+    return first_binary_operand_type_mismatch_in_statement(
+        allocator, file, ast, selected.node_id, local_types, function_returns
+    );
+}
+
+fn first_assignment_type_mismatch_in_comptime_if(
+    allocator: Allocator, file: &source::SourceFile, ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId, then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId, local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::AssignmentTypeSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return diagnostic_summary::no_assignment_type_mismatch();
+    }
+    return first_assignment_type_mismatch_in_statement(
+        allocator, file, ast, selected.node_id, local_types, function_returns
+    );
+}
+
+fn first_immutable_assignment_in_comptime_if(
+    allocator: Allocator, file: &source::SourceFile, ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId, then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId, local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>
+) -> !model::ImmutableAssignmentSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return diagnostic_summary::no_immutable_assignment();
+    }
+    return first_immutable_assignment_in_statement(
+        allocator, file, ast, selected.node_id, local_types, local_mutability
+    );
+}
+
+fn first_invalid_assignment_target_in_comptime_if(
+    allocator: Allocator, file: &source::SourceFile, ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId, then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::InvalidAssignmentTargetSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return diagnostic_summary::no_invalid_assignment_target();
+    }
+    return first_invalid_assignment_target_node(
+        allocator, file, ast, selected.node_id, local_types, expression_types
+    );
+}
+
+fn first_undefined_variable_in_comptime_if(
+    allocator: Allocator, file: &source::SourceFile, ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId, then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId, local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return diagnostic_summary::no_undefined_variable();
+    }
+    return first_undefined_variable_in_statement(
+        allocator, file, ast, selected.node_id, local_types
+    );
+}
+
+fn check_comptime_if_statement(
+    allocator: Allocator, file: &source::SourceFile, ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId, then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId, local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>, expected_return: []u8,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !TypeScanSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return type_scan_summary(0, 0, 0);
+    }
+    return check_statement_node(
+        allocator, file, ast, selected.node_id, local_types,
+        local_mutability, expected_return, function_returns
+    );
+}
+
+fn first_match_diagnostic_in_comptime_if(
+    allocator: Allocator, file: &source::SourceFile, ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId, then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId, local_types: &std::map::Map<[]u8, []u8>,
+    enum_counts: &std::map::Map<[]u8, i64>, enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::MatchDiagnosticSummary {
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return diagnostic_summary::no_match_diagnostic();
+    }
+    return first_match_diagnostic_in_statement(
+        allocator, file, ast, selected.node_id, local_types,
+        enum_counts, enum_tags, function_returns
+    );
 }
 
 pub fn check(resolved: resolver::ResolveSummary) -> model::TypeSummary {
@@ -172,6 +316,12 @@ fn check_parsed_sources_core(
         let source_index = try parsed_source_indexes.get(index);
         let file = try files.at(source_index);
         if source::is_frontend_source(file.kind) {
+            let comptime_found = try comptime_diagnostic::first_diagnostic(
+                allocator, file, parsed_source.ast, parsed_source.root
+            );
+            if comptime_found.found {
+                diagnostics = diagnostics + 1;
+            }
             let scan = try type_ref_scan_ast::check_file_type_references_from_ast(
                 allocator,
                 file,
@@ -299,6 +449,10 @@ pub fn first_pre_move_check_diagnostic_ast_node_with_facts(
     copyable: &var std::map::Map<[]u8, bool>,
     expression_types: &var expression_facts::ExpressionTypeFacts
 ) -> !diagnostic::Report {
+    let comptime_report = try comptime_diagnostic::first_report(allocator, file, ast, root);
+    if comptime_report.found {
+        return comptime_report;
+    }
     try type_refs::collect_type_parameters_from_ast(file, ast, root, kinds, arities, copyable);
     let type_ref = try type_ref_ast::first_type_error_in_ast(allocator, file, ast, root, kinds, arities);
     if type_ref.found {
@@ -1433,16 +1587,10 @@ fn first_argument_type_mismatch_in_statement(
             function_param_types,
             function_returns
         );,
-        ComptimeIf(comptime_if_node) => return first_argument_type_mismatch_in_if(
-            allocator,
-            file,
-            ast,
-            comptime_if_node.condition,
-            comptime_if_node.then_block,
-            comptime_if_node.else_block,
-            local_types,
-            function_param_types,
-            function_returns
+        ComptimeIf(comptime_if_node) => return first_argument_type_mismatch_in_comptime_if(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block,
+            local_types, function_param_types, function_returns
         );,
         _ => return diagnostic_summary::no_argument_type_mismatch();,
     }
@@ -2211,15 +2359,10 @@ fn first_binary_operand_type_mismatch_in_statement(
             local_types,
             function_returns
         );,
-        ComptimeIf(comptime_if_node) => return first_binary_operand_type_mismatch_in_if(
-            allocator,
-            file,
-            ast,
-            comptime_if_node.condition,
-            comptime_if_node.then_block,
-            comptime_if_node.else_block,
-            local_types,
-            function_returns
+        ComptimeIf(comptime_if_node) => return first_binary_operand_type_mismatch_in_comptime_if(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block,
+            local_types, function_returns
         );,
         _ => return diagnostic_summary::no_argument_type_mismatch();,
     }
@@ -2830,14 +2973,10 @@ fn first_assignment_type_mismatch_in_statement(
             local_types,
             function_returns
         );,
-        ComptimeIf(comptime_if_node) => return first_assignment_type_mismatch_in_two_statements(
-            allocator,
-            file,
-            ast,
-            comptime_if_node.then_block,
-            comptime_if_node.else_block,
-            local_types,
-            function_returns
+        ComptimeIf(comptime_if_node) => return first_assignment_type_mismatch_in_comptime_if(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block,
+            local_types, function_returns
         );,
         _ => return diagnostic_summary::no_assignment_type_mismatch();,
     }
@@ -3146,14 +3285,10 @@ fn first_immutable_assignment_in_statement(
             local_types,
             local_mutability
         );,
-        ComptimeIf(comptime_if_node) => return first_immutable_assignment_in_two_statements(
-            allocator,
-            file,
-            ast,
-            comptime_if_node.then_block,
-            comptime_if_node.else_block,
-            local_types,
-            local_mutability
+        ComptimeIf(comptime_if_node) => return first_immutable_assignment_in_comptime_if(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block,
+            local_types, local_mutability
         );,
         _ => return diagnostic_summary::no_immutable_assignment();,
     }
@@ -3306,8 +3441,9 @@ fn first_invalid_assignment_target_node(
         Unsafe(unsafe_node) => return first_invalid_assignment_target_node(
             allocator, file, ast, unsafe_node.body, local_types, expression_types
         );,
-        ComptimeIf(comptime_if_node) => return first_invalid_assignment_target_in_two_nodes(
-            allocator, file, ast, comptime_if_node.then_block, comptime_if_node.else_block,
+        ComptimeIf(comptime_if_node) => return first_invalid_assignment_target_in_comptime_if(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block,
             local_types, expression_types
         );,
         _ => return diagnostic_summary::no_invalid_assignment_target();,
@@ -3625,14 +3761,9 @@ fn first_undefined_variable_in_statement(
             unsafe_node.body,
             local_types
         );,
-        ComptimeIf(comptime_if_node) => return first_undefined_variable_in_if(
-            allocator,
-            file,
-            ast,
-            comptime_if_node.condition,
-            comptime_if_node.then_block,
-            comptime_if_node.else_block,
-            local_types
+        ComptimeIf(comptime_if_node) => return first_undefined_variable_in_comptime_if(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block, local_types
         );,
         _ => return diagnostic_summary::no_undefined_variable();,
     }
@@ -4172,17 +4303,10 @@ fn check_statement_node(
             expected_return,
             function_returns
         );,
-        ComptimeIf(comptime_if_node) => return check_if_statement(
-            allocator,
-            file,
-            ast,
-            comptime_if_node.condition,
-            comptime_if_node.then_block,
-            comptime_if_node.else_block,
-            local_types,
-            local_mutability,
-            expected_return,
-            function_returns
+        ComptimeIf(comptime_if_node) => return check_comptime_if_statement(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block,
+            local_types, local_mutability, expected_return, function_returns
         );,
         Break(break_node) => return type_scan_summary(0, 1, 0);,
         Continue(continue_node) => return type_scan_summary(0, 1, 0);,
@@ -5103,17 +5227,10 @@ fn first_match_diagnostic_in_statement(
             enum_tags,
             function_returns
         );,
-        ComptimeIf(comptime_if_node) => return first_match_diagnostic_in_three_nodes(
-            allocator,
-            file,
-            ast,
-            comptime_if_node.condition,
-            comptime_if_node.then_block,
-            comptime_if_node.else_block,
-            local_types,
-            enum_counts,
-            enum_tags,
-            function_returns
+        ComptimeIf(comptime_if_node) => return first_match_diagnostic_in_comptime_if(
+            allocator, file, ast, comptime_if_node.condition,
+            comptime_if_node.then_block, comptime_if_node.else_block,
+            local_types, enum_counts, enum_tags, function_returns
         );,
         Defer(defer_node) => return first_match_diagnostic_in_expression(
             allocator,

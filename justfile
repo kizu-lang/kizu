@@ -78,9 +78,11 @@ selfhost-bootstrap-preflight:
     just selfhost-switch-gate
     just cache-smoke
 
-# Run the stage0-stage1-stage2 selfhost bootstrap comparison.
+# Run the stage0-stage1-stage2 selfhost bootstrap comparison. The embedded backend
+# artifact gate needs a proven LLVM verifier, so brew's llvm goes ahead of Apple clang
+# the same way selfhost-backend-artifact-gate arranges it.
 selfhost-bootstrap:
-    KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=60m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
+    PATH="$(brew --prefix llvm 2>/dev/null)/bin:$PATH" KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=60m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
 
 # Run #458 commands through the hosted stage2 production artifact.
 selfhost-production-gate:

@@ -1,3 +1,4 @@
+import selfhost::comptime_eval;
 import selfhost::parser;
 import selfhost::source;
 import selfhost::ownership::data;
@@ -369,12 +370,7 @@ fn check_ownership_ast_node(
             arena_new.allocator
         );,
         TryExpr(try_expr_node) => return check_ownership_ast_node(allocator, file, ast, try_expr_node.value);,
-        ComptimeExpr(comptime_expr_node) => return check_ownership_ast_node(
-            allocator,
-            file,
-            ast,
-            comptime_expr_node.value
-        );,
+        ComptimeExpr(comptime_expr_node) => return ownership_summary(0, 1, 0, 0);,
         Block(block) => return check_ownership_range(allocator, file, ast, block.statements);,
         If(if_node) => return check_ownership_if(
             allocator,
@@ -662,12 +658,7 @@ fn check_function_body(
             arena_new.allocator
         );,
         TryExpr(try_expr_node) => return check_ownership_ast_node(allocator, file, ast, try_expr_node.value);,
-        ComptimeExpr(comptime_expr_node) => return check_ownership_ast_node(
-            allocator,
-            file,
-            ast,
-            comptime_expr_node.value
-        );,
+        ComptimeExpr(comptime_expr_node) => return ownership_summary(0, 1, 0, 0);,
         If(if_node) => return check_ownership_if(
             allocator,
             file,
@@ -1038,10 +1029,13 @@ fn check_ownership_comptime_if(
     then_block: std::kizu::ast::NodeId,
     else_block: std::kizu::ast::NodeId
 ) -> !data::OwnershipSummary {
-    var summary = try check_ownership_ast_node(allocator, file, ast, condition);
-    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, then_block));
-    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, else_block));
-    return summary;
+    let selected = try comptime_eval::select_branch_node_without_bindings(
+        file, ast, condition, then_block, else_block
+    );
+    if selected.kind == comptime_eval::SelectedNodeKind::Error {
+        return ownership_summary(0, 1, 0, 0);
+    }
+    return check_ownership_ast_node(allocator, file, ast, selected.node_id);
 }
 
 fn check_ownership_loop(
