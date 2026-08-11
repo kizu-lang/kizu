@@ -29,6 +29,7 @@ Kizu はメモリ安全な systems programming language です。
 遅くなったら profile、重複削除、アルゴリズム改善、不要な gate 分離で改善します。
 並列化でごまかす改善は NG です。
 commit 前は原則 `pre-commit run --all-files` を通してください。
+`go test ./...` は pre-push hook にあり、commit 時ではなく push 時に走ります。
 
 selfhost 作業では、毎回 full bootstrap しないで検証段階を分けます。
 
