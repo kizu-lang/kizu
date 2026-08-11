@@ -11,6 +11,12 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
+// TestSelfhostProductionFunctionTargetsUseOwnedProjections keeps FunctionTarget's two numeric
+// fields private to the module that declares them: every other production source has to reach a
+// target's component and function ids through package_function_identity's projections, so a
+// direct .component.value or .function.value read elsewhere is a layering break. The declaring
+// module and the *_gate fixtures are exempt because that is where the projections live and where
+// they are deliberately probed.
 func TestSelfhostProductionFunctionTargetsUseOwnedProjections(t *testing.T) {
 	root := "../../selfhost/src"
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
@@ -40,68 +46,161 @@ func TestSelfhostProductionFunctionTargetsUseOwnedProjections(t *testing.T) {
 	}
 }
 
+// bodyCallClassificationTally accumulates both halves of the emitted-Call gate during a single
+// scan of a fact stream: the Call nodes the backend emitted (body-node ... kind Call) and the
+// target or builtin classification it emitted for each one. Both halves are counted under the
+// same call key, so pairing them is a map comparison instead of a second pass over the text.
+type bodyCallClassificationTally struct {
+	bodyCalls       map[string]int
+	classifications map[string]int
+	malformed       int
+	unknown         int
+}
+
+// newBodyCallClassificationTally returns an empty tally with both call maps ready to count into.
+func newBodyCallClassificationTally() *bodyCallClassificationTally {
+	return &bodyCallClassificationTally{
+		bodyCalls:       map[string]int{},
+		classifications: map[string]int{},
+	}
+}
+
+// emittedCallKey identifies one emitted call site by owning function and source span. body-node
+// and body-call-* facts carry that same triple, so it is the join key between the two halves of
+// the gate; the NUL separator keeps it unambiguous for names that contain spaces.
+func emittedCallKey(function, spanStart, spanEnd string) string {
+	return function + "\x00" + spanStart + "\x00" + spanEnd
+}
+
+// observe folds one fact line into the tally and ignores every fact kind this gate does not judge.
+func (tally *bodyCallClassificationTally) observe(line string) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return
+	}
+	switch fields[0] {
+	case "body-node":
+		if isEmittedCallNodeFact(fields) {
+			tally.bodyCalls[emittedCallKey(fields[1], fields[8], fields[9])]++
+		}
+	case "body-call-target":
+		tally.observeCallTarget(fields)
+	case "body-call-builtin":
+		tally.observeCallBuiltin(fields)
+	}
+}
+
+// isEmittedCallNodeFact reports whether fields is the body-node fact for a Call expression:
+// "body-node <function> ... kind Call span <start> <end>". Body nodes of any other kind, and any
+// body-node whose arity does not match that shape, are outside this gate rather than failures.
+func isEmittedCallNodeFact(fields []string) bool {
+	return len(fields) == 10 && fields[0] == "body-node" &&
+		fields[5] == "kind" && fields[6] == "Call" && fields[7] == "span"
+}
+
+// observeCallTarget records a resolved-call classification, which spells the call site and the
+// callee it resolved to: "body-call-target <function> <start> <end> <callee>". Any other arity is
+// counted as malformed rather than as a classification, so a truncated fact cannot pair with a
+// Call node.
+func (tally *bodyCallClassificationTally) observeCallTarget(fields []string) {
+	if len(fields) != 5 {
+		tally.malformed++
+		return
+	}
+	tally.classifications[emittedCallKey(fields[1], fields[2], fields[3])]++
+}
+
+// observeCallBuiltin records a builtin classification: "body-call-builtin <function> <start>
+// <end> <kind> <operation> <identity>". Beyond pairing it also judges the classification itself,
+// because a builtin fact that names no decided operation would otherwise satisfy the pairing
+// check while telling the backend nothing about what to lower.
+func (tally *bodyCallClassificationTally) observeCallBuiltin(fields []string) {
+	if len(fields) != 7 {
+		tally.malformed++
+		return
+	}
+	tally.classifications[emittedCallKey(fields[1], fields[2], fields[3])]++
+	kind, operation, identity := fields[4], fields[5], fields[6]
+	if !isDecidedBuiltinClassification(kind, operation) {
+		tally.unknown++
+	}
+	if !builtinIdentityMatchesOperation(operation, identity) {
+		tally.malformed++
+	}
+}
+
+// isDecidedBuiltinClassification reports whether a builtin fact names one of the three kinds the
+// backend can act on and an operation the producer actually decided; "none" and "unknown" are the
+// two spellings it emits when it gave up on the call.
+func isDecidedBuiltinClassification(kind, operation string) bool {
+	if kind != "language" && kind != "runtime" && kind != "external-shape" {
+		return false
+	}
+	return operation != "none" && operation != "unknown"
+}
+
+// builtinIdentityMatchesOperation reports whether the identity column agrees with the operation:
+// free-runtime calls carry the resolved runtime identity, and every other operation must leave
+// the column as "-". Either half missing means the producer mixed up two fact shapes.
+func builtinIdentityMatchesOperation(operation, identity string) bool {
+	if operation == "free-runtime" {
+		return identity != "-"
+	}
+	return identity == "-"
+}
+
+// countUnpairedBodyCalls counts emitted Call nodes that were not classified exactly once and
+// returns the first such key, so the failure message can name a call site instead of only a count.
+func (tally *bodyCallClassificationTally) countUnpairedBodyCalls() (int, string) {
+	unpaired := 0
+	first := ""
+	for key, emitted := range tally.bodyCalls {
+		if emitted != 1 || tally.classifications[key] != 1 {
+			unpaired++
+			if first == "" {
+				first = key
+			}
+		}
+	}
+	return unpaired, first
+}
+
+// countUnpairedClassifications counts classifications that do not stand for exactly one emitted
+// Call node: a classification for a call the backend never emitted, or a duplicated one.
+func (tally *bodyCallClassificationTally) countUnpairedClassifications() int {
+	unpaired := 0
+	for key, classified := range tally.classifications {
+		if classified != 1 || tally.bodyCalls[key] != 1 {
+			unpaired++
+		}
+	}
+	return unpaired
+}
+
+// countEveryEmittedBodyCallClassificationFailures fails t and returns 1 when the emitted facts do
+// not pair every Call node with exactly one well-formed classification, and returns 0 otherwise.
+// Callers use the count to stop before asserting positive facts about a stream already known to
+// be inconsistent. The gate is deliberately total: an empty stream, a malformed or undecided
+// classification, a Call node without exactly one classification, and a classification without
+// exactly one Call node all fail it.
 func countEveryEmittedBodyCallClassificationFailures(t *testing.T, facts string) int {
 	t.Helper()
-	bodyCalls := map[string]int{}
-	classifications := map[string]int{}
-	malformedClassifications := 0
-	unknownClassifications := 0
+	tally := newBodyCallClassificationTally()
 	for _, line := range strings.Split(facts, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 10 && fields[0] == "body-node" &&
-			fields[5] == "kind" && fields[6] == "Call" && fields[7] == "span" {
-			bodyCalls[fields[1]+"\x00"+fields[8]+"\x00"+fields[9]]++
-		}
-		if len(fields) > 0 && fields[0] == "body-call-target" {
-			if len(fields) != 5 {
-				malformedClassifications++
-				continue
-			}
-			classifications[fields[1]+"\x00"+fields[2]+"\x00"+fields[3]]++
-		}
-		if len(fields) > 0 && fields[0] == "body-call-builtin" {
-			if len(fields) != 7 {
-				malformedClassifications++
-				continue
-			}
-			classifications[fields[1]+"\x00"+fields[2]+"\x00"+fields[3]]++
-			kind, operation, identity := fields[4], fields[5], fields[6]
-			if (kind != "language" && kind != "runtime" && kind != "external-shape") ||
-				operation == "none" || operation == "unknown" {
-				unknownClassifications++
-			}
-			if (operation == "free-runtime" && identity == "-") ||
-				(operation != "free-runtime" && identity != "-") {
-				malformedClassifications++
-			}
-		}
+		tally.observe(line)
 	}
-	invalidBodyCalls := 0
-	firstInvalidBodyCall := ""
-	for key, count := range bodyCalls {
-		if count != 1 || classifications[key] != 1 {
-			invalidBodyCalls++
-			if firstInvalidBodyCall == "" {
-				firstInvalidBodyCall = key
-			}
-		}
-	}
-	orphanClassifications := 0
-	for key, count := range classifications {
-		if count != 1 || bodyCalls[key] != 1 {
-			orphanClassifications++
-		}
-	}
-	if len(bodyCalls) == 0 || malformedClassifications != 0 ||
-		unknownClassifications != 0 || invalidBodyCalls != 0 ||
+	invalidBodyCalls, firstInvalidBodyCall := tally.countUnpairedBodyCalls()
+	orphanClassifications := tally.countUnpairedClassifications()
+	if len(tally.bodyCalls) == 0 || tally.malformed != 0 ||
+		tally.unknown != 0 || invalidBodyCalls != 0 ||
 		orphanClassifications != 0 {
 		t.Errorf(
 			"emitted Call classification gate: calls=%d classifications=%d "+
 				"invalid-calls=%d first-invalid=%q orphan-classifications=%d "+
 				"malformed=%d unknown=%d",
-			len(bodyCalls), len(classifications), invalidBodyCalls,
+			len(tally.bodyCalls), len(tally.classifications), invalidBodyCalls,
 			firstInvalidBodyCall, orphanClassifications,
-			malformedClassifications, unknownClassifications,
+			tally.malformed, tally.unknown,
 		)
 		return 1
 	}
@@ -135,6 +234,19 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 	if countEveryEmittedBodyCallClassificationFailures(t, facts) != 0 {
 		return
 	}
+	assertGenericFormalsEmittedOnce(t, facts)
+	assertEmittedSignaturesAreUniquelyOwned(t, facts)
+	assertResolvedCollectCheckedEdge(t, facts)
+	assertConstructorFactsSourceABI(t, facts)
+	assertNumericClosureReachesEveryEntrypoint(t, facts)
+	assertNumericClosureEmitsPackageRecords(t, facts)
+}
+
+// assertGenericFormalsEmittedOnce pins the declared type parameters the closure carries through
+// substitution: each formal is emitted once, under its owning type and at its declared ordinal,
+// so a substitution bug surfaces as a missing or duplicated formal rather than a silent rename.
+func assertGenericFormalsEmittedOnce(t *testing.T, facts string) {
+	t.Helper()
 	for _, fact := range []string{
 		"function-type-parameter std::array::Array 0 T",
 		"function-type-parameter std::map::Map 0 K",
@@ -144,9 +256,15 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 			t.Fatalf("numeric closure emitted %q %d times, want exactly once", fact, count)
 		}
 	}
+}
+
+// assertEmittedSignaturesAreUniquelyOwned requires every function the closure emitted to be
+// declared once and attributed to exactly one owning module. A function reached through two
+// different edges, or attributed to two modules, would let the backend lower it twice.
+func assertEmittedSignaturesAreUniquelyOwned(t *testing.T, facts string) {
+	t.Helper()
 	signatureCounts := map[string]int{}
 	ownerCounts := map[string]int{}
-	callTargetFound := false
 	for _, line := range strings.Split(facts, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && fields[0] == "function-signature-return" {
@@ -154,11 +272,6 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 		}
 		if len(fields) == 3 && fields[0] == "function-owner-module" {
 			ownerCounts[fields[1]]++
-		}
-		if len(fields) == 5 && fields[0] == "body-call-target" &&
-			fields[1] == "selfhost::types::constructor_facts::collect_checked" &&
-			fields[4] == "selfhost::types::constructor_facts::collect_node" {
-			callTargetFound = true
 		}
 	}
 	for name, count := range signatureCounts {
@@ -169,9 +282,30 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 			t.Fatalf("function signature %s has %d owner facts, want exactly one", name, count)
 		}
 	}
-	if !callTargetFound {
-		t.Fatal("resolved collect_checked -> collect_node body-call-target fact missing")
+}
+
+// assertResolvedCollectCheckedEdge pins one concrete resolved edge inside the closure. Counting
+// facts alone cannot tell a resolved call from a copied name, so this requires the call from
+// collect_checked to collect_node to appear as a body-call-target with both endpoints spelled.
+func assertResolvedCollectCheckedEdge(t *testing.T, facts string) {
+	t.Helper()
+	for _, line := range strings.Split(facts, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 5 && fields[0] == "body-call-target" &&
+			fields[1] == "selfhost::types::constructor_facts::collect_checked" &&
+			fields[4] == "selfhost::types::constructor_facts::collect_node" {
+			return
+		}
 	}
+	t.Fatal("resolved collect_checked -> collect_node body-call-target fact missing")
+}
+
+// assertConstructorFactsSourceABI pins the ABI the checked producer hands to the backend: the
+// LLVM type name of each struct and the exact field order the consumer indexes by position.
+// Field order is asserted literally, not as a set, because a reordering silently mis-lowers every
+// consumer instead of failing to compile.
+func assertConstructorFactsSourceABI(t *testing.T, facts string) {
+	t.Helper()
 	requireSourceFragments(t, "ConstructorFacts source ABI facts", facts, []string{
 		"type-llvm selfhost::types::constructor_facts::ConstructorFacts " +
 			"%kizu.selfhost.types.constructor_facts.constructor_facts",
@@ -194,6 +328,15 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 		"struct-field selfhost::types::primitive_type::TypeRecord 2 bit_width i64",
 		"struct-field selfhost::types::primitive_type::TypeRecord 3 signed bool",
 	})
+}
+
+// assertNumericClosureReachesEveryEntrypoint pins how far the closure reaches. The first list is
+// every function the closure must define exactly once -- the CLI, render, codegen, format and
+// parser roots plus the constructor-facts producer it was pointed at. The second is the subset
+// that crosses the external ABI, which must also be announced exactly once as an entrypoint, so a
+// dropped root and a root reached twice are both caught.
+func assertNumericClosureReachesEveryEntrypoint(t *testing.T, facts string) {
+	t.Helper()
 	for _, name := range []string{
 		"selfhost::cli::check::fast_diagnostics_parsed_file",
 		"selfhost::cli::execute::render_checked_run_artifact",
@@ -229,6 +372,13 @@ func TestSelfhostNumericPackageCollectorBehavior(t *testing.T) {
 			t.Fatalf("external ABI entrypoint %s emitted %d times, want exactly once", name, count)
 		}
 	}
+}
+
+// assertNumericClosureEmitsPackageRecords requires all three package record kinds to be present.
+// Their contents are pinned elsewhere; what this catches is a closure that walked the catalog and
+// emitted signatures while producing no edges, definitions or references at all.
+func assertNumericClosureEmitsPackageRecords(t *testing.T, facts string) {
+	t.Helper()
 	if count := strings.Count(facts, "package-dependency "); count == 0 {
 		t.Fatal("numeric collector closure emitted no dependency records")
 	}
@@ -330,33 +480,77 @@ func TestSelfhostNumericPackageCollectorBackendConsumerRejectsWrongIDs(t *testin
 	}
 }
 
-// TestSelfhostPackageResolverClassificationBehavior exercises the production
-// resolver boundary for package dependencies and deliberate runtime omissions.
-func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
-	restore, err := chdirRepoRoot()
-	if err != nil {
-		t.Fatal(err)
+// packageResolverGateCase names one resolver gate defined in the selfhost sources. module
+// defaults to package_resolver_gates, which is where all but the catalog-owned gates live.
+// wantError is empty when the gate must succeed, and otherwise holds the substring the resolver's
+// error has to contain -- these gates are as much about what the resolver refuses as what it
+// resolves, and an empty wantError would let a rejection pass by failing for any reason at all.
+type packageResolverGateCase struct {
+	name      string
+	module    string
+	entry     string
+	wantError string
+}
+
+// packageResolverGateCases lists every resolver gate, in the order the groups below declare them.
+// The groups exist only so each list stays readable and so a reader can find the gates for one
+// subject together; the driver runs them as a single table.
+func packageResolverGateCases() []packageResolverGateCase {
+	var cases []packageResolverGateCase
+	for _, group := range [][]packageResolverGateCase{
+		packageResolverClassificationIdentityGates(),
+		packageCatalogFunctionRegistrationGates(),
+		packageCatalogImportAndDeclaredTypeGates(),
+		packageResolverGenericBuiltinGates(),
+		packageResolverDeclarationOwnerGates(),
+		packageResolverGenericSubstitutionGates(),
+		packageCatalogParameterLayoutGates(),
+		packageResolverExpressionTypeGates(),
+		packageResolverMethodTargetGates(),
+		packageResolverLexicalScopeGates(),
+		packageResolverGenericAndPointerGates(),
+		packageResolverUnresolvedTargetGates(),
+		packageResolverStdCatalogGates(),
+	} {
+		cases = append(cases, group...)
 	}
-	defer restore()
-	_, program, err := loadPackageProgram("selfhost")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := checkProgram(program); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name      string
-		module    string
-		entry     string
-		wantError string
-	}{
+	return cases
+}
+
+// packageResolverClassificationIdentityGates cover what the resolver calls a thing: an explicitly
+// classified runtime builtin, structurally interned semantic TypeIds, a canonical IR token for a
+// generic owner, and a free-runtime return schema that keeps its fallibility.
+func packageResolverClassificationIdentityGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
 		{name: "known runtime builtin is explicitly classified", entry: "package_resolver_builtin_gate"},
-		{name: "semantic TypeIds are structurally interned", entry: "package_type_store_structural_interning_gate"},
-		{name: "generic owner identity is a canonical IR token", entry: "package_generic_owner_identity_canonical_gate"},
-		{name: "free runtime return schema preserves fallibility", entry: "package_resolver_free_runtime_return_type_gate"},
-		{name: "dense component function ranges preserve exact lookup", entry: "package_catalog_dense_function_range_gate"},
-		{name: "function name spans use ordered binary search", entry: "package_catalog_function_span_binary_search_gate"},
+		{
+			name:  "semantic TypeIds are structurally interned",
+			entry: "package_type_store_structural_interning_gate",
+		},
+		{
+			name:  "generic owner identity is a canonical IR token",
+			entry: "package_generic_owner_identity_canonical_gate",
+		},
+		{
+			name:  "free runtime return schema preserves fallibility",
+			entry: "package_resolver_free_runtime_return_type_gate",
+		},
+	}
+}
+
+// packageCatalogFunctionRegistrationGates cover the catalog's dense function storage: registration
+// must stay ordered and non-overlapping so name spans can be binary searched, and the exact name
+// index must fail closed on every way it can be asked a question it cannot answer honestly.
+func packageCatalogFunctionRegistrationGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
+		{
+			name:  "dense component function ranges preserve exact lookup",
+			entry: "package_catalog_dense_function_range_gate",
+		},
+		{
+			name:  "function name spans use ordered binary search",
+			entry: "package_catalog_function_span_binary_search_gate",
+		},
 		{
 			name:      "function name spans reject source order violations",
 			entry:     "package_catalog_reject_unordered_function_span_gate",
@@ -367,7 +561,10 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			entry:     "package_catalog_reject_overlapping_function_span_gate",
 			wantError: "package function name spans must not overlap",
 		},
-		{name: "exact function indexes preserve collisions and owner identity", entry: "package_catalog_exact_index_gate"},
+		{
+			name:  "exact function indexes preserve collisions and owner identity",
+			entry: "package_catalog_exact_index_gate",
+		},
 		{
 			name:      "exact function lookup fails closed before finalization",
 			entry:     "package_catalog_exact_index_unfinalized_gate",
@@ -398,7 +595,18 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			entry:     "package_catalog_reject_late_function_gate",
 			wantError: "package functions must register contiguously by component",
 		},
-		{name: "function type and import rows stay component-owned", entry: "package_catalog_component_owned_ranges_gate"},
+	}
+}
+
+// packageCatalogImportAndDeclaredTypeGates cover the import table and the declared-type lookups
+// that read it: imports stay component-owned and register in component order, and a declared type
+// resolves locally, through its exact import alias, or canonically -- in that precedence.
+func packageCatalogImportAndDeclaredTypeGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
+		{
+			name:  "function type and import rows stay component-owned",
+			entry: "package_catalog_component_owned_ranges_gate",
+		},
 		{
 			name:      "import collection rejects a skipped component",
 			entry:     "package_catalog_reject_out_of_order_import_begin_gate",
@@ -409,9 +617,26 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			entry:     "package_catalog_reject_overlapping_import_begin_gate",
 			wantError: "package imports must register in component order",
 		},
-		{name: "bare declared type stays component-local", entry: "package_declared_type_bare_local_gate"},
-		{name: "qualified declared type follows exact import alias", entry: "package_declared_type_import_alias_gate"},
-		{name: "canonical declared type wins over import alias", entry: "package_declared_type_canonical_precedence_gate"},
+		{
+			name:  "bare declared type stays component-local",
+			entry: "package_declared_type_bare_local_gate",
+		},
+		{
+			name:  "qualified declared type follows exact import alias",
+			entry: "package_declared_type_import_alias_gate",
+		},
+		{
+			name:  "canonical declared type wins over import alias",
+			entry: "package_declared_type_canonical_precedence_gate",
+		},
+	}
+}
+
+// packageResolverGenericBuiltinGates cover builtin methods on generic runtime types, where the
+// classification has to survive substitution, and the owned-constructor descriptor that keeps an
+// ordinary factory function from being mistaken for one.
+func packageResolverGenericBuiltinGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
 		{name: "Channel generic recv classification", entry: "package_resolver_channel_recv_gate"},
 		{name: "Array generic get classification", entry: "package_resolver_array_get_gate"},
 		{name: "Array generic reserve classification", entry: "package_resolver_array_reserve_gate"},
@@ -423,8 +648,23 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			name:  "owned constructor descriptor excludes ordinary factories",
 			entry: "package_resolver_owned_constructor_descriptor_gate",
 		},
-		{name: "local Call return feeds receiver type", entry: "package_resolver_local_call_receiver_gate"},
-		{name: "comptime Call return feeds receiver type", entry: "package_resolver_comptime_receiver_gate"},
+	}
+}
+
+// packageResolverDeclarationOwnerGates cover receiver types that come from another expression --
+// a local call's return, a comptime call's return, a Match payload, a qualified method return or
+// field -- and require each to keep the owner of the declaration it came from rather than the
+// component the use happens to sit in.
+func packageResolverDeclarationOwnerGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
+		{
+			name:  "local Call return feeds receiver type",
+			entry: "package_resolver_local_call_receiver_gate",
+		},
+		{
+			name:  "comptime Call return feeds receiver type",
+			entry: "package_resolver_comptime_receiver_gate",
+		},
 		{
 			name:  "cross-component Match payload keeps declaration owner",
 			entry: "package_resolver_cross_component_match_payload_gate",
@@ -437,6 +677,14 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			name:  "direct qualified field and Match use catalog declaration identity",
 			entry: "package_resolver_direct_qualified_field_match_gate",
 		},
+	}
+}
+
+// packageResolverGenericSubstitutionGates cover applying type arguments to a declared generic:
+// nested field and payload types substitute arbitrarily deep, and the three ways an application
+// can be wrong -- arity, an unknown formal, a duplicated formal -- are each rejected by name.
+func packageResolverGenericSubstitutionGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
 		{
 			name:  "generic nominal struct substitutes arbitrary nested field types",
 			entry: "package_resolver_imported_generic_constructor_result_gate",
@@ -460,6 +708,13 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			entry:     "package_resolver_duplicate_declared_formal_gate",
 			wantError: "duplicate declared type parameter",
 		},
+	}
+}
+
+// packageCatalogParameterLayoutGates cover the catalogued parameter layout, where the receiver
+// owns ordinal zero and the runtime parameters follow it.
+func packageCatalogParameterLayoutGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
 		{
 			name:  "function parameter layout owns receiver and runtime ordinals",
 			entry: "package_catalog_function_param_layout_gate",
@@ -469,48 +724,110 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			entry:     "package_catalog_late_receiver_gate",
 			wantError: "function receiver parameter must be first",
 		},
-		{name: "nested imported component type resolves exactly", entry: "package_resolver_nested_import_type_gate"},
-		{name: "binary initializer preserves exact operand and result types", entry: "package_resolver_binary_initializer_gate"},
+	}
+}
+
+// packageResolverExpressionTypeGates cover the expression forms that produce a type without being
+// a call: imported type references, binary operands, match and if expressions, and namespace enum
+// or union variants. Each must land on one exact type, and the mismatches must be rejected rather
+// than widened to something both arms happen to satisfy.
+func packageResolverExpressionTypeGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
+		{
+			name:  "nested imported component type resolves exactly",
+			entry: "package_resolver_nested_import_type_gate",
+		},
+		{
+			name:  "binary initializer preserves exact operand and result types",
+			entry: "package_resolver_binary_initializer_gate",
+		},
 		{
 			name:      "binary initializer rejects mismatched exact operand types",
 			entry:     "package_resolver_binary_operand_mismatch_gate",
 			wantError: "binary operator operands must have same type",
 		},
-		{name: "union match expression binds payload and accepts trailing wildcard", entry: "package_resolver_match_expression_gate"},
-		{name: "enum match expression validates exact exhaustive tags", entry: "package_resolver_enum_match_expression_gate"},
+		{
+			name:  "union match expression binds payload and accepts trailing wildcard",
+			entry: "package_resolver_match_expression_gate",
+		},
+		{
+			name:  "enum match expression validates exact exhaustive tags",
+			entry: "package_resolver_enum_match_expression_gate",
+		},
 		{
 			name:      "match expression rejects differing exact arm types",
 			entry:     "package_resolver_match_expression_type_mismatch_gate",
 			wantError: "match expression arm types differ",
 		},
-		{name: "if expression derives exact type from scoped block tails", entry: "package_resolver_if_expression_block_gate"},
-		{name: "namespace enum variant supplies exact binary operand type", entry: "package_resolver_namespace_variant_binary_gate"},
-		{name: "payloadless union namespace variant supplies exact value type", entry: "package_resolver_payloadless_union_variant_binary_gate"},
+		{
+			name:  "if expression derives exact type from scoped block tails",
+			entry: "package_resolver_if_expression_block_gate",
+		},
+		{
+			name:  "namespace enum variant supplies exact binary operand type",
+			entry: "package_resolver_namespace_variant_binary_gate",
+		},
+		{
+			name:  "payloadless union namespace variant supplies exact value type",
+			entry: "package_resolver_payloadless_union_variant_binary_gate",
+		},
 		{
 			name:      "catalog rejects duplicate enum tags before wildcard match",
 			entry:     "package_resolver_duplicate_enum_tag_gate",
 			wantError: "duplicate package enum tag",
 		},
+	}
+}
+
+// packageResolverMethodTargetGates cover which declaration a receiver-directed call lands on and
+// what it yields: try unwraps an error union receiver while a plain one does not, Self and
+// borrowed Self resolve inside an impl, a leading self parameter at top level is not a method, a
+// declared method beats a builtin of the same spelling, and a spawned task yields its worker's
+// return type.
+func packageResolverMethodTargetGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
 		{
 			name:      "plain error union call does not unwrap receiver",
 			entry:     "package_resolver_plain_error_union_receiver_gate",
 			wantError: "unresolved receiver package method target",
 		},
-		{name: "try unwraps exact error union receiver", entry: "package_resolver_try_error_union_receiver_gate"},
+		{
+			name:  "try unwraps exact error union receiver",
+			entry: "package_resolver_try_error_union_receiver_gate",
+		},
 		{name: "impl Self and borrowed Self resolve exactly", entry: "package_resolver_impl_self_gate"},
 		{
 			name:      "top level first self parameter is not a method",
 			entry:     "package_resolver_top_level_self_param_not_method_gate",
 			wantError: "unresolved receiver package method target",
 		},
-		{name: "declared method wins builtin spelling collision", entry: "package_resolver_declared_builtin_collision_gate"},
-		{name: "task spawn result follows worker return", entry: "package_resolver_task_spawn_result_gate"},
+		{
+			name:  "declared method wins builtin spelling collision",
+			entry: "package_resolver_declared_builtin_collision_gate",
+		},
+		{
+			name:  "task spawn result follows worker return",
+			entry: "package_resolver_task_spawn_result_gate",
+		},
+	}
+}
+
+// packageResolverLexicalScopeGates cover which bindings share one scope. Parameters, for-loop
+// induction variables and match payloads share the scope of the body they introduce, so
+// redeclaring them is a duplicate; an ordinary nested block is the one place shadowing is legal,
+// and a local binding shadowing a top-level callee makes the call unresolvable rather than
+// silently reaching the function.
+func packageResolverLexicalScopeGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
 		{
 			name:      "function body shares parameter lexical scope",
 			entry:     "package_resolver_function_param_shadow_gate",
 			wantError: "resolver duplicate local in lexical scope",
 		},
-		{name: "ordinary nested block may shadow outer binding", entry: "package_resolver_nested_block_shadow_gate"},
+		{
+			name:  "ordinary nested block may shadow outer binding",
+			entry: "package_resolver_nested_block_shadow_gate",
+		},
 		{
 			name:      "local binding shadows top level callee",
 			entry:     "package_resolver_local_callee_shadow_gate",
@@ -526,16 +843,49 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			entry:     "package_resolver_match_payload_shadow_gate",
 			wantError: "resolver duplicate local in lexical scope",
 		},
-		{name: "generic task spawn result substitutes worker return", entry: "package_resolver_generic_task_spawn_result_gate"},
-		{name: "raw pointer dereference keeps nested generic identity", entry: "package_resolver_raw_pointer_nested_generic_gate"},
+	}
+}
+
+// packageResolverGenericAndPointerGates cover type identity surviving indirection: a generic task
+// result, a dereferenced raw pointer, a pointer cast's static type argument, and generic call
+// syntax that a comparison must not be parsed across. The type-value gate is the negative case --
+// a type application is a type, not a receiver with methods.
+func packageResolverGenericAndPointerGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
+		{
+			name:  "generic task spawn result substitutes worker return",
+			entry: "package_resolver_generic_task_spawn_result_gate",
+		},
+		{
+			name:  "raw pointer dereference keeps nested generic identity",
+			entry: "package_resolver_raw_pointer_nested_generic_gate",
+		},
 		{
 			name:      "type application receiver has bare type value type",
 			entry:     "package_resolver_type_value_gate",
 			wantError: "unresolved receiver package method target",
 		},
-		{name: "pointer cast result uses exact static type argument", entry: "package_resolver_pointer_cast_result_gate"},
-		{name: "comparison does not cross generic cast syntax", entry: "package_resolver_comparison_generic_cast_gate"},
-		{name: "bare generic call accepts nested static type", entry: "package_resolver_bare_nested_generic_call_gate"},
+		{
+			name:  "pointer cast result uses exact static type argument",
+			entry: "package_resolver_pointer_cast_result_gate",
+		},
+		{
+			name:  "comparison does not cross generic cast syntax",
+			entry: "package_resolver_comparison_generic_cast_gate",
+		},
+		{
+			name:  "bare generic call accepts nested static type",
+			entry: "package_resolver_bare_nested_generic_call_gate",
+		},
+	}
+}
+
+// packageResolverUnresolvedTargetGates cover the calls that must not resolve at all. Each names a
+// way a lookup could quietly succeed -- an unknown method or builtin, an unknown local or
+// component, a component spelled without importing it -- and requires the resolver to fail
+// instead, because a resolver that guesses here produces a dependency edge to the wrong function.
+func packageResolverUnresolvedTargetGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
 		{
 			name:      "unknown local receiver method",
 			entry:     "package_resolver_unknown_local_method_gate",
@@ -554,9 +904,18 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			wantError: "unresolved qualified package call target",
 		},
 		{
-			name: "unimported alias does not resolve by component spelling", entry: "package_resolver_unimported_alias_gate",
+			name:      "unimported alias does not resolve by component spelling",
+			entry:     "package_resolver_unimported_alias_gate",
 			wantError: "unresolved qualified package call target",
 		},
+	}
+}
+
+// packageResolverStdCatalogGates cover std components, which are catalogued like any other: a
+// present function resolves, and a missing function or method on a catalogued std owner fails
+// closed instead of falling back to a builtin or to another component with the same spelling.
+func packageResolverStdCatalogGates() []packageResolverGateCase {
+	return []packageResolverGateCase{
 		{name: "std source function resolves", entry: "package_resolver_std_function_gate"},
 		{
 			name:      "missing function in catalogued std component",
@@ -580,7 +939,25 @@ func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
 			name: "same spelling in wrong component", entry: "package_resolver_wrong_component_gate",
 			wantError: "unresolved qualified package call target",
 		},
-	} {
+	}
+}
+
+// TestSelfhostPackageResolverClassificationBehavior exercises the production
+// resolver boundary for package dependencies and deliberate runtime omissions.
+func TestSelfhostPackageResolverClassificationBehavior(t *testing.T) {
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProgram(program); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range packageResolverGateCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
 			module := tc.module
@@ -610,9 +987,36 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 	callFacts := readSelfhostFile(t, "../../selfhost/src/ir/package_call_facts.kizu")
 	graph := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency_graph.kizu")
 	programLLVM := readSelfhostFile(t, "../../selfhost/src/backend/compiled_program_llvm.kizu")
-	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
-	typeDeclarations := readSelfhostFile(t, "../../selfhost/src/backend/compiled_type_declarations.kizu")
 
+	assertFunctionTargetProjectionsStayOwned(t, identity, catalog)
+	assertDeletedPackageAPIsStayDeleted(t, map[string]string{
+		"package function identity": identity,
+		"package exact lookup":      lookup,
+		"package call facts":        callFacts,
+		"package dependency graph":  graph,
+	})
+	requireSourceFragments(t, "package definition lookup", definitionLookup, []string{
+		"pub fn definition_node(",
+	})
+	requireSourceFragments(t, "package exact lookup", lookup, []string{
+		"pub fn resolve_call(",
+	})
+	assertQualifiedCallRoutingIsShapeDirected(t, lookup)
+	requireSourceFragments(t, "package dependency graph", graph, []string{
+		"pub fn append_closure_targets(",
+	})
+	assertDeclaredTypeRoutingIsShapeDirected(t, lookup)
+	assertReachableDeclarationsAreRegistered(t, programLLVM)
+	assertNumericClosureBFSStaysNumeric(t, graph)
+	assertSparsePackageDependencyConsumer(t, programLLVM)
+}
+
+// assertFunctionTargetProjectionsStayOwned pins both ends of the FunctionTarget boundary: the
+// declaring module types the two projections over its own fields, and the catalog reaches the
+// numeric ids only by calling them. A cross-module .component.value read would compile and even
+// pass, which is why the absence of one is asserted here rather than left to review.
+func assertFunctionTargetProjectionsStayOwned(t *testing.T, identity, catalog string) {
+	t.Helper()
 	requireSourceFragments(t, "package function identity", identity, []string{
 		"pub struct ComponentId",
 		"pub struct FunctionId",
@@ -639,12 +1043,14 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 		strings.Contains(targetSlot, "target.function.value") {
 		t.Fatal("target_slot directly projects cross-module FunctionTarget fields")
 	}
-	for label, source := range map[string]string{
-		"package function identity": identity,
-		"package exact lookup":      lookup,
-		"package call facts":        callFacts,
-		"package dependency graph":  graph,
-	} {
+}
+
+// assertDeletedPackageAPIsStayDeleted keeps the spelling-based package API from growing back. Each
+// entry below was a function or type the numeric identity work replaced; the sources are keyed by
+// label so a regression names the module that reintroduced one.
+func assertDeletedPackageAPIsStayDeleted(t *testing.T, sources map[string]string) {
+	t.Helper()
+	for label, source := range sources {
 		for _, legacyAPI := range []string{
 			"pub fn dependency_target(",
 			"pub fn source_function_target(",
@@ -663,39 +1069,63 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 			}
 		}
 	}
-	requireSourceFragments(t, "package definition lookup", definitionLookup, []string{
-		"pub fn definition_node(",
-	})
-	requireSourceFragments(t, "package exact lookup", lookup, []string{
-		"pub fn resolve_call(",
-	})
+}
+
+// assertQualifiedCallRoutingIsShapeDirected pins how a qualified call picks a lookup: the number
+// of separators in the name decides it, not the text around them. A two-separator name is an
+// alias-qualified call and must reach the import table before the canonical component scan, so
+// the two routes are also asserted to appear in that order.
+func assertQualifiedCallRoutingIsShapeDirected(t *testing.T, lookup string) {
+	t.Helper()
+	const (
+		aliasRoute     = "if second_separator + 1 >= std::mem::len(qualified)"
+		canonicalRoute = "var component = 0"
+	)
 	qualifiedRoute := dependencyFunctionBody(t, lookup, "find_qualified_function")
 	requireSourceFragments(t, "shape-directed qualified call routing", qualifiedRoute, []string{
 		"var second_separator = separator + 2",
-		"if second_separator + 1 >= std::mem::len(qualified)",
+		aliasRoute,
 		"package_catalog::component_import_start_at(",
-		"var component = 0",
+		canonicalRoute,
 	})
-	if aliasRoute, canonicalRoute := strings.Index(
-		qualifiedRoute, "if second_separator + 1 >= std::mem::len(qualified)",
-	), strings.Index(qualifiedRoute, "var component = 0"); aliasRoute < 0 ||
-		canonicalRoute < 0 || aliasRoute > canonicalRoute {
+	alias := strings.Index(qualifiedRoute, aliasRoute)
+	canonical := strings.Index(qualifiedRoute, canonicalRoute)
+	if alias < 0 || canonical < 0 || alias > canonical {
 		t.Fatal("alias-qualified calls do not route to imports before canonical component scan")
 	}
-	requireSourceFragments(t, "package dependency graph", graph, []string{
-		"pub fn append_closure_targets(",
-	})
+}
+
+// assertDeclaredTypeRoutingIsShapeDirected pins the same discipline for declared types: a name
+// without a separator is component-local and returns before any canonical or imported lookup runs,
+// so a bare type can never be answered by another component that happens to declare the spelling.
+func assertDeclaredTypeRoutingIsShapeDirected(t *testing.T, lookup string) {
+	t.Helper()
+	const (
+		localRoute     = "return exact_local_type_identity("
+		canonicalRoute = "let canonical = try exact_canonical_type_identity"
+	)
 	typeRoute := dependencyFunctionBody(t, lookup, "declared_type_identity")
 	requireSourceFragments(t, "shape-directed declared type routing", typeRoute, []string{
 		"if !contains_double_colon(constructor)",
-		"return exact_local_type_identity(",
-		"let canonical = try exact_canonical_type_identity",
+		localRoute,
+		canonicalRoute,
 		"return exact_imported_type_identity(",
 	})
-	if local, canonical := strings.Index(typeRoute, "return exact_local_type_identity("),
-		strings.Index(typeRoute, "let canonical = try exact_canonical_type_identity"); local < 0 || canonical < 0 || local > canonical {
+	local := strings.Index(typeRoute, localRoute)
+	canonical := strings.Index(typeRoute, canonicalRoute)
+	if local < 0 || canonical < 0 || local > canonical {
 		t.Fatal("bare declared type route does not return before canonical lookup")
 	}
+}
+
+// assertReachableDeclarationsAreRegistered requires reachable type declarations to be lowered from
+// the dependency closure instead of being written into the LLVM preamble by hand. The two struct
+// declarations named below are the ones that used to be hardcoded, so their absence from the
+// preamble is what proves the registry is doing the work.
+func assertReachableDeclarationsAreRegistered(t *testing.T, programLLVM string) {
+	t.Helper()
+	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
+	declarations := readSelfhostFile(t, "../../selfhost/src/backend/compiled_type_declarations.kizu")
 	for _, forbidden := range []string{
 		"%kizu.selfhost.types.constructor_facts.constructor_facts = type",
 		"%kizu.selfhost.types.primitive_type.type_record = type",
@@ -704,7 +1134,7 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 			t.Fatalf("LLVM preamble retained hardcoded reachable declaration %q", forbidden)
 		}
 	}
-	requireSourceFragments(t, "reachable declaration registry", typeDeclarations, []string{
+	requireSourceFragments(t, "reachable declaration registry", declarations, []string{
 		"pub fn append_reachable_declarations(",
 		"lower_and_declare(",
 	})
@@ -719,6 +1149,14 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 			t.Errorf("compiled_program_llvm dependency consumption missing %q", fragment)
 		}
 	}
+}
+
+// assertNumericClosureBFSStaysNumeric keeps the dependency BFS working on numeric ids alone. Each
+// forbidden word below is a way the walk could start reading names -- comparing bytes, matching a
+// prefix, or reaching for a callee, symbol or LLVM spelling -- and any of them would reintroduce
+// exactly the source-literal dispatch the numeric identities were built to remove.
+func assertNumericClosureBFSStaysNumeric(t *testing.T, graph string) {
+	t.Helper()
 	body := dependencyFunctionBody(t, graph, "append_closure_targets")
 	for _, forbidden := range []string{
 		"equal_bytes", "starts_with", "callee", "symbol", "llvm",
@@ -727,7 +1165,6 @@ func TestSelfhostPackageDependencyIdentityFlow(t *testing.T) {
 			t.Errorf("numeric closure BFS must not inspect %q", forbidden)
 		}
 	}
-	assertSparsePackageDependencyConsumer(t, programLLVM)
 }
 
 // assertSparsePackageDependencyConsumer verifies numeric claims use sparse identity pairs.
@@ -767,7 +1204,10 @@ func assertSparsePackageDependencyConsumer(t *testing.T, programLLVM string) {
 		"claimed_functions",
 	} {
 		if strings.Contains(consumer, forbidden) {
-			t.Fatalf("compiled program dependency consumer reintroduced dense numeric allocation %q", forbidden)
+			t.Fatalf(
+				"compiled program dependency consumer reintroduced dense numeric allocation %q",
+				forbidden,
+			)
 		}
 	}
 }
@@ -857,7 +1297,7 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 		t.Fatal("method resolver fell back to owner spelling instead of declaration identity")
 	}
 	for _, fragment := range []string{
-		"package_call_resolution::resolve_package_calls(",
+		"package_call_resolution::resolve_package_calls_with_types(",
 		"package_call_resolution::append_resolved_dependencies(",
 		"append_numeric_package_closure(",
 		"package_dependency_graph::queue_append_dependencies(",
@@ -868,14 +1308,23 @@ func TestSelfhostPackageCallResolverOwnsAstChildAtEdge(t *testing.T) {
 			t.Fatalf("append_facts does not consume resolver numeric targets: missing %q", fragment)
 		}
 	}
-	numericClosure := dependencyFunctionBody(t, executable, "append_numeric_package_closure")
+	closureEntry := dependencyFunctionBody(t, executable, "append_numeric_package_closure")
+	if !strings.Contains(closureEntry, "append_external_abi_roots(") {
+		t.Fatal("numeric package closure no longer seeds its queue from the external ABI manifest")
+	}
+	// The manifest walk lives in append_external_abi_roots; the closure and the
+	// helper it delegates to are audited as one unit so extracting code cannot
+	// move a name policy out of range of the forbidden-fragment scan below.
+	numericClosure := closureEntry + "\n" +
+		dependencyFunctionBody(t, executable, "append_external_abi_roots")
 	for _, fragment := range []string{
 		"external_abi_entrypoints::collect(allocator)",
 		"manifest_entries.at(entrypoint_index)",
 		"entrypoint.package_name",
 		"entrypoint.module_path",
 		"entrypoint.function_name",
-		"queue_append(&var pending, catalog, target)",
+		"package_exact_lookup::resolve_call(",
+		"package_dependency_graph::queue_append(pending, catalog, target)",
 	} {
 		if !strings.Contains(numericClosure, fragment) {
 			t.Fatalf("numeric package closure missing external ABI manifest flow %q", fragment)
@@ -938,11 +1387,25 @@ func TestSelfhostPackageMethodIdentityIncludesOwnerType(t *testing.T) {
 	lookupSource := readSelfhostFile(t, "../../selfhost/src/ir/package_exact_lookup.kizu")
 	graph := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency_graph.kizu")
 	dependency := catalog + "\n" + collector + "\n" + lookupSource + "\n" + graph
+
 	requireSourceFragments(t, "raw dense package catalog registration", catalog, []string{
 		"component_name: []u8\n) -> !i64",
 		"component_value: i64,\n    local_name: []u8",
 		"component: package_function_identity::ComponentId { value: component_value }",
 	})
+	assertCatalogCollectionCarriesComponentIdentity(t, catalog, collector)
+	assertComponentImportLifecycleUsesArrayLengths(t, catalog)
+	assertMethodOwnerIdentityIsCatalogued(t, dependency, catalog, lookupSource)
+	assertExactNameIndexHashIsConstantTime(t, exactIndex)
+}
+
+// assertCatalogCollectionCarriesComponentIdentity pins how the two collection passes agree on
+// which component a parsed file belongs to: the first pass records the id it assigned and the
+// second reads it back by index. Re-resolving the component by name in the second pass, or
+// unwrapping the typed ComponentId to do so, is how the same file used to end up in two
+// components, so both are asserted absent.
+func assertCatalogCollectionCarriesComponentIdentity(t *testing.T, catalog, collector string) {
+	t.Helper()
 	registration := dependencyFunctionBody(t, catalog, "register_function")
 	if strings.Contains(registration, "component.value") {
 		t.Fatal("dense package catalog registration unwraps a typed ComponentId")
@@ -958,12 +1421,23 @@ func TestSelfhostPackageMethodIdentityIncludesOwnerType(t *testing.T) {
 		"validate_component_source_identity(",
 	} {
 		if !strings.Contains(collection, fragment) {
-			t.Fatalf("package catalog collection does not preserve first-pass component identity %q", fragment)
+			t.Fatalf(
+				"package catalog collection does not preserve first-pass component identity %q",
+				fragment,
+			)
 		}
 	}
 	if strings.Contains(collection, "package_catalog::component_by_name(") {
 		t.Fatal("package catalog collection re-resolves second-pass component identity by name")
 	}
+}
+
+// assertComponentImportLifecycleUsesArrayLengths pins the import lifecycle to the lengths of the
+// arrays it fills instead of a separate cursor. begin, append and finish each check the two array
+// lengths against the owning component, so an interleaved or skipped component is caught by the
+// data itself -- the scalar cursor that used to track this could disagree with the arrays.
+func assertComponentImportLifecycleUsesArrayLengths(t *testing.T, catalog string) {
+	t.Helper()
 	if strings.Contains(catalog, "next_import_component") {
 		t.Fatal("package catalog retains duplicate scalar import lifecycle state")
 	}
@@ -984,6 +1458,14 @@ func TestSelfhostPackageMethodIdentityIncludesOwnerType(t *testing.T) {
 		"catalog.component_import_starts.len() != owner_component + 1",
 		"catalog.component_import_lens.len() != owner_component",
 	})
+}
+
+// assertMethodOwnerIdentityIsCatalogued pins the owner type into the catalog key. Methods are
+// registered with the impl's type name and looked up through the owner-specific exact index,
+// while top-level functions use the component-and-name index; without the owner in the key,
+// Ast.deinit and ParseResult.deinit collapse into one numeric target.
+func assertMethodOwnerIdentityIsCatalogued(t *testing.T, dependency, catalog, lookupSource string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"function_owner_type_names: std::array::Array<[]u8>",
 		"node_text(text, ast, impl_decl.type_name)",
@@ -1014,6 +1496,13 @@ func TestSelfhostPackageMethodIdentityIncludesOwnerType(t *testing.T) {
 			t.Fatalf("exact function index build misses identity guard %q", fragment)
 		}
 	}
+}
+
+// assertExactNameIndexHashIsConstantTime pins the exact-name hash to one normalize-and-fold step
+// per value and a capacity that cannot overflow. The per-byte shift loop and the repeated modular
+// add it replaced made index construction cost grow with name length for no added distribution.
+func assertExactNameIndexHashIsConstantTime(t *testing.T, exactIndex string) {
+	t.Helper()
 	hashStep := dependencyFunctionBody(t, exactIndex, "hash_step")
 	requireSourceFragments(t, "constant-time exact function hash step", hashStep, []string{
 		"let normalized = hash_normalize(value, modulus)",
@@ -1043,7 +1532,8 @@ func TestSelfhostPackageMethodCallerIdentityUsesNameSpan(t *testing.T) {
 	for _, fragment := range []string{
 		"function_name_starts: std::array::Array<i64>",
 		"function_name_ends: std::array::Array<i64>",
-		"package_exact_lookup::function_entry_by_name_span(catalog, component_id, name_span.start, name_span.end)",
+		"package_exact_lookup::function_entry_by_name_span(" +
+			"catalog, component_id, name_span.start, name_span.end)",
 	} {
 		if !strings.Contains(dependency, fragment) {
 			t.Fatalf("same-name impl caller identity missing %q", fragment)

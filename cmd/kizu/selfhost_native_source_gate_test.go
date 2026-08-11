@@ -246,7 +246,19 @@ func expectNativeSourceCommand(
 ) int {
 	t.Helper()
 	if result.code != code || result.stdout != stdout || result.stderr != stderr {
-		t.Errorf("native source %s mismatch", name)
+		// Say what mismatched. The report beside this records only sha256s, so a bare
+		// "mismatch" sends the next reader off to reproduce the command by hand -- and a
+		// failure that reproduces only inside the gate then costs hours before anyone sees
+		// the message the compiler actually printed.
+		t.Errorf("native source %s mismatch\n"+
+			"  command:  %s\n"+
+			"  exit:     got %d, want %d\n"+
+			"  stdout:   got %q\n"+
+			"            want %q\n"+
+			"  stderr:   got %q\n"+
+			"            want %q",
+			name, result.command, result.code, code,
+			result.stdout, stdout, result.stderr, stderr)
 		return 1
 	}
 	return 0

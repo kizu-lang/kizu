@@ -185,14 +185,19 @@ fn extract_param_kizu_type_from_line(
     return entry[colon2 + 1..entry_len];
 }
 
-pub fn resolve_struct_literal_type_indexed(
+// resolve_struct_literal_declaration_indexed resolves the DECLARATION a struct literal builds, not
+// just the ABI it lowers to. The ABI names a layout; the declaration names the field order that
+// layout is indexed by, and a literal writes its fields in source order rather than declared order.
+// Callers that have to map one to the other need canonical_identity, which is what the
+// 'struct-field' facts are keyed by; the LLVM type alone does not spell it.
+pub fn resolve_struct_literal_declaration_indexed(
     index: &ir_index::IrIndex,
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
     struct_literal_node: i64,
     bs: i64
-) -> ![]u8 {
+) -> !compiled_type_resolver::ResolvedType {
     // nf tightens this struct-literal's own structural facts (its 'type' edge / name token and
     // 'body-struct-literal' detail) to its body-node line via the index; those facts sort
     // at-or-after that line, so a scan from nf is byte-identical to one from bs. The type-name
@@ -207,16 +212,28 @@ pub fn resolve_struct_literal_type_indexed(
         ir_bytes, function_name, type_node, nf
     );
     if std::mem::len(type_name) > 0 {
-        let resolved = try compiled_type_resolver::resolve_type_indexed(
+        return try compiled_type_resolver::resolve_type_indexed(
             index, ir_bytes, module_prefix, type_name
         );
-        return resolved.abi;
     }
     let qualified_name = try ir_contract::sequence_fact_value_from(
         ir_bytes, "body-struct-literal ", function_name, struct_literal_node, nf
     );
-    let resolved = try compiled_type_resolver::resolve_type_indexed(
+    return try compiled_type_resolver::resolve_type_indexed(
         index, ir_bytes, module_prefix, qualified_name
+    );
+}
+
+pub fn resolve_struct_literal_type_indexed(
+    index: &ir_index::IrIndex,
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    struct_literal_node: i64,
+    bs: i64
+) -> ![]u8 {
+    let resolved = try resolve_struct_literal_declaration_indexed(
+        index, ir_bytes, function_name, module_prefix, struct_literal_node, bs
     );
     return resolved.abi;
 }

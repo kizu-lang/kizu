@@ -109,7 +109,8 @@ func TestSelfhostCodegenRunAstBuilderEmissionRemoved(t *testing.T) {
 			t.Fatalf("handwritten parse-int bridge remains: %q", fragment)
 		}
 	}
-	if _, err := os.Stat("../../selfhost/src/backend/cli_run_i64_codegen_llvm.kizu"); !os.IsNotExist(err) {
+	const bridgeModule = "../../selfhost/src/backend/cli_run_i64_codegen_llvm.kizu"
+	if _, err := os.Stat(bridgeModule); !os.IsNotExist(err) {
 		t.Fatal("handwritten parse-int bridge module should be removed")
 	}
 }

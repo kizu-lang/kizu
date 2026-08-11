@@ -5,6 +5,7 @@ import selfhost::types::expression_facts;
 import selfhost::types::expression_infer;
 import selfhost::types::model;
 import selfhost::types::package_modules;
+import selfhost::types::pointer_builtin;
 
 pub fn first_package_function_call_error_ast_node(
     allocator: Allocator,
@@ -125,6 +126,13 @@ pub fn collect_function_signatures_from_ast(
             impl_decl.methods,
             returns
         );,
+        ContractDecl(contract_decl) => return collect_method_param_type_facts_in_range(
+            allocator,
+            file,
+            ast,
+            contract_decl.methods,
+            returns
+        );,
         _ => return;,
     }
     return;
@@ -195,21 +203,27 @@ fn collect_function_signature_from_ast(
     try qualified.append_bytes("::");
     try qualified.append_bytes(ast_ref_node_text(file, ast, name));
     let function_name = qualified.as_bytes();
-    if arities.contains(function_name) {
-        return error("duplicate function");
+    // A repeated function identity is user source, not a broken invariant: every
+    // caller of this collector is a frontend type-check pass over a file the user
+    // wrote. Failing here aborted `check` with an internal `runtime error:
+    // duplicate function` before the resolver could report `duplicate symbol`. The
+    // first declaration keeps the facts, which is the one the diagnostic points
+    // back to. Written as a guard rather than an early return so the single deinit
+    // below still follows every use of the borrowed name.
+    if !arities.contains(function_name) {
+        try arities.insert(function_name, params.len);
+        var canonical_return = try expression_infer::build_canonical_type_spelling(
+            allocator,
+            file,
+            ast_return_type(file, ast, return_type),
+            returns
+        );
+        defer canonical_return.deinit();
+        try returns.insert_source_owned(allocator, &function_name, &canonical_return);
+        try collect_function_param_type_facts(
+            allocator, file, ast, params, returns
+        );
     }
-    try arities.insert(function_name, params.len);
-    var canonical_return = try expression_infer::build_canonical_type_spelling(
-        allocator,
-        file,
-        ast_return_type(file, ast, return_type),
-        returns
-    );
-    defer canonical_return.deinit();
-    try returns.insert_source_owned(&function_name, &canonical_return);
-    try collect_function_param_type_facts(
-        allocator, file, ast, params, returns
-    );
     qualified.deinit();
     return;
 }
@@ -257,7 +271,7 @@ fn insert_function_param_type_fact(
         returns
     );
     defer canonical_type.deinit();
-    try returns.insert_source_owned(&key_bytes, &canonical_type);
+    try returns.insert_source_owned(allocator, &key_bytes, &canonical_type);
     return;
 }
 
@@ -335,10 +349,13 @@ fn collect_function_arity(
     try qualified.append_bytes("::");
     try qualified.append_bytes(ast_ref_node_text(file, ast, name));
     let key = qualified.as_bytes();
-    if arities.contains(key) {
-        return error("duplicate function");
+    // Same as collect_function_signature_from_ast: the duplicate is reported as
+    // `duplicate symbol` by the resolver, so the first arity stays and this pass
+    // does not abort the check. Written as a guard rather than an early return so
+    // the single deinit still follows every use of the borrowed key.
+    if !arities.contains(key) {
+        try arities.insert(key, params);
     }
-    try arities.insert(key, params);
     qualified.deinit();
     return;
 }
@@ -910,6 +927,24 @@ fn function_call_error_for_ast_call(
         return function_call_summary(false, 0, 0, 0, 0, 0);
     }
     let name = function_call_name_text(file, ast, callee);
+    // A compiler builtin is not declared anywhere, so it resolves from its own
+    // signature table rather than the declared function table. Its arity is still
+    // checked here; the table is a signature, not an exemption.
+    let builtin = pointer_builtin::lookup(name);
+    if builtin.params >= 0 {
+        let callee_node = ast.get(callee);
+        if builtin.params != args.len {
+            return function_call_summary(
+                true,
+                2,
+                callee_node.span.start,
+                callee_node.span.end,
+                builtin.params,
+                args.len
+            );
+        }
+        return function_call_summary(false, 0, 0, 0, 0, 0);
+    }
     if should_skip_function_reference(name) or
         last_segment_starts_with_uppercase(name) or
         (try is_generic_constructor_text(name)) or

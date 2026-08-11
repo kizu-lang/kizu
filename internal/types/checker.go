@@ -1731,7 +1731,16 @@ func (c *Checker) defineSpecialLetInitializer(
 		if err != nil {
 			return true, err
 		}
-		return true, env.defineParam(stmt.Name, typ, true, mutable)
+		// `Array.at` is declared `-> !&T borrows self`, so the element view is backed by
+		// whatever backs the array. Binding it without that provenance made
+		// `self.parts.at(index)` read as a fresh owner and refused a view off the element
+		// that is in fact tied to `self`. Falling back to the bound name keeps the older,
+		// owner-of-itself answer whenever the initializer names no single source.
+		source := c.singleBorrowSource(stmt.Value, env, unsafe)
+		if source == "" {
+			source = stmt.Name
+		}
+		return true, env.defineParamWithSource(stmt.Name, typ, true, mutable, source)
 	}
 	typ, mutable, ok, err = c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
 	if ok || err != nil {
@@ -4949,6 +4958,11 @@ func (c *Checker) checkArenaNewExpr(
 }
 
 // checkStructLiteralExpr validates field names and initializer types.
+//
+// A literal names each declared field exactly once (ADR-0079). A repeated name is
+// reported where it is written, before the declared fields are measured, because a
+// literal that writes one field twice carries two initializers for one slot and no
+// rule picks between them.
 func (c *Checker) checkStructLiteralExpr(
 	expr *ast.StructLiteralExpr,
 	env *scope,
@@ -4961,6 +4975,9 @@ func (c *Checker) checkStructLiteralExpr(
 	values := map[string]Type{}
 	exprs := map[string]ast.Expression{}
 	for _, field := range expr.Fields {
+		if _, written := values[field.Name]; written {
+			return "", errorf("type error: duplicate field `%s.%s`", expr.TypeName, field.Name)
+		}
 		got, err := c.checkExpr(field.Value, env, unsafe)
 		if err != nil {
 			return "", err
@@ -5660,6 +5677,9 @@ func (c *Checker) checkArrayMethod(
 	if isStdArrayStorageMethod(name) {
 		return c.checkStdArrayStorageMethod(elem, name, args, env, unsafe)
 	}
+	if typ, handled, err := checkArrayNullaryMethod(elem, name, args); handled {
+		return typ, err
+	}
 	switch name {
 	case "append":
 		return c.checkArrayAppendArg(elem, args, env, unsafe)
@@ -5668,21 +5688,6 @@ func (c *Checker) checkArrayMethod(
 			return "", err
 		}
 		return "!void", nil
-	case "pop":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
-		}
-		return Type("!" + string(elem)), nil
-	case "pop_or_panic":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.pop_or_panic` expects 0 args, got %d", len(args))
-		}
-		return elem, nil
-	case "len", "capacity":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
-		}
-		return typeI64, nil
 	case "get", "get_or_panic":
 		return c.checkArrayGet(elem, name, args, env, unsafe)
 	case "at", "at_mut":
@@ -5690,14 +5695,33 @@ func (c *Checker) checkArrayMethod(
 			name, name)
 	case "set":
 		return c.checkArraySet(elem, args, env, unsafe)
-	case "deinit":
-		if len(args) != 0 {
-			return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
-		}
-		return typeVoid, nil
 	default:
 		return "", errorf("type error: Array has no method `%s`", name)
 	}
+}
+
+// checkArrayNullaryMethod validates the Array methods that take no arguments and
+// so differ only in the type they yield; folding them together keeps the arity
+// diagnostic spelled once instead of once per method. It reports handled=false
+// for everything else, leaving the argument-taking methods to the caller.
+func checkArrayNullaryMethod(elem Type, name string, args []ast.Expression) (Type, bool, error) {
+	var result Type
+	switch name {
+	case "pop":
+		result = Type("!" + string(elem))
+	case "pop_or_panic":
+		result = elem
+	case "len", "capacity":
+		result = typeI64
+	case "deinit":
+		result = typeVoid
+	default:
+		return "", false, nil
+	}
+	if len(args) != 0 {
+		return "", true, errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
+	}
+	return result, true, nil
 }
 
 // checkStdArrayStorageMethod validates Array helpers reserved to std source.

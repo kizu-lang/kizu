@@ -1,5 +1,6 @@
 import selfhost::abi::fixed_abi_contract;
 import selfhost::backend::compiled_canonical_facts;
+import selfhost::backend::compiled_fact_lookup;
 import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_mir_lower_call;
 import selfhost::backend::compiled_mir_types;
@@ -46,6 +47,12 @@ pub fn transparent_struct_literal_value(
     );
 }
 
+// lower_struct_fields is the no-alias entry: a caller with no local renaming in scope (a
+// whole-function struct return, an expression stream that binds nothing) passes empty tables and
+// every field spells its source name unchanged. Callers that DO hold a rename map -- a let, a
+// return, an if arm, an expression inside a block that merged an if or renamed a loop-carried
+// variable -- must call lower_struct_fields_with_aliases instead, or the literal's fields read the
+// register that held the variable before the merge.
 pub fn lower_struct_fields(
     ir_bytes: []u8,
     function_name: []u8,
@@ -57,12 +64,60 @@ pub fn lower_struct_fields(
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
 ) -> !std::array::Array<compiled_mir::MirStructField> {
-    let field_count = try count_struct_fields(ir_bytes, function_name, value_node, bs);
+    var empty_alias_sources = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer empty_alias_sources.deinit();
+    var empty_alias_currents = std::array::Array<[]u8>(std::mem::page_allocator());
+    defer empty_alias_currents.deinit();
+    return try lower_struct_fields_with_aliases(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        params_spec,
+        value_node,
+        &empty_alias_sources,
+        &empty_alias_currents,
+        bs,
+        ir_lookup_index,
+        canonical_facts,
+        call_arg_type_cache
+    );
+}
+
+// lower_struct_fields_with_aliases lowers a struct literal's fields against a source-name to
+// current-SSA-name map, the same tables the shared call-argument lowering already takes. Types stay
+// resolved from the SOURCE name -- locals_spec is keyed by it and a rename never changes a
+// variable's type -- and only the emitted register spelling is rewritten.
+//
+// The lowered fields come out in DECLARATION order, not in the order the literal wrote them. A
+// field's slot in the layout is the index its declaration gives it, so 'P3 { c: .., a: .., b: .. }'
+// must still store a at 0; walking the literal's own order writes c there instead, and when the
+// slots happen to share a type nothing downstream can see it. The renderer's insertvalue chain also
+// reads this array positionally -- each line feeds %v<prefix>_<n-1> into %v<prefix>_<n> and the
+// finished value is the last element's -- so declaration order has to be the array's order rather
+// than only its .index values.
+pub fn lower_struct_fields_with_aliases(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    value_node: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex,
+    canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
+    call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
+) -> !std::array::Array<compiled_mir::MirStructField> {
+    var literal_positions = try struct_literal_declaration_order(
+        ir_bytes, function_name, module_prefix, value_node, bs, ir_lookup_index
+    );
+    defer literal_positions.deinit();
     var fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
     var field_index = 0;
-    while field_index < field_count {
+    while field_index < literal_positions.len() {
+        let literal_position = try literal_positions.get(field_index);
         let field_node = try ir_contract::body_child_sequence_from(
-            ir_bytes, function_name, value_node, "field", field_index, bs
+            ir_bytes, function_name, value_node, "field", literal_position, bs
         );
         let field_value = try ir_contract::body_child_sequence_from(
             ir_bytes, function_name, field_node, "value", 0, bs
@@ -78,6 +133,8 @@ pub fn lower_struct_fields(
             field_index,
             field_value,
             field_value_kind,
+            alias_sources,
+            alias_currents,
             bs,
             ir_lookup_index,
             canonical_facts,
@@ -86,6 +143,103 @@ pub fn lower_struct_fields(
         field_index = field_index + 1;
     }
     return fields;
+}
+
+// struct_literal_declaration_order returns, for each declared field index of the struct this
+// literal builds, the position that field was written at in the literal. It resolves the literal's
+// declaration and matches every written field to a declared one BY NAME -- the only thing the two
+// orders share.
+//
+// A literal that omits a declared field, names a field the struct does not declare, or writes one
+// field twice leaves this mapping incomplete, and there is no index to fall back on that is not a
+// guess. Each of those is refused by name. The type checker rejects all three ahead of lowering, so
+// reaching one here means the checker and the backend disagree about the declaration, which is
+// exactly the disagreement that must not silently pick a slot.
+fn struct_literal_declaration_order(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    value_node: i64,
+    bs: i64,
+    ir_lookup_index: &ir_index::IrIndex
+) -> !std::array::Array<i64> {
+    let literal_count = try count_struct_fields(ir_bytes, function_name, value_node, bs);
+    let declaration = try compiled_signature::resolve_struct_literal_declaration_indexed(
+        ir_lookup_index, ir_bytes, function_name, module_prefix, value_node, bs
+    );
+    let identity = declaration.canonical_identity;
+    let declared_count = try compiled_fact_lookup::validate_struct_field_owner_indexed(
+        ir_lookup_index, ir_bytes, identity
+    );
+    var positions = std::array::Array<i64>(std::mem::page_allocator());
+    var slot = 0;
+    while slot < declared_count {
+        try positions.append(-1);
+        slot = slot + 1;
+    }
+    var literal_position = 0;
+    while literal_position < literal_count {
+        let field_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, value_node, "field", literal_position, bs
+        );
+        let field_name = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-field-init ", function_name, field_node, bs
+        );
+        let declared = try compiled_fact_lookup::lookup_struct_field_exact_indexed(
+            ir_lookup_index, ir_bytes, identity, field_name
+        );
+        if !declared.found {
+            return try struct_literal_field_error(
+                "compiled mir: struct literal names a field the struct does not declare: ",
+                function_name, identity, field_name, value_node
+            );
+        }
+        if try positions.get(declared.index) >= 0 {
+            return try struct_literal_field_error(
+                "compiled mir: struct literal writes a field twice: ",
+                function_name, identity, field_name, value_node
+            );
+        }
+        try positions.set(declared.index, literal_position);
+        literal_position = literal_position + 1;
+    }
+    var check = 0;
+    while check < declared_count {
+        if try positions.get(check) < 0 {
+            let missing = try compiled_fact_lookup::lookup_struct_field_at_index_exact_indexed(
+                ir_lookup_index, ir_bytes, identity, check
+            );
+            return try struct_literal_field_error(
+                "compiled mir: struct literal omits a declared field: ",
+                function_name, identity, missing.field_name, value_node
+            );
+        }
+        check = check + 1;
+    }
+    return positions;
+}
+
+// struct_literal_field_error names the function, the struct declaration, the field and the literal's
+// body node, so a refusal points at the one literal that produced it rather than at a field index
+// that is meaningless without knowing which struct it indexes.
+fn struct_literal_field_error(
+    reason: []u8,
+    function_name: []u8,
+    identity: []u8,
+    field_name: []u8,
+    value_node: i64
+) -> !std::array::Array<i64> {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes(reason);
+    try message.append_bytes(function_name);
+    try message.append_bytes(" struct ");
+    try message.append_bytes(identity);
+    try message.append_bytes(" field ");
+    try message.append_bytes(field_name);
+    try message.append_bytes(" node ");
+    try std::fmt::append_i64(&var message, value_node);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }
 
 fn count_struct_fields(
@@ -242,6 +396,8 @@ fn lower_struct_field(
     field_index: i64,
     field_value: i64,
     field_value_kind: []u8,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -269,7 +425,13 @@ fn lower_struct_field(
             ir_lookup_index, ir_bytes, function_name, module_prefix,
             params_spec, var_name, bs, call_arg_type_cache
         );
-        return compiled_mir::var_struct_field(field_index, var_type, var_name);
+        return compiled_mir::var_struct_field(
+            field_index,
+            var_type,
+            try compiled_mir_lower_call::aliased_name_or_original(
+                alias_sources, alias_currents, var_name
+            )
+        );
     }
     if std::mem::equal_bytes(field_value_kind, "String") {
         let token = try ir_contract::body_token_or_empty_from(
@@ -353,6 +515,8 @@ fn lower_struct_field(
             params_spec,
             field_index,
             field_value,
+            alias_sources,
+            alias_currents,
             bs,
             ir_lookup_index,
             call_arg_type_cache
@@ -366,6 +530,8 @@ fn lower_struct_field(
             params_spec,
             field_index,
             field_value,
+            alias_sources,
+            alias_currents,
             bs,
             ir_lookup_index,
             canonical_facts,
@@ -380,6 +546,8 @@ fn lower_struct_field(
             params_spec,
             field_index,
             field_value,
+            alias_sources,
+            alias_currents,
             bs,
             ir_lookup_index,
             call_arg_type_cache
@@ -393,6 +561,8 @@ fn lower_struct_field(
             params_spec,
             field_index,
             field_value,
+            alias_sources,
+            alias_currents,
             bs,
             ir_lookup_index,
             canonical_facts,
@@ -425,6 +595,8 @@ fn lower_struct_field_call(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -438,7 +610,8 @@ fn lower_struct_field_call(
     if owned_constructor.found {
         return try lower_struct_field_owned_container(
             ir_bytes, function_name, module_prefix, params_spec,
-            field_index, field_value, &owned_constructor, bs,
+            field_index, field_value, &owned_constructor,
+            alias_sources, alias_currents, bs,
             ir_lookup_index, call_arg_type_cache
         );
     }
@@ -449,7 +622,8 @@ fn lower_struct_field_call(
     // emit the literal 'ast.<method>' against the caller's module and drop the receiver.
     if try compiled_mir_types::callee_is_field_mode_method(ir_bytes, function_name, field_value, bs) {
         return try lower_struct_field_method_call(
-            ir_bytes, function_name, module_prefix, params_spec, field_index, field_value, bs,
+            ir_bytes, function_name, module_prefix, params_spec, field_index, field_value,
+            alias_sources, alias_currents, bs,
             ir_lookup_index, canonical_facts, call_arg_type_cache
         );
     }
@@ -460,8 +634,9 @@ fn lower_struct_field_call(
         ir_lookup_index, canonical_facts, ir_bytes,
         function_name, module_prefix, field_value, bs, call_arg_type_cache
     );
-    let args = try compiled_mir_lower_call::lower_call_args_canonical(
-        ir_bytes, function_name, module_prefix, params_spec, field_value, 0, bs,
+    let args = try compiled_mir_lower_call::lower_call_args_canonical_with_aliases(
+        ir_bytes, function_name, module_prefix, params_spec, field_value, 0,
+        alias_sources, alias_currents, bs,
         ir_lookup_index, canonical_facts, &call_info.types,
         call_arg_type_cache
     );
@@ -486,6 +661,8 @@ fn lower_struct_field_owned_container(
     field_index: i64,
     field_value: i64,
     constructor: &compiled_type_resolver::ResolvedOwnedConstructor,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
@@ -528,7 +705,10 @@ fn lower_struct_field_owned_container(
     let allocator_abi = allocator_type.abi;
     var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
     try args.append(compiled_mir::var_call_arg(
-        allocator_abi, alloc_name
+        allocator_abi,
+        try compiled_mir_lower_call::aliased_name_or_original(
+            alias_sources, alias_currents, alloc_name
+        )
     ));
     if constructor_runtime.type_size_argument_slot >= 0 {
         if !constructor.type_arguments_concrete or
@@ -560,6 +740,8 @@ fn lower_struct_field_method_call(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -584,7 +766,12 @@ fn lower_struct_field_method_call(
         try compiled_canonical_facts::parsed_canonical_runtime_abi(
             ir_lookup_index, canonical_facts, ir_bytes, call_info.types.receiver_id
         );
-    try args.append(compiled_mir::var_call_arg(receiver_type, info.receiver_name));
+    try args.append(compiled_mir::var_call_arg(
+        receiver_type,
+        try compiled_mir_lower_call::aliased_name_or_original(
+            alias_sources, alias_currents, info.receiver_name
+        )
+    ));
     var arg_index = 0;
     while arg_index < runtime_arg_nodes.len() {
         let type_id = try compiled_canonical_facts::parsed_call_runtime_type_id(
@@ -595,9 +782,10 @@ fn lower_struct_field_method_call(
                 ir_lookup_index, canonical_facts, ir_bytes, type_id
             );
         let scalar_arg =
-            try compiled_mir_lower_call::lower_single_call_arg_canonical(
+            try compiled_mir_lower_call::lower_single_call_arg_canonical_with_aliases(
                 ir_bytes, function_name, module_prefix, params_spec, arg_type,
-                try runtime_arg_nodes.get(arg_index), 0, bs, ir_lookup_index,
+                try runtime_arg_nodes.get(arg_index), 0,
+                alias_sources, alias_currents, bs, ir_lookup_index,
                 canonical_facts, call_arg_type_cache
             );
         if scalar_arg.kind == compiled_mir::MirCallArgKind::String {
@@ -622,6 +810,8 @@ fn lower_struct_field_computed_binary(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
@@ -669,6 +859,11 @@ fn lower_struct_field_computed_binary(
             if !std::mem::equal_bytes(left_type, "i64") {
                 return error("compiled mir: computed struct field lhs must be i64");
             }
+            // The type came from the source name; the operand register is whichever SSA name
+            // holds that variable here.
+            left_name = try compiled_mir_lower_call::aliased_name_or_original(
+                alias_sources, alias_currents, left_name
+            );
         }
         var right_name = "";
         var right_literal = 0;
@@ -688,6 +883,9 @@ fn lower_struct_field_computed_binary(
             if !std::mem::equal_bytes(right_type, "i64") {
                 return error("compiled mir: computed struct field rhs must be i64");
             }
+            right_name = try compiled_mir_lower_call::aliased_name_or_original(
+                alias_sources, alias_currents, right_name
+            );
         }
         return compiled_mir::computed_scalar_binary_struct_field(
             field_index, op,
@@ -759,10 +957,14 @@ fn lower_struct_field_computed_binary(
     return compiled_mir::computed_binary_struct_field(
         field_index,
         "i64",
-        root_name,
+        try compiled_mir_lower_call::aliased_name_or_original(
+            alias_sources, alias_currents, root_name
+        ),
         field.receiver_llvm_type,
         field.field_index,
-        right_name
+        try compiled_mir_lower_call::aliased_name_or_original(
+            alias_sources, alias_currents, right_name
+        )
     );
 }
 
@@ -779,6 +981,8 @@ fn lower_struct_field_struct(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -787,8 +991,9 @@ fn lower_struct_field_struct(
     let nested_type = try compiled_signature::resolve_struct_literal_type_indexed(
         ir_lookup_index, ir_bytes, function_name, module_prefix, field_value, bs
     );
-    let nested_fields = try lower_struct_fields(
-        ir_bytes, function_name, module_prefix, params_spec, field_value, bs,
+    let nested_fields = try lower_struct_fields_with_aliases(
+        ir_bytes, function_name, module_prefix, params_spec, field_value,
+        alias_sources, alias_currents, bs,
         ir_lookup_index, canonical_facts, call_arg_type_cache
     );
     return compiled_mir::struct_literal_struct_field(
@@ -805,6 +1010,8 @@ fn lower_struct_field_expr(
     params_spec: []u8,
     field_index: i64,
     field_value: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
@@ -841,6 +1048,8 @@ fn lower_struct_field_expr(
             field_index,
             field_value,
             receiver,
+            alias_sources,
+            alias_currents,
             bs,
             ir_lookup_index,
             call_arg_type_cache
@@ -862,7 +1071,9 @@ fn lower_struct_field_expr(
     return try compiled_mir::field_access_struct_field(
         field_index,
         field.field_llvm_type,
-        receiver_name,
+        try compiled_mir_lower_call::aliased_name_or_original(
+            alias_sources, alias_currents, receiver_name
+        ),
         field.receiver_llvm_type,
         field.field_index
     );
@@ -880,6 +1091,8 @@ fn lower_nested_struct_field_expr(
     field_index: i64,
     field_value: i64,
     receiver: i64,
+    alias_sources: &std::array::Array<[]u8>,
+    alias_currents: &std::array::Array<[]u8>,
     bs: i64,
     ir_lookup_index: &ir_index::IrIndex,
     call_arg_type_cache: &var compiled_mir_types::CallArgTypeCache
@@ -944,6 +1157,11 @@ fn lower_nested_struct_field_expr(
         try steps.append(compiled_mir::field_step(step.source_type, step.field_index));
     }
     return compiled_mir::field_access_path_struct_field(
-        field_index, result_llvm, root_name, steps
+        field_index,
+        result_llvm,
+        try compiled_mir_lower_call::aliased_name_or_original(
+            alias_sources, alias_currents, root_name
+        ),
+        steps
     );
 }

@@ -1,3 +1,4 @@
+import selfhost::backend::compiled_error_abi;
 import selfhost::backend::compiled_mir;
 import selfhost::backend::compiled_signature;
 import selfhost::backend::compiled_util;
@@ -67,10 +68,19 @@ pub fn append_call_return(
     try out.append_bytes("entry:");
     try out.append_byte(cast<u8>(10));
     try append_call_arg_setup(out, function.name, &function.call_args);
-    try out.append_bytes("  %");
-    try out.append_bytes(inst.result.payload);
-    try out.append_bytes(" = call ");
-    try out.append_bytes(function.return_type.llvm_name);
+    // A void call has no result to name. LLVM rejects '%r = call void @g()' outright
+    // ("instructions returning void cannot have a name"), so the '%name = ' prefix is written
+    // only when the callee hands back a value. What the DECLARATION then owes the return -- 'ret
+    // void', the flag-only success arm of %kizu.error.void, or a refusal -- is settled by
+    // append_call_return_value.
+    if call_produces_value(inst.result.ty.llvm_name) {
+        try out.append_bytes("  %");
+        try out.append_bytes(inst.result.payload);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
+    try out.append_bytes(inst.result.ty.llvm_name);
     try out.append_bytes(" @");
     try append_callee_symbol(
         out,
@@ -81,13 +91,179 @@ pub fn append_call_return(
     try append_call_args(out, &function.call_args);
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  ret ");
-    try out.append_bytes(function.return_type.llvm_name);
-    try out.append_bytes(" %");
-    try out.append_bytes(function.entry.terminator.value.payload);
-    try out.append_byte(cast<u8>(10));
+    try append_call_return_value(
+        out,
+        function.name,
+        function.return_type.llvm_name,
+        inst.result.ty.llvm_name,
+        function.entry.terminator.value.payload
+    );
     try out.append_bytes("}");
     try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+// call_produces_value reports whether the emitted call instruction defines an SSA value. Only a
+// void callee does not, and that is the whole difference between naming the call's result and
+// spelling it as a statement. LLVM rejects a named void call outright, so every emitter that
+// renders '%name = call <type>' asks this first.
+pub fn call_produces_value(call_result_type: []u8) -> bool {
+    return !std::mem::equal_bytes(call_result_type, "void");
+}
+
+// call_return_abi_mismatch is the one refusal every 'return g(...);' emitter shares: the DECLARED
+// return type is neither what the callee hands back nor the error union carrying it, so there is
+// no return to render. It names the function, because the lowering recognises an enumerated set
+// of shapes and a bare message costs a native rebuild to locate.
+pub fn call_return_abi_mismatch(
+    llvm_symbol: []u8,
+    return_type: []u8,
+    call_result_type: []u8
+) -> !void {
+    // The error carries a view into this buffer, so the buffer outlives the call: releasing it
+    // here (a defer, or a deinit before the return) hands the diagnostic freed bytes and the
+    // refusal prints as garbage. The same bounded leak every other message-building refusal
+    // in this backend takes.
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled mir llvm: call return ABI mismatch in ");
+    try message.append_bytes(llvm_symbol);
+    try message.append_bytes(": declared ");
+    try message.append_bytes(return_type);
+    try message.append_bytes(", callee returns ");
+    try message.append_bytes(call_result_type);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
+}
+
+// append_void_call_return renders the return of a 'return g(...);' whose callee returns void.
+// Every emitter of that statement shares it, because the answer depends only on the DECLARED
+// return type -- the call produced no value, so there is no name to forward:
+//
+//   declared          disposition
+//   ---------------   ------------------------------------------------------------------------
+//   void              'ret void'
+//   %kizu.error.void  the flag alone. %kizu.error.void is { i1, message }: the success case has
+//                     no payload field, so the wrap is one insertvalue and the ret
+//   anything else     refused by name -- the declaration wants a value the callee never made
+//
+// The wrap needs one SSA name, and the emitters disambiguate theirs differently, so the name is
+// spelled here from the caller's pieces: <head>_<index>_<arm><tail>, with a negative index or arm
+// omitting that piece. The pieces only have to make the name unique inside the function; they do
+// not have to reproduce the name the emitter would have given the call's result, because a void
+// call has no result.
+pub fn append_void_call_return(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    return_type: []u8,
+    wrap_head: []u8,
+    wrap_index: i64,
+    wrap_arm_index: i64,
+    wrap_tail: []u8
+) -> !void {
+    if std::mem::equal_bytes(return_type, "void") {
+        try out.append_bytes("  ret void");
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if !compiled_error_abi::wraps_success(return_type, "void") {
+        return call_return_abi_mismatch(llvm_symbol, return_type, "void");
+    }
+    try out.append_bytes("  %");
+    try append_void_wrap_name(out, wrap_head, wrap_index, wrap_arm_index, wrap_tail);
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" zeroinitializer, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %");
+    try append_void_wrap_name(out, wrap_head, wrap_index, wrap_arm_index, wrap_tail);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_void_wrap_name(
+    out: &var std::string::String,
+    wrap_head: []u8,
+    wrap_index: i64,
+    wrap_arm_index: i64,
+    wrap_tail: []u8
+) -> !void {
+    try out.append_bytes(wrap_head);
+    if wrap_index >= 0 {
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, wrap_index);
+    }
+    if wrap_arm_index >= 0 {
+        try out.append_bytes("_");
+        try std::fmt::append_i64(out, wrap_arm_index);
+    }
+    try out.append_bytes(wrap_tail);
+    return;
+}
+
+// append_call_return_value returns the callee's result under the DECLARED return type. Four pairs
+// of (declared, callee) reach here and each has one answer:
+//
+//   declared    callee     disposition
+//   ---------   --------   -------------------------------------------------------------------
+//   T           T          forward: 'ret T %result'
+//   !T          T          wrap: the success arm carries the named result as the payload
+//   !void       void       wrap: %kizu.error.void is { i1, message }, so the success case is the
+//                          flag alone -- there is no payload, and no result to carry
+//   void        void       forward: 'ret void'. The call was emitted as a statement, so there is
+//                          no '%result' to name here either
+//
+// Everything else is refused by name rather than emitted with a signature the module's call sites
+// do not use: 'ret void %result' and 'ret i64 %result' off a void call are both invalid LLVM, and
+// a declaration that is neither the callee's type nor the error union carrying it has no lowering.
+fn append_call_return_value(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    return_type: []u8,
+    call_result_type: []u8,
+    result_name: []u8
+) -> !void {
+    if !call_produces_value(call_result_type) {
+        return append_void_call_return(
+            out, llvm_symbol, return_type, result_name, -1, -1, "_wrap0"
+        );
+    }
+    if std::mem::equal_bytes(return_type, call_result_type) {
+        try out.append_bytes("  ret ");
+        try out.append_bytes(return_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(result_name);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if !compiled_error_abi::wraps_success(return_type, call_result_type) {
+        return call_return_abi_mismatch(llvm_symbol, return_type, call_result_type);
+    }
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_wrap0 = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" zeroinitializer, i1 true, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_wrap1 = insertvalue ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_wrap0, ");
+    try out.append_bytes(call_result_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(result_name);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(return_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(result_name);
+    try out.append_bytes("_wrap1");
     try out.append_byte(cast<u8>(10));
     return;
 }

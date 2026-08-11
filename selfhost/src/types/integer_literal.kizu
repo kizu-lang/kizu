@@ -1,0 +1,167 @@
+import selfhost::source;
+import selfhost::types::ast_text;
+import selfhost::types::model;
+import selfhost::types::primitive_type;
+
+// Contextual integer typing (SPEC.md 7.2) is keyed on literal *syntax*, never on an
+// inferred type. `take_byte(255)` narrows because the argument is written as a
+// literal; `let x = 1; take_byte(x)` stays a mismatch because `x` is a binding that
+// already settled on `i64`. IntegerLiteralValue carries that syntactic verdict along
+// with the value the literal denotes.
+pub struct IntegerLiteralValue {
+    pub found: bool,
+    pub value: i64,
+    // A diagnostic spells a literal the way the expression prints itself: the integer
+    // token's own digits, wrapped in `(-` ... `)` once for every negation applied to it
+    // (internal/ast/ast.go:668 and :737).
+    pub digits: []u8,
+    pub negations: i64,
+}
+
+fn no_integer_literal() -> IntegerLiteralValue {
+    return IntegerLiteralValue { found: false, value: 0, digits: "", negations: 0 };
+}
+
+fn integer_literal(value: i64, digits: []u8, negations: i64) -> IntegerLiteralValue {
+    return IntegerLiteralValue {
+        found: true,
+        value: value,
+        digits: digits,
+        negations: negations
+    };
+}
+
+// ContextualInteger is the verdict the contextual typing rule reaches at one position:
+// the type the value takes there, plus the range violation that stops a literal from
+// taking that type at all. A violation is a diagnostic in its own right, not a refusal
+// to narrow, so a caller reports it instead of the ordinary mismatch for the position.
+pub struct ContextualInteger {
+    pub type_text: []u8,
+    pub literal: model::IntegerLiteralRange,
+}
+
+pub fn contextual_type(type_text: []u8) -> ContextualInteger {
+    return ContextualInteger {
+        type_text: type_text,
+        literal: model::IntegerLiteralRange {
+            found: false,
+            digits: "",
+            negations: 0,
+            expected: ""
+        }
+    };
+}
+
+pub fn contextual_out_of_range(
+    type_text: []u8,
+    expected: []u8,
+    literal: IntegerLiteralValue
+) -> ContextualInteger {
+    return ContextualInteger {
+        type_text: type_text,
+        literal: model::IntegerLiteralRange {
+            found: true,
+            digits: literal.digits,
+            negations: literal.negations,
+            expected: expected
+        }
+    };
+}
+
+// integer_literal_value classifies an expression node as an integer literal. Only an
+// integer token, or a negation applied to one, qualifies: any other node shape keeps
+// its inferred type so that no already-typed value is silently renarrowed.
+pub fn integer_literal_value(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> IntegerLiteralValue {
+    let node = ast.get(node_id);
+    match node.data {
+        Int(int_node) => return decimal_literal_value(ast_text::ast_node_text(file, ast, node_id));,
+        Prefix(prefix_node) => return negated_literal_value(file, ast, prefix_node.op, prefix_node.right);,
+        _ => return no_integer_literal();,
+    }
+}
+
+fn negated_literal_value(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    op: std::kizu::ast::PrefixOp,
+    right: std::kizu::ast::NodeId
+) -> IntegerLiteralValue {
+    if !is_negation(op) {
+        return no_integer_literal();
+    }
+    let inner = integer_literal_value(file, ast, right);
+    if !inner.found {
+        return no_integer_literal();
+    }
+    return integer_literal(0 - inner.value, inner.digits, inner.negations + 1);
+}
+
+fn is_negation(op: std::kizu::ast::PrefixOp) -> bool {
+    match op {
+        Not => return false;,
+        Neg => return true;,
+        Borrow => return false;,
+        MutBorrow => return false;,
+    }
+}
+
+// decimal_literal_value decodes the literal token text. The lexer only ever produces
+// runs of decimal digits for an integer token, so a non-digit byte or a value the
+// interpreter cannot represent means the literal is not usable for narrowing.
+fn decimal_literal_value(text: []u8) -> IntegerLiteralValue {
+    let length = std::mem::len(text);
+    if length == 0 {
+        return no_integer_literal();
+    }
+    var value = 0;
+    var index = 0;
+    while index < length {
+        let byte = text[index];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            return no_integer_literal();
+        }
+        let digit = cast<i64>(byte - cast<u8>(48));
+        let next = value * 10 + digit;
+        if next < value {
+            return no_integer_literal();
+        }
+        value = next;
+        index = index + 1;
+    }
+    return integer_literal(value, text, 0);
+}
+
+// integer_literal_fits applies the range rule of SPEC.md 7.2. The bounds are computed
+// from the width and signedness that primitive_type already decodes generically, so a
+// new integer width becomes narrowable without touching this file.
+pub fn integer_literal_fits(record: primitive_type::TypeRecord, value: i64) -> bool {
+    if record.kind != primitive_type::type_kind_integer() {
+        return false;
+    }
+    if record.bit_width >= 64 {
+        if record.signed {
+            return true;
+        }
+        return value >= 0;
+    }
+    if record.signed {
+        let magnitude = power_of_two(record.bit_width - 1);
+        return value >= 0 - magnitude and value <= magnitude - 1;
+    }
+    let magnitude = power_of_two(record.bit_width);
+    return value >= 0 and value <= magnitude - 1;
+}
+
+fn power_of_two(exponent: i64) -> i64 {
+    var result = 1;
+    var index = 0;
+    while index < exponent {
+        result = result * 2;
+        index = index + 1;
+    }
+    return result;
+}

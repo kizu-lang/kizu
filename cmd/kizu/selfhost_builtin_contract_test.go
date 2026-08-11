@@ -8,6 +8,12 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
+// TestSelfhostBuiltinContractValidAndInvalidPairs runs the contract's own
+// accept and reject oracles. The positive gates are grouped because a builtin
+// call is only well formed when the frontend contract, the compiled resolver,
+// and the semantic signature all agree on the same pair; the negative cases
+// assert on the diagnostic text so a rejection that stops naming its reason
+// still fails.
 func TestSelfhostBuiltinContractValidAndInvalidPairs(t *testing.T) {
 	_, program, err := loadPackageProgram("../../selfhost")
 	if err != nil {
@@ -55,6 +61,9 @@ func TestSelfhostBuiltinContractValidAndInvalidPairs(t *testing.T) {
 	}
 }
 
+// TestSelfhostNullableABIRequiresContractCapability checks that nullable ABI is
+// a capability a type has to declare, not a fallback: asking for it on a type
+// without the contract is an error rather than a silently chosen representation.
 func TestSelfhostNullableABIRequiresContractCapability(t *testing.T) {
 	_, program, err := loadPackageProgram("../../selfhost")
 	if err != nil {
@@ -72,6 +81,11 @@ func TestSelfhostNullableABIRequiresContractCapability(t *testing.T) {
 	}
 }
 
+// TestSelfhostBuiltinContractHasSingleOwner keeps builtin_contract.kizu the only
+// place that knows which builtin kinds and operations exist. Both consumers must
+// import it and derive their answers from it, and neither may keep the private
+// name tables and equal_bytes chains it replaced -- a second copy of the table is
+// exactly how the frontend and the backend drift apart on what a builtin means.
 func TestSelfhostBuiltinContractHasSingleOwner(t *testing.T) {
 	contract := readSelfhostFile(t, "../../selfhost/src/ir/builtin_contract.kizu")
 	callFacts := readSelfhostFile(t, "../../selfhost/src/ir/package_call_facts.kizu")
@@ -138,6 +152,12 @@ func TestSelfhostBuiltinContractHasSingleOwner(t *testing.T) {
 	}
 }
 
+// TestSelfhostOwnedDeinitUsesBuiltinDescriptorAndResolvedABI pins owned-container
+// deinit lowering to two resolved facts: the operation id from the builtin
+// descriptor and the receiver's resolved ABI kind. The forbidden fragments are
+// the spelling-derived route it replaced -- matching the receiver against
+// std::array::Array / std::arena::Arena or the method name "deinit" -- which
+// AGENTS.md rules out and which cannot see through an alias or a type parameter.
 func TestSelfhostOwnedDeinitUsesBuiltinDescriptorAndResolvedABI(t *testing.T) {
 	contract := readSelfhostFile(t, "../../selfhost/src/ir/builtin_contract.kizu")
 	lower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
@@ -184,6 +204,13 @@ func TestSelfhostOwnedDeinitUsesBuiltinDescriptorAndResolvedABI(t *testing.T) {
 	}
 }
 
+// TestSelfhostOwnedConstructorUsesOrthogonalTypeIDDescriptor follows one owned
+// constructor from source to LLVM and requires every stage to speak the same
+// descriptor: the frontend classifies from resolved type identity, the emitter
+// writes the type arguments as facts, the compiled resolver hands back an
+// indexed descriptor, and both lowering sites consume it. The descriptor is
+// "orthogonal" in that container family, result ABI, and storage ABI are
+// independent fields, so a new container needs no new branch anywhere here.
 func TestSelfhostOwnedConstructorUsesOrthogonalTypeIDDescriptor(t *testing.T) {
 	callResolution := readSelfhostFile(t, "../../selfhost/src/ir/package_call_resolution.kizu")
 	typeResolution := readSelfhostFile(t, "../../selfhost/src/ir/package_type_resolution.kizu")
@@ -205,6 +232,17 @@ func TestSelfhostOwnedConstructorUsesOrthogonalTypeIDDescriptor(t *testing.T) {
 			t.Fatalf("%s does not participate in the owned constructor descriptor", label)
 		}
 	}
+	assertOwnedConstructorFrontendClassification(t, callResolution)
+	assertOwnedConstructorFactEmission(t, emitter, callFacts)
+	assertOwnedConstructorResolverDescriptor(t, resolver)
+	assertOwnedConstructorLoweringConsumesDescriptor(t, lower, structLower)
+}
+
+// assertOwnedConstructorFrontendClassification requires the frontend to decide
+// the container family from the resolved nominal target and its type arguments.
+// Recovering it from the constructor's spelling is the failure this rules out.
+func assertOwnedConstructorFrontendClassification(t *testing.T, callResolution string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"package_type_resolution::intrinsic_owned_container_family(",
 		"nominal_constructor != resolution.target_index",
@@ -218,6 +256,13 @@ func TestSelfhostOwnedConstructorUsesOrthogonalTypeIDDescriptor(t *testing.T) {
 	if strings.Contains(callResolution, "runtime_intrinsic_method_identity(") {
 		t.Fatal("constructor classification recovered family from constructor spelling")
 	}
+}
+
+// assertOwnedConstructorFactEmission requires the emitted fact to carry the full
+// type-argument list. The forbidden name is the earlier single-element schema,
+// which could not describe a two-parameter container such as a map.
+func assertOwnedConstructorFactEmission(t *testing.T, emitter, callFacts string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"body-call-owned-constructor ",
 		"owned_constructor_action(calls, index)",
@@ -231,6 +276,13 @@ func TestSelfhostOwnedConstructorUsesOrthogonalTypeIDDescriptor(t *testing.T) {
 	if strings.Contains(callFacts, "owned_constructor_element_spelling") {
 		t.Fatal("owned constructor facts retain the single-element schema")
 	}
+}
+
+// assertOwnedConstructorResolverDescriptor requires the compiled resolver to
+// expose one indexed descriptor lookup that fails closed: the action, the result
+// identity, and the owned ABI are each checked with their own diagnostic.
+func assertOwnedConstructorResolverDescriptor(t *testing.T, resolver string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"pub fn owned_constructor_indexed(",
 		"owned constructor action mismatch",
@@ -243,6 +295,15 @@ func TestSelfhostOwnedConstructorUsesOrthogonalTypeIDDescriptor(t *testing.T) {
 			t.Fatalf("compiled owned constructor resolver missing %q", fragment)
 		}
 	}
+}
+
+// assertOwnedConstructorLoweringConsumesDescriptor requires both lowering sites
+// -- standalone/value-loop and struct-field -- to read the same descriptor for
+// the result ABI, the storage ABI, and the runtime symbol. They differ only in
+// what they bind the descriptor to, so they are checked against separate lists.
+// The forbidden names are the per-shape constructor paths they replaced.
+func assertOwnedConstructorLoweringConsumesDescriptor(t *testing.T, lower, structLower string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"compiled_type_resolver::owned_constructor_indexed(",
 		"owned_constructor.result_type.abi",

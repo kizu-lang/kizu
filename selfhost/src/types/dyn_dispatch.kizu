@@ -1,0 +1,448 @@
+import selfhost::source;
+import selfhost::types::ast_text;
+import selfhost::types::contract_rules;
+import selfhost::types::model;
+
+// dyn_dispatch owns what may be called through a contract object. A `&dyn Contract`
+// receiver has no type behind it that the call site knows -- that is what dynamic
+// dispatch means -- so the only methods it reaches are the ones the contract itself
+// declares, with the arity the contract declares them at
+// (internal/types/checker.go:6495 and :6510). Every other method call is settled against
+// a receiver whose type is known, and is not this pass's business.
+
+struct DynReceiver {
+    found: bool,
+    contract_name: []u8,
+}
+
+pub fn first_dyn_dispatch_diagnostic_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !model::DynDispatchSummary {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return first_dispatch_error_in_declarations(
+            file, ast, program.declarations, program.declarations
+        );,
+        _ => return no_dyn_dispatch_diagnostic();,
+    }
+    return no_dyn_dispatch_diagnostic();
+}
+
+fn first_dispatch_error_in_declarations(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    children: std::kizu::ast::ChildRange
+) -> !model::DynDispatchSummary {
+    var index = 0;
+    while index < children.len {
+        let child = try ast.child_at(children, index);
+        let found = try first_dispatch_error_in_declaration(
+            file, ast, declarations, child
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_dyn_dispatch_diagnostic();
+}
+
+fn first_dispatch_error_in_declaration(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId
+) -> !model::DynDispatchSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return first_dispatch_error_in_node(
+            file, ast, declarations, fn_decl.params, fn_decl.body
+        );,
+        ImplDecl(impl_decl) => return first_dispatch_error_in_declarations(
+            file, ast, declarations, impl_decl.methods
+        );,
+        ContractDecl(contract_decl) => return first_dispatch_error_in_declarations(
+            file, ast, declarations, contract_decl.methods
+        );,
+        _ => return no_dyn_dispatch_diagnostic();,
+    }
+    return no_dyn_dispatch_diagnostic();
+}
+
+// ---------------------------------------------------------------------------
+// The body walk
+// ---------------------------------------------------------------------------
+
+fn first_dispatch_error_in_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId
+) -> !model::DynDispatchSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_dispatch_error_in_range(
+            file, ast, declarations, params, block.statements
+        );,
+        Let(let_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, let_node.value
+        );,
+        Assign(assign_node) => return first_dispatch_error_in_two(
+            file, ast, declarations, params, assign_node.target, assign_node.value
+        );,
+        Return(return_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, return_node.value
+        );,
+        Defer(defer_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, defer_node.expr
+        );,
+        ErrDefer(err_defer_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, err_defer_node.expr
+        );,
+        ExprStmt(expr_stmt) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, expr_stmt.expr
+        );,
+        If(if_node) => return first_dispatch_error_in_three(
+            file, ast, declarations, params,
+            if_node.condition, if_node.then_block, if_node.else_block
+        );,
+        ComptimeIf(comptime_if_node) => return first_dispatch_error_in_three(
+            file, ast, declarations, params,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block
+        );,
+        While(while_node) => return first_dispatch_error_in_two(
+            file, ast, declarations, params, while_node.condition, while_node.body
+        );,
+        For(for_node) => return first_dispatch_error_in_three(
+            file, ast, declarations, params, for_node.start, for_node.end, for_node.body
+        );,
+        Match(match_node) => return first_dispatch_error_in_node_and_range(
+            file, ast, declarations, params, match_node.value, match_node.arms
+        );,
+        MatchArm(match_arm) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, match_arm.body
+        );,
+        Unsafe(unsafe_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, unsafe_node.body
+        );,
+        Prefix(prefix_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, prefix_node.right
+        );,
+        Binary(binary) => return first_dispatch_error_in_two(
+            file, ast, declarations, params, binary.left, binary.right
+        );,
+        FieldExpr(field_expr_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, field_expr_node.receiver
+        );,
+        DerefExpr(deref_expr_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, deref_expr_node.receiver
+        );,
+        CastExpr(cast_expr) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, cast_expr.value
+        );,
+        IndexExpr(index_expr) => return first_dispatch_error_in_three(
+            file, ast, declarations, params,
+            index_expr.target, index_expr.start, index_expr.end
+        );,
+        StructLiteralExpr(struct_literal) => return first_dispatch_error_in_range(
+            file, ast, declarations, params, struct_literal.fields
+        );,
+        StructFieldInit(struct_field_init) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, struct_field_init.value
+        );,
+        ArenaNewExpr(arena_new) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, arena_new.allocator
+        );,
+        TryExpr(try_expr_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, try_expr_node.value
+        );,
+        ComptimeExpr(comptime_expr_node) => return first_dispatch_error_in_node(
+            file, ast, declarations, params, comptime_expr_node.value
+        );,
+        Call(call_node) => return first_dispatch_error_in_call(
+            file, ast, declarations, params, call_node.callee, call_node.args
+        );,
+        _ => return no_dyn_dispatch_diagnostic();,
+    }
+    return no_dyn_dispatch_diagnostic();
+}
+
+fn first_dispatch_error_in_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    children: std::kizu::ast::ChildRange
+) -> !model::DynDispatchSummary {
+    var index = 0;
+    while index < children.len {
+        let child = try ast.child_at(children, index);
+        let found = try first_dispatch_error_in_node(
+            file, ast, declarations, params, child
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_dyn_dispatch_diagnostic();
+}
+
+fn first_dispatch_error_in_two(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId
+) -> !model::DynDispatchSummary {
+    let found = try first_dispatch_error_in_node(file, ast, declarations, params, first);
+    if found.found {
+        return found;
+    }
+    return first_dispatch_error_in_node(file, ast, declarations, params, second);
+}
+
+fn first_dispatch_error_in_three(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId
+) -> !model::DynDispatchSummary {
+    let found = try first_dispatch_error_in_two(
+        file, ast, declarations, params, first, second
+    );
+    if found.found {
+        return found;
+    }
+    return first_dispatch_error_in_node(file, ast, declarations, params, third);
+}
+
+fn first_dispatch_error_in_node_and_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId,
+    children: std::kizu::ast::ChildRange
+) -> !model::DynDispatchSummary {
+    let found = try first_dispatch_error_in_node(file, ast, declarations, params, node_id);
+    if found.found {
+        return found;
+    }
+    return first_dispatch_error_in_range(file, ast, declarations, params, children);
+}
+
+// ---------------------------------------------------------------------------
+// The rule
+// ---------------------------------------------------------------------------
+
+fn first_dispatch_error_in_call(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !model::DynDispatchSummary {
+    let found = try dispatch_error_for_call(
+        file, ast, declarations, params, callee, args
+    );
+    if found.found {
+        return found;
+    }
+    let callee_found = try first_dispatch_error_in_node(
+        file, ast, declarations, params, callee
+    );
+    if callee_found.found {
+        return callee_found;
+    }
+    return first_dispatch_error_in_range(file, ast, declarations, params, args);
+}
+
+fn dispatch_error_for_call(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !model::DynDispatchSummary {
+    let node = ast.get(callee);
+    match node.data {
+        FieldExpr(field_expr_node) => return dispatch_error_for_method(
+            file,
+            ast,
+            declarations,
+            params,
+            callee,
+            field_expr_node.namespace,
+            field_expr_node.receiver,
+            field_expr_node.name,
+            args
+        );,
+        _ => return no_dyn_dispatch_diagnostic();,
+    }
+    return no_dyn_dispatch_diagnostic();
+}
+
+fn dispatch_error_for_method(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    callee: std::kizu::ast::NodeId,
+    namespace: bool,
+    receiver: std::kizu::ast::NodeId,
+    name_node: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !model::DynDispatchSummary {
+    if namespace {
+        return no_dyn_dispatch_diagnostic();
+    }
+    let dynamic = try dyn_receiver(file, ast, params, receiver);
+    if !dynamic.found {
+        return no_dyn_dispatch_diagnostic();
+    }
+    let method = ast_text::ast_node_text(file, ast, name_node);
+    let lookup = try contract_rules::contract_method_lookup(
+        file, ast, declarations, dynamic.contract_name, method
+    );
+    if !lookup.contract_found {
+        return no_dyn_dispatch_diagnostic();
+    }
+    let node = ast.get(callee);
+    if !lookup.method_found {
+        return dyn_dispatch_summary(
+            true, kind_unknown_method(), node.span.start, node.span.end,
+            dynamic.contract_name, method, 0, 0
+        );
+    }
+    // A method reaches its receiver through the self parameter, so the arity a call site
+    // writes is the declared one without it.
+    if lookup.params.len == 0 {
+        return no_dyn_dispatch_diagnostic();
+    }
+    let expected = lookup.params.len - 1;
+    if expected != args.len {
+        return dyn_dispatch_summary(
+            true, kind_method_arity(), node.span.start, node.span.end,
+            dynamic.contract_name, method, expected, args.len
+        );
+    }
+    return no_dyn_dispatch_diagnostic();
+}
+
+// dyn_receiver names the contract a receiver dispatches on. A contract object is reached
+// through a `&dyn Contract` parameter -- the one placement the language gives it -- so the
+// receiver names such a parameter or it is not dynamic.
+fn dyn_receiver(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    receiver: std::kizu::ast::NodeId
+) -> !DynReceiver {
+    let node = ast.get(receiver);
+    match node.data {
+        Var(var_node) => return dyn_param_receiver(
+            file, ast, params, ast_text::ast_node_text(file, ast, receiver)
+        );,
+        _ => return no_dyn_receiver();,
+    }
+    return no_dyn_receiver();
+}
+
+fn dyn_param_receiver(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !DynReceiver {
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        let found = named_param_dyn_receiver(file, ast, child, name);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_dyn_receiver();
+}
+
+fn named_param_dyn_receiver(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> DynReceiver {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return param_dyn_receiver(
+            file, ast, param_node.name, param_node.type_node, name
+        );,
+        _ => return no_dyn_receiver();,
+    }
+    return no_dyn_receiver();
+}
+
+fn param_dyn_receiver(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name_node: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    name: []u8
+) -> DynReceiver {
+    if !std::mem::equal_bytes(ast_text::ast_node_text(file, ast, name_node), name) {
+        return no_dyn_receiver();
+    }
+    let dispatched_on = contract_rules::dyn_contract_name(
+        ast_text::ast_node_text(file, ast, type_node)
+    );
+    if std::mem::len(dispatched_on) == 0 {
+        return no_dyn_receiver();
+    }
+    return DynReceiver { found: true, contract_name: dispatched_on };
+}
+
+fn no_dyn_receiver() -> DynReceiver {
+    return DynReceiver { found: false, contract_name: "" };
+}
+
+pub fn kind_unknown_method() -> i64 { return 1; }
+pub fn kind_method_arity() -> i64 { return 2; }
+
+fn no_dyn_dispatch_diagnostic() -> model::DynDispatchSummary {
+    return dyn_dispatch_summary(false, 0, 0, 0, "", "", 0, 0);
+}
+
+fn dyn_dispatch_summary(
+    found: bool,
+    kind: i64,
+    start: i64,
+    end: i64,
+    contract_name: []u8,
+    method: []u8,
+    expected: i64,
+    observed: i64
+) -> model::DynDispatchSummary {
+    return model::DynDispatchSummary {
+        found: found,
+        kind: kind,
+        start: start,
+        end: end,
+        contract_name: contract_name,
+        method: method,
+        expected: expected,
+        observed: observed
+    };
+}

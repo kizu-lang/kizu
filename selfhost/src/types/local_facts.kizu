@@ -1,12 +1,15 @@
 import selfhost::source;
+import selfhost::type_constructor;
 import selfhost::types::ast_text;
 import selfhost::types::expression_facts;
 import selfhost::types::expression_infer;
+import selfhost::types::type_parameter_scope;
 
 pub fn collect_function_statement_locals(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
@@ -28,6 +31,7 @@ pub fn collect_function_statement_locals(
             file,
             ast,
             child,
+            type_params,
             local_types,
             local_mutability,
             function_returns
@@ -43,7 +47,41 @@ pub fn collect_function_statement_locals(
         local_mutability,
         function_returns
     );
-    return params.len + local_count;
+    let type_param_count = try collect_type_parameter_locals(
+        file,
+        ast,
+        type_params,
+        local_types,
+        local_mutability
+    );
+    return params.len + local_count + type_param_count;
+}
+
+// A declared static type parameter is in scope for the whole body as an
+// immutable value of the meta type: it names a type, so it may appear where a
+// type value is expected and nowhere else. Value bindings are collected first
+// so a parameter or local of the same name keeps precedence over the formal.
+fn collect_type_parameter_locals(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>
+) -> !i64 {
+    let meta_type = try type_constructor::meta_type_name();
+    var count = 0;
+    var index = 0;
+    while index < type_params.len {
+        let child = try ast.child_at(type_params, index);
+        let name = ast_text::ast_node_text(file, ast, child);
+        if !local_types.contains(name) {
+            try local_types.insert(name, meta_type);
+            try local_mutability.insert(name, false);
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
 }
 
 fn collect_param_local(
@@ -51,6 +89,7 @@ fn collect_param_local(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
     function_returns: &var expression_facts::ExpressionTypeFacts
@@ -63,6 +102,7 @@ fn collect_param_local(
             ast,
             node_id,
             param_node.name,
+            type_params,
             local_types,
             local_mutability,
             function_returns
@@ -77,6 +117,7 @@ fn collect_param_node_local(
     ast: std::kizu::ast::Ast,
     param_node: std::kizu::ast::NodeId,
     name_id: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
     function_returns: &var expression_facts::ExpressionTypeFacts
@@ -91,7 +132,12 @@ fn collect_param_node_local(
             return error("canonical parameter type fact missing");
         }
         let canonical_type = try function_returns.get_source(&key_bytes);
-        try local_types.insert(name, canonical_type);
+        try local_types.insert(
+            name,
+            try type_parameter_scope::declared_type_text(
+                file, ast, type_params, canonical_type
+            )
+        );
         try local_mutability.insert(name, false);
     }
     return;
@@ -210,22 +256,12 @@ fn collect_statement_locals_from_node(
             local_mutability,
             function_returns
         );,
-        Match(match_node) => return collect_statement_locals_from_range(
+        Match(match_node) => return collect_match_arm_locals_for_value(
             allocator,
             file,
             ast,
+            match_node.value,
             match_node.arms,
-            local_types,
-            local_mutability,
-            function_returns
-        );,
-        MatchArm(match_arm) => return collect_match_arm_locals(
-            allocator,
-            file,
-            ast,
-            match_arm.pattern,
-            match_arm.binding,
-            match_arm.body,
             local_types,
             local_mutability,
             function_returns
@@ -253,13 +289,82 @@ fn collect_statement_locals_from_node(
     }
 }
 
+// A match arm binds the payload of one variant, so the payload table can only be read
+// once the union being matched is known. The matched value is typed first and carried
+// into every arm.
+fn collect_match_arm_locals_for_value(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !i64 {
+    let matched_type = try expression_infer::infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    var count = 0;
+    var index = 0;
+    while index < arms.len {
+        let child = try ast.child_at(arms, index);
+        count = count + try collect_match_arm_locals(
+            allocator,
+            file,
+            ast,
+            child,
+            matched_type,
+            local_types,
+            local_mutability,
+            function_returns
+        );
+        index = index + 1;
+    }
+    return count;
+}
+
 fn collect_match_arm_locals(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    matched_type: []u8,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !i64 {
+    let node = ast.get(node_id);
+    match node.data {
+        MatchArm(match_arm) => return collect_match_arm_binding_local(
+            allocator,
+            file,
+            ast,
+            match_arm.pattern,
+            match_arm.binding,
+            match_arm.body,
+            matched_type,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        _ => return 0;,
+    }
+}
+
+fn collect_match_arm_binding_local(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     pattern: std::kizu::ast::NodeId,
     binding: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
+    matched_type: []u8,
     local_types: &var std::map::Map<[]u8, []u8>,
     local_mutability: &var std::map::Map<[]u8, bool>,
     function_returns: &var expression_facts::ExpressionTypeFacts
@@ -267,7 +372,10 @@ fn collect_match_arm_locals(
     var count = 0;
     let binding_name = ast_text::ast_node_text(file, ast, binding);
     if !std::mem::equal_bytes(binding_name, "") and !local_types.contains(binding_name) {
-        try local_types.insert(binding_name, ast_match_arm_binding_type(file, ast, pattern));
+        try local_types.insert(
+            binding_name,
+            match_arm_binding_type(file, ast, pattern, matched_type)
+        );
         try local_mutability.insert(binding_name, false);
         count = count + 1;
     }
@@ -282,16 +390,28 @@ fn collect_match_arm_locals(
     );
 }
 
-fn ast_match_arm_binding_type(
+fn match_arm_binding_type(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
-    binding: std::kizu::ast::NodeId
+    binding: std::kizu::ast::NodeId,
+    matched_type: []u8
 ) -> []u8 {
+    if !std::mem::equal_bytes(matched_type, ast_data_union_name()) {
+        return "unknown";
+    }
     let node = ast.get(binding);
     match node.data {
         Var(var_node) => return ast_data_payload_type(ast_text::ast_node_text(file, ast, binding));,
         _ => return "unknown";,
     }
+}
+
+// The payload table below describes one union, the syntax node payload the frontend
+// walks. A variant name on its own identifies no union -- `Binary` names a variant of any
+// number of them -- so the table answers only for values of that union and every other
+// match leaves its arm binding unresolved.
+fn ast_data_union_name() -> []u8 {
+    return "std::kizu::ast::AstData";
 }
 
 fn ast_data_payload_type(pattern: []u8) -> []u8 {
@@ -413,10 +533,11 @@ fn collect_match_expression_locals(
         local_mutability,
         function_returns
     );
-    let arm_count = try collect_statement_locals_from_range(
+    let arm_count = try collect_match_arm_locals_for_value(
         allocator,
         file,
         ast,
+        value,
         arms,
         local_types,
         local_mutability,

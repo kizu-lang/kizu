@@ -79,7 +79,8 @@ pub fn from_source_name(name: []u8) -> i64 {
         std::mem::equal_bytes(name, "std::channel::Channel") { return kind_channel(); }
     if std::mem::equal_bytes(name, "Atomic") or
         std::mem::equal_bytes(name, "std::atomic::Atomic") { return kind_atomic(); }
-    if std::mem::equal_bytes(name, "Mutex") { return kind_mutex(); }
+    if std::mem::equal_bytes(name, "Mutex") or
+        std::mem::equal_bytes(name, "std::sync::Mutex") { return kind_mutex(); }
     if std::mem::equal_bytes(name, "Task") { return kind_task(); }
     if std::mem::equal_bytes(name, "option") { return kind_option(); }
     if std::mem::equal_bytes(name, "TaskGroup") { return kind_task_group(); }
@@ -89,7 +90,10 @@ pub fn from_source_name(name: []u8) -> i64 {
     return -1;
 }
 
-pub fn canonical_name(kind: i64) -> ![]u8 {
+// source_spelling is the total form of canonical_name: an identity this registry does
+// not own answers with an empty spelling instead of an error. A caller enumerating the
+// registry needs that distinction to be data rather than a failure it has to catch.
+pub fn source_spelling(kind: i64) -> []u8 {
     if kind == kind_void() { return "void"; }
     if kind == kind_bool() { return "bool"; }
     if kind == kind_i8() { return "i8"; }
@@ -124,7 +128,53 @@ pub fn canonical_name(kind: i64) -> ![]u8 {
     if kind == kind_partition() { return "Partition"; }
     if kind == kind_local_buffer() { return "LocalBuffer"; }
     if kind == kind_error() { return "error"; }
-    return error("intrinsic type contract: invalid kind");
+    return "";
+}
+
+pub fn canonical_name(kind: i64) -> ![]u8 {
+    let name = source_spelling(kind);
+    if std::mem::len(name) == 0 {
+        return error("intrinsic type contract: invalid kind");
+    }
+    return name;
+}
+
+// A source-named identity is one whose canonical spelling maps back to itself. Asking
+// both tables to agree is what keeps the enumeration below from becoming a third list
+// that can drift: an identity reachable only through an alias, or one with no source
+// spelling at all, is not part of the namespace a source file may name.
+pub fn is_source_named_kind(kind: i64) -> bool {
+    let name = source_spelling(kind);
+    if std::mem::len(name) == 0 {
+        return false;
+    }
+    return from_source_name(name) == kind;
+}
+
+pub fn source_named_kind_count() -> i64 {
+    var count = 0;
+    var kind = 0;
+    while kind <= kind_error() {
+        if is_source_named_kind(kind) { count = count + 1; }
+        kind = kind + 1;
+    }
+    return count;
+}
+
+// source_named_kind_at enumerates the identities a source type spelling may name, in
+// increasing identity order. A frontend that needs the whole builtin type namespace
+// walks this instead of keeping its own copy of the table.
+pub fn source_named_kind_at(index: i64) -> !i64 {
+    var seen = 0;
+    var kind = 0;
+    while kind <= kind_error() {
+        if is_source_named_kind(kind) {
+            if seen == index { return kind; }
+            seen = seen + 1;
+        }
+        kind = kind + 1;
+    }
+    return error("intrinsic type contract: source named kind index out of range");
 }
 
 pub fn arity(kind: i64) -> i64 {

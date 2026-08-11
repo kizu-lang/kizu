@@ -1,0 +1,567 @@
+import selfhost::source;
+import selfhost::type_constructor;
+import selfhost::types::ast_text;
+import selfhost::types::contract_rules;
+import selfhost::types::expression_facts;
+import selfhost::types::expression_infer;
+import selfhost::types::local_facts;
+import selfhost::types::model;
+import selfhost::types::type_ref_ast;
+
+// type_placement owns the positions a resolvable type spelling may occupy. Two spellings
+// name a type and still name no storage: the meta type `type`, whose values exist only
+// while the compiler runs, and `dyn Contract`, whose object has no size until dispatch
+// picks one. Resolution says both are real types; this pass says where the language lets
+// them stand -- never as a parameter, a result, a field, a variant payload, or a local
+// binding. `void` joins them in the parameter position for the same reason: it is the
+// identity of "no value", so no parameter can be given one.
+
+pub fn kind_parameter_void() -> i64 { return 1; }
+pub fn kind_parameter_type() -> i64 { return 2; }
+pub fn kind_return_type() -> i64 { return 3; }
+pub fn kind_return_dyn() -> i64 { return 4; }
+pub fn kind_field_type() -> i64 { return 5; }
+pub fn kind_field_dyn() -> i64 { return 6; }
+pub fn kind_variant_type() -> i64 { return 7; }
+pub fn kind_variant_dyn() -> i64 { return 8; }
+pub fn kind_local_type() -> i64 { return 9; }
+
+// Declaration positions are decided from the written spelling alone, so they are all
+// settled before the first body is read -- the same order the declarations themselves
+// are collected in.
+pub fn first_type_placement_diagnostic_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::TypePlacementSummary {
+    let declared = try first_declared_violation(file, ast, root);
+    if declared.found {
+        return declared;
+    }
+    return try first_local_violation(allocator, file, ast, root, expression_types);
+}
+
+// mentions_meta_type reports whether a written type spelling names the meta type anywhere
+// inside it. A wrapper does not make a comptime value storable, and neither does a static
+// argument position, so the question is asked of every name the spelling contains rather
+// than of the spelling as a whole.
+pub fn mentions_meta_type(spelling: []u8) -> bool {
+    var index = 0;
+    while index < std::mem::len(spelling) {
+        // One assignment advances the cursor. The MIR lowering recognises a
+        // branch-merge loop only when the exiting arm carries nothing but the
+        // bound assignment, so the two-armed form stops `selfhost stage selfhost`.
+        var next = index + 1;
+        if type_ref_ast::is_type_identifier_start_byte(spelling[index]) {
+            let end = type_ref_ast::type_path_end_in_text(spelling, index);
+            next = end;
+            if type_constructor::is_meta_type_name(spelling[index..end]) {
+                return true;
+            }
+        }
+        index = next;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Declaration positions
+// ---------------------------------------------------------------------------
+
+fn first_declared_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !model::TypePlacementSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_declared_violation_in_range(
+            file, ast, program.declarations
+        );,
+        ImplDecl(impl_decl) => return first_declared_violation_in_range(
+            file, ast, impl_decl.methods
+        );,
+        ContractDecl(contract_decl) => return first_declared_violation_in_range(
+            file, ast, contract_decl.methods
+        );,
+        FnDecl(fn_decl) => return signature_violation(
+            file, ast, fn_decl.name, fn_decl.params, fn_decl.return_type
+        );,
+        StructDecl(struct_decl) => return field_violation_in_range(
+            file, ast, struct_decl.name, struct_decl.fields
+        );,
+        UnionDecl(union_decl) => return variant_violation_in_range(
+            file, ast, union_decl.name, union_decl.variants
+        );,
+        _ => return no_type_placement_diagnostic();,
+    }
+}
+
+fn first_declared_violation_in_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    children: std::kizu::ast::ChildRange
+) -> !model::TypePlacementSummary {
+    var index = 0;
+    while index < children.len {
+        let child = try ast.child_at(children, index);
+        let found = try first_declared_violation(file, ast, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_type_placement_diagnostic();
+}
+
+// A signature is read left to right: every parameter slot first, then the result, which is
+// the order a caller has to satisfy it in.
+fn signature_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId
+) -> !model::TypePlacementSummary {
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        let found = try parameter_violation(file, ast, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return return_violation(file, ast, name, return_type);
+}
+
+fn parameter_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !model::TypePlacementSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return declared_parameter_violation(
+            file, ast, node_id, param_node.name, param_node.type_node
+        );,
+        _ => return no_type_placement_diagnostic();,
+    }
+}
+
+// A parameter is a runtime slot the caller fills. `void` fills nothing and a type value
+// exists only before the call, so neither spelling can name one. A `dyn Contract`
+// parameter is legal in the borrowed form, so its own rule lives with the contract rules
+// that decide which form.
+fn declared_parameter_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    param: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId
+) -> !model::TypePlacementSummary {
+    let spelling = ast_text::ast_node_text(file, ast, type_node);
+    if std::mem::len(spelling) == 0 {
+        return no_type_placement_diagnostic();
+    }
+    let node = ast.get(param);
+    let parameter = ast_text::ast_node_text(file, ast, name);
+    if type_constructor::is_void_type_name(spelling) {
+        return type_placement_summary(
+            true, kind_parameter_void(), node.span.start, node.span.end, "", parameter
+        );
+    }
+    if mentions_meta_type(spelling) {
+        return type_placement_summary(
+            true, kind_parameter_type(), node.span.start, node.span.end, "", parameter
+        );
+    }
+    return no_type_placement_diagnostic();
+}
+
+// A result crosses back to the caller as a value, so neither a comptime type value nor a
+// sizeless dynamic object can be one.
+fn return_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    return_type: std::kizu::ast::NodeId
+) -> !model::TypePlacementSummary {
+    let spelling = ast_text::ast_node_text(file, ast, return_type);
+    if std::mem::len(spelling) == 0 {
+        return no_type_placement_diagnostic();
+    }
+    let node = ast.get(return_type);
+    let function = ast_text::ast_node_text(file, ast, name);
+    if mentions_meta_type(spelling) {
+        return type_placement_summary(
+            true, kind_return_type(), node.span.start, node.span.end, function, ""
+        );
+    }
+    if contract_rules::mentions_dynamic_layer(spelling) {
+        return type_placement_summary(
+            true, kind_return_dyn(), node.span.start, node.span.end, function, ""
+        );
+    }
+    return no_type_placement_diagnostic();
+}
+
+fn field_violation_in_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange
+) -> !model::TypePlacementSummary {
+    let owner = ast_text::ast_node_text(file, ast, name);
+    var index = 0;
+    while index < fields.len {
+        let child = try ast.child_at(fields, index);
+        let found = try field_violation(file, ast, owner, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_type_placement_diagnostic();
+}
+
+fn field_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    owner: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::TypePlacementSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Field(field_node) => return stored_violation(
+            file,
+            ast,
+            node_id,
+            owner,
+            field_node.name,
+            field_node.type_node,
+            kind_field_type(),
+            kind_field_dyn()
+        );,
+        _ => return no_type_placement_diagnostic();,
+    }
+}
+
+fn variant_violation_in_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    variants: std::kizu::ast::ChildRange
+) -> !model::TypePlacementSummary {
+    let owner = ast_text::ast_node_text(file, ast, name);
+    var index = 0;
+    while index < variants.len {
+        let child = try ast.child_at(variants, index);
+        let found = try variant_violation(file, ast, owner, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_type_placement_diagnostic();
+}
+
+fn variant_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    owner: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::TypePlacementSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        UnionVariant(union_variant) => return stored_violation(
+            file,
+            ast,
+            node_id,
+            owner,
+            union_variant.name,
+            union_variant.payload,
+            kind_variant_type(),
+            kind_variant_dyn()
+        );,
+        _ => return no_type_placement_diagnostic();,
+    }
+}
+
+// A field and a variant payload are the same position under two names: storage the
+// declaration lays out ahead of every value that will fill it. Neither spelling can be
+// laid out, so the two share one rule and differ only in how the report names them.
+fn stored_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declaration: std::kizu::ast::NodeId,
+    owner: []u8,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    meta_kind: i64,
+    dyn_kind: i64
+) -> !model::TypePlacementSummary {
+    let spelling = ast_text::ast_node_text(file, ast, type_node);
+    if std::mem::len(spelling) == 0 {
+        return no_type_placement_diagnostic();
+    }
+    let node = ast.get(declaration);
+    let member = ast_text::ast_node_text(file, ast, name);
+    if mentions_meta_type(spelling) {
+        return type_placement_summary(
+            true, meta_kind, node.span.start, node.span.end, owner, member
+        );
+    }
+    if contract_rules::mentions_dynamic_layer(spelling) {
+        return type_placement_summary(
+            true, dyn_kind, node.span.start, node.span.end, owner, member
+        );
+    }
+    return no_type_placement_diagnostic();
+}
+
+// ---------------------------------------------------------------------------
+// Local bindings
+// ---------------------------------------------------------------------------
+
+fn first_local_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::TypePlacementSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_local_violation_in_range(
+            allocator, file, ast, program.declarations, function_returns
+        );,
+        ImplDecl(impl_decl) => return first_local_violation_in_range(
+            allocator, file, ast, impl_decl.methods, function_returns
+        );,
+        FnDecl(fn_decl) => return first_local_violation_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.type_params,
+            fn_decl.params,
+            fn_decl.body,
+            function_returns
+        );,
+        _ => return no_type_placement_diagnostic();,
+    }
+}
+
+fn first_local_violation_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::TypePlacementSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_local_violation(
+            allocator, file, ast, child, function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_type_placement_diagnostic();
+}
+
+// The static type parameters are collected with the value bindings because that is what
+// puts a declared `T` in scope as a comptime type value; without them the initializer
+// below would resolve to nothing and the rule would have nothing to decide.
+fn first_local_violation_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::TypePlacementSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    defer local_types.deinit();
+    defer local_mutability.deinit();
+    let locals = try local_facts::collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        type_params,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    return first_local_violation_in_statement(
+        allocator, file, ast, body, local_types, function_returns
+    );
+}
+
+fn first_local_violation_in_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::TypePlacementSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_local_violation_in_statement_range(
+            allocator, file, ast, block.statements, local_types, function_returns
+        );,
+        Let(let_node) => return let_binding_violation(
+            allocator,
+            file,
+            ast,
+            node_id,
+            let_node.name,
+            let_node.value,
+            local_types,
+            function_returns
+        );,
+        If(if_node) => return first_local_violation_in_two_statements(
+            allocator,
+            file,
+            ast,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            function_returns
+        );,
+        While(while_node) => return first_local_violation_in_statement(
+            allocator, file, ast, while_node.body, local_types, function_returns
+        );,
+        For(for_node) => return first_local_violation_in_statement(
+            allocator, file, ast, for_node.body, local_types, function_returns
+        );,
+        Match(match_node) => return first_local_violation_in_statement_range(
+            allocator, file, ast, match_node.arms, local_types, function_returns
+        );,
+        MatchArm(match_arm) => return first_local_violation_in_statement(
+            allocator, file, ast, match_arm.body, local_types, function_returns
+        );,
+        Unsafe(unsafe_node) => return first_local_violation_in_statement(
+            allocator, file, ast, unsafe_node.body, local_types, function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return first_local_violation_in_two_statements(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            function_returns
+        );,
+        _ => return no_type_placement_diagnostic();,
+    }
+}
+
+fn first_local_violation_in_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::TypePlacementSummary {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let found = try first_local_violation_in_statement(
+            allocator, file, ast, child, local_types, function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_type_placement_diagnostic();
+}
+
+fn first_local_violation_in_two_statements(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::TypePlacementSummary {
+    let found = try first_local_violation_in_statement(
+        allocator, file, ast, first, local_types, function_returns
+    );
+    if found.found {
+        return found;
+    }
+    return first_local_violation_in_statement(
+        allocator, file, ast, second, local_types, function_returns
+    );
+}
+
+// A local binding outlives the expression that produced it, so it is storage like a field
+// is. The initializer is measured by its inferred type rather than by a written spelling:
+// a type value reaches a binding only by being named, and every way of naming one -- a
+// static type parameter, a `type<...>` application -- infers to the single meta identity.
+fn let_binding_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> !model::TypePlacementSummary {
+    let value_type = try expression_infer::infer_expression_type(
+        allocator, file, ast, value, local_types, function_returns
+    );
+    // The meta type is asked for anywhere in the inferred type, not only as the whole of
+    // it: `std::array::Array<type>` is a container the compiler could lay out and still
+    // holds values that stop existing when compilation ends, so the binding stores no more
+    // than a bare `type` does.
+    if !mentions_meta_type(value_type) {
+        return no_type_placement_diagnostic();
+    }
+    let node = ast.get(statement);
+    return type_placement_summary(
+        true,
+        kind_local_type(),
+        node.span.start,
+        node.span.end,
+        "",
+        ast_text::ast_node_text(file, ast, name)
+    );
+}
+
+fn no_type_placement_diagnostic() -> model::TypePlacementSummary {
+    return type_placement_summary(false, 0, 0, 0, "", "");
+}
+
+fn type_placement_summary(
+    found: bool,
+    kind: i64,
+    start: i64,
+    end: i64,
+    owner: []u8,
+    member: []u8
+) -> model::TypePlacementSummary {
+    return model::TypePlacementSummary {
+        found: found,
+        kind: kind,
+        start: start,
+        end: end,
+        owner: owner,
+        member: member
+    };
+}

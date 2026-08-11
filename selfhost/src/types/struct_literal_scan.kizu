@@ -1,0 +1,417 @@
+import selfhost::source;
+import selfhost::types::diagnostic_summary;
+import selfhost::types::expression_facts;
+import selfhost::types::local_facts;
+import selfhost::types::model;
+import selfhost::types::package_modules;
+import selfhost::types::struct_literal;
+
+// struct_literal_scan reaches every struct literal one file writes, in source order, and
+// hands each one to selfhost::types::struct_literal, which owns what a literal has to
+// satisfy. A literal stands for a value, so the walk carries the two things deciding one
+// needs: the declarations its type name is resolved against, and the local types of the
+// function the literal was written in.
+//
+// The three questions are asked around the walk rather than after it. The reference
+// checker settles a literal's type name before it reads any of the values, and reads every
+// value before it measures any of them against the declaration
+// (internal/types/checker.go:4951), so a literal nested inside another literal's value is
+// reported before the outer literal's own field set is.
+
+pub fn first_struct_literal_diagnostic_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    var alias_starts = std::map::Map<[]u8, i64>(allocator);
+    var alias_ends = std::map::Map<[]u8, i64>(allocator);
+    try package_modules::collect_import_aliases_from_ast(
+        file, &ast, root, alias_starts, alias_ends
+    );
+    let found = try first_violation_in_program(
+        allocator, file, ast, root, kinds, alias_starts, alias_ends, expression_types
+    );
+    alias_starts.deinit();
+    alias_ends.deinit();
+    return found;
+}
+
+fn first_violation_in_program(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return first_violation_in_declarations(
+            allocator, file, ast, program.declarations, program.declarations,
+            kinds, alias_starts, alias_ends, expression_types
+        );,
+        _ => return diagnostic_summary::no_struct_literal_diagnostic();,
+    }
+}
+
+fn first_violation_in_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    children: std::kizu::ast::ChildRange,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    var index = 0;
+    while index < children.len {
+        let child = try ast.child_at(children, index);
+        let found = try first_violation_in_declaration(
+            allocator, file, ast, declarations, child,
+            kinds, alias_starts, alias_ends, expression_types
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return diagnostic_summary::no_struct_literal_diagnostic();
+}
+
+fn first_violation_in_declaration(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return try first_violation_in_function(
+            allocator, file, ast, declarations,
+            fn_decl.type_params, fn_decl.params, fn_decl.body,
+            kinds, alias_starts, alias_ends, expression_types
+        );,
+        ImplDecl(impl_decl) => return first_violation_in_declarations(
+            allocator, file, ast, declarations, impl_decl.methods,
+            kinds, alias_starts, alias_ends, expression_types
+        );,
+        ContractDecl(contract_decl) => return first_violation_in_declarations(
+            allocator, file, ast, declarations, contract_decl.methods,
+            kinds, alias_starts, alias_ends, expression_types
+        );,
+        _ => return diagnostic_summary::no_struct_literal_diagnostic();,
+    }
+}
+
+// A value's type is read in the scope the value was written in, so the locals are built
+// once per function and thrown away with it.
+fn first_violation_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    type_params: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    let locals = try local_facts::collect_function_statement_locals(
+        allocator, file, ast, type_params, params, body,
+        local_types, local_mutability, expression_types
+    );
+    let found = try first_violation_in_node(
+        allocator, file, ast, declarations, body,
+        kinds, alias_starts, alias_ends, local_types, expression_types
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return found;
+}
+
+fn first_violation_in_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_violation_in_range(
+            allocator, file, ast, declarations, block.statements,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Let(let_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, let_node.value,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Assign(assign_node) => return first_violation_in_two(
+            allocator, file, ast, declarations, assign_node.target, assign_node.value,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Return(return_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, return_node.value,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Defer(defer_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, defer_node.expr,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        ErrDefer(err_defer_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, err_defer_node.expr,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        ExprStmt(expr_stmt) => return first_violation_in_node(
+            allocator, file, ast, declarations, expr_stmt.expr,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        If(if_node) => return first_violation_in_three(
+            allocator, file, ast, declarations,
+            if_node.condition, if_node.then_block, if_node.else_block,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        ComptimeIf(comptime_if_node) => return first_violation_in_three(
+            allocator, file, ast, declarations,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        While(while_node) => return first_violation_in_two(
+            allocator, file, ast, declarations, while_node.condition, while_node.body,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        For(for_node) => return first_violation_in_three(
+            allocator, file, ast, declarations,
+            for_node.start, for_node.end, for_node.body,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Match(match_node) => return first_violation_in_node_and_range(
+            allocator, file, ast, declarations, match_node.value, match_node.arms,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        MatchArm(match_arm) => return first_violation_in_node(
+            allocator, file, ast, declarations, match_arm.body,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Unsafe(unsafe_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, unsafe_node.body,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Prefix(prefix_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, prefix_node.right,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Binary(binary) => return first_violation_in_two(
+            allocator, file, ast, declarations, binary.left, binary.right,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        FieldExpr(field_expr_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, field_expr_node.receiver,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        DerefExpr(deref_expr_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, deref_expr_node.receiver,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        CastExpr(cast_expr) => return first_violation_in_node(
+            allocator, file, ast, declarations, cast_expr.value,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        IndexExpr(index_expr) => return first_violation_in_three(
+            allocator, file, ast, declarations,
+            index_expr.target, index_expr.start, index_expr.end,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        StructLiteralExpr(struct_literal_node) => return try first_violation_in_literal(
+            allocator, file, ast, declarations,
+            struct_literal_node.type_name, struct_literal_node.fields,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        StructFieldInit(field_init) => return first_violation_in_node(
+            allocator, file, ast, declarations, field_init.value,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        ArenaNewExpr(arena_new) => return first_violation_in_node(
+            allocator, file, ast, declarations, arena_new.allocator,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        TryExpr(try_expr_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, try_expr_node.value,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        ComptimeExpr(comptime_expr_node) => return first_violation_in_node(
+            allocator, file, ast, declarations, comptime_expr_node.value,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        Call(call_node) => return first_violation_in_node_and_range(
+            allocator, file, ast, declarations, call_node.callee, call_node.args,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        TypeApplyExpr(type_apply) => return first_violation_in_node(
+            allocator, file, ast, declarations, type_apply.callee,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );,
+        _ => return diagnostic_summary::no_struct_literal_diagnostic();,
+    }
+}
+
+fn first_violation_in_literal(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    type_name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let unknown = try struct_literal::unknown_struct_violation(
+        allocator, file, ast, type_name, kinds, alias_starts, alias_ends
+    );
+    if unknown.found {
+        return unknown;
+    }
+    let stored = try first_violation_in_range(
+        allocator, file, ast, declarations, fields,
+        kinds, alias_starts, alias_ends, local_types, expression_types
+    );
+    if stored.found {
+        return stored;
+    }
+    return struct_literal::field_contract_violation(
+        allocator, file, ast, declarations, type_name, fields,
+        local_types, expression_types
+    );
+}
+
+fn first_violation_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    children: std::kizu::ast::ChildRange,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    var index = 0;
+    while index < children.len {
+        let child = try ast.child_at(children, index);
+        let found = try first_violation_in_node(
+            allocator, file, ast, declarations, child,
+            kinds, alias_starts, alias_ends, local_types, expression_types
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return diagnostic_summary::no_struct_literal_diagnostic();
+}
+
+fn first_violation_in_two(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let found = try first_violation_in_node(
+        allocator, file, ast, declarations, first,
+        kinds, alias_starts, alias_ends, local_types, expression_types
+    );
+    if found.found {
+        return found;
+    }
+    return first_violation_in_node(
+        allocator, file, ast, declarations, second,
+        kinds, alias_starts, alias_ends, local_types, expression_types
+    );
+}
+
+fn first_violation_in_three(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let found = try first_violation_in_two(
+        allocator, file, ast, declarations, first, second,
+        kinds, alias_starts, alias_ends, local_types, expression_types
+    );
+    if found.found {
+        return found;
+    }
+    return first_violation_in_node(
+        allocator, file, ast, declarations, third,
+        kinds, alias_starts, alias_ends, local_types, expression_types
+    );
+}
+
+fn first_violation_in_node_and_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId,
+    children: std::kizu::ast::ChildRange,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let found = try first_violation_in_node(
+        allocator, file, ast, declarations, node_id,
+        kinds, alias_starts, alias_ends, local_types, expression_types
+    );
+    if found.found {
+        return found;
+    }
+    return first_violation_in_range(
+        allocator, file, ast, declarations, children,
+        kinds, alias_starts, alias_ends, local_types, expression_types
+    );
+}

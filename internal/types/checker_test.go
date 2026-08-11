@@ -694,6 +694,56 @@ fn bad(picker: &Picker, left: []u8, right: []u8) -> []u8 borrows left {
 	runErrorCases(t, cases)
 }
 
+// TestCheckAcceptsArrayElementViewTiedToArrayOwner keeps `Array.at` provenance.
+// The element borrow is declared `-> !&T borrows self`, so a view read off the
+// element is backed by whatever backs the array; binding the element without
+// that source made `self.parts.at(index)` read as a fresh owner and refused a
+// return that is in fact tied to `self`.
+func TestCheckAcceptsArrayElementViewTiedToArrayOwner(t *testing.T) {
+	source := `import std::array;
+import std::string;
+struct Store {
+    parts: std::array::Array<std::string::String>,
+}
+fn view(store: &Store, index: i64) -> ![]u8 borrows store {
+    let parts = &store.parts;
+    let part = try parts.at(index);
+    let length = part.len();
+    let bytes = part.as_bytes();
+    return bytes[0..length];
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("array element view rejected: %v", err)
+	}
+}
+
+// TestCheckRejectsArrayElementViewFromAnotherOwner keeps the provenance answer
+// exact: an element view off one array must not satisfy another's borrow.
+func TestCheckRejectsArrayElementViewFromAnotherOwner(t *testing.T) {
+	source := `import std::array;
+import std::string;
+struct Store {
+    parts: std::array::Array<std::string::String>,
+}
+fn view(left: &Store, right: &Store, index: i64) -> ![]u8 borrows left {
+    let parts = &right.parts;
+    let part = try parts.at(index);
+    let length = part.len();
+    let bytes = part.as_bytes();
+    return bytes[0..length];
+}
+fn main() {}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	want := "return borrows `left` but returned value is not tied to that source"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("got %q, want substring %q", err.Error(), want)
+	}
+}
+
 // TestCheckAcceptsPublicAPIWithPublicTypes checks public boundary declarations.
 func TestCheckAcceptsPublicAPIWithPublicTypes(t *testing.T) {
 	source := `pub enum TokenKind {

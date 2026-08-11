@@ -7,11 +7,19 @@ import (
 	"testing"
 )
 
-// TestSelfhostValueLoopStructuralGate pins that std::kizu::lexer::tokenize stays lowered
-// through the generic value-carried array loop (issue 1165): the name-based MirTokenizeStmt
-// path must not return, and lower_value_array_loop must keep requiring the exact source shape
-// so a near-miss function is an explicit error rather than a silent mis-lowering. It is a
-// source-structural gate, not a textual LLVM gate, so it runs without the bootstrap.
+// TestSelfhostValueLoopStructuralGate pins that std::kizu::lexer::tokenize is lowered by a
+// path that reads its statements rather than its name (issue 1165). It is a source-structural
+// gate, not a textual LLVM gate, so it runs without the bootstrap.
+//
+// It used to also assert that lower_value_array_loop validated the exact source shape, so a
+// near-miss function was an explicit error rather than a silent mis-lowering. That shape is
+// gone: the generic while path took the loop over, and the assertions had no subject left.
+// They are not replaced by nothing. The old shape emitted the whole loop as one opaque
+// ValueWhile and never lowered its body, so what it did inside was unpinnable; the artifact
+// gate now pins tokenize's generic form directly -- the head reload, BOTH array_append calls
+// including the body one that could not be named before, and the owned success return. A
+// mis-lowering that the deleted assertions would have caught by refusing to recognise the
+// shape is now caught by the emitted code not matching.
 func TestSelfhostValueLoopStructuralGate(t *testing.T) {
 	mir := readBackendKizu(t, "compiled_mir.kizu")
 	lower := readBackendKizu(t, "compiled_mir_lower.kizu")
@@ -19,8 +27,6 @@ func TestSelfhostValueLoopStructuralGate(t *testing.T) {
 	cliLLVM := readBackendKizu(t, "compiled_llvm.kizu")
 
 	assertValueLoopNoTokenizeDispatch(t, mir, lower, llvm, cliLLVM)
-	assertValueLoopExactShapeChecks(t, lower)
-	assertValueLoopOwnedConstructorDescriptor(t, lower)
 }
 
 // readBackendKizu reads a selfhost backend source file for source-structural gates.
@@ -60,55 +66,5 @@ func assertValueLoopNoTokenizeDispatch(t *testing.T, mir, lower, llvm, cliLLVM s
 	// generic multi-statement path.
 	if strings.Contains(cliLLVM, `"std::kizu::lexer::tokenize"`) {
 		t.Errorf("compiled_llvm.kizu still name-dispatches std::kizu::lexer::tokenize")
-	}
-}
-
-// assertValueLoopExactShapeChecks pins exact source-shape validation errors.
-func assertValueLoopExactShapeChecks(t *testing.T, lower string) {
-	t.Helper()
-	requiredChecks := []string{
-		"value-loop while must follow the seed append",
-		"value-loop while must be the penultimate statement",
-		"value-loop owned sequence constructor let not found",
-		"value-loop owned sequence constructor takes exactly the allocator argument",
-		"value-loop owned sequence constructor argument must be the allocator",
-		"value-loop seed takes exactly the source argument",
-		"value-loop seed argument must be the source",
-		"value-loop reassignment target must be a local",
-		"value-loop reassignment must target the carried value",
-		"value-loop update takes the source and carried value",
-		"value-loop update first argument must be the source",
-		"value-loop update second argument must be the carried value",
-		"value-loop append receiver must be the array",
-		"value-loop append argument must be the carried value",
-		"value-loop must end with the array return",
-		"value-loop must return the filled array",
-	}
-	for _, check := range requiredChecks {
-		if !strings.Contains(lower, check) {
-			t.Errorf("lower_value_array_loop missing exact-shape validation: %q", check)
-		}
-	}
-}
-
-// assertValueLoopOwnedConstructorDescriptor pins semantic constructor classification.
-func assertValueLoopOwnedConstructorDescriptor(t *testing.T, lower string) {
-	t.Helper()
-	body := selfhostKizuFunctionBody(t, lower, "fn value_loop_owned_constructor(")
-	required := []string{
-		"compiled_type_resolver::owned_constructor_indexed(",
-		"builtin_contract::owned_container_family_sequence()",
-		"constructor.result_type.abi",
-		"constructor.storage_type.abi",
-	}
-	for _, check := range required {
-		if !strings.Contains(body, check) {
-			t.Errorf("value_loop_owned_constructor missing descriptor use: %q", check)
-		}
-	}
-	for _, forbidden := range []string{"std::array::Array", "std::arena::Arena", "body_call_callee"} {
-		if strings.Contains(body, forbidden) {
-			t.Errorf("value_loop_owned_constructor retained spelling classification %q", forbidden)
-		}
 	}
 }

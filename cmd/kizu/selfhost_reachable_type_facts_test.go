@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+// TestSelfhostReachableComponentTypeFacts pins the type facts emitted for one
+// reachable component: struct/enum/union identity, field spellings that keep
+// their generic arguments intact, and declared type parameters reproduced
+// verbatim (including a leading-underscore name). The tail of the test also
+// pins the enum ABI header as a single line emitted exactly once and
+// immediately followed by its first variant, because a mis-terminated header
+// silently fuses two facts into one and still looks plausible in the dump.
 func TestSelfhostReachableComponentTypeFacts(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::ir::package_type_facts_gates::component_type_facts_gate",
@@ -64,6 +71,10 @@ func TestSelfhostReachableComponentTypeFacts(t *testing.T) {
 	}
 }
 
+// TestSelfhostEnumTypeFactUsesExplicitNewlineByte guards the source-level cause
+// of the fused enum header above: the selfhost string literal does not decode
+// "\n", so the emitter must terminate the line with byte 10 rather than an
+// escape that would survive into the fact stream as two literal characters.
 func TestSelfhostEnumTypeFactUsesExplicitNewlineByte(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/ir/package_type_facts.kizu")
 	body := selfhostKizuFunctionBody(t, source, "fn append_enum_name(")
@@ -76,6 +87,12 @@ func TestSelfhostEnumTypeFactUsesExplicitNewlineByte(t *testing.T) {
 	}
 }
 
+// TestSelfhostExternalABIRepresentationHasSingleOwner keeps compiler-owned
+// types to exactly one ABI owner. String is described by an abi-repr fact, and
+// a competing type-llvm fact for the same identity would give lowering two
+// answers to choose between. The intrinsic reprs asserted alongside it are the
+// generic (arity-driven) ones, so admitting a new pointer-like type must not
+// add a new fact family.
 func TestSelfhostExternalABIRepresentationHasSingleOwner(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::ir::package_type_facts_gates::external_abi_owner_gate",
@@ -100,6 +117,12 @@ func TestSelfhostExternalABIRepresentationHasSingleOwner(t *testing.T) {
 	}
 }
 
+// TestSelfhostExternalABIContractIsUnifiedAndFailClosed pins the external ABI
+// table as a single record read through one accessor. The four per-field
+// lookups it replaced could drift apart row by row, so their names are asserted
+// gone rather than merely unused. The out-of-range half matters just as much:
+// an unknown index must raise, since a zero-value row would hand lowering a
+// well-formed but wrong ABI.
 func TestSelfhostExternalABIContractIsUnifiedAndFailClosed(t *testing.T) {
 	contractSource := readSelfhostFile(
 		t, "../../selfhost/src/ir/intrinsic_type_contract.kizu",
@@ -160,6 +183,11 @@ func TestSelfhostExternalABIContractIsUnifiedAndFailClosed(t *testing.T) {
 	}
 }
 
+// TestSelfhostPackageTypeCatalogIncludesTypeOnlyComponents covers the
+// components a function-driven walk would miss: RunArtifact and OutputStream
+// are only ever named as types, never called, so they appear in the catalog
+// only if type discovery runs over the whole package instead of following the
+// reachable-function closure.
 func TestSelfhostPackageTypeCatalogIncludesTypeOnlyComponents(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::ir::package_type_facts_gates::package_component_type_facts_gate",
@@ -177,6 +205,10 @@ func TestSelfhostPackageTypeCatalogIncludesTypeOnlyComponents(t *testing.T) {
 	})
 }
 
+// TestSelfhostPackageQueueComponentAccessor pins the dependency queue's
+// per-entry component accessor: a target queued from a registered function must
+// report the component that owns it, so the graph walk can attribute work
+// without re-deriving ownership from the function name.
 func TestSelfhostPackageQueueComponentAccessor(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::package_dependency_edge_gate::queue_target_component_gate",
@@ -189,6 +221,11 @@ func TestSelfhostPackageQueueComponentAccessor(t *testing.T) {
 	}
 }
 
+// TestSelfhostNumericCollectorHasNoNamedTypeSeeds keeps the numeric closure
+// purely a reachability walk. Seeding it with specific type names, or appending
+// struct facts by qualified name from inside it, would make the closure's
+// result depend on which types happen to be spelled in the collector rather
+// than on what the package actually reaches.
 func TestSelfhostNumericCollectorHasNoNamedTypeSeeds(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	body := selfhostKizuFunctionBody(t, source, "fn append_numeric_package_closure(")
@@ -202,9 +239,20 @@ func TestSelfhostNumericCollectorHasNoNamedTypeSeeds(t *testing.T) {
 	}
 }
 
+// TestSelfhostFunctionTypeParametersUseCatalogFacts pins function-scoped type
+// parameters as catalog data on both ends: the fact rows are written from the
+// catalog's length/name accessors, and the declaration traversal decides
+// whether a formal is a type parameter by asking the resolver for the
+// function's indexed parameters. The forbidden spellings are the giveaway that
+// the traversal has fallen back to recognising conventional names.
 func TestSelfhostFunctionTypeParametersUseCatalogFacts(t *testing.T) {
-	emitter := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	body := selfhostKizuFunctionBody(t, emitter, "fn append_function_type_parameter_facts(")
+	// The emitter moved out of executable_functions into the dependency graph and
+	// was split into an entry, a per-entry step, and the row writer. All three are
+	// read so the assertions still cover the whole emitter.
+	emitter := readSelfhostFile(t, "../../selfhost/src/ir/package_dependency_graph.kizu")
+	body := selfhostKizuFunctionBody(t, emitter, "pub fn append_function_type_parameter_facts(") +
+		selfhostKizuFunctionBody(t, emitter, "fn append_entry_function_type_parameter_facts(") +
+		selfhostKizuFunctionBody(t, emitter, "fn append_function_type_parameter_rows(")
 	requireSourceFragments(t, "function type parameter fact emitter", body, []string{
 		`out.append_bytes("function-type-parameter ")`,
 		"package_catalog::function_type_parameter_len(",
@@ -224,6 +272,11 @@ func TestSelfhostFunctionTypeParametersUseCatalogFacts(t *testing.T) {
 	}
 }
 
+// TestSelfhostAstDataUnionLayoutIsFactDerived removes the compiler's private
+// knowledge of its own AST union. The frontend must not emit AstData-specific
+// ABI facts, the LLVM writer must not carry a hand-written declaration for it,
+// and the payload capacity must come from the layout helper, so a user union
+// with the same shape lowers through exactly the same path.
 func TestSelfhostAstDataUnionLayoutIsFactDerived(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	for _, legacy := range []string{
@@ -246,6 +299,11 @@ func TestSelfhostAstDataUnionLayoutIsFactDerived(t *testing.T) {
 	}
 }
 
+// TestSelfhostMatchUnionConsumerCarriesResolvedABI pins where match-on-union
+// ABI is decided: lowering resolves the callee and the exact struct field that
+// yields the union, records the resulting names on the MIR statement, and the
+// renderer reads only those fields. The forbidden AST spellings in the renderer
+// are what re-resolution at render time used to look like.
 func TestSelfhostMatchUnionConsumerCarriesResolvedABI(t *testing.T) {
 	lower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
 	resolver := selfhostKizuFunctionBody(t, lower, "fn resolve_node_field_fetch_abi(")
@@ -286,6 +344,11 @@ func TestSelfhostMatchUnionConsumerCarriesResolvedABI(t *testing.T) {
 	}
 }
 
+// TestSelfhostImportedMatchUnionABIUsesCalleeAndFieldOwners is the behavioural
+// half of the contract above, over a fixture that reaches the union through an
+// import alias. Every value in the expected output belongs to the callee's
+// module or to the module declaring the field -- never to the calling package
+// -- so resolving through the caller's namespace fails the exact-match check.
 func TestSelfhostImportedMatchUnionABIUsesCalleeAndFieldOwners(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_mir_lower::gate_imported_match_union_abi",
@@ -299,6 +362,10 @@ func TestSelfhostImportedMatchUnionABIUsesCalleeAndFieldOwners(t *testing.T) {
 	}
 }
 
+// TestSelfhostResolvedMatchUnionMIRRendersOnlyCarriedABI checks the emitted
+// LLVM for a resolved match: the call, the two extractvalues, and the payload
+// slot all name fixture types. Any AST spelling in the output means the
+// renderer reached past its statement for an ABI it was already given.
 func TestSelfhostResolvedMatchUnionMIRRendersOnlyCarriedABI(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_mir_llvm::resolved_match_union_renderer_gate",
@@ -322,6 +389,11 @@ func TestSelfhostResolvedMatchUnionMIRRendersOnlyCarriedABI(t *testing.T) {
 	}
 }
 
+// TestSelfhostImportedNodeSpanABIUsesCalleeAndFieldOwners applies the same rule
+// to span fetches, which resolve more than a type name: the receiver and index
+// types come from the callee's signature, and the three trailing indices are
+// looked up in the fixture's own field order. That order deliberately differs
+// from the compiler's AST layout, so fixed indices cannot pass.
 func TestSelfhostImportedNodeSpanABIUsesCalleeAndFieldOwners(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_mir_lower::gate_imported_node_span_abi",
@@ -335,6 +407,10 @@ func TestSelfhostImportedNodeSpanABIUsesCalleeAndFieldOwners(t *testing.T) {
 	}
 }
 
+// TestSelfhostNodeSpanMIRRenderersUseOnlyCarriedABI covers the three span
+// renderers together, since they share the carried ABI but emit under different
+// value prefixes. The asserted extractvalue indices are the fixture's field
+// positions, which is what distinguishes carried indices from remembered ones.
 func TestSelfhostNodeSpanMIRRenderersUseOnlyCarriedABI(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_mir_llvm::resolved_node_span_renderer_gate",
@@ -360,6 +436,10 @@ func TestSelfhostNodeSpanMIRRenderersUseOnlyCarriedABI(t *testing.T) {
 	}
 }
 
+// TestSelfhostCountRangeMIRRendererUsesOnlyCarriedABI extends the same
+// expectation to the count-over-range loop, whose calls also carry error union
+// types. Both the child accessor's error ABI and the counted callee's are
+// fixture-derived, so a remembered AST error name would show up in the output.
 func TestSelfhostCountRangeMIRRendererUsesOnlyCarriedABI(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_mir_llvm::resolved_count_range_renderer_gate",
@@ -382,6 +462,12 @@ func TestSelfhostCountRangeMIRRendererUsesOnlyCarriedABI(t *testing.T) {
 	}
 }
 
+// TestSelfhostRemainingSourceDefinedABILiteralsAreResolved sweeps the lexer and
+// comment-state paths, which were the last places holding ABI names for types
+// that are defined in Kizu source rather than owned by the compiler. It is
+// stated twice over: the lowering must not mention the literals, and the
+// renderers must read the resolved modules and field indices instead. The
+// forbidden ", N" appends are the fixed field positions those indices replaced.
 func TestSelfhostRemainingSourceDefinedABILiteralsAreResolved(t *testing.T) {
 	lower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
 	for _, fn := range []string{
@@ -414,7 +500,12 @@ func TestSelfhostRemainingSourceDefinedABILiteralsAreResolved(t *testing.T) {
 			t.Fatalf("next-token renderer does not consume resolved field %q", field)
 		}
 	}
-	for _, forbidden := range []string{"append_ll_line(out, \", 1\")", "append_ll_line(out, \", 2\")", "append_ll_line(out, \", 3\")", "append_ll_line(out, \", 4\")"} {
+	for _, forbidden := range []string{
+		`append_ll_line(out, ", 1")`,
+		`append_ll_line(out, ", 2")`,
+		`append_ll_line(out, ", 3")`,
+		`append_ll_line(out, ", 4")`,
+	} {
 		if strings.Contains(nextRenderer, forbidden) {
 			t.Fatalf("next-token renderer retained fixed source field index %q", forbidden)
 		}
@@ -427,13 +518,21 @@ func TestSelfhostRemainingSourceDefinedABILiteralsAreResolved(t *testing.T) {
 	if strings.Contains(commentEmitter, "%kizu.selfhost.parser.format.comment_format_state") {
 		t.Fatal("comment-state emitter retained a source-defined LLVM type literal")
 	}
-	for _, field := range []string{"state_type", "last_index", "at_line_start_index", "after_comment_index"} {
+	for _, field := range []string{
+		"state_type", "last_index", "at_line_start_index", "after_comment_index",
+	} {
 		if !strings.Contains(commentEmitter, field) {
 			t.Fatalf("comment-state emitter does not consume resolved field %q", field)
 		}
 	}
 }
 
+// TestSelfhostCustomLexerAndCommentStateABIAreCarried runs the previous test's
+// contract against packages that define their own lexer and formatter state.
+// Both fixtures order their fields differently from the compiler's own types,
+// so the expected indices (6/4 and 2/0/1) only appear if they were looked up.
+// The rendered wrapper then has to call the fixture's helpers by their real
+// module symbols rather than the built-in lexer entry points.
 func TestSelfhostCustomLexerAndCommentStateABIAreCarried(t *testing.T) {
 	kind, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_mir_lower::gate_custom_token_kind_field_abi",
@@ -470,7 +569,8 @@ func TestSelfhostCustomLexerAndCommentStateABIAreCarried(t *testing.T) {
 		"extractvalue %test.token %previous, 2",
 		"extractvalue %test.token %previous, 7",
 		"extractvalue %test.token %previous, 4",
-		"call %test.position @kizu_lib__geo_advance(%test.bytes %bytes, i32 %nt_pstart, i32 %nt_pend, %test.position %nt_pos)",
+		"call %test.position @kizu_lib__geo_advance(" +
+			"%test.bytes %bytes, i32 %nt_pstart, i32 %nt_pend, %test.position %nt_pos)",
 	})
 	for _, forbidden := range []string{
 		"%kizu.kizu.lexer.token", "%kizu.kizu.lexer.position",
@@ -482,6 +582,10 @@ func TestSelfhostCustomLexerAndCommentStateABIAreCarried(t *testing.T) {
 	}
 }
 
+// TestSelfhostCountRangeCarriesDerivedChildErrorABI pins the count-range loop's
+// child accessor error ABI as a carried MIR field derived from the callee's
+// resolved return type. Naming the error union by hand worked only while the
+// element type was NodeId, so the handwritten spellings are asserted gone.
 func TestSelfhostCountRangeCarriesDerivedChildErrorABI(t *testing.T) {
 	mir := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir.kizu")
 	if !strings.Contains(mir, "pub child_error_union: []u8") {
@@ -500,6 +604,12 @@ func TestSelfhostCountRangeCarriesDerivedChildErrorABI(t *testing.T) {
 	}
 }
 
+// TestSelfhostSelectedComponentsUseCanonicalTypeCatalog pins the one place type
+// discovery is allowed to happen. The fact producer builds the package-wide
+// catalog; the numeric function closure must no longer own component discovery
+// or track which components it already emitted. The forbidden names are the
+// per-role emitters that predated the catalog, each of which decided for itself
+// which types a loader, a diagnostic, or the codegen path needed.
 func TestSelfhostSelectedComponentsUseCanonicalTypeCatalog(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	appendFacts := selfhostKizuFunctionBody(t, source, "fn append_facts_from_parsed(")
@@ -522,6 +632,10 @@ func TestSelfhostSelectedComponentsUseCanonicalTypeCatalog(t *testing.T) {
 	}
 }
 
+// TestSelfhostLegacyAstTypeFactHelpersAreDeleted keeps the AST-shaped fact
+// emitters from coming back. Each named helper recognised the compiler's own
+// node structs by name and emitted layout for them directly; leaving any of
+// them reachable would let AST types bypass the catalog the tests above pin.
 func TestSelfhostLegacyAstTypeFactHelpersAreDeleted(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	for _, deadHelper := range []string{
@@ -542,6 +656,12 @@ func TestSelfhostLegacyAstTypeFactHelpersAreDeleted(t *testing.T) {
 	}
 }
 
+// TestSelfhostCliEmittersCarryDerivedNominalErrorABI pins the CLI entry point,
+// the last emitter that wrote nominal error ABI names by hand. Both error
+// unions it needs must be derived -- hence the exact count of two -- and the
+// resulting names threaded into the AST boundary emitter as parameters. The
+// forbidden list mixes the handwritten spellings with the specialised emitters
+// that only existed to serve them, so a partial revert cannot pass.
 func TestSelfhostCliEmittersCarryDerivedNominalErrorABI(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	body := selfhostKizuFunctionBody(t, cli, "pub fn append_functions(")
@@ -582,6 +702,11 @@ func TestSelfhostCliEmittersCarryDerivedNominalErrorABI(t *testing.T) {
 	}
 }
 
+// TestSelfhostErrorAbiFacts pins the whole error ABI fact stream byte for byte,
+// including its order and trailing blank line. The list is exact rather than
+// fragment-matched because it is a closed set: one row per fixed scalar, then
+// one row per nominal payload reached by the catalog. A new row appearing here
+// without a corresponding reachable type means the derivation invented a name.
 func TestSelfhostErrorAbiFacts(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_error_abi::gate",
@@ -608,6 +733,11 @@ func TestSelfhostErrorAbiFacts(t *testing.T) {
 	}
 }
 
+// TestSelfhostErrorAbiDerivationBorrowsFactCatalog pins the ownership side of
+// that derivation. It reads the already-built fact catalog by reference and
+// must not deinit it, so production can hand it the live output buffer instead
+// of copying every fact. The gate fragments check the borrow from the caller's
+// side: the source outlives the call and its length is unchanged afterwards.
 func TestSelfhostErrorAbiDerivationBorrowsFactCatalog(t *testing.T) {
 	errorABI := readSelfhostFile(t, "../../selfhost/src/backend/compiled_error_abi.kizu")
 	if !strings.Contains(errorABI,
@@ -641,6 +771,12 @@ func TestSelfhostErrorAbiDerivationBorrowsFactCatalog(t *testing.T) {
 	}
 }
 
+// TestSelfhostFixedABIContractOwnsScalarClassification pins one owner for "is
+// this ABI string a fixed scalar, and how wide is it". The contract holds the
+// spelling/LLVM-name/size table -- floats included, since they were the last
+// widths added -- and the four consumers checked here must ask it rather than
+// compare ABI bytes themselves. Each forbidden fragment is a surviving raw
+// comparison; they are listed individually because each one drifts on its own.
 func TestSelfhostFixedABIContractOwnsScalarClassification(t *testing.T) {
 	contract := readSelfhostFile(t, "../../selfhost/src/abi/fixed_abi_contract.kizu")
 	requireSourceFragments(t, "fixed float ABI contract", contract, []string{
@@ -653,7 +789,16 @@ func TestSelfhostFixedABIContractOwnsScalarClassification(t *testing.T) {
 		`kind: kind, llvm_name: "float", llvm_body: "", size: 4, alignment: 4`,
 		`kind: kind, llvm_name: "double", llvm_body: "", size: 8, alignment: 8`,
 	})
+	assertMirLoweringClassifiesThroughContract(t)
+	assertCommentStateClassifiesThroughContract(t)
+	assertErrorABINamingClassifiesThroughContract(t)
+}
 
+// assertMirLoweringClassifiesThroughContract pins that the two MIR lowerings that
+// read a scalar ABI ask the fixed contract instead of comparing the spelling
+// themselves, so admitting a new scalar does not need an edit here.
+func assertMirLoweringClassifiesThroughContract(t *testing.T) {
+	t.Helper()
 	lower := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_lower.kizu")
 	for _, signature := range []string{
 		"fn resolve_node_span_fetch_abi(",
@@ -663,13 +808,25 @@ func TestSelfhostFixedABIContractOwnsScalarClassification(t *testing.T) {
 		if !strings.Contains(body, "fixed_abi_contract::from_llvm(") {
 			t.Fatalf("%s does not classify fixed scalar ABI through the contract", signature)
 		}
-		for _, forbidden := range []string{`equal_bytes(start_type.abi, "i64")`, `equal_bytes(end_type.abi, "i64")`, `equal_bytes(range_len_type.abi, "i64")`, `child_types.get(2), "i64"`} {
+		for _, forbidden := range []string{
+			`equal_bytes(start_type.abi, "i64")`,
+			`equal_bytes(end_type.abi, "i64")`,
+			`equal_bytes(range_len_type.abi, "i64")`,
+			`child_types.get(2), "i64"`,
+		} {
 			if strings.Contains(body, forbidden) {
 				t.Fatalf("%s retains raw scalar ABI classification %q", signature, forbidden)
 			}
 		}
 	}
 
+}
+
+// assertCommentStateClassifiesThroughContract pins the comment-preservation state
+// ABI on the same contract: it must name the contract's kinds rather than compare
+// the i8 / i1 spellings its three scalars happen to have today.
+func assertCommentStateClassifiesThroughContract(t *testing.T) {
+	t.Helper()
 	comment := selfhostKizuFunctionBody(t,
 		readSelfhostFile(t, "../../selfhost/src/backend/compiled_struct_cf.kizu"),
 		"pub fn comment_state_abi_indexed(",
@@ -683,18 +840,34 @@ func TestSelfhostFixedABIContractOwnsScalarClassification(t *testing.T) {
 			t.Fatalf("comment state ABI classification missing %q", fragment)
 		}
 	}
-	for _, forbidden := range []string{`equal_bytes(last_type.abi, "i8")`, `equal_bytes(at_line_start_type.abi, "i1")`, `equal_bytes(after_comment_type.abi, "i1")`} {
+	for _, forbidden := range []string{
+		`equal_bytes(last_type.abi, "i8")`,
+		`equal_bytes(at_line_start_type.abi, "i1")`,
+		`equal_bytes(after_comment_type.abi, "i1")`,
+	} {
 		if strings.Contains(comment, forbidden) {
 			t.Fatalf("comment state retains raw scalar ABI classification %q", forbidden)
 		}
 	}
 
+}
+
+// assertErrorABINamingClassifiesThroughContract pins that error payload naming reads
+// the fixed contract rather than keeping its own copy of the scalar table. The
+// forbidden list is that copy, spelling by spelling: a duplicate table is how the two
+// drift apart and start naming the same payload differently.
+func assertErrorABINamingClassifiesThroughContract(t *testing.T) {
+	t.Helper()
 	errorABI := readSelfhostFile(t, "../../selfhost/src/backend/compiled_error_abi.kizu")
 	knownName := selfhostKizuFunctionBody(t, errorABI, "fn known_name(")
 	if !strings.Contains(knownName, "fixed_abi_contract::from_llvm(payload_abi)") {
 		t.Fatal("error ABI naming does not classify payloads through the fixed contract")
 	}
-	for _, fixedScalar := range []string{`"void"`, `"i1"`, `"i8"`, `"i16"`, `"i32"`, `"i64"`, `"float"`, `"double"`, `"ptr"`, `"%kizu.slice.u8"`, `"%kizu.owned"`, `"%kizu.handle"`} {
+	for _, fixedScalar := range []string{
+		`"void"`, `"i1"`, `"i8"`, `"i16"`, `"i32"`, `"i64"`,
+		`"float"`, `"double"`, `"ptr"`,
+		`"%kizu.slice.u8"`, `"%kizu.owned"`, `"%kizu.handle"`,
+	} {
 		if strings.Contains(knownName, "equal_bytes(payload_abi, "+fixedScalar+")") {
 			t.Fatalf("error ABI naming retains duplicate raw scalar classification %s", fixedScalar)
 		}
@@ -710,6 +883,11 @@ func TestSelfhostFixedABIContractOwnsScalarClassification(t *testing.T) {
 	}
 }
 
+// TestSelfhostCompiledTypeLowerHasNoTypeAllowlist closes the loop on type
+// lowering: no "direct or empty" shortcut functions, which were allowlists in
+// all but name, and no bare type spellings to match against. Lowering resolves
+// an error ABI by exact fact lookup, so an unknown type fails instead of
+// falling through to whichever branch happened to come last.
 func TestSelfhostCompiledTypeLowerHasNoTypeAllowlist(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/backend/compiled_type_lower.kizu")
 	for _, forbidden := range []string{

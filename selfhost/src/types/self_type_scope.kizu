@@ -1,0 +1,101 @@
+import selfhost::types::expression_facts;
+import selfhost::types::symbols;
+import selfhost::types::type_ref_ast;
+
+// self_type_scope owns one question: which type does a spelling name when it mentions
+// `Self`? `Self` is the target type of the enclosing impl or contract (SPEC.md 16), so it
+// fixes a type only where a declaration supplies that target. The reference checker
+// resolves it the moment it builds an impl method's signature, before the method body is
+// read (internal/types/checker.go:598), which is why inside an impl the target stands
+// under two spellings and both name one type.
+//
+// A declaration no impl encloses supplies no target. There `Self` names itself, and a
+// value of any other type is the mismatch the reference checker reports -- a top-level
+// `fn f() -> Self { return 1; }` is rejected because `Self` and `i64` are two types, not
+// because the spelling was unreadable.
+//
+// This is the scope the type parameter scope already models for `T`: a name the
+// declaration site binds, resolved before any rule compares the spelling it appears in.
+
+// no_self_type is the scope of a declaration no impl or contract encloses.
+pub fn no_self_type() -> []u8 {
+    return "";
+}
+
+// resolved_type_text answers with the spelling every rule compares: the written one with
+// the enclosing target substituted for `Self`. The built spelling is interned with the
+// other collected type facts so it outlives this call the way every other spelling the
+// frontend builds does.
+pub fn resolved_type_text(
+    allocator: Allocator,
+    spelling: []u8,
+    self_type: []u8,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> ![]u8 {
+    if std::mem::len(self_type) == 0 or !mentions_language_target(spelling) {
+        return spelling;
+    }
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try key.append_bytes("sf ");
+    try key.append_bytes(self_type);
+    try key.append_bytes(" ");
+    try key.append_bytes(spelling);
+    let key_bytes = key.as_bytes();
+    if !facts.contains_source(&key_bytes) {
+        var resolved = std::string::String(allocator);
+        defer resolved.deinit();
+        try append_resolved_type_text(&var resolved, spelling, self_type);
+        try facts.insert_source_owned(allocator, &key_bytes, &resolved);
+    }
+    return try facts.get_source(&key_bytes);
+}
+
+// append_resolved_type_text rewrites every language target name in a spelling to the type
+// the enclosing declaration is written for. A wrapper does not hide the name, so the
+// question is asked of every name the spelling contains rather than of the whole.
+pub fn append_resolved_type_text(
+    out: &var std::string::String,
+    spelling: []u8,
+    self_type: []u8
+) -> !void {
+    var index = 0;
+    while index < std::mem::len(spelling) {
+        // One assignment advances the cursor, the same reason mentions_language_target
+        // below is written this way: the branch-merge lowering wants the exiting arm to
+        // carry nothing but the bound assignment.
+        var next = index + 1;
+        var segment = spelling[index..index + 1];
+        if type_ref_ast::is_type_identifier_start_byte(spelling[index]) {
+            let end = type_ref_ast::type_path_end_in_text(spelling, index);
+            next = end;
+            segment = spelling[index..end];
+            if symbols::is_language_type_name(spelling[index..end]) {
+                segment = self_type;
+            }
+        }
+        try out.append_bytes(segment);
+        index = next;
+    }
+    return;
+}
+
+fn mentions_language_target(spelling: []u8) -> bool {
+    var index = 0;
+    while index < std::mem::len(spelling) {
+        // The cursor advances through one assignment rather than through both arms of
+        // an if/else. The MIR lowering recognises a branch-merge loop only when the
+        // exiting arm carries nothing but the bound assignment, so the two-armed form
+        // stops `selfhost stage selfhost`.
+        var next = index + 1;
+        if type_ref_ast::is_type_identifier_start_byte(spelling[index]) {
+            let end = type_ref_ast::type_path_end_in_text(spelling, index);
+            if symbols::is_language_type_name(spelling[index..end]) {
+                return true;
+            }
+            next = end;
+        }
+        index = next;
+    }
+    return false;
+}

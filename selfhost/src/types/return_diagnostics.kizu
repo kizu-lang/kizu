@@ -5,12 +5,26 @@ import selfhost::types::expression_facts;
 import selfhost::types::expression_infer;
 import selfhost::types::local_facts;
 import selfhost::types::model;
+import selfhost::types::self_type_scope;
+import selfhost::types::type_parameter_scope;
+
+// ReturnScope carries what a return statement is measured against: the result type the
+// declaration fixes, and the scope its spelling was read in. Both sides of the comparison
+// are read in that scope -- a value's inferred spelling can mention the same static
+// parameters the declared one does -- so the scope travels with the expected type rather
+// than being applied to one side of the comparison only.
+struct ReturnScope {
+    expected: []u8,
+    type_params: std::kizu::ast::ChildRange,
+    type_args: std::kizu::ast::ChildRange,
+}
 
 pub fn first_return_type_mismatch_node(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
+    self_type: []u8,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !model::ReturnTypeSummary {
     let node = ast.get(node_id);
@@ -20,6 +34,7 @@ pub fn first_return_type_mismatch_node(
             file,
             ast,
             program.declarations,
+            self_type,
             function_returns
         );,
         FnDecl(fn_decl) => return first_return_type_mismatch_in_function(
@@ -27,16 +42,22 @@ pub fn first_return_type_mismatch_node(
             file,
             ast,
             fn_decl.name,
+            fn_decl.type_params,
+            no_type_arguments(),
             fn_decl.params,
             fn_decl.return_type,
             fn_decl.body,
+            self_type,
             function_returns
         );,
+        // The impl target is the type its methods read `Self` as, so the block hands its
+        // own target down to the signatures written inside it.
         ImplDecl(impl_decl) => return first_return_type_mismatch_in_declarations(
             allocator,
             file,
             ast,
             impl_decl.methods,
+            ast_text::ast_node_text(file, ast, impl_decl.type_name),
             function_returns
         );,
         _ => return diagnostic_summary::no_return_type_mismatch();,
@@ -47,6 +68,7 @@ fn first_return_type_mismatch_in_declarations(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     declarations: std::kizu::ast::ChildRange,
+    self_type: []u8,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !model::ReturnTypeSummary {
     var index = 0;
@@ -57,6 +79,7 @@ fn first_return_type_mismatch_in_declarations(
             file,
             ast,
             child,
+            self_type,
             function_returns
         );
         if found.found {
@@ -67,14 +90,20 @@ fn first_return_type_mismatch_in_declarations(
     return diagnostic_summary::no_return_type_mismatch();
 }
 
-fn first_return_type_mismatch_in_function(
+// A generic declaration is checked in the scope one call site supplies: `type_args` is
+// that call site's static arguments, and the empty range is the declaration read on its
+// own, where its parameters bind no type.
+pub fn first_return_type_mismatch_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange,
+    type_args: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     return_type: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
+    self_type: []u8,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !model::ReturnTypeSummary {
     var local_types = std::map::Map<[]u8, []u8>(allocator);
@@ -83,13 +112,14 @@ fn first_return_type_mismatch_in_function(
         allocator,
         file,
         ast,
+        type_params,
         params,
         body,
         local_types,
         local_mutability,
         function_returns
     );
-    let expected_return = try local_facts::function_statement_return_type(
+    let declared_return = try local_facts::function_statement_return_type(
         allocator,
         file,
         ast,
@@ -97,6 +127,25 @@ fn first_return_type_mismatch_in_function(
         return_type,
         function_returns
     );
+    let scoped_return = try type_parameter_scope::scoped_type_text(
+        allocator,
+        file,
+        ast,
+        type_params,
+        type_args,
+        declared_return,
+        function_returns
+    );
+    let scope = ReturnScope {
+        expected: try self_type_scope::resolved_type_text(
+            allocator,
+            scoped_return,
+            self_type,
+            function_returns
+        ),
+        type_params: type_params,
+        type_args: type_args
+    };
     let found = try first_return_type_mismatch_in_statement(
         allocator,
         file,
@@ -104,7 +153,7 @@ fn first_return_type_mismatch_in_function(
         body,
         local_types,
         local_mutability,
-        expected_return,
+        &scope,
         function_returns
     );
     local_types.deinit();
@@ -119,7 +168,7 @@ fn first_return_type_mismatch_in_statement(
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
     local_mutability: &std::map::Map<[]u8, bool>,
-    expected_return: []u8,
+    scope: &ReturnScope,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !model::ReturnTypeSummary {
     let node = ast.get(node_id);
@@ -131,7 +180,7 @@ fn first_return_type_mismatch_in_statement(
             block.statements,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );,
         Return(return_node) => return return_statement_type_mismatch(
@@ -140,7 +189,7 @@ fn first_return_type_mismatch_in_statement(
             ast,
             return_node.value,
             local_types,
-            expected_return,
+            scope,
             function_returns
         );,
         If(if_node) => return first_return_type_mismatch_in_two_statements(
@@ -151,7 +200,7 @@ fn first_return_type_mismatch_in_statement(
             if_node.else_block,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );,
         While(while_node) => return first_return_type_mismatch_in_statement(
@@ -161,7 +210,7 @@ fn first_return_type_mismatch_in_statement(
             while_node.body,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );,
         For(for_node) => return first_return_type_mismatch_in_statement(
@@ -171,7 +220,7 @@ fn first_return_type_mismatch_in_statement(
             for_node.body,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );,
         Match(match_node) => return first_return_type_mismatch_in_statement_range(
@@ -181,7 +230,7 @@ fn first_return_type_mismatch_in_statement(
             match_node.arms,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );,
         MatchArm(match_arm) => return first_return_type_mismatch_in_statement(
@@ -191,7 +240,7 @@ fn first_return_type_mismatch_in_statement(
             match_arm.body,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );,
         Unsafe(unsafe_node) => return first_return_type_mismatch_in_statement(
@@ -201,7 +250,7 @@ fn first_return_type_mismatch_in_statement(
             unsafe_node.body,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );,
         ComptimeIf(comptime_if_node) => return first_return_type_mismatch_in_two_statements(
@@ -212,7 +261,7 @@ fn first_return_type_mismatch_in_statement(
             comptime_if_node.else_block,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );,
         _ => return diagnostic_summary::no_return_type_mismatch();,
@@ -226,7 +275,7 @@ fn first_return_type_mismatch_in_statement_range(
     statements: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
     local_mutability: &std::map::Map<[]u8, bool>,
-    expected_return: []u8,
+    scope: &ReturnScope,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !model::ReturnTypeSummary {
     var index = 0;
@@ -239,7 +288,7 @@ fn first_return_type_mismatch_in_statement_range(
             child,
             local_types,
             local_mutability,
-            expected_return,
+            scope,
             function_returns
         );
         if found.found {
@@ -258,7 +307,7 @@ fn first_return_type_mismatch_in_two_statements(
     second: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
     local_mutability: &std::map::Map<[]u8, bool>,
-    expected_return: []u8,
+    scope: &ReturnScope,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !model::ReturnTypeSummary {
     let first_found = try first_return_type_mismatch_in_statement(
@@ -268,7 +317,7 @@ fn first_return_type_mismatch_in_two_statements(
         first,
         local_types,
         local_mutability,
-        expected_return,
+        scope,
         function_returns
     );
     if first_found.found {
@@ -281,7 +330,7 @@ fn first_return_type_mismatch_in_two_statements(
         second,
         local_types,
         local_mutability,
-        expected_return,
+        scope,
         function_returns
     );
 }
@@ -292,10 +341,10 @@ fn return_statement_type_mismatch(
     ast: std::kizu::ast::Ast,
     value: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    expected_return: []u8,
+    scope: &ReturnScope,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !model::ReturnTypeSummary {
-    let actual = try expression_infer::infer_expression_type(
+    let inferred = try expression_infer::infer_expression_type(
         allocator,
         file,
         ast,
@@ -303,14 +352,39 @@ fn return_statement_type_mismatch(
         local_types,
         function_returns
     );
-    if expression_infer::known_type_mismatch(expected_return, actual) {
-        let value_node = ast.get(value);
+    let contextual = expression_infer::contextual_integer(
+        file,
+        ast,
+        value,
+        scope.expected,
+        inferred
+    );
+    let value_node = ast.get(value);
+    if contextual.literal.found {
+        return diagnostic_summary::integer_literal_range_return_summary(
+            value_node.span.start,
+            value_node.span.end,
+            contextual.literal.digits,
+            contextual.literal.negations,
+            contextual.literal.expected
+        );
+    }
+    let actual = try type_parameter_scope::scoped_type_text(
+        allocator,
+        file,
+        ast,
+        scope.type_params,
+        scope.type_args,
+        contextual.type_text,
+        function_returns
+    );
+    if expression_infer::known_type_mismatch(scope.expected, actual) {
         return diagnostic_summary::return_type_summary(
             true,
             value_node.span.start,
             value_node.span.end,
-            expected_return,
-            actual
+            try ast_text::module_local_type_text(allocator, file, scope.expected),
+            try ast_text::module_local_type_text(allocator, file, actual)
         );
     }
     return diagnostic_summary::no_return_type_mismatch();
@@ -336,6 +410,7 @@ pub fn first_missing_return_node(
             allocator,
             file,
             ast,
+            fn_decl.extern_abi,
             fn_decl.name,
             fn_decl.return_type,
             fn_decl.body,
@@ -381,11 +456,17 @@ fn first_missing_return_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    extern_abi: std::kizu::ast::NodeId,
     name: std::kizu::ast::NodeId,
     return_type: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !model::MissingReturnSummary {
+    // A declaration that names an external ABI has no body, so it has no statements
+    // that could fail to return. Its obligation belongs to the foreign definition.
+    if ast_text::declares_extern_abi(ast, extern_abi) {
+        return diagnostic_summary::no_missing_return();
+    }
     let expected_return = try local_facts::function_statement_return_type(
         allocator,
         file,
@@ -405,6 +486,12 @@ fn first_missing_return_in_function(
         ast_text::ast_node_text(file, ast, name),
         expected_return
     );
+}
+
+// no_type_arguments is the declaration read on its own: no call site has supplied static
+// arguments, so the declaration's type parameters bind nothing.
+pub fn no_type_arguments() -> std::kizu::ast::ChildRange {
+    return std::kizu::ast::ChildRange { start: 0, len: 0 };
 }
 
 fn function_requires_return(expected_return: []u8) -> bool {

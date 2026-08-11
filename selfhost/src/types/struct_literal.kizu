@@ -1,0 +1,408 @@
+import selfhost::source;
+import selfhost::types::ast_text;
+import selfhost::types::diagnostic_summary;
+import selfhost::types::expression_facts;
+import selfhost::types::expression_infer;
+import selfhost::types::model;
+import selfhost::types::type_ref_names;
+
+// struct_literal owns what a written `Type { field: value }` has to satisfy before it
+// stands for a value. A struct declaration is a complete statement about the members a
+// value of that type has, so a literal is measured against the declaration and nothing
+// else: the type has to name a declared struct, the literal has to give every field the
+// struct declares exactly once and no other, and each value has to have the type its
+// field declares (ADR-0079, internal/types/checker.go:4951). The declared fields are read
+// in declaration order and the field set is settled before the extra names are, because
+// which rule a literal that breaks more than one reports is observable.
+
+pub fn kind_unknown_struct() -> i64 { return 1; }
+pub fn kind_missing_field() -> i64 { return 2; }
+pub fn kind_unknown_field() -> i64 { return 3; }
+pub fn kind_field_type() -> i64 { return 4; }
+pub fn kind_duplicate_field() -> i64 { return 5; }
+
+// StructLookup answers whether the declarations in scope declare a struct under the name a
+// literal wrote, and carries that struct's fields when they do.
+pub struct StructLookup {
+    pub found: bool,
+    pub fields: std::kizu::ast::ChildRange,
+}
+
+// unknown_struct_violation asks the declared-type registry what the literal's type name
+// names. Naming no struct is the first thing that can be wrong with a literal, so it is
+// asked before the fields are read at all. The registry is keyed by resolved identity and
+// the name is resolved the way every other type position resolves it, so a declaration in
+// this module answers before the language's own namespace does. A name the registry does
+// not hold is a type this file cannot read the declaration of, and says nothing.
+pub fn unknown_struct_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_name_node: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>
+) -> !model::StructLiteralSummary {
+    let written = ast_text::ast_node_text(file, ast, type_name_node);
+    if !(try names_declared_non_struct(
+        allocator, file, kinds, alias_starts, alias_ends, written
+    )) {
+        return diagnostic_summary::no_struct_literal_diagnostic();
+    }
+    return diagnostic_summary::unknown_struct_literal_summary(
+        kind_unknown_struct(), written
+    );
+}
+
+fn names_declared_non_struct(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    written: []u8
+) -> !bool {
+    var resolved = std::string::String(allocator);
+    try type_ref_names::append_resolved_type_reference_name(
+        resolved, file, kinds, written, alias_starts, alias_ends
+    );
+    // The map is asked with the resolved view directly: it borrows `resolved` and cannot
+    // escape into a helper.
+    let key = resolved.as_bytes();
+    var declared_non_struct = false;
+    if kinds.contains(key) {
+        declared_non_struct = !((try kinds.get(key)) == model::TypeKind::Struct);
+    }
+    resolved.deinit();
+    return declared_non_struct;
+}
+
+// declared_struct_lookup finds the struct declaration a literal names. A type name written
+// without qualification names a declaration of the file it is written in, so the
+// declarations in scope are asked directly rather than through a registry that only
+// records that a name exists.
+pub fn declared_struct_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !StructLookup {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let lookup = struct_declaration_lookup(file, ast, child, name);
+        if lookup.found {
+            return lookup;
+        }
+        index = index + 1;
+    }
+    return no_struct_lookup();
+}
+
+fn struct_declaration_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> StructLookup {
+    let node = ast.get(node_id);
+    return match node.data {
+        StructDecl(struct_decl) => named_struct_lookup(
+            file, ast, struct_decl.name, struct_decl.fields, name
+        ),
+        _ => no_struct_lookup(),
+    };
+}
+
+fn named_struct_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name_node: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    name: []u8
+) -> StructLookup {
+    if std::mem::equal_bytes(ast_text::ast_node_text(file, ast, name_node), name) {
+        return StructLookup { found: true, fields: fields };
+    }
+    return no_struct_lookup();
+}
+
+fn no_struct_lookup() -> StructLookup {
+    return StructLookup {
+        found: false,
+        fields: std::kizu::ast::ChildRange { start: 0, len: 0 }
+    };
+}
+
+// field_contract_violation measures a literal against the fields its struct declares. A
+// name the literal writes twice is reported first, because a repeated name is a mistake in
+// the literal itself and it also makes the declared fields unmeasurable: two initializers
+// reach one slot and nothing picks between them. The declared fields are then read in
+// order, so a literal that leaves one out and gets another one's type wrong reports
+// whichever field the declaration writes first; the names the declaration does not have
+// are reported only once every declared field is accounted for.
+pub fn field_contract_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    type_name_node: std::kizu::ast::NodeId,
+    literal_fields: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let written = ast_text::ast_node_text(file, ast, type_name_node);
+    let declaration = try declared_struct_lookup(file, ast, declarations, written);
+    if !declaration.found {
+        return diagnostic_summary::no_struct_literal_diagnostic();
+    }
+    let repeated = try first_duplicate_field(file, ast, written, literal_fields);
+    if repeated.found {
+        return repeated;
+    }
+    let declared = try first_declared_field_violation(
+        allocator, file, ast, written, declaration.fields, literal_fields,
+        local_types, expression_types
+    );
+    if declared.found {
+        return declared;
+    }
+    return try first_undeclared_field(
+        file, ast, written, declaration.fields, literal_fields
+    );
+}
+
+fn first_declared_field_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    written: []u8,
+    declared_fields: std::kizu::ast::ChildRange,
+    literal_fields: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    var index = 0;
+    while index < declared_fields.len {
+        let child = try ast.child_at(declared_fields, index);
+        let found = try declared_field_violation(
+            allocator, file, ast, written, child, literal_fields,
+            local_types, expression_types
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return diagnostic_summary::no_struct_literal_diagnostic();
+}
+
+fn declared_field_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    written: []u8,
+    declared_field: std::kizu::ast::NodeId,
+    literal_fields: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let node = ast.get(declared_field);
+    match node.data {
+        Field(field_node) => return try named_field_violation(
+            allocator, file, ast, written, field_node.name, field_node.type_node,
+            literal_fields, local_types, expression_types
+        );,
+        _ => return diagnostic_summary::no_struct_literal_diagnostic();,
+    }
+}
+
+fn named_field_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    written: []u8,
+    name_node: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    literal_fields: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let field_name = ast_text::ast_node_text(file, ast, name_node);
+    let given = try initializer_index_for_field(file, ast, literal_fields, field_name);
+    if given < 0 {
+        return diagnostic_summary::struct_literal_field_summary(
+            kind_missing_field(), written, field_name, "", ""
+        );
+    }
+    let initializer = try ast.child_at(literal_fields, given);
+    return try initializer_value_violation(
+        allocator, file, ast, written, field_name,
+        ast_text::ast_return_type_text(file, ast, type_node),
+        initializer, local_types, expression_types
+    );
+}
+
+fn initializer_value_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    written: []u8,
+    field_name: []u8,
+    expected: []u8,
+    initializer: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let node = ast.get(initializer);
+    match node.data {
+        StructFieldInit(field_init) => return try stored_value_violation(
+            allocator, file, ast, written, field_name, expected, field_init.value,
+            local_types, expression_types
+        );,
+        _ => return diagnostic_summary::no_struct_literal_diagnostic();,
+    }
+}
+
+fn stored_value_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    written: []u8,
+    field_name: []u8,
+    expected: []u8,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::StructLiteralSummary {
+    let inferred = try expression_infer::infer_expression_type(
+        allocator, file, ast, value, local_types, expression_types
+    );
+    let contextual = expression_infer::contextual_integer(
+        file, ast, value, expected, inferred
+    );
+    if contextual.literal.found {
+        return diagnostic_summary::integer_literal_range_struct_field_summary(
+            kind_field_type(), written, field_name,
+            contextual.literal.digits,
+            contextual.literal.negations,
+            contextual.literal.expected
+        );
+    }
+    if !expression_infer::known_type_mismatch(expected, contextual.type_text) {
+        return diagnostic_summary::no_struct_literal_diagnostic();
+    }
+    return diagnostic_summary::struct_literal_field_summary(
+        kind_field_type(), written, field_name, expected, contextual.type_text
+    );
+}
+
+// initializer_index_for_field returns where the literal writes one declared field, or -1
+// when it does not write it at all.
+fn initializer_index_for_field(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    literal_fields: std::kizu::ast::ChildRange,
+    field_name: []u8
+) -> !i64 {
+    var index = 0;
+    while index < literal_fields.len {
+        let child = try ast.child_at(literal_fields, index);
+        if std::mem::equal_bytes(initializer_field_name(file, ast, child), field_name) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// first_duplicate_field reports the first field name the literal writes again. The name a
+// literal writes is what maps it to a declared field, so a name written twice carries two
+// values into one slot; the language has no rule that picks between them and does not read
+// the later one as an update (ADR-0079). A repetition is found by asking where the name is
+// written first: an initializer whose name is already written before it is the repetition.
+fn first_duplicate_field(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    written: []u8,
+    literal_fields: std::kizu::ast::ChildRange
+) -> !model::StructLiteralSummary {
+    var index = 0;
+    while index < literal_fields.len {
+        let child = try ast.child_at(literal_fields, index);
+        let name = initializer_field_name(file, ast, child);
+        let first = try initializer_index_for_field(file, ast, literal_fields, name);
+        if std::mem::len(name) > 0 and first < index {
+            return diagnostic_summary::struct_literal_field_summary(
+                kind_duplicate_field(), written, name, "", ""
+            );
+        }
+        index = index + 1;
+    }
+    return diagnostic_summary::no_struct_literal_diagnostic();
+}
+
+fn first_undeclared_field(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    written: []u8,
+    declared_fields: std::kizu::ast::ChildRange,
+    literal_fields: std::kizu::ast::ChildRange
+) -> !model::StructLiteralSummary {
+    var index = 0;
+    while index < literal_fields.len {
+        let child = try ast.child_at(literal_fields, index);
+        let name = initializer_field_name(file, ast, child);
+        if std::mem::len(name) > 0 and
+            !(try declares_field(file, ast, declared_fields, name)) {
+            return diagnostic_summary::struct_literal_field_summary(
+                kind_unknown_field(), written, name, "", ""
+            );
+        }
+        index = index + 1;
+    }
+    return diagnostic_summary::no_struct_literal_diagnostic();
+}
+
+fn declares_field(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declared_fields: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !bool {
+    var index = 0;
+    while index < declared_fields.len {
+        let child = try ast.child_at(declared_fields, index);
+        if std::mem::equal_bytes(declared_field_name(file, ast, child), name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn initializer_field_name(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    return match node.data {
+        StructFieldInit(field_init) => ast_text::ast_node_text(
+            file, ast, field_init.name
+        ),
+        _ => "",
+    };
+}
+
+fn declared_field_name(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    return match node.data {
+        Field(field_node) => ast_text::ast_node_text(file, ast, field_node.name),
+        _ => "",
+    };
+}

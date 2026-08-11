@@ -1,5 +1,7 @@
 import selfhost::source;
+import selfhost::type_spelling;
 import selfhost::types::ast_text;
+import selfhost::types::type_parameter_scope;
 
 pub struct FunctionParamType {
     pub function_name: []u8,
@@ -9,6 +11,13 @@ pub struct FunctionParamType {
 
 pub struct FunctionParamLookup {
     pub found: bool,
+    pub type_name: []u8,
+}
+
+// BorrowArgumentView is one call argument paired with the type it is measured against,
+// after the borrow operator a borrow parameter is filled with has been removed from both.
+pub struct BorrowArgumentView {
+    pub node: std::kizu::ast::NodeId,
     pub type_name: []u8,
 }
 
@@ -33,6 +42,7 @@ pub fn collect_local_function_param_types(
             file,
             ast,
             ast_text::ast_node_text(file, ast, fn_decl.name),
+            fn_decl.type_params,
             fn_decl.params,
             param_types
         );,
@@ -57,6 +67,56 @@ pub fn lookup_function_param_type(
     return function_param_lookup(false, "");
 }
 
+// borrow_argument_view pairs a call argument with the parameter it fills. A borrow
+// parameter is filled by writing the borrow operator at the call site, and that operator
+// is what matches the parameter's borrow layer: the value that flows in is the borrowed
+// operand, measured against the parameter's element type
+// (internal/types/checker.go:6592). Every other argument is measured as written.
+pub fn borrow_argument_view(
+    ast: std::kizu::ast::Ast,
+    arg: std::kizu::ast::NodeId,
+    declared: []u8
+) -> !BorrowArgumentView {
+    let layer = try type_spelling::parse(declared);
+    if layer.kind != type_spelling::layer_borrow() and
+        layer.kind != type_spelling::layer_borrow_var() {
+        return borrow_argument_view_of(arg, declared);
+    }
+    let node = ast.get(arg);
+    match node.data {
+        Prefix(prefix_node) => return borrowed_operand_view(
+            prefix_node.op,
+            prefix_node.right,
+            arg,
+            try type_spelling::first_child(&layer, declared),
+            declared
+        );,
+        _ => return borrow_argument_view_of(arg, declared);,
+    }
+    return borrow_argument_view_of(arg, declared);
+}
+
+fn borrowed_operand_view(
+    op: std::kizu::ast::PrefixOp,
+    right: std::kizu::ast::NodeId,
+    arg: std::kizu::ast::NodeId,
+    element: []u8,
+    declared: []u8
+) -> BorrowArgumentView {
+    match op {
+        Borrow => return borrow_argument_view_of(right, element);,
+        MutBorrow => return borrow_argument_view_of(right, element);,
+        _ => return borrow_argument_view_of(arg, declared);,
+    }
+}
+
+fn borrow_argument_view_of(
+    node: std::kizu::ast::NodeId,
+    type_name: []u8
+) -> BorrowArgumentView {
+    return BorrowArgumentView { node: node, type_name: type_name };
+}
+
 fn collect_local_function_param_types_in_range(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -78,13 +138,16 @@ fn collect_function_param_types(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     function_name: []u8,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     param_types: &var std::array::Array<FunctionParamType>
 ) -> !void {
     var index = 0;
     while index < params.len {
         let child = try ast.child_at(params, index);
-        try collect_function_param_type(file, ast, function_name, child, index, param_types);
+        try collect_function_param_type(
+            file, ast, function_name, type_params, child, index, param_types
+        );
         index = index + 1;
     }
     return;
@@ -94,6 +157,7 @@ fn collect_function_param_type(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     function_name: []u8,
+    type_params: std::kizu::ast::ChildRange,
     node_id: std::kizu::ast::NodeId,
     param_index: i64,
     param_types: &var std::array::Array<FunctionParamType>
@@ -104,6 +168,7 @@ fn collect_function_param_type(
             file,
             ast,
             function_name,
+            type_params,
             param_node.type_node,
             param_index,
             param_types
@@ -116,15 +181,21 @@ fn collect_function_param_node_type(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     function_name: []u8,
+    type_params: std::kizu::ast::ChildRange,
     type_node: std::kizu::ast::NodeId,
     param_index: i64,
     param_types: &var std::array::Array<FunctionParamType>
 ) -> !void {
-    try param_types.append(function_param_type(
-        function_name,
-        param_index,
+    // The declared text is bound before the append rather than written as a `try` inside
+    // the argument list: the MIR lowering has no shape for a try-call in call-argument
+    // position, so the nested form stops `selfhost stage selfhost`.
+    let declared = try type_parameter_scope::declared_type_text(
+        file,
+        ast,
+        type_params,
         ast_text::ast_return_type_text(file, ast, type_node)
-    ));
+    );
+    try param_types.append(function_param_type(function_name, param_index, declared));
     return;
 }
 

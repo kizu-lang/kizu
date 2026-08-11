@@ -1,4 +1,5 @@
 import selfhost::source;
+import selfhost::type_spelling;
 
 pub fn append_module_name(
     name: &var std::string::String,
@@ -6,6 +7,55 @@ pub fn append_module_name(
 ) -> !void {
     try source::append_qualified_module_name(name, file);
     return;
+}
+
+// module_local_type_text spells a type the way the file that reads the diagnostic writes
+// it. Inference records the module-qualified name the resolver settled on, while a type
+// this module declares is written by its own name here and only a type from another module
+// carries its module path -- which is the spelling the reference checker prints, because a
+// module-local declaration resolves to its bare name (internal/types/checker.go:1984).
+pub fn module_local_type_text(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    type_text: []u8
+) -> ![]u8 borrows type_text {
+    var module_prefix = std::string::String(allocator);
+    defer module_prefix.deinit();
+    try append_module_name(module_prefix, file);
+    try module_prefix.append_bytes("::");
+    let width = module_prefix.len();
+    if std::mem::len(type_text) <= width {
+        return type_text;
+    }
+    let prefix = module_prefix.as_bytes();
+    var index = 0;
+    while index < width {
+        if type_text[index] != prefix[index] {
+            return type_text;
+        }
+        index = index + 1;
+    }
+    let rest = type_text[width..std::mem::len(type_text)];
+    // A deeper module under this one is a different module: `app::types::Widget` read from
+    // `app` keeps the `types::` that names where it was declared.
+    if names_further_module(rest) {
+        return type_text;
+    }
+    return rest;
+}
+
+fn names_further_module(type_text: []u8) -> bool {
+    var index = 0;
+    while index + 1 < std::mem::len(type_text) {
+        if type_text[index] == cast<u8>(58) and type_text[index + 1] == cast<u8>(58) {
+            return true;
+        }
+        if !type_spelling::is_name_byte(type_text[index]) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 pub fn token_text(
@@ -60,6 +110,7 @@ pub fn ast_return_type_text(
         EnumDecl(enum_decl) => return ast_node_text(file, ast, node_id);,
         UnionDecl(union_decl) => return ast_node_text(file, ast, node_id);,
         ImplDecl(impl_decl) => return ast_node_text(file, ast, node_id);,
+        ContractDecl(contract_decl) => return ast_node_text(file, ast, node_id);,
         UnionVariant(union_variant) => return ast_node_text(file, ast, node_id);,
         Match(match_node) => return ast_node_text(file, ast, node_id);,
         MatchArm(match_arm) => return ast_node_text(file, ast, node_id);,
@@ -88,6 +139,36 @@ pub fn ast_ref_node_text(
     let node = ast.get(node_id);
     let span = &node.span;
     return std::mem::trim_ascii(file.text[span.start..span.end]);
+}
+
+// declares_extern_abi reports whether a function declaration names an external ABI.
+// The parser leaves the field empty for an ordinary declaration and fills it with the
+// ABI string literal for `extern "c" fn`, which is the only declaration form the
+// language gives no body.
+pub fn declares_extern_abi(
+    ast: std::kizu::ast::Ast,
+    extern_abi: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(extern_abi);
+    match node.data {
+        String(string_node) => return true;,
+        _ => return false;,
+    }
+}
+
+// fn_decl_name_text spells the name a function declaration binds. A node that declares no
+// function names nothing, which is how a caller reading a declaration list tells a method
+// from anything else that appears beside one.
+pub fn fn_decl_name_text(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    return match node.data {
+        FnDecl(fn_decl) => ast_node_text(file, ast, fn_decl.name),
+        _ => "",
+    };
 }
 
 pub fn is_qualified_name(name: []u8) -> bool {

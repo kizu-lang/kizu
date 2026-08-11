@@ -198,9 +198,56 @@ func (l *lowerer) paramIRTypeName(param ast.Param) string {
 	return "&" + param.TypeName
 }
 
+// scopedBinding remembers what a name meant before a block rebound it.
+type scopedBinding struct {
+	name  string
+	value Value
+	bound bool
+}
+
+// scopeBlockBindings makes the declarations written directly in block local to
+// it and returns a function that puts the enclosing bindings back. Nested blocks
+// scope themselves, so only this level is collected.
+//
+// Without this, a `let` inside a loop body stayed in the environment after the
+// loop, so the next if statement saw two different SSA values for that name --
+// one from each sibling loop -- and mergeEnvs built a phi over them. Neither
+// value dominates the merge, because either loop can run zero times, so the
+// emitted module failed the LLVM verifier.
+func (l *lowerer) scopeBlockBindings(block *ast.BlockStmt) func() {
+	var saved []scopedBinding
+	for _, stmt := range block.Statements {
+		declaration, ok := stmt.(*ast.LetStmt)
+		if !ok {
+			continue
+		}
+		previous, bound := l.env[declaration.Name]
+		saved = append(saved, scopedBinding{
+			name: declaration.Name, value: previous, bound: bound,
+		})
+	}
+	if len(saved) == 0 {
+		return func() {}
+	}
+	return func() {
+		// Reverse order, so a name declared twice in one block ends on the
+		// binding that was in scope before either declaration.
+		for index := len(saved) - 1; index >= 0; index-- {
+			binding := saved[index]
+			if binding.bound {
+				l.env[binding.name] = binding.value
+				continue
+			}
+			delete(l.env, binding.name)
+		}
+	}
+}
+
 // lowerBlock lowers statements into the current block.
 func (l *lowerer) lowerBlock(block *ast.BlockStmt) error {
 	frame := l.pushDeferFrame()
+	restoreBindings := l.scopeBlockBindings(block)
+	defer restoreBindings()
 	for _, stmt := range block.Statements {
 		if l.block.Terminator.Op != "" {
 			l.popDeferFrame()
@@ -326,7 +373,15 @@ func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
 	errorReturn := l.producesErrorValue(value)
 	if errorName, success, ok := errorUnionParts(l.current.Return); ok {
 		if value.Type == success {
-			value = l.emit("error.ok", l.current.Return, []Value{value}, "")
+			// A `!void` success carries no payload, so its wrap takes no operand.
+			// `return try f();` on a `!void` callee unwraps to a void value, and
+			// handing that to error.ok as a payload made the wrap reject its own
+			// arity ("error.ok !void expects 0 args") at emit time.
+			args := []Value{value}
+			if success == "void" {
+				args = nil
+			}
+			value = l.emit("error.ok", l.current.Return, args, "")
 		} else if errorName != "" && value.Type == errorName {
 			value = l.emit("error.error", l.current.Return, []Value{value}, "")
 			errorReturn = true
@@ -729,17 +784,14 @@ func (l *lowerer) lowerMapMethod(name string, valueType string, args []Value) (V
 	}
 }
 
-// lowerArrayMethod lowers runtime-backed std::array::Array<T> methods.
+// lowerArrayMethod lowers runtime-backed std::array::Array<T> methods. Only the
+// methods whose result mentions the element type need to be spelled out here;
+// the rest carry a fixed result type and go through arrayMethodResultType.
 func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Value, error) {
+	if result, ok := arrayMethodResultType(name); ok {
+		return l.emit("array."+name, result, args, elem), nil
+	}
 	switch name {
-	case "append":
-		return l.emit("array.append", "!void", args, elem), nil
-	case "len":
-		return l.emit("array.len", "i64", args, elem), nil
-	case "capacity":
-		return l.emit("array.capacity", "i64", args, elem), nil
-	case "reserve":
-		return l.emit("array.reserve", "!void", args, elem), nil
 	case "pop":
 		return l.emit("array.pop", "!"+elem, args, elem), nil
 	case "pop_or_panic":
@@ -752,18 +804,27 @@ func (l *lowerer) lowerArrayMethod(name string, elem string, args []Value) (Valu
 		return l.emit("array.at", "!&"+elem, args, elem), nil
 	case "at_mut":
 		return l.emit("array.at_mut", "!&var "+elem, args, elem), nil
-	case "set":
-		return l.emit("array.set", "!void", args, elem), nil
-	case "truncate":
-		return l.emit("array.truncate", "!void", args, elem), nil
-	case "clear":
-		return l.emit("array.clear", "void", args, elem), nil
-	case "as_bytes":
-		return l.emit("array.as_bytes", "[]u8", args, elem), nil
-	case "deinit":
-		return l.emit("array.deinit", "void", args, elem), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown array method `%s`", name)
+	}
+}
+
+// arrayMethodResultType gives the IR result type of the Array methods that do
+// not hand back an element, so their lowering is uniform. It reports false for
+// element-typed methods, which keeps unknown names on lowerArrayMethod's error
+// path rather than lowering them to an instruction.
+func arrayMethodResultType(name string) (string, bool) {
+	switch name {
+	case "append", "reserve", "set", "truncate":
+		return "!void", true
+	case "len", "capacity":
+		return "i64", true
+	case "clear", "deinit":
+		return "void", true
+	case "as_bytes":
+		return "[]u8", true
+	default:
+		return "", false
 	}
 }
 

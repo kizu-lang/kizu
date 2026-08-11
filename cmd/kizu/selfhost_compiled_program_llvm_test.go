@@ -7,6 +7,11 @@ import (
 	"testing"
 )
 
+// TestSelfhostGenericIdentityInstancesVerifyWithClang checks that a generic
+// function used at two types emits one specialization per instantiation, each
+// called exactly once, and that the result is real LLVM: the module is linked
+// with clang and the executable is run so a mismatched instance signature fails
+// here rather than at stage2 link time.
 func TestSelfhostGenericIdentityInstancesVerifyWithClang(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_program_llvm::generic_identity_instances_gate",
@@ -54,6 +59,11 @@ entry:
 	}
 }
 
+// TestSelfhostCompiledProgramLLVMOwnsReachableFunctionEmission fixes which side
+// of the boundary owns reachable-function emission. compiled_program_llvm walks
+// the indexed package facts and lowers each definition, but takes the index and
+// the canonical fact table from its caller rather than building them; cli_llvm
+// calls it instead of keeping its own copy of the walk.
 func TestSelfhostCompiledProgramLLVMOwnsReachableFunctionEmission(t *testing.T) {
 	programLLVM := readSelfhostFile(
 		t, "../../selfhost/src/backend/compiled_program_llvm.kizu",

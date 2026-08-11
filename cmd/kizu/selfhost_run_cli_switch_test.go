@@ -92,9 +92,22 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	const unsupported = "examples/mutable_borrow.kizu"
 	const unsupportedGoOutput = "bob\nbob\n"
 
-	// Gate on: the supported shape is selfhost-owned end to end. The printed
-	// output comes from executing the linked native artifact, not the Go
-	// interpreter.
+	assertRunCliSwitchSupportedShape(t, bin, repoRoot, supported)
+	diagnostic := runCliSwitchUnsupportedDiagnostic(
+		t, bin, repoRoot, unsupported, unsupportedGoOutput,
+	)
+	assertRunCliSwitchDefaultGoPath(t, bin, repoRoot, unsupported, unsupportedGoOutput)
+
+	if err := writeRunCliSwitchReport(supported, unsupported, diagnostic); err != nil {
+		t.Fatalf("write run cli switch report: %v", err)
+	}
+}
+
+// assertRunCliSwitchSupportedShape is the gate-on half for a shape selfhost
+// supports: the printed output comes from executing the linked native artifact,
+// not from the Go interpreter.
+func assertRunCliSwitchSupportedShape(t *testing.T, bin, repoRoot, supported string) {
+	t.Helper()
 	onStdout, _, onCode := runCliSwitchCommand(t, bin, repoRoot, true, supported)
 	if onCode != 0 {
 		t.Fatalf("selfhost run %s exit = %d, want 0", supported, onCode)
@@ -102,9 +115,21 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	if onStdout != "hello, kizu\n" {
 		t.Fatalf("selfhost run %s stdout = %q, want %q", supported, onStdout, "hello, kizu\n")
 	}
+}
 
-	// Gate on: the unsupported shape is an explicit selfhost diagnostic, never the
-	// Go interpreter output. This is the no-Go-fallback guarantee.
+// runCliSwitchUnsupportedDiagnostic is the no-Go-fallback guarantee: with the
+// gate on, a shape selfhost defers must fail with an explicit selfhost
+// diagnostic and neither stream may carry what the Go interpreter would have
+// printed. It returns that diagnostic for the production report, preferring
+// stderr and falling back to stdout.
+func runCliSwitchUnsupportedDiagnostic(
+	t *testing.T,
+	bin string,
+	repoRoot string,
+	unsupported string,
+	unsupportedGoOutput string,
+) string {
+	t.Helper()
 	badStdout, badStderr, badCode := runCliSwitchCommand(t, bin, repoRoot, true, unsupported)
 	if badCode == 0 {
 		t.Fatalf("selfhost run %s exit = 0, want explicit diagnostic", unsupported)
@@ -119,20 +144,26 @@ func TestSelfhostRunCliSwitchRoutesThroughSelfhost(t *testing.T) {
 	if diagnostic == "" {
 		diagnostic = strings.TrimSpace(badStdout)
 	}
+	return diagnostic
+}
 
-	// Gate off: the same unsupported shape stays on the default Go path, which
-	// runs it through the interpreter. This confirms the switch is gated rather
-	// than a broadened default.
+// assertRunCliSwitchDefaultGoPath is the gate-off half: the same unsupported
+// shape still runs through the Go interpreter by default. Without it, a selfhost
+// path that had simply become the default would satisfy the two gate-on checks.
+func assertRunCliSwitchDefaultGoPath(
+	t *testing.T,
+	bin string,
+	repoRoot string,
+	unsupported string,
+	unsupportedGoOutput string,
+) {
+	t.Helper()
 	offStdout, _, offCode := runCliSwitchCommand(t, bin, repoRoot, false, unsupported)
 	if offCode != 0 {
 		t.Fatalf("default Go run %s exit = %d, want 0", unsupported, offCode)
 	}
 	if offStdout != unsupportedGoOutput {
 		t.Fatalf("default Go run %s stdout = %q, want Go interpreter output", unsupported, offStdout)
-	}
-
-	if err := writeRunCliSwitchReport(supported, unsupported, diagnostic); err != nil {
-		t.Fatalf("write run cli switch report: %v", err)
 	}
 }
 

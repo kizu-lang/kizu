@@ -4,19 +4,33 @@ import selfhost::resolver;
 import selfhost::source;
 import selfhost::types::ast_text;
 import selfhost::types::body_scan;
+import selfhost::types::concurrency;
+import selfhost::types::concurrency_contract;
+import selfhost::types::container_report;
+import selfhost::types::container_scan;
+import selfhost::types::contract_rules;
 import selfhost::types::diagnostic_summary;
+import selfhost::types::dyn_dispatch;
 import selfhost::types::expression_infer;
 import selfhost::types::expression_facts;
 import selfhost::types::function_call_scan_ast;
 import selfhost::types::function_calls;
 import selfhost::types::function_params;
+import selfhost::types::generic_instantiation;
+import selfhost::types::impl_methods;
 import selfhost::types::local_facts;
 import selfhost::types::model;
 import selfhost::types::reports;
 import selfhost::types::return_diagnostics;
+import selfhost::types::self_type_scope;
+import selfhost::types::struct_literal_scan;
+import selfhost::types::type_placement;
 import selfhost::types::type_ref_ast;
+import selfhost::types::type_parameter_scope;
 import selfhost::types::type_ref_scan_ast;
 import selfhost::types::type_refs;
+import selfhost::types::unsafe_rules;
+import selfhost::types::visibility;
 
 struct TypeScanSummary {
     next: i64,
@@ -290,6 +304,83 @@ pub fn first_pre_move_check_diagnostic_ast_node_with_facts(
     if type_ref.found {
         return try reports::from_type_reference_summary(allocator, file.path, file.text, type_ref);
     }
+    // A container decides what it may hold from the written spelling alone, which is why
+    // it is settled with the declarations rather than with the bodies: a map key that
+    // cannot be hashed is wrong where it is written, before any position rule reads the
+    // declaration and before any value flows into it.
+    let container = try container_scan::first_container_storage_diagnostic_node(
+        allocator,
+        file,
+        ast,
+        root,
+        kinds,
+        copyable
+    );
+    if container.found {
+        return try container_report::from_container_storage_summary(
+            allocator, file.path, container
+        );
+    }
+    // Resolving a type spelling only says the name exists. `type` and `dyn Contract`
+    // resolve and still store nothing, so the position each spelling was written in is
+    // decided next, before any rule that reads the declaration as if it held a value.
+    let placement = try type_placement::first_type_placement_diagnostic_node(
+        allocator,
+        file,
+        ast,
+        root,
+        expression_types
+    );
+    if placement.found {
+        return try reports::from_type_placement_summary(allocator, file.path, placement);
+    }
+    // What a module publishes is settled once every type reference resolves and before
+    // any rule reads a declaration's contents: the public boundary is a statement about
+    // the names a signature writes, not about what they hold.
+    let visible = try visibility::first_visibility_diagnostic_node(file, ast, root);
+    if visible.found {
+        return try reports::from_visibility_summary(allocator, file.path, visible);
+    }
+    // A type's method namespace is settled before anything is measured against it: a
+    // contract is satisfied by the method set the impl blocks declare, and a name declared
+    // twice does not say which declaration that set holds.
+    let impl_method = try impl_methods::first_impl_method_diagnostic_node(file, ast, root);
+    if impl_method.found {
+        return try reports::from_impl_method_summary(allocator, file.path, impl_method);
+    }
+    // Contract rules are decided once every type reference resolves: a `dyn Contract`
+    // placement and an `impl Contract for Type` method set are both statements about
+    // names that already exist.
+    let contract_rule = try contract_rules::first_contract_diagnostic_node(
+        allocator,
+        file,
+        ast,
+        root
+    );
+    if contract_rule.found {
+        return try reports::from_contract_summary(allocator, file.path, contract_rule);
+    }
+    // A call through a contract object reaches the contract's own method set and nothing
+    // else, so it is decided once that set is known to be complete.
+    let dispatch = try dyn_dispatch::first_dyn_dispatch_diagnostic_node(file, ast, root);
+    if dispatch.found {
+        return try reports::from_dyn_dispatch_summary(allocator, file.path, dispatch);
+    }
+    // A struct literal is the one expression whose type is settled by a declaration rather
+    // than by what flows into it, so it is decided before the rules that read a value's
+    // type: a literal the declaration does not admit stands for no value at all, and every
+    // position it is written in would otherwise measure a type the program never built.
+    let literal = try struct_literal_scan::first_struct_literal_diagnostic_node(
+        allocator,
+        file,
+        ast,
+        root,
+        kinds,
+        expression_types
+    );
+    if literal.found {
+        return try reports::from_struct_literal_summary(allocator, file.path, literal);
+    }
 
     var enum_counts = std::map::Map<[]u8, i64>(allocator);
     var enum_tags = std::map::Map<[]u8, bool>(allocator);
@@ -313,10 +404,26 @@ pub fn first_pre_move_check_diagnostic_ast_node_with_facts(
         file,
         ast,
         root,
+        self_type_scope::no_self_type(),
         expression_types
     );
     if return_type.found {
         return try reports::from_return_type_summary(allocator, file.path, return_type);
+    }
+    // A generic declaration fixes no result type on its own, so its body is measured
+    // against the type arguments a call site supplies rather than against the parameters
+    // it was written with.
+    let instantiated_return = try generic_instantiation::first_instantiated_return_mismatch_node(
+        allocator,
+        file,
+        ast,
+        root,
+        expression_types
+    );
+    if instantiated_return.found {
+        return try reports::from_return_type_summary(
+            allocator, file.path, instantiated_return
+        );
     }
     let missing_return = try return_diagnostics::first_missing_return_node(
         allocator,
@@ -386,6 +493,28 @@ pub fn first_post_move_check_diagnostic_ast_node_with_facts(
     if local_call.found {
         return try reports::from_function_call_summary(allocator, file.path, file.text, local_call);
     }
+    let unsafe_rule = try unsafe_rules::first_unsafe_diagnostic_node(
+        allocator,
+        file,
+        ast,
+        root,
+        expression_types
+    );
+    if unsafe_rule.found {
+        return try reports::from_unsafe_summary(allocator, file, unsafe_rule);
+    }
+    // A `comptime Function` slot resolves in the function namespace, so it is decided
+    // before the value-namespace scan below ever sees the argument.
+    let concurrent = try concurrency::first_concurrency_diagnostic_node(
+        allocator,
+        file,
+        ast,
+        root,
+        expression_types
+    );
+    if concurrent.found {
+        return try reports::from_concurrency_summary(allocator, file.path, concurrent);
+    }
     let undefined = try first_undefined_variable_node(
         allocator,
         file,
@@ -427,10 +556,15 @@ pub fn first_post_move_check_diagnostic_ast_node_with_facts(
     if immutable.found {
         return try reports::from_immutable_assignment_summary(allocator, file.path, immutable);
     }
+    var no_locals = std::map::Map<[]u8, []u8>(allocator);
+    defer no_locals.deinit();
     let invalid = try first_invalid_assignment_target_node(
+        allocator,
         file,
         ast,
-        root
+        root,
+        no_locals,
+        expression_types
     );
     if invalid.found {
         return try reports::from_invalid_assignment_target_summary(
@@ -496,8 +630,58 @@ pub fn collect_nominal_resolution_facts_from_ast(
         ImportDecl(import_decl) => return insert_struct_import_alias(
             allocator, file, ast, import_decl.path, returns
         );,
+        ImplDecl(impl_decl) => return insert_contract_conformance_fact(
+            allocator, file, ast, impl_decl.contract_name, impl_decl.type_name, returns
+        );,
         _ => return;,
     }
+}
+
+// insert_contract_conformance_fact records one `impl Contract for Type`. Explicit
+// conformance is the only way a type satisfies a contract (SPEC.md 16), so this fact is
+// what a `dyn Contract` argument is measured against; an inherent impl carries an empty
+// contract slot and records nothing.
+fn insert_contract_conformance_fact(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    contract_name: std::kizu::ast::NodeId,
+    type_name: std::kizu::ast::NodeId,
+    returns: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    let contract_text = ast_text::ast_node_text(file, ast, contract_name);
+    if std::mem::len(contract_text) == 0 {
+        return;
+    }
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try append_contract_conformance_prefix(key, allocator, file, contract_text, returns);
+    try expression_infer::append_resolved_nominal_type(
+        key, allocator, file, ast_text::ast_node_text(file, ast, type_name), returns
+    );
+    let key_bytes = key.as_bytes();
+    if !returns.contains_source(&key_bytes) {
+        try returns.insert_source(allocator, &key_bytes, contract_text);
+    }
+    return;
+}
+
+// append_contract_conformance_prefix keys one conformance by the module-qualified
+// contract, the same resolution every other nominal fact in this bag uses. The caller
+// appends the type, which is already canonical when it comes from inference.
+pub fn append_contract_conformance_prefix(
+    out: &var std::string::String,
+    allocator: Allocator,
+    file: &source::SourceFile,
+    contract_name: []u8,
+    returns: &var expression_facts::ExpressionTypeFacts
+) -> !void {
+    try out.append_bytes("cs ");
+    try expression_infer::append_resolved_nominal_type(
+        out, allocator, file, contract_name, returns
+    );
+    try out.append_bytes(" ");
+    return;
 }
 
 pub fn collect_struct_field_resolution_facts_from_ast(
@@ -549,6 +733,9 @@ fn collect_nominal_type_facts_in_range(
             ImportDecl(value) => try insert_struct_import_alias(
                 allocator, file, ast, value.path, returns
             );,
+            ImplDecl(value) => try insert_contract_conformance_fact(
+                allocator, file, ast, value.contract_name, value.type_name, returns
+            );,
             _ => ignore_nominal_declaration();,
         }
         index = index + 1;
@@ -580,7 +767,7 @@ fn insert_nominal_type_fact(
     try key.append_bytes(canonical_bytes);
     let key_bytes = key.as_bytes();
     if !returns.contains_source(&key_bytes) {
-        try returns.insert_source_owned(&key_bytes, &canonical_name);
+        try returns.insert_source_owned(allocator, &key_bytes, &canonical_name);
     }
     return;
 }
@@ -691,7 +878,7 @@ fn insert_struct_metadata(
     try key.append_bytes(" ");
     try std::fmt::append_i64(key, index);
     let key_bytes = key.as_bytes();
-    try returns.insert_source(&key_bytes, value);
+    try returns.insert_source(allocator, &key_bytes, value);
     return;
 }
 
@@ -746,7 +933,7 @@ fn insert_struct_field_type(
         }
         return;
     }
-    try returns.insert_field(&key_bytes, &resolved_field_type);
+    try returns.insert_field(allocator, &key_bytes, &resolved_field_type);
     return;
 }
 
@@ -795,7 +982,7 @@ fn insert_struct_import_alias(
         }
         return;
     }
-    try returns.insert_source(&key_bytes, target);
+    try returns.insert_source(allocator, &key_bytes, target);
     return;
 }
 
@@ -812,6 +999,7 @@ fn check_file_body_ast_node(
         file,
         ast,
         root,
+        self_type_scope::no_self_type(),
         function_returns
     );
     let traversal_summary = type_scan_summary(
@@ -828,6 +1016,7 @@ fn check_ast_statements(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
+    self_type: []u8,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !TypeScanSummary {
     let node = ast.get(node_id);
@@ -837,6 +1026,7 @@ fn check_ast_statements(
             file,
             ast,
             program.declarations,
+            self_type,
             function_returns
         );,
         Empty => return type_scan_summary(0, 0, 0);,
@@ -844,11 +1034,25 @@ fn check_ast_statements(
         StructDecl(struct_decl) => return type_scan_summary(0, 0, 0);,
         EnumDecl(enum_decl) => return type_scan_summary(0, 0, 0);,
         UnionDecl(union_decl) => return type_scan_summary(0, 0, 0);,
+        // The impl target is the type its methods read `Self` as, so the block hands its
+        // own target down to the signatures written inside it. A contract declares the
+        // method set an implementing type must supply and names no target of its own, so
+        // `Self` stays unresolved there -- and a signature without a body has no value to
+        // compare against it.
         ImplDecl(impl_decl) => return check_statement_declarations(
             allocator,
             file,
             ast,
             impl_decl.methods,
+            ast_text::ast_node_text(file, ast, impl_decl.type_name),
+            function_returns
+        );,
+        ContractDecl(contract_decl) => return check_statement_declarations(
+            allocator,
+            file,
+            ast,
+            contract_decl.methods,
+            self_type_scope::no_self_type(),
             function_returns
         );,
         FnDecl(fn_decl) => return check_function_statements(
@@ -856,9 +1060,11 @@ fn check_ast_statements(
             file,
             ast,
             fn_decl.name,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.return_type,
             fn_decl.body,
+            self_type,
             function_returns
         );,
         Int(int_node) => return type_scan_summary(0, 0, 0);,
@@ -906,6 +1112,7 @@ fn check_statement_declarations(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     declarations: std::kizu::ast::ChildRange,
+    self_type: []u8,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !TypeScanSummary {
     var summary = type_scan_summary(0, 0, 0);
@@ -914,7 +1121,9 @@ fn check_statement_declarations(
         let child = try ast.child_at(declarations, index);
         summary = merge_type_summaries(
             summary,
-            try check_ast_statements(allocator, file, ast, child, function_returns)
+            try check_ast_statements(
+                allocator, file, ast, child, self_type, function_returns
+            )
         );
         index = index + 1;
     }
@@ -926,9 +1135,11 @@ fn check_function_statements(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     return_type: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
+    self_type: []u8,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !TypeScanSummary {
     var local_types = std::map::Map<[]u8, []u8>(allocator);
@@ -939,18 +1150,31 @@ fn check_function_statements(
         allocator,
         file,
         ast,
+        type_params,
         params,
         body,
         local_types,
         local_mutability,
         function_returns
     );
-    let expected_return = try local_facts::function_statement_return_type(
+    let declared_return = try local_facts::function_statement_return_type(
         allocator,
         file,
         ast,
         name,
         return_type,
+        function_returns
+    );
+    let scoped_return = try type_parameter_scope::declared_type_text(
+        file,
+        ast,
+        type_params,
+        declared_return
+    );
+    let expected_return = try self_type_scope::resolved_type_text(
+        allocator,
+        scoped_return,
+        self_type,
         function_returns
     );
     var summary = type_scan_summary(0, local_typed_nodes, 0);
@@ -992,6 +1216,7 @@ fn first_argument_type_mismatch_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.body,
             function_param_types,
@@ -1040,6 +1265,7 @@ fn first_argument_type_mismatch_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     function_param_types: &std::array::Array<function_params::FunctionParamType>,
@@ -1053,6 +1279,7 @@ fn first_argument_type_mismatch_in_function(
         allocator,
         file,
         ast,
+        type_params,
         params,
         body,
         local_types,
@@ -1494,27 +1721,97 @@ fn argument_type_mismatch_for_call(
         if !expected.found {
             return diagnostic_summary::no_argument_type_mismatch();
         }
-        let actual = try expression_infer::infer_expression_type(
+        // A borrow parameter is filled by writing the borrow operator at the call site, so
+        // the value measured here is the borrowed operand and the type it is measured
+        // against is the parameter's element type.
+        let passed = try function_params::borrow_argument_view(ast, arg, expected.type_name);
+        let inferred = try expression_infer::infer_expression_type(
             allocator,
             file,
             ast,
-            arg,
+            passed.node,
             local_types,
             function_returns
         );
-        if expression_infer::known_type_mismatch(expected.type_name, actual) {
-            let arg_node = ast.get(arg);
-            return diagnostic_summary::argument_type_summary(
-                true,
-                arg_node.span.start,
-                arg_node.span.end,
-                expected.type_name,
-                actual
+        let contextual = expression_infer::contextual_integer(
+            file,
+            ast,
+            passed.node,
+            passed.type_name,
+            inferred
+        );
+        if contextual.literal.found {
+            let literal_node = ast.get(passed.node);
+            return diagnostic_summary::integer_literal_range_argument_summary(
+                literal_node.span.start,
+                literal_node.span.end,
+                contextual.literal.digits,
+                contextual.literal.negations,
+                contextual.literal.expected
             );
+        }
+        let actual = contextual.type_text;
+        // A `dyn Contract` parameter accepts every type that explicitly implements the
+        // contract, so the conformance table answers it instead of type identity.
+        let dyn_contract = contract_rules::dyn_contract_name(passed.type_name);
+        // The condition is bound rather than written in the `if` head: the MIR lowering
+        // has no shape for a short-circuit condition on an if/else, so writing it inline
+        // stops `selfhost stage selfhost`.
+        let expects_contract = std::mem::len(dyn_contract) > 0 and
+            !expression_infer::is_unknown_type_text(actual);
+        if expects_contract {
+            if !(try type_satisfies_contract(
+                allocator, file, dyn_contract, actual, function_returns
+            )) {
+                let arg_node = ast.get(arg);
+                return diagnostic_summary::unsatisfied_contract_argument_summary(
+                    arg_node.span.start,
+                    arg_node.span.end,
+                    dyn_contract,
+                    actual
+                );
+            }
+        } else {
+            // The view above stripped the parameter's borrow layer to measure the
+            // borrowed operand against the element type. That is the right measurement
+            // for `&x` where x owns its value, and the wrong one for `&x` where x is
+            // already a borrow: a re-borrow carries the borrow the parameter wants, so
+            // the operand is that borrow and not the element. Ask the declared type too,
+            // and report only when the argument fits neither.
+            if expression_infer::known_type_mismatch(passed.type_name, actual) and
+                expression_infer::known_type_mismatch(expected.type_name, actual) {
+                let arg_node = ast.get(arg);
+                return diagnostic_summary::argument_type_summary(
+                    true,
+                    arg_node.span.start,
+                    arg_node.span.end,
+                    passed.type_name,
+                    actual
+                );
+            }
         }
         index = index + 1;
     }
     return diagnostic_summary::no_argument_type_mismatch();
+}
+
+// type_satisfies_contract asks the conformance table recorded from `impl Contract for
+// Type`. There is no implicit satisfaction in v0.2, so an unrecorded pair does not.
+fn type_satisfies_contract(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    contract_name: []u8,
+    type_name: []u8,
+    returns: &var expression_facts::ExpressionTypeFacts
+) -> !bool {
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try append_contract_conformance_prefix(key, allocator, file, contract_name, returns);
+    try expression_infer::append_resolved_nominal_type(
+        key, allocator, file, type_name, returns
+    );
+    let key_bytes = key.as_bytes();
+    return returns.contains_source(&key_bytes);
 }
 
 fn first_argument_type_mismatch_in_two_expressions(
@@ -1717,6 +2014,7 @@ fn first_binary_operand_type_mismatch_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.body,
             function_returns
@@ -1761,6 +2059,7 @@ fn first_binary_operand_type_mismatch_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     function_returns: &var expression_facts::ExpressionTypeFacts
@@ -1773,6 +2072,7 @@ fn first_binary_operand_type_mismatch_in_function(
         allocator,
         file,
         ast,
+        type_params,
         params,
         body,
         local_types,
@@ -2210,12 +2510,15 @@ fn binary_operand_type_mismatch(
         left_type, right_type
     ) {
         let right_node = ast.get(right);
+        // The comparison above is on canonical types, which is the identity. The
+        // note quotes what the source wrote, so this file's own module prefix comes
+        // back off before the names reach the report.
         return diagnostic_summary::argument_type_summary(
             true,
             right_node.span.start,
             right_node.span.end,
-            left_type,
-            right_type
+            try local_module_type_name(allocator, file, left_type),
+            try local_module_type_name(allocator, file, right_type)
         );
     }
     return diagnostic_summary::no_argument_type_mismatch();
@@ -2375,6 +2678,7 @@ fn first_assignment_type_mismatch_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.body,
             function_returns
@@ -2419,6 +2723,7 @@ fn first_assignment_type_mismatch_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     function_returns: &var expression_facts::ExpressionTypeFacts
@@ -2431,6 +2736,7 @@ fn first_assignment_type_mismatch_in_function(
         allocator,
         file,
         ast,
+        type_params,
         params,
         body,
         local_types,
@@ -2632,7 +2938,7 @@ fn assignment_type_mismatch_for_var_assign(
         return diagnostic_summary::no_assignment_type_mismatch();
     }
     let expected = try local_types.get(name);
-    let actual = try expression_infer::infer_expression_type(
+    let inferred = try expression_infer::infer_expression_type(
         allocator,
         file,
         ast,
@@ -2640,8 +2946,25 @@ fn assignment_type_mismatch_for_var_assign(
         local_types,
         function_returns
     );
+    let contextual = expression_infer::contextual_integer(
+        file,
+        ast,
+        value,
+        expected,
+        inferred
+    );
+    let value_node = ast.get(value);
+    if contextual.literal.found {
+        return diagnostic_summary::integer_literal_range_assignment_summary(
+            value_node.span.start,
+            value_node.span.end,
+            contextual.literal.digits,
+            contextual.literal.negations,
+            contextual.literal.expected
+        );
+    }
+    let actual = contextual.type_text;
     if expression_infer::known_type_mismatch(expected, actual) {
-        let value_node = ast.get(value);
         return diagnostic_summary::assignment_type_summary(
             true,
             value_node.span.start,
@@ -2673,6 +2996,7 @@ fn first_immutable_assignment_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.body,
             function_returns
@@ -2717,6 +3041,7 @@ fn first_immutable_assignment_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     function_returns: &var expression_facts::ExpressionTypeFacts
@@ -2729,6 +3054,7 @@ fn first_immutable_assignment_in_function(
         allocator,
         file,
         ast,
+        type_params,
         params,
         body,
         local_types,
@@ -2935,78 +3261,97 @@ fn immutable_assignment_for_var_assign(
 }
 
 fn first_invalid_assignment_target_node(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
 ) -> !model::InvalidAssignmentTargetSummary {
     let node = ast.get(node_id);
     match node.data {
         Program(program) => return first_invalid_assignment_target_in_range(
-            file,
-            ast,
-            program.declarations
+            allocator, file, ast, program.declarations, local_types, expression_types
         );,
-        FnDecl(fn_decl) => return first_invalid_assignment_target_node(
-            file,
-            ast,
-            fn_decl.body
+        FnDecl(fn_decl) => return first_invalid_assignment_target_in_function(
+            allocator, file, ast,
+            fn_decl.type_params, fn_decl.params, fn_decl.body,
+            expression_types
         );,
         ImplDecl(impl_decl) => return first_invalid_assignment_target_in_range(
-            file,
-            ast,
-            impl_decl.methods
+            allocator, file, ast, impl_decl.methods, local_types, expression_types
         );,
         Block(block) => return first_invalid_assignment_target_in_range(
-            file,
-            ast,
-            block.statements
+            allocator, file, ast, block.statements, local_types, expression_types
         );,
         Assign(assign_node) => return invalid_assignment_target_for_assign(
-            ast,
-            assign_node.target
+            file, ast, assign_node.target, local_types
         );,
         If(if_node) => return first_invalid_assignment_target_in_two_nodes(
-            file,
-            ast,
-            if_node.then_block,
-            if_node.else_block
+            allocator, file, ast, if_node.then_block, if_node.else_block,
+            local_types, expression_types
         );,
-        While(while_node) => return first_invalid_assignment_target_node(file, ast, while_node.body);,
-        For(for_node) => return first_invalid_assignment_target_node(file, ast, for_node.body);,
+        While(while_node) => return first_invalid_assignment_target_node(
+            allocator, file, ast, while_node.body, local_types, expression_types
+        );,
+        For(for_node) => return first_invalid_assignment_target_node(
+            allocator, file, ast, for_node.body, local_types, expression_types
+        );,
         Match(match_node) => return first_invalid_assignment_target_in_range(
-            file,
-            ast,
-            match_node.arms
+            allocator, file, ast, match_node.arms, local_types, expression_types
         );,
         MatchArm(match_arm) => return first_invalid_assignment_target_node(
-            file,
-            ast,
-            match_arm.body
+            allocator, file, ast, match_arm.body, local_types, expression_types
         );,
         Unsafe(unsafe_node) => return first_invalid_assignment_target_node(
-            file,
-            ast,
-            unsafe_node.body
+            allocator, file, ast, unsafe_node.body, local_types, expression_types
         );,
         ComptimeIf(comptime_if_node) => return first_invalid_assignment_target_in_two_nodes(
-            file,
-            ast,
-            comptime_if_node.then_block,
-            comptime_if_node.else_block
+            allocator, file, ast, comptime_if_node.then_block, comptime_if_node.else_block,
+            local_types, expression_types
         );,
         _ => return diagnostic_summary::no_invalid_assignment_target();,
     }
 }
 
-fn first_invalid_assignment_target_in_range(
+// Whether a target is assignable depends on what the receiver is, so the walk carries
+// the same local binding types the other body passes build.
+fn first_invalid_assignment_target_in_function(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
-    range: std::kizu::ast::ChildRange
+    type_params: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    expression_types: &var expression_facts::ExpressionTypeFacts
+) -> !model::InvalidAssignmentTargetSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    defer local_types.deinit();
+    defer local_mutability.deinit();
+    let locals = try local_facts::collect_function_statement_locals(
+        allocator, file, ast, type_params, params, body,
+        local_types, local_mutability, expression_types
+    );
+    return try first_invalid_assignment_target_node(
+        allocator, file, ast, body, local_types, expression_types
+    );
+}
+
+fn first_invalid_assignment_target_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
 ) -> !model::InvalidAssignmentTargetSummary {
     var index = 0;
     while index < range.len {
         let child = try ast.child_at(range, index);
-        let found = try first_invalid_assignment_target_node(file, ast, child);
+        let found = try first_invalid_assignment_target_node(
+            allocator, file, ast, child, local_types, expression_types
+        );
         if found.found {
             return found;
         }
@@ -3016,34 +3361,67 @@ fn first_invalid_assignment_target_in_range(
 }
 
 fn first_invalid_assignment_target_in_two_nodes(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     first: std::kizu::ast::NodeId,
-    second: std::kizu::ast::NodeId
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expression_types: &var expression_facts::ExpressionTypeFacts
 ) -> !model::InvalidAssignmentTargetSummary {
-    let first_found = try first_invalid_assignment_target_node(file, ast, first);
+    let first_found = try first_invalid_assignment_target_node(
+        allocator, file, ast, first, local_types, expression_types
+    );
     if first_found.found {
         return first_found;
     }
-    return first_invalid_assignment_target_node(file, ast, second);
+    return try first_invalid_assignment_target_node(
+        allocator, file, ast, second, local_types, expression_types
+    );
 }
 
 fn invalid_assignment_target_for_assign(
+    file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
-    target: std::kizu::ast::NodeId
-) -> model::InvalidAssignmentTargetSummary {
+    target: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::InvalidAssignmentTargetSummary {
     let target_node = ast.get(target);
     match target_node.data {
         Var(var_node) => return diagnostic_summary::no_invalid_assignment_target();,
         FieldExpr(field_expr_node) => return diagnostic_summary::no_invalid_assignment_target();,
         DerefExpr(deref_expr_node) => return diagnostic_summary::no_invalid_assignment_target();,
         IndexExpr(index_expr) => return diagnostic_summary::no_invalid_assignment_target();,
+        Call(call_node) => return try assignable_slot_call_target(
+            file, ast, target, call_node.callee, local_types
+        );,
         _ => return diagnostic_summary::invalid_assignment_target_result(
             true,
             target_node.span.start,
             target_node.span.end
         );,
     }
+}
+
+// A call is an assignment target only when it names a mutable slot the compiler owns.
+// Which accessors those are is intrinsic-registry data, so a user method call of the
+// same shape stays rejected.
+fn assignable_slot_call_target(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::InvalidAssignmentTargetSummary {
+    if try concurrency::is_mutable_slot_accessor(file, ast, callee, local_types) {
+        return diagnostic_summary::no_invalid_assignment_target();
+    }
+    let target_node = ast.get(target);
+    return diagnostic_summary::invalid_assignment_target_result(
+        true,
+        target_node.span.start,
+        target_node.span.end
+    );
 }
 
 fn first_undefined_variable_node(
@@ -3066,6 +3444,7 @@ fn first_undefined_variable_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.body,
             function_returns
@@ -3110,6 +3489,7 @@ fn first_undefined_variable_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     function_returns: &var expression_facts::ExpressionTypeFacts
@@ -3122,6 +3502,7 @@ fn first_undefined_variable_in_function(
         allocator,
         file,
         ast,
+        type_params,
         params,
         body,
         local_types,
@@ -3322,10 +3703,11 @@ fn first_undefined_variable_in_expression(
             deref_expr_node.receiver,
             local_types
         );,
-        Call(call_node) => return first_undefined_variable_in_expression_range(
+        Call(call_node) => return first_undefined_variable_in_call(
             allocator,
             file,
             ast,
+            call_node.callee,
             call_node.args,
             local_types
         );,
@@ -3393,6 +3775,29 @@ fn first_undefined_variable_in_expression(
     }
 }
 
+// An argument in a `comptime Function` slot is a function-name token, not an expression:
+// it resolves in the function namespace, which selfhost::types::concurrency decides. The
+// value-namespace scan therefore skips that one argument and only that one, so a bare
+// function name stays undefined in every other position.
+fn first_undefined_variable_in_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let operation = try concurrency::operation_of(file, ast, callee, local_types);
+    return try first_undefined_variable_in_expression_range_except(
+        allocator,
+        file,
+        ast,
+        args,
+        concurrency_contract::function_slot(operation),
+        local_types
+    );
+}
+
 fn first_undefined_variable_in_expression_range(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -3400,18 +3805,43 @@ fn first_undefined_variable_in_expression_range(
     expressions: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
+    return try first_undefined_variable_in_expression_range_except(
+        allocator,
+        file,
+        ast,
+        expressions,
+        -1,
+        local_types
+    );
+}
+
+fn first_undefined_variable_in_expression_range_except(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expressions: std::kizu::ast::ChildRange,
+    skipped: i64,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
     var index = 0;
     while index < expressions.len {
-        let child = try ast.child_at(expressions, index);
-        let found = try first_undefined_variable_in_expression(
-            allocator,
-            file,
-            ast,
-            child,
-            local_types
-        );
-        if found.found {
-            return found;
+        // The skipped slot is stepped over with a guard rather than a `continue`. The
+        // MIR backend lowers a continue-latch loop only when the body terminates
+        // (compiled_mir_lower.kizu:22184), and this body falls through, so a `continue`
+        // here stops `selfhost stage selfhost`. The guard says the same thing in the
+        // subset every other selfhost source is written in.
+        if index != skipped {
+            let child = try ast.child_at(expressions, index);
+            let found = try first_undefined_variable_in_expression(
+                allocator,
+                file,
+                ast,
+                child,
+                local_types
+            );
+            if found.found {
+                return found;
+            }
         }
         index = index + 1;
     }
@@ -3765,6 +4195,7 @@ fn check_statement_node(
         EnumDecl(enum_decl) => return type_scan_summary(0, 0, 0);,
         UnionDecl(union_decl) => return type_scan_summary(0, 0, 0);,
         ImplDecl(impl_decl) => return type_scan_summary(0, 0, 0);,
+        ContractDecl(contract_decl) => return type_scan_summary(0, 0, 0);,
         UnionVariant(union_variant) => return type_scan_summary(0, 0, 0);,
         FnDecl(fn_decl) => return type_scan_summary(0, 0, 0);,
         Int(int_node) => return type_scan_summary(0, 1, 0);,
@@ -3879,6 +4310,20 @@ fn check_let_statement(
     return type_scan_summary(0, 1, diagnostics);
 }
 
+// The package pass asks the same question of a call target as the fast pass does: a call
+// is assignable only when it names an intrinsic mutable slot.
+fn assignable_slot_call_summary(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    if try concurrency::is_mutable_slot_accessor(file, ast, callee, local_types) {
+        return type_scan_summary(0, 1, 0);
+    }
+    return invalid_assignment_target_summary();
+}
+
 fn check_assign_statement(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -3911,7 +4356,12 @@ fn check_assign_statement(
         Bool(bool_node) => return invalid_assignment_target_summary();,
         Prefix(prefix_node) => return invalid_assignment_target_summary();,
         Binary(binary) => return invalid_assignment_target_summary();,
-        Call(call_node) => return invalid_assignment_target_summary();,
+        Call(call_node) => return try assignable_slot_call_summary(
+            file,
+            ast,
+            call_node.callee,
+            local_types
+        );,
         TypeApplyExpr(type_apply) => return invalid_assignment_target_summary();,
         CastExpr(cast_expr) => return invalid_assignment_target_summary();,
         StructLiteralExpr(struct_literal) => return invalid_assignment_target_summary();,
@@ -3938,6 +4388,7 @@ fn check_assign_statement(
         EnumDecl(enum_decl) => return invalid_assignment_target_summary();,
         UnionDecl(union_decl) => return invalid_assignment_target_summary();,
         ImplDecl(impl_decl) => return invalid_assignment_target_summary();,
+        ContractDecl(contract_decl) => return invalid_assignment_target_summary();,
         UnionVariant(union_variant) => return invalid_assignment_target_summary();,
         Match(match_node) => return invalid_assignment_target_summary();,
         MatchArm(match_arm) => return invalid_assignment_target_summary();,
@@ -3968,7 +4419,7 @@ fn check_assign_var_statement(
         diagnostics = diagnostics + 1;
     }
     let target_type = try local_types.get(name);
-    let value_type = try expression_infer::infer_expression_type(
+    let inferred = try expression_infer::infer_expression_type(
         allocator,
         file,
         ast,
@@ -3976,7 +4427,15 @@ fn check_assign_var_statement(
         local_types,
         function_returns
     );
-    if expression_infer::known_type_mismatch(target_type, value_type) {
+    let contextual = expression_infer::contextual_integer(
+        file,
+        ast,
+        value,
+        target_type,
+        inferred
+    );
+    if contextual.literal.found or
+        expression_infer::known_type_mismatch(target_type, contextual.type_text) {
         diagnostics = diagnostics + 1;
     }
     return type_scan_summary(0, 1, diagnostics);
@@ -3995,7 +4454,7 @@ fn check_return_statement(
     expected_return: []u8,
     function_returns: &var expression_facts::ExpressionTypeFacts
 ) -> !TypeScanSummary {
-    let value_type = try expression_infer::infer_expression_type(
+    let inferred = try expression_infer::infer_expression_type(
         allocator,
         file,
         ast,
@@ -4003,8 +4462,16 @@ fn check_return_statement(
         local_types,
         function_returns
     );
+    let contextual = expression_infer::contextual_integer(
+        file,
+        ast,
+        value,
+        expected_return,
+        inferred
+    );
     var diagnostics = 0;
-    if expression_infer::known_type_mismatch(expected_return, value_type) {
+    if contextual.literal.found or
+        expression_infer::known_type_mismatch(expected_return, contextual.type_text) {
         diagnostics = 1;
     }
     return type_scan_summary(0, 1, diagnostics);
@@ -4244,6 +4711,7 @@ fn collect_match_enum_types(
         StructDecl(struct_decl) => return;,
         UnionDecl(union_decl) => return;,
         ImplDecl(impl_decl) => return;,
+        ContractDecl(contract_decl) => return;,
         FnDecl(fn_decl) => return;,
         Empty => return;,
         Int(int_node) => return;,
@@ -4369,6 +4837,7 @@ fn first_match_diagnostic_node(
             allocator,
             file,
             ast,
+            fn_decl.type_params,
             fn_decl.params,
             fn_decl.body,
             enum_counts,
@@ -4380,6 +4849,15 @@ fn first_match_diagnostic_node(
             file,
             ast,
             impl_decl.methods,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        ContractDecl(contract_decl) => return first_match_diagnostic_in_range(
+            allocator,
+            file,
+            ast,
+            contract_decl.methods,
             enum_counts,
             enum_tags,
             function_returns
@@ -4462,6 +4940,7 @@ fn first_match_diagnostic_in_function(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     enum_counts: &std::map::Map<[]u8, i64>,
@@ -4476,6 +4955,7 @@ fn first_match_diagnostic_in_function(
         allocator,
         file,
         ast,
+        type_params,
         params,
         body,
         local_types,
@@ -4666,6 +5146,7 @@ fn first_match_diagnostic_in_statement(
         EnumDecl(enum_decl) => return diagnostic_summary::no_match_diagnostic();,
         UnionDecl(union_decl) => return diagnostic_summary::no_match_diagnostic();,
         ImplDecl(impl_decl) => return diagnostic_summary::no_match_diagnostic();,
+        ContractDecl(contract_decl) => return diagnostic_summary::no_match_diagnostic();,
         UnionVariant(union_variant) => return diagnostic_summary::no_match_diagnostic();,
         FnDecl(fn_decl) => return diagnostic_summary::no_match_diagnostic();,
         Int(int_node) => return diagnostic_summary::no_match_diagnostic();,
@@ -4921,6 +5402,7 @@ fn first_match_diagnostic_in_expression(
         EnumDecl(enum_decl) => return diagnostic_summary::no_match_diagnostic();,
         UnionDecl(union_decl) => return diagnostic_summary::no_match_diagnostic();,
         ImplDecl(impl_decl) => return diagnostic_summary::no_match_diagnostic();,
+        ContractDecl(contract_decl) => return diagnostic_summary::no_match_diagnostic();,
         UnionVariant(union_variant) => return diagnostic_summary::no_match_diagnostic();,
         MatchArm(match_arm) => return diagnostic_summary::no_match_diagnostic();,
         Unsafe(unsafe_node) => return diagnostic_summary::no_match_diagnostic();,
@@ -5046,6 +5528,40 @@ fn first_match_diagnostic_in_three_nodes(
     );
 }
 
+// local_module_type_name drops this file's own module prefix from a canonical type
+// name, so a type declared here is spelled the way the source wrote it. Inference
+// canonicalizes a declared type to <module>::<Name>, while the tables built from
+// this file's declarations are keyed by <Name> and diagnostics quote what was
+// written. A name carrying any other module's path is returned unchanged, so it
+// still fails to match a local declaration -- which is the correct answer for it.
+fn local_module_type_name(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    value_type: []u8
+) -> ![]u8 borrows value_type {
+    var prefix = std::string::String(allocator);
+    defer prefix.deinit();
+    try ast_text::append_module_name(prefix, file);
+    try prefix.append_bytes("::");
+    let prefix_len = prefix.len();
+    let prefix_bytes = prefix.as_bytes();
+    if std::mem::len(value_type) <= prefix_len {
+        return value_type;
+    }
+    // The length comes off the String and the bytes are compared by index:
+    // prefix_bytes borrows that String, and passing a borrowed view into a
+    // function -- std::mem::len or std::mem::starts_with alike -- is an escape,
+    // while indexing it is not.
+    var index = 0;
+    while index < prefix_len {
+        if value_type[index] != prefix_bytes[index] {
+            return value_type;
+        }
+        index = index + 1;
+    }
+    return value_type[prefix_len..std::mem::len(value_type)];
+}
+
 fn first_match_diagnostic_for_match(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -5077,7 +5593,15 @@ fn first_match_diagnostic_for_match(
             function_returns
         );
     }
-    if !enum_counts.contains(value_type) {
+    // infer_expression_type reports an enum value with its canonical
+    // module-qualified type, while enum_counts and enum_tags are keyed by the
+    // declaration text collected from this file. Looking the qualified spelling up
+    // in that table always missed, so every enum match fell through to the
+    // not-an-enum path and the exhaustiveness, unknown-tag and duplicate-tag
+    // diagnostics were dropped silently. Enums declared elsewhere keep their path
+    // and still miss, which is the same answer as before for them.
+    let local_type = try local_module_type_name(allocator, file, value_type);
+    if !enum_counts.contains(local_type) {
         if unsupported_match_value_type(value_type) {
             return diagnostic_summary::match_diagnostic_summary(true, 1, value_type, "");
         }
@@ -5096,7 +5620,7 @@ fn first_match_diagnostic_for_match(
         allocator,
         file,
         ast,
-        value_type,
+        local_type,
         arms,
         enum_counts,
         enum_tags
@@ -5195,6 +5719,7 @@ fn current_enum_match_arm_scan(
         EnumDecl(enum_decl) => return no_match_arm_scan(wildcard);,
         UnionDecl(union_decl) => return no_match_arm_scan(wildcard);,
         ImplDecl(impl_decl) => return no_match_arm_scan(wildcard);,
+        ContractDecl(contract_decl) => return no_match_arm_scan(wildcard);,
         FnDecl(fn_decl) => return no_match_arm_scan(wildcard);,
         Int(int_node) => return no_match_arm_scan(wildcard);,
         String(string_node) => return no_match_arm_scan(wildcard);,
@@ -5311,6 +5836,7 @@ fn match_arm_pattern_equals(
         EnumDecl(enum_decl) => return false;,
         UnionDecl(union_decl) => return false;,
         ImplDecl(impl_decl) => return false;,
+        ContractDecl(contract_decl) => return false;,
         FnDecl(fn_decl) => return false;,
         Int(int_node) => return false;,
         String(string_node) => return false;,

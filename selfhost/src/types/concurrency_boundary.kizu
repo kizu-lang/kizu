@@ -1,0 +1,223 @@
+import selfhost::source;
+import selfhost::type_constructor;
+import selfhost::type_spelling;
+import selfhost::types::ast_text;
+import selfhost::types::concurrency_contract;
+import selfhost::types::raw_pointer;
+
+// Which types may cross a concurrency boundary.
+//
+// A value handed to a worker leaves the scope that can observe its lifetime, so a type
+// whose safety rests on that scope cannot go with it: a raw pointer carries no lifetime
+// at all, and an arena, handle, Array, Map, Mutex or Task is a single-owner structure
+// whose invariants the other side cannot uphold. Which identities those are is read from
+// selfhost::ir::intrinsic_type_contract through concurrency_contract::boundary_message,
+// so the rule holds for every identity that registry owns.
+//
+// The question reaches through type arguments and struct fields, because a type that
+// holds such a value is such a value as far as the boundary can tell.
+
+pub struct BoundaryViolation {
+    pub found: bool,
+    pub reason: []u8,
+    pub owner: []u8,
+    pub field: []u8,
+}
+
+pub fn no_violation() -> BoundaryViolation {
+    return BoundaryViolation { found: false, reason: "", owner: "", field: "" };
+}
+
+fn violation(reason: []u8) -> BoundaryViolation {
+    return BoundaryViolation { found: true, reason: reason, owner: "", field: "" };
+}
+
+fn field_violation(owner: []u8, field: []u8, reason: []u8) -> BoundaryViolation {
+    return BoundaryViolation { found: true, reason: reason, owner: owner, field: field };
+}
+
+pub fn first_boundary_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !BoundaryViolation {
+    if std::mem::len(spelling) == 0 or std::mem::equal_bytes(spelling, "unknown") {
+        return no_violation();
+    }
+    if raw_pointer::is_raw_pointer(spelling) {
+        return violation("raw pointer cannot cross concurrency boundary");
+    }
+    // A recursive type reaches itself; having asked once is answer enough.
+    if visited.contains(spelling) {
+        return no_violation();
+    }
+    try visited.insert(spelling, true);
+    let layer = try type_spelling::parse(spelling);
+    if layer.kind != type_spelling::layer_named() {
+        return no_violation();
+    }
+    let constructor = try type_spelling::constructor(&layer, spelling);
+    // The identity is the one the spelling applies, not the one its bare constructor
+    // happens to share a name with. internal/types/checker.go:7182 reaches these rules
+    // only through splitGenericType, so `Mutex<i64>` is the intrinsic and a program's own
+    // `struct Mutex` is not: the bare spelling falls through to the declared fields below
+    // like any other struct.
+    let kind = type_constructor::applied_constructor_kind(constructor, layer.has_arguments);
+    let reason = concurrency_contract::boundary_message(kind);
+    if std::mem::len(reason) > 0 {
+        return violation(reason);
+    }
+    if layer.has_arguments {
+        if !concurrency_contract::carries_element_boundary(kind) {
+            return no_violation();
+        }
+        return try arguments_violation(
+            file, ast, root, try type_spelling::arguments(&layer, spelling), visited
+        );
+    }
+    return try declared_fields_violation(file, ast, root, spelling, visited);
+}
+
+fn arguments_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    arguments: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !BoundaryViolation {
+    var start = 0;
+    while start < std::mem::len(arguments) {
+        let argument = try type_spelling::next_argument(arguments, start);
+        let found = try first_boundary_violation(file, ast, root, argument, visited);
+        if found.found {
+            return found;
+        }
+        start = try type_spelling::next_argument_start(arguments, start);
+    }
+    return no_violation();
+}
+
+// A nominal type crosses the boundary only when every declared field does. Only the
+// declarations of the file being checked are visible here, so a struct declared in
+// another module answers yes until the frontend resolves nominal types across modules.
+fn declared_fields_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !BoundaryViolation {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return try declarations_violation(
+            file, ast, root, program.declarations, spelling, visited
+        );,
+        _ => return no_violation();,
+    }
+}
+
+fn declarations_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    declarations: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !BoundaryViolation {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try declaration_violation(file, ast, root, child, spelling, visited);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_violation();
+}
+
+fn declaration_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !BoundaryViolation {
+    let node = ast.get(node_id);
+    match node.data {
+        StructDecl(struct_decl) => return try named_struct_violation(
+            file, ast, root, struct_decl.name, struct_decl.fields, spelling, visited
+        );,
+        _ => return no_violation();,
+    }
+}
+
+fn named_struct_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !BoundaryViolation {
+    let owner = ast_text::ast_node_text(file, ast, name);
+    if !std::mem::equal_bytes(owner, spelling) {
+        return no_violation();
+    }
+    var index = 0;
+    while index < fields.len {
+        let child = try ast.child_at(fields, index);
+        let found = try field_violation_node(file, ast, root, owner, child, visited);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_violation();
+}
+
+fn field_violation_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    owner: []u8,
+    node_id: std::kizu::ast::NodeId,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !BoundaryViolation {
+    let node = ast.get(node_id);
+    match node.data {
+        Field(field_node) => return try named_field_violation(
+            file, ast, root, owner, field_node.name, field_node.type_node, visited
+        );,
+        _ => return no_violation();,
+    }
+}
+
+fn named_field_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    owner: []u8,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !BoundaryViolation {
+    let found = try first_boundary_violation(
+        file, ast, root, ast_text::ast_node_text(file, ast, type_node), visited
+    );
+    if !found.found {
+        return no_violation();
+    }
+    // A nested struct already names its own field; only the outermost anonymous reason
+    // takes this struct's field name.
+    if std::mem::len(found.owner) == 0 {
+        return field_violation(
+            owner, ast_text::ast_node_text(file, ast, name), found.reason
+        );
+    }
+    return found;
+}

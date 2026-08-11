@@ -1,0 +1,543 @@
+import selfhost::source;
+import selfhost::type_spelling;
+import selfhost::types::ast_text;
+import selfhost::types::model;
+import selfhost::types::self_type_scope;
+import selfhost::types::type_ref_ast;
+
+// contract_rules owns the SPEC.md 16 rules a contract carries beyond naming a method set:
+// where a `dyn Contract` may appear in a signature, and what `impl Contract for Type` has
+// to provide before that conformance exists. Both are decided from declarations, so the
+// pass reads the AST directly instead of a seeded table.
+
+struct ContractLookup {
+    found: bool,
+    methods: std::kizu::ast::ChildRange,
+}
+
+struct MethodLookup {
+    found: bool,
+    index: i64,
+}
+
+// ContractMethodLookup answers what a contract declares about one method name. The two
+// answers are separate because a name the file does not declare a contract for says
+// nothing at all, while a contract that declares no such method says the method is not
+// there.
+pub struct ContractMethodLookup {
+    pub contract_found: bool,
+    pub method_found: bool,
+    pub params: std::kizu::ast::ChildRange,
+}
+
+pub fn first_contract_diagnostic_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !model::ContractSummary {
+    let placement = try first_dyn_parameter_violation(file, ast, root);
+    if placement.found {
+        return placement;
+    }
+    return try first_unsatisfied_contract_impl(allocator, file, ast, root);
+}
+
+// dyn_contract_name returns the contract a type spelling dispatches on: the name written
+// directly after the `dyn` layer keyword. A spelling with no dyn layer names nothing,
+// which is how a caller tells a dynamic parameter from an ordinary one.
+pub fn dyn_contract_name(spelling: []u8) -> []u8 {
+    let offset = dyn_layer_offset(spelling);
+    if offset < 0 {
+        return spelling[0..0];
+    }
+    var index = offset;
+    while index < std::mem::len(spelling) {
+        if type_ref_ast::is_type_identifier_start_byte(spelling[index]) {
+            return spelling[index..type_ref_ast::type_path_end_in_text(spelling, index)];
+        }
+        index = index + 1;
+    }
+    return spelling[0..0];
+}
+
+// last_type_segment drops the module qualification a canonical spelling carries, so a
+// report names the type the way the source wrote it.
+pub fn last_type_segment(name: []u8) -> []u8 {
+    var start = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            start = index + 2;
+        }
+        index = index + 1;
+    }
+    return name[start..std::mem::len(name)];
+}
+
+// mentions_dynamic_layer reports whether a type spelling dispatches dynamically anywhere
+// inside it. A dyn layer under a borrow, a slice, or a static argument still names an
+// object of unknown size, so every position rule about `dyn` asks this question and not
+// whether the whole spelling is a dyn layer.
+pub fn mentions_dynamic_layer(spelling: []u8) -> bool {
+    return dyn_layer_offset(spelling) >= 0;
+}
+
+// dyn_layer_offset returns the index just past the `dyn` layer keyword, or -1 when the
+// spelling carries no dyn layer.
+fn dyn_layer_offset(spelling: []u8) -> i64 {
+    var index = 0;
+    while index < std::mem::len(spelling) {
+        // One assignment advances the cursor. The MIR lowering recognises a
+        // branch-merge loop only when the exiting arm carries nothing but the
+        // bound assignment, so the two-armed form stops `selfhost stage selfhost`.
+        var next = index + 1;
+        if type_ref_ast::is_type_identifier_start_byte(spelling[index]) {
+            let end = type_ref_ast::type_path_end_in_text(spelling, index);
+            next = end;
+            if type_ref_ast::is_dynamic_type_keyword(spelling[index..end]) {
+                return end;
+            }
+        }
+        index = next;
+    }
+    return -1;
+}
+
+fn first_dyn_parameter_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !model::ContractSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_dyn_parameter_violation_in_range(
+            file, ast, program.declarations
+        );,
+        ImplDecl(impl_decl) => return first_dyn_parameter_violation_in_range(
+            file, ast, impl_decl.methods
+        );,
+        ContractDecl(contract_decl) => return first_dyn_parameter_violation_in_range(
+            file, ast, contract_decl.methods
+        );,
+        FnDecl(fn_decl) => return first_dyn_parameter_violation_in_range(
+            file, ast, fn_decl.params
+        );,
+        Param(param_node) => return dyn_parameter_violation(
+            file, ast, node_id, param_node.name, param_node.type_node
+        );,
+        _ => return no_contract_diagnostic();,
+    }
+}
+
+fn first_dyn_parameter_violation_in_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    children: std::kizu::ast::ChildRange
+) -> !model::ContractSummary {
+    var index = 0;
+    while index < children.len {
+        let child = try ast.child_at(children, index);
+        let found = try first_dyn_parameter_violation(file, ast, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_contract_diagnostic();
+}
+
+// dyn_parameter_violation applies the v0.1 dispatch restriction: dynamic dispatch happens
+// through an immutable borrow of the contract object, so `&dyn C` is the one placement a
+// parameter may spell.
+fn dyn_parameter_violation(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    param: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId
+) -> !model::ContractSummary {
+    let spelling = ast_text::ast_node_text(file, ast, type_node);
+    if !mentions_dynamic_layer(spelling) {
+        return no_contract_diagnostic();
+    }
+    let node = ast.get(param);
+    let start = node.span.start;
+    let end = node.span.end;
+    let parameter = ast_text::ast_node_text(file, ast, name);
+    let layer = try type_spelling::parse(spelling);
+    if layer.kind == type_spelling::layer_dynamic() {
+        return contract_summary(true, 3, start, end, parameter, "", "");
+    }
+    if layer.kind == type_spelling::layer_borrow() or
+        layer.kind == type_spelling::layer_borrow_var() {
+        let inner = try type_spelling::parse(try type_spelling::first_child(&layer, spelling));
+        if inner.kind == type_spelling::layer_dynamic() {
+            if layer.kind == type_spelling::layer_borrow_var() {
+                return contract_summary(true, 4, start, end, parameter, "", "");
+            }
+            return no_contract_diagnostic();
+        }
+    }
+    return contract_summary(true, 5, start, end, parameter, "", "");
+}
+
+// first_unsatisfied_contract_impl measures every `impl Contract for Type` in the file
+// against the contract's declared method set. A contract declared in another file of the
+// package is left alone here: this pass only sees one file's declarations, and the missing
+// method set is not knowable from a name alone.
+fn first_unsatisfied_contract_impl(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !model::ContractSummary {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return first_unsatisfied_impl_in_range(
+            allocator, file, ast, program.declarations
+        );,
+        _ => return no_contract_diagnostic();,
+    }
+}
+
+fn first_unsatisfied_impl_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !model::ContractSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try unsatisfied_impl_declaration(
+            allocator, file, ast, declarations, child
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_contract_diagnostic();
+}
+
+fn unsatisfied_impl_declaration(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId
+) -> !model::ContractSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        ImplDecl(impl_decl) => return unsatisfied_contract_impl(
+            allocator,
+            file,
+            ast,
+            declarations,
+            node_id,
+            impl_decl.contract_name,
+            impl_decl.type_name,
+            impl_decl.methods
+        );,
+        _ => return no_contract_diagnostic();,
+    }
+}
+
+fn unsatisfied_contract_impl(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId,
+    contract_name: std::kizu::ast::NodeId,
+    type_name: std::kizu::ast::NodeId,
+    methods: std::kizu::ast::ChildRange
+) -> !model::ContractSummary {
+    let contract_text = ast_text::ast_node_text(file, ast, contract_name);
+    if std::mem::len(contract_text) == 0 {
+        return no_contract_diagnostic();
+    }
+    let declared = try find_contract_declaration(file, ast, declarations, contract_text);
+    if !declared.found {
+        return no_contract_diagnostic();
+    }
+    let node = ast.get(node_id);
+    let type_text = ast_text::ast_node_text(file, ast, type_name);
+    var index = 0;
+    while index < declared.methods.len {
+        let required = try ast.child_at(declared.methods, index);
+        let required_name = ast_text::fn_decl_name_text(file, ast, required);
+        let provided = try find_named_method(file, ast, methods, required_name);
+        if !provided.found {
+            return contract_summary(
+                true,
+                1,
+                node.span.start,
+                node.span.end,
+                type_text,
+                contract_text,
+                required_name
+            );
+        }
+        let implemented = try ast.child_at(methods, provided.index);
+        if !(try method_signatures_match(allocator, file, ast, required, implemented, type_text)) {
+            return contract_summary(
+                true,
+                2,
+                node.span.start,
+                node.span.end,
+                type_text,
+                contract_text,
+                required_name
+            );
+        }
+        index = index + 1;
+    }
+    return no_contract_diagnostic();
+}
+
+// contract_method_lookup resolves a method name in the method set a contract declares.
+// A call through `dyn Contract` reaches exactly that set and nothing else, so the answer
+// here is what such a call is measured against.
+pub fn contract_method_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    contract_name: []u8,
+    method_name: []u8
+) -> !ContractMethodLookup {
+    let declared = try find_contract_declaration(file, ast, declarations, contract_name);
+    if !declared.found {
+        return ContractMethodLookup {
+            contract_found: false,
+            method_found: false,
+            params: empty_child_range()
+        };
+    }
+    let provided = try find_named_method(file, ast, declared.methods, method_name);
+    if !provided.found {
+        return ContractMethodLookup {
+            contract_found: true,
+            method_found: false,
+            params: empty_child_range()
+        };
+    }
+    let method = try ast.child_at(declared.methods, provided.index);
+    return ContractMethodLookup {
+        contract_found: true,
+        method_found: true,
+        params: method_params(ast, method)
+    };
+}
+
+fn method_params(
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> std::kizu::ast::ChildRange {
+    let node = ast.get(node_id);
+    return match node.data {
+        FnDecl(fn_decl) => fn_decl.params,
+        _ => empty_child_range(),
+    };
+}
+
+fn find_contract_declaration(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !ContractLookup {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let lookup = contract_declaration_lookup(file, ast, child, name);
+        if lookup.found {
+            return lookup;
+        }
+        index = index + 1;
+    }
+    return no_contract_lookup();
+}
+
+fn contract_declaration_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> ContractLookup {
+    let node = ast.get(node_id);
+    return match node.data {
+        ContractDecl(contract_decl) => named_contract_lookup(
+            file, ast, contract_decl.name, contract_decl.methods, name
+        ),
+        _ => no_contract_lookup(),
+    };
+}
+
+fn named_contract_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name_node: std::kizu::ast::NodeId,
+    methods: std::kizu::ast::ChildRange,
+    name: []u8
+) -> ContractLookup {
+    if std::mem::equal_bytes(ast_text::ast_node_text(file, ast, name_node), name) {
+        return ContractLookup { found: true, methods: methods };
+    }
+    return no_contract_lookup();
+}
+
+fn no_contract_lookup() -> ContractLookup {
+    return ContractLookup { found: false, methods: empty_child_range() };
+}
+
+fn find_named_method(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    methods: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !MethodLookup {
+    var index = 0;
+    while index < methods.len {
+        let child = try ast.child_at(methods, index);
+        if std::mem::equal_bytes(ast_text::fn_decl_name_text(file, ast, child), name) {
+            return MethodLookup { found: true, index: index };
+        }
+        index = index + 1;
+    }
+    return MethodLookup { found: false, index: 0 };
+}
+
+// method_signatures_match compares a contract signature with the implementation that
+// claims it, after resolving `Self` to the implementing type on both sides. That is the
+// only difference the two spellings are allowed to have.
+fn method_signatures_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    required: std::kizu::ast::NodeId,
+    provided: std::kizu::ast::NodeId,
+    receiver: []u8
+) -> !bool {
+    var want = std::string::String(allocator);
+    defer want.deinit();
+    var got = std::string::String(allocator);
+    defer got.deinit();
+    try append_method_signature(want, file, ast, required, receiver);
+    try append_method_signature(got, file, ast, provided, receiver);
+    return same_text(&want, &got);
+}
+
+fn same_text(left: &std::string::String, right: &std::string::String) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    var index = 0;
+    while index < left.len() {
+        if left_bytes[index] != right_bytes[index] {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn append_method_signature(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    receiver: []u8
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return append_signature_parts(
+            out, file, ast, fn_decl.params, fn_decl.return_type, receiver
+        );,
+        _ => return;,
+    }
+}
+
+fn append_signature_parts(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId,
+    receiver: []u8
+) -> !void {
+    try out.append_bytes("(");
+    var index = 0;
+    while index < params.len {
+        if index > 0 {
+            try out.append_bytes(",");
+        }
+        let param = try ast.child_at(params, index);
+        try append_param_type(out, file, ast, param, receiver);
+        index = index + 1;
+    }
+    try out.append_bytes(")->");
+    try append_receiver_substituted(
+        out, ast_text::ast_node_text(file, ast, return_type), receiver
+    );
+    return;
+}
+
+fn append_param_type(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    receiver: []u8
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return append_receiver_substituted(
+            out, ast_text::ast_node_text(file, ast, param_node.type_node), receiver
+        );,
+        _ => return;,
+    }
+}
+
+// append_receiver_substituted rewrites the language type name `Self` to the type the impl
+// is written for, which is what makes a contract signature comparable to its impl. The
+// impl target is the scope `Self` resolves in wherever it is written, so the rewrite is
+// the one self_type_scope owns.
+fn append_receiver_substituted(
+    out: &var std::string::String,
+    spelling: []u8,
+    receiver: []u8
+) -> !void {
+    return self_type_scope::append_resolved_type_text(out, spelling, receiver);
+}
+
+fn empty_child_range() -> std::kizu::ast::ChildRange {
+    return std::kizu::ast::ChildRange { start: 0, len: 0 };
+}
+
+fn no_contract_diagnostic() -> model::ContractSummary {
+    return contract_summary(false, 0, 0, 0, "", "", "");
+}
+
+fn contract_summary(
+    found: bool,
+    kind: i64,
+    start: i64,
+    end: i64,
+    subject: []u8,
+    contract_name: []u8,
+    method: []u8
+) -> model::ContractSummary {
+    return model::ContractSummary {
+        found: found,
+        kind: kind,
+        start: start,
+        end: end,
+        subject: subject,
+        contract_name: contract_name,
+        method: method
+    };
+}

@@ -1,0 +1,677 @@
+// mir_env is the state a MIR lowering carries while it walks a function body: which SSA value a
+// source name denotes in the block being lowered, and what a phi takes on each incoming edge.
+// It is a port of internal/ir/control.go -- the construction the Go backend already uses and the
+// differential harness already compares against -- and the operation names are kept so the two can
+// be read side by side: copy_env / merge_envs / add_phi here are copyEnv / mergeEnvs / addPhi there.
+// mir_env_loop.kizu carries the loop half (createLoopPhis / finishLoopPhis / finishLoopExitPhis).
+//
+// It answers the same questions the per-shape lowering in compiled_mir_lower.kizu answers once per
+// statement shape, in one place instead of sixty-five. The environment half is built there at every
+// point the alias map is written; the merge pair below is what the if-joins there ask; the loop half
+// in mir_env_loop.kizu is still reached only from mir_env_gate.kizu.
+//
+// WHERE KIZU FORCED A DIVERGENCE
+//
+// control.go keeps the environment as `map[string]Value`, copies it whenever control forks, and
+// stores a copy inside every loop edge. Kizu has no closures and no map keyed by anything but
+// []u8, and it has no `Array<Array<T>>` -- no selfhost source declares one -- so a per-env map
+// cannot be stored inside an edge row. Every table here is therefore a FLAT arena of parallel
+// arrays: one row per fact, with the owning id in the first column.
+//
+//   env id    -> its rows of binding_env      (control.go: one map[string]Value)
+//   phi id    -> its rows of incoming_phi     (control.go: one *Instr with an Incoming slice)
+//   loop id   -> its rows of edge_loop        (control.go: one *loopContext with two edge slices)
+//   group id  -> its rows of group_owner      (control.go: one map[string]*Instr)
+//
+// A lookup is then a linear scan. That is affordable because it is the cost the table this
+// replaces already pays: local_alias_index in compiled_mir_lower.kizu is the same scan over the
+// same population -- the live names of one function body -- and copy_local_aliases already copies
+// the whole of it at every fork.
+//
+// Every counter is the LENGTH of an array rather than an i64 field. These tables are reached
+// through a `&var EnvSpace`, and compiled_mir_types.kizu:195 records that a scalar field written
+// through a `&var` parameter does not reach the caller under the native backend, while the heap
+// behind an array field does. env_depth, phi_block, loop_label and group_header are each the
+// supply of their own ids, exactly as void_alias_slots is the supply of alias slots.
+//
+// A phi's result is NOT a minted string. control.go calls l.next(typ) and gets a name; the
+// equivalent here would have to own the bytes it invented, and the one owner this codebase has
+// for invented names -- compiled_mir::MirNameStore -- cannot itself be lowered by this compiler:
+// its constructor passes a call as an owned container's allocator and its deinit pops a String
+// with a non-fallible method let, and the lowering refuses both. So a phi's identity IS its id:
+// a ValueRef either carries a name the caller already owns or points at a phi, and the pair is
+// spelled only when something renders it. Nothing here allocates a name.
+//
+// Two more shapes this compiler refuses shaped the code below, both measured with the probe in
+// mir_env_gate.kizu: an element read is `try <array>.get(index)` and never `get_or_panic`
+// (builtin_contract.kizu declares no runtime method ABI for array-get-or-panic), and a scan that
+// wants the LAST match runs forward keeping the last hit rather than counting down, because an
+// induction variable may not be initialized from a call. A ValueRef parameter is a borrow because
+// a struct passed by value is moved, and a value moved on one arm of an `if` is unusable on the
+// other even though only one arm runs.
+//
+// One accident of the reference is not reproduced: control.go ranges over Go maps to place loop
+// and merge phis, so the ORDER of the phis it emits in a block is unspecified. Here the order is
+// the order the names were given, so a phi set is a value a gate can compare.
+
+// ValueRef is control.go's Value: the SSA value a name denotes, and its type. Exactly one of the
+// two identities is set -- `name` for a value the caller already has, `phi` for one this
+// construction opened.
+pub struct ValueRef {
+    pub name: []u8,
+    pub phi: i64,
+    pub value_type: []u8,
+}
+
+pub fn named_value(name: []u8, value_type: []u8) -> ValueRef {
+    return ValueRef { name: name, phi: -1, value_type: value_type };
+}
+
+pub struct EnvSpace {
+    // ---- bindings: one row per binding, appended in the order the lowering makes them ----
+    // The row that a name denotes is the LAST live matching row, so a declaration simply appends
+    // and shadows. binding_live goes to 0 when the scope that made the row is left.
+    pub binding_env: std::array::Array<i64>,
+    pub binding_name: std::array::Array<[]u8>,
+    pub binding_value: std::array::Array<[]u8>,
+    pub binding_phi: std::array::Array<i64>,
+    pub binding_type: std::array::Array<[]u8>,
+    pub binding_depth: std::array::Array<i64>,
+    pub binding_live: std::array::Array<i64>,
+
+    // ---- envs: one row per env, holding that env's current scope depth ----
+    // Its length is the next env id.
+    pub env_depth: std::array::Array<i64>,
+
+    // ---- phis: one row per phi ----
+    // Its length is the next phi id. phi_prefix plus that id is the phi's spelling.
+    pub phi_block: std::array::Array<[]u8>,
+    pub phi_prefix: std::array::Array<[]u8>,
+    pub phi_type: std::array::Array<[]u8>,
+
+    // ---- incomings: one row per (phi, predecessor) ----
+    pub incoming_phi: std::array::Array<i64>,
+    pub incoming_block: std::array::Array<[]u8>,
+    pub incoming_value: std::array::Array<[]u8>,
+    pub incoming_source: std::array::Array<i64>,
+
+    // ---- loops: one row per loop ever opened; its length is the next loop id ----
+    // A closed loop keeps its row: control.go pops the loop off l.loops but goes on reading
+    // loop.continueEdges through a pointer it still holds, and an id into a table that never
+    // shrinks is how a Kizu caller keeps the same handle. loop_open is the stack membership.
+    pub loop_label: std::array::Array<[]u8>,
+    pub loop_break_to: std::array::Array<[]u8>,
+    pub loop_continue_to: std::array::Array<[]u8>,
+    pub loop_open: std::array::Array<i64>,
+
+    // ---- loop edges: one row per break/continue, each carrying an env SNAPSHOT id ----
+    pub edge_loop: std::array::Array<i64>,
+    pub edge_break: std::array::Array<i64>,
+    pub edge_block: std::array::Array<[]u8>,
+    pub edge_env: std::array::Array<i64>,
+
+    // ---- header phi groups: one row per (group, name) ----
+    // group_header's length is the next group id, and the row records which block the group's
+    // phis were opened in.
+    pub group_header: std::array::Array<[]u8>,
+    pub group_owner: std::array::Array<i64>,
+    pub group_name: std::array::Array<[]u8>,
+    pub group_phi: std::array::Array<i64>,
+}
+
+pub fn env_space() -> EnvSpace {
+    // The allocator is bound to a name first: this compiler refuses an owned-container field
+    // whose allocator argument is a call ('owned-container struct field allocator must be a
+    // value name').
+    let allocator = std::mem::page_allocator();
+    return EnvSpace {
+        binding_env: std::array::Array<i64>(allocator),
+        binding_name: std::array::Array<[]u8>(allocator),
+        binding_value: std::array::Array<[]u8>(allocator),
+        binding_phi: std::array::Array<i64>(allocator),
+        binding_type: std::array::Array<[]u8>(allocator),
+        binding_depth: std::array::Array<i64>(allocator),
+        binding_live: std::array::Array<i64>(allocator),
+        env_depth: std::array::Array<i64>(allocator),
+        phi_block: std::array::Array<[]u8>(allocator),
+        phi_prefix: std::array::Array<[]u8>(allocator),
+        phi_type: std::array::Array<[]u8>(allocator),
+        incoming_phi: std::array::Array<i64>(allocator),
+        incoming_block: std::array::Array<[]u8>(allocator),
+        incoming_value: std::array::Array<[]u8>(allocator),
+        incoming_source: std::array::Array<i64>(allocator),
+        loop_label: std::array::Array<[]u8>(allocator),
+        loop_break_to: std::array::Array<[]u8>(allocator),
+        loop_continue_to: std::array::Array<[]u8>(allocator),
+        loop_open: std::array::Array<i64>(allocator),
+        edge_loop: std::array::Array<i64>(allocator),
+        edge_break: std::array::Array<i64>(allocator),
+        edge_block: std::array::Array<[]u8>(allocator),
+        edge_env: std::array::Array<i64>(allocator),
+        group_header: std::array::Array<[]u8>(allocator),
+        group_owner: std::array::Array<i64>(allocator),
+        group_name: std::array::Array<[]u8>(allocator),
+        group_phi: std::array::Array<i64>(allocator)
+    };
+}
+
+impl EnvSpace {
+    fn deinit(self: EnvSpace) -> void {
+        self.group_phi.deinit();
+        self.group_name.deinit();
+        self.group_owner.deinit();
+        self.group_header.deinit();
+        self.edge_env.deinit();
+        self.edge_block.deinit();
+        self.edge_break.deinit();
+        self.edge_loop.deinit();
+        self.loop_open.deinit();
+        self.loop_continue_to.deinit();
+        self.loop_break_to.deinit();
+        self.loop_label.deinit();
+        self.incoming_source.deinit();
+        self.incoming_value.deinit();
+        self.incoming_block.deinit();
+        self.incoming_phi.deinit();
+        self.phi_type.deinit();
+        self.phi_prefix.deinit();
+        self.phi_block.deinit();
+        self.env_depth.deinit();
+        self.binding_live.deinit();
+        self.binding_depth.deinit();
+        self.binding_type.deinit();
+        self.binding_phi.deinit();
+        self.binding_value.deinit();
+        self.binding_name.deinit();
+        self.binding_env.deinit();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the environment: which value a name denotes in the block being lowered
+// ---------------------------------------------------------------------------
+
+// new_env opens an empty environment. control.go: the map a function body starts with.
+pub fn new_env(space: &var EnvSpace) -> !i64 {
+    let env = space.env_depth.len();
+    try space.env_depth.append(0);
+    return env;
+}
+
+fn append_binding(
+    space: &var EnvSpace,
+    env: i64,
+    name: []u8,
+    value: &ValueRef,
+    depth: i64
+) -> !void {
+    try space.binding_env.append(env);
+    try space.binding_name.append(name);
+    try space.binding_value.append(value.name);
+    try space.binding_phi.append(value.phi);
+    try space.binding_type.append(value.value_type);
+    try space.binding_depth.append(depth);
+    try space.binding_live.append(1);
+    return;
+}
+
+fn binding_matches(space: &EnvSpace, index: i64, env: i64, name: []u8) -> !bool {
+    let row_env = try space.binding_env.get(index);
+    if row_env != env {
+        return false;
+    }
+    let live = try space.binding_live.get(index);
+    if live != 1 {
+        return false;
+    }
+    let row_name = try space.binding_name.get(index);
+    return std::mem::equal_bytes(row_name, name);
+}
+
+// live_binding answers control.go's `l.env[name]`: the row this name denotes, or -1.
+// Rows are appended in binding order and a declaration shadows by appending, so the LAST live
+// matching row is the one in scope -- the rule scoped_local_type_or_empty already scans by.
+//
+// It scans forward and keeps the last hit rather than scanning backward and stopping at the
+// first, because this compiler refuses an induction variable whose initializer is a call
+// ('induction variable must be initialized to an integer or a parameter'), which is what
+// `var index = <array>.len()` is. Same answer, one extra pass over rows already in cache.
+fn live_binding(space: &EnvSpace, env: i64, name: []u8) -> !i64 {
+    var found = -1;
+    var index = 0;
+    let rows = space.binding_env.len();
+    while index < rows {
+        let matched = try binding_matches(space, index, env, name);
+        if matched {
+            found = index;
+        }
+        index = index + 1;
+    }
+    return found;
+}
+
+fn binding_value_at(space: &EnvSpace, row: i64) -> !ValueRef {
+    let name = try space.binding_value.get(row);
+    let phi = try space.binding_phi.get(row);
+    let value_type = try space.binding_type.get(row);
+    return ValueRef { name: name, phi: phi, value_type: value_type };
+}
+
+pub fn has_name(space: &EnvSpace, env: i64, name: []u8) -> !bool {
+    let row = try live_binding(space, env, name);
+    return row >= 0;
+}
+
+pub fn value_of(space: &EnvSpace, env: i64, name: []u8) -> !ValueRef {
+    let row = try live_binding(space, env, name);
+    if row < 0 {
+        return error("mir env: name is not bound in this environment");
+    }
+    return binding_value_at(space, row);
+}
+
+// assign is `l.env[name] = value`: the name goes on denoting the same variable, now held by a
+// different SSA value. A name not yet bound is bound at the current depth, as assigning to a
+// fresh key in a Go map is.
+//
+// Binding an unbound name at depth ZERO instead was tried, to keep an assignment an arm makes to a
+// variable this environment does not hold alive past the arm's leave_scope. It is the wrong repair
+// and it is not needed: an environment that does not hold the variable cannot merge for it either
+// -- merge_envs walks the right environment's rows, so a row only one side has is carried out with
+// no phi -- and the caller that opens such an environment now puts the outer names in it
+// (seed_env_with_outer_names in compiled_mir_lower.kizu). Measured: with the seeding in place,
+// depth-zero and current-depth produce the same staged module, byte for byte.
+pub fn assign(space: &var EnvSpace, env: i64, name: []u8, value: &ValueRef) -> !void {
+    let row = try live_binding(space, env, name);
+    if row < 0 {
+        let depth = try space.env_depth.get(env);
+        try append_binding(space, env, name, value, depth);
+        return;
+    }
+    try space.binding_value.set(row, value.name);
+    try space.binding_phi.set(row, value.phi);
+    try space.binding_type.set(row, value.value_type);
+    return;
+}
+
+// declare binds a NEW variable that happens to reuse a spelling. It always appends, so the
+// enclosing binding is untouched and comes back when the scope is left. This is the operation
+// control.go does not have -- it deletes a `for` variable by hand in restoreLoopVar and leaves
+// every other declaration to leak -- and the one that LocalAliasState pays for with
+// shadowed_outer_name plus shadowed_outer_block: an arm's own `end` is not the enclosing `end`.
+pub fn declare(space: &var EnvSpace, env: i64, name: []u8, value: &ValueRef) -> !void {
+    let depth = try space.env_depth.get(env);
+    try append_binding(space, env, name, value, depth);
+    return;
+}
+
+pub fn enter_scope(space: &var EnvSpace, env: i64) -> !void {
+    let depth = try space.env_depth.get(env);
+    try space.env_depth.set(env, depth + 1);
+    return;
+}
+
+fn binding_at_or_below(space: &EnvSpace, index: i64, env: i64, depth: i64) -> !bool {
+    let row_env = try space.binding_env.get(index);
+    if row_env != env {
+        return false;
+    }
+    let row_depth = try space.binding_depth.get(index);
+    return row_depth >= depth;
+}
+
+// leave_scope ends every declaration the scope made. An ASSIGNMENT the scope made to an
+// enclosing variable survives, because it rewrote that variable's own row rather than adding one.
+pub fn leave_scope(space: &var EnvSpace, env: i64) -> !void {
+    let depth = try space.env_depth.get(env);
+    if depth <= 0 {
+        return error("mir env: leaving a scope that was never entered");
+    }
+    var index = 0;
+    let rows = space.binding_env.len();
+    while index < rows {
+        let ends_here = try binding_at_or_below(space, index, env, depth);
+        if ends_here {
+            try space.binding_live.set(index, 0);
+        }
+        index = index + 1;
+    }
+    try space.env_depth.set(env, depth - 1);
+    return;
+}
+
+// copy_env is control.go's copyEnv: the snapshot a branch arm is lowered against and the one a
+// break or continue edge carries. Only live rows travel, so a scope already left cannot reappear.
+pub fn copy_env(space: &var EnvSpace, env: i64) -> !i64 {
+    let rows = space.binding_env.len();
+    let source_depth = try space.env_depth.get(env);
+    let copy = try new_env(space);
+    try space.env_depth.set(copy, source_depth);
+    var index = 0;
+    while index < rows {
+        // Every column is read out before the call: the call borrows space mutably, so reading a
+        // field of it in the same argument list is a borrow error.
+        let row_env = try space.binding_env.get(index);
+        let live = try space.binding_live.get(index);
+        if row_env == env {
+            if live == 1 {
+                let name = try space.binding_name.get(index);
+                let value = try binding_value_at(space, index);
+                let depth = try space.binding_depth.get(index);
+                try append_binding(space, copy, name, &value, depth);
+            }
+        }
+        index = index + 1;
+    }
+    return copy;
+}
+
+// ---------------------------------------------------------------------------
+// phis: what a name takes on each incoming edge
+// ---------------------------------------------------------------------------
+
+// add_phi is control.go's addPhi: it appends a phi to a block. The prefix plus the phi's own id
+// is its spelling, and the id is unique per space, so two phis can never take one name however
+// many entry points a body is lowered from -- the failure void_then_alias_name was written to fix.
+pub fn add_phi(
+    space: &var EnvSpace,
+    block: []u8,
+    value_type: []u8,
+    prefix: []u8
+) -> !i64 {
+    let phi = space.phi_block.len();
+    try space.phi_block.append(block);
+    try space.phi_prefix.append(prefix);
+    try space.phi_type.append(value_type);
+    return phi;
+}
+
+pub fn add_incoming(
+    space: &var EnvSpace,
+    phi: i64,
+    block: []u8,
+    value: &ValueRef
+) -> !void {
+    if phi < 0 {
+        return error("mir env: incoming for an unknown phi");
+    }
+    if phi >= space.phi_block.len() {
+        return error("mir env: incoming for an unknown phi");
+    }
+    try space.incoming_phi.append(phi);
+    try space.incoming_block.append(block);
+    try space.incoming_value.append(value.name);
+    try space.incoming_source.append(value.phi);
+    return;
+}
+
+pub fn phi_count(space: &EnvSpace) -> i64 {
+    return space.phi_block.len();
+}
+
+// phi_value is what a name denotes once a phi carries it.
+pub fn phi_value(space: &EnvSpace, phi: i64) -> !ValueRef {
+    let value_type = try space.phi_type.get(phi);
+    return ValueRef { name: "", phi: phi, value_type: value_type };
+}
+
+// same_value is control.go's sameValue: two references to the same SSA value need no phi.
+pub fn same_value(left: &ValueRef, right: &ValueRef) -> bool {
+    if left.phi != right.phi {
+        return false;
+    }
+    if !std::mem::equal_bytes(left.name, right.name) {
+        return false;
+    }
+    return std::mem::equal_bytes(left.value_type, right.value_type);
+}
+
+fn topmost_live(space: &EnvSpace, index: i64, env: i64) -> !bool {
+    let row_env = try space.binding_env.get(index);
+    if row_env != env {
+        return false;
+    }
+    let live = try space.binding_live.get(index);
+    if live != 1 {
+        return false;
+    }
+    let name = try space.binding_name.get(index);
+    let row = try live_binding(space, env, name);
+    return row == index;
+}
+
+// merge_envs is control.go's mergeEnvs: the join of two arms, emitting a phi only where the two
+// disagree. A name only the right arm binds is carried over as the right arm's value, as the
+// reference does; with scopes that can only be a declaration the arm left standing on purpose.
+pub fn merge_envs(
+    space: &var EnvSpace,
+    block: []u8,
+    left_env: i64,
+    left_block: []u8,
+    right_env: i64,
+    right_block: []u8
+) -> !i64 {
+    let rows = space.binding_env.len();
+    let merged = try copy_env(space, left_env);
+    var index = 0;
+    while index < rows {
+        let carried = try topmost_live(space, index, right_env);
+        if carried {
+            let name = try space.binding_name.get(index);
+            let right_value = try binding_value_at(space, index);
+            let left_row = try live_binding(space, left_env, name);
+            if left_row < 0 {
+                try assign(space, merged, name, &right_value);
+            } else {
+                let left_value = try binding_value_at(space, left_row);
+                if !same_value(&left_value, &right_value) {
+                    let phi = try add_phi(space, block, left_value.value_type, "join");
+                    try add_incoming(space, phi, left_block, &left_value);
+                    try add_incoming(space, phi, right_block, &right_value);
+                    let joined = try phi_value(space, phi);
+                    try assign(space, merged, name, &joined);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return merged;
+}
+
+// merge_branches is the whole of control.go's lowerIfStmt join: an arm that jumped away -- a
+// break, a continue, a return -- contributes no edge to the merge block, so the merge is the
+// other arm's environment unchanged and no phi is emitted. -1 says the merge block is
+// unreachable, which is control.go's `default:` case setting Terminator{Op: "unreachable"}.
+pub fn merge_branches(
+    space: &var EnvSpace,
+    block: []u8,
+    then_env: i64,
+    then_block: []u8,
+    then_reachable: bool,
+    else_env: i64,
+    else_block: []u8,
+    else_reachable: bool
+) -> !i64 {
+    if then_reachable {
+        if else_reachable {
+            return merge_envs(space, block, then_env, then_block, else_env, else_block);
+        }
+        return then_env;
+    }
+    if else_reachable {
+        return else_env;
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
+// reading a merge back out
+// ---------------------------------------------------------------------------
+//
+// merge_envs answers a caller's question by leaving an environment behind, and the caller has to
+// walk it. Kizu has no closures, so the walk cannot be handed in as a callback and the iteration
+// lives at the caller: binding_row_count bounds it, binding_row_is_current filters it, and the two
+// accessors read the row. The row INDEX is the cursor rather than a per-env position because the
+// arena is flat -- one array for every environment -- so an environment's rows are a subsequence of
+// it and not a contiguous run.
+//
+// Walking forward visits an environment's names in the order they were bound, which is the order
+// merge_envs opens phis in, so a caller that emits one thing per row emits them in phi order.
+
+pub fn binding_row_count(space: &EnvSpace) -> i64 {
+    return space.binding_env.len();
+}
+
+// binding_row_is_current reports whether this row is what env denotes for its name right now: owned
+// by env, live, and the last such row. It is the same test merge_envs selects the right arm's rows
+// with, so the two walks visit the same rows in the same order.
+pub fn binding_row_is_current(space: &EnvSpace, index: i64, env: i64) -> !bool {
+    return try topmost_live(space, index, env);
+}
+
+pub fn binding_row_name(space: &EnvSpace, index: i64) -> ![]u8 {
+    return try space.binding_name.get(index);
+}
+
+pub fn binding_row_value(space: &EnvSpace, index: i64) -> !ValueRef {
+    return try binding_value_at(space, index);
+}
+
+// phi_incoming_count is how many edges this phi has been given. A caller that renders a phi into a
+// payload with a FIXED number of operand slots -- compiled_mir::MirCarriedScalar holds one
+// latch_var and one exit_var -- has to know the construction agreed on that number rather than
+// assume it, because an operand the payload cannot carry is one the module silently loses.
+pub fn phi_incoming_count(space: &EnvSpace, phi: i64) -> !i64 {
+    var found = 0;
+    var index = 0;
+    let rows = space.incoming_phi.len();
+    while index < rows {
+        let owner = try space.incoming_phi.get(index);
+        if owner == phi {
+            found = found + 1;
+        }
+        index = index + 1;
+    }
+    return found;
+}
+
+// phi_incoming_at reads back the position-th edge add_incoming recorded for this phi, in the order
+// it was recorded: merge_envs adds the LEFT environment's edge first and the right one's second.
+// Asking for an edge the phi does not have is an error rather than an empty value, so a caller that
+// expects two and finds one stops instead of merging from a name nothing defines.
+pub fn phi_incoming_at(space: &EnvSpace, phi: i64, position: i64) -> !ValueRef {
+    var seen = 0;
+    var index = 0;
+    let rows = space.incoming_phi.len();
+    while index < rows {
+        let owner = try space.incoming_phi.get(index);
+        if owner == phi {
+            if seen == position {
+                let name = try space.incoming_value.get(index);
+                let source = try space.incoming_source.get(index);
+                let value_type = try space.phi_type.get(phi);
+                return ValueRef { name: name, phi: source, value_type: value_type };
+            }
+            seen = seen + 1;
+        }
+        index = index + 1;
+    }
+    return error("mir env: phi has no incoming at this position");
+}
+
+// phi_incoming_block_at reads the block the position-th edge arrives from, indexed exactly as
+// phi_incoming_at indexes the value. A phi operand is a pair and a caller that renders one needs
+// both halves; they are read separately because Kizu returns one value and ValueRef is the
+// construction's own type, which has no room for a block it does not otherwise care about.
+pub fn phi_incoming_block_at(space: &EnvSpace, phi: i64, position: i64) -> ![]u8 {
+    var seen = 0;
+    var index = 0;
+    let rows = space.incoming_phi.len();
+    while index < rows {
+        let owner = try space.incoming_phi.get(index);
+        if owner == phi {
+            if seen == position {
+                return space.incoming_block.get(index);
+            }
+            seen = seen + 1;
+        }
+        index = index + 1;
+    }
+    return error("mir env: phi has no incoming at this position");
+}
+
+// ---------------------------------------------------------------------------
+// rendering: the only place a phi is spelled
+// ---------------------------------------------------------------------------
+
+// append_phi_name writes a phi's spelling: its prefix and its own id.
+pub fn append_phi_name(
+    space: &EnvSpace,
+    out: &var std::string::String,
+    phi: i64
+) -> !void {
+    let prefix = try space.phi_prefix.get(phi);
+    try out.append_bytes(prefix);
+    try out.append_byte(cast<u8>(46));
+    try std::fmt::append_i64(out, phi);
+    return;
+}
+
+// append_value writes what a value is called: a phi by its spelling, anything else by the name
+// the caller already had for it.
+pub fn append_value(
+    space: &EnvSpace,
+    out: &var std::string::String,
+    value: &ValueRef
+) -> !void {
+    if value.phi >= 0 {
+        try append_phi_name(space, out, value.phi);
+        return;
+    }
+    try out.append_bytes(value.name);
+    return;
+}
+
+// render_phis writes the phi set as one line per phi, in creation order:
+//   <block> <result> <type> <- <value>@<block> <value>@<block>
+// It is what a gate compares. Nothing in the lowering renders through it.
+pub fn render_phis(space: &EnvSpace, out: &var std::string::String) -> !void {
+    let blank = cast<u8>(32);
+    let at = cast<u8>(64);
+    let newline = cast<u8>(10);
+    var phi = 0;
+    let phis = space.phi_block.len();
+    while phi < phis {
+        if phi > 0 {
+            try out.append_byte(newline);
+        }
+        let block = try space.phi_block.get(phi);
+        let value_type = try space.phi_type.get(phi);
+        try out.append_bytes(block);
+        try out.append_byte(blank);
+        try append_phi_name(space, out, phi);
+        try out.append_byte(blank);
+        try out.append_bytes(value_type);
+        try out.append_bytes(" <-");
+        var index = 0;
+        let incomings = space.incoming_phi.len();
+        while index < incomings {
+            let owner = try space.incoming_phi.get(index);
+            if owner == phi {
+                let incoming_name = try space.incoming_value.get(index);
+                let incoming_source = try space.incoming_source.get(index);
+                let incoming_block = try space.incoming_block.get(index);
+                let incoming = ValueRef {
+                    name: incoming_name, phi: incoming_source, value_type: ""
+                };
+                try out.append_byte(blank);
+                try append_value(space, out, &incoming);
+                try out.append_byte(at);
+                try out.append_bytes(incoming_block);
+            }
+            index = index + 1;
+        }
+        phi = phi + 1;
+    }
+    return;
+}

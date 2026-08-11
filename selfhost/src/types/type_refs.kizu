@@ -1,50 +1,76 @@
+import selfhost::ir::intrinsic_type_contract;
 import selfhost::source;
 import selfhost::types::model;
 
+// seed_builtin_types installs the builtin type namespace. The intrinsic identities come
+// from selfhost::ir::intrinsic_type_contract, the registry the package TypeStore and the
+// ABI fact emitters already share, so the frontend cannot accept a narrower set of
+// builtin type constructors than the rest of the compiler models. Entries are keyed by the
+// canonical ABI identity the registry enumerates; which of an identity's source spellings a
+// type position may actually write is a separate question, and type_ref_names answers it
+// from the spelling as written. What remains below is the std nominal
+// declarations, which are ordinary struct and enum declarations the frontend has not yet
+// collected from their own sources; those entries go away once it does.
 pub fn seed_builtin_types(
     kinds: &var std::map::Map<[]u8, model::TypeKind>,
     arities: &var std::map::Map<[]u8, i64>,
     copyable: &var std::map::Map<[]u8, bool>
 ) -> !void {
-    try kinds.insert("void", model::TypeKind::Primitive);
-    try arities.insert("void", 0);
-    try copyable.insert("void", true);
-    try kinds.insert("bool", model::TypeKind::Primitive);
-    try arities.insert("bool", 0);
-    try copyable.insert("bool", true);
-    try kinds.insert("i64", model::TypeKind::Primitive);
-    try arities.insert("i64", 0);
-    try copyable.insert("i64", true);
-    try kinds.insert("u8", model::TypeKind::Primitive);
-    try arities.insert("u8", 0);
-    try copyable.insert("u8", true);
-    try kinds.insert("Allocator", model::TypeKind::Primitive);
-    try arities.insert("Allocator", 0);
-    try copyable.insert("Allocator", true);
-    try kinds.insert("Io", model::TypeKind::Primitive);
-    try arities.insert("Io", 0);
-    try copyable.insert("Io", true);
-    try kinds.insert("Function", model::TypeKind::Primitive);
-    try arities.insert("Function", 0);
-    try copyable.insert("Function", true);
-    try kinds.insert("std::arena::Arena", model::TypeKind::Container);
-    try arities.insert("std::arena::Arena", 1);
-    try copyable.insert("std::arena::Arena", false);
-    try kinds.insert("std::arena::Handle", model::TypeKind::Container);
-    try arities.insert("std::arena::Handle", 1);
-    try copyable.insert("std::arena::Handle", true);
-    try kinds.insert("std::atomic::Atomic", model::TypeKind::Container);
-    try arities.insert("std::atomic::Atomic", 1);
-    try copyable.insert("std::atomic::Atomic", false);
-    try kinds.insert("std::array::Array", model::TypeKind::Container);
-    try arities.insert("std::array::Array", 1);
-    try copyable.insert("std::array::Array", false);
-    try kinds.insert("std::map::Map", model::TypeKind::Container);
-    try arities.insert("std::map::Map", 2);
-    try copyable.insert("std::map::Map", false);
-    try kinds.insert("std::mem::Box", model::TypeKind::Container);
-    try arities.insert("std::mem::Box", 1);
-    try copyable.insert("std::mem::Box", false);
+    try seed_intrinsic_types(kinds, arities, copyable);
+    try seed_std_nominal_types(kinds, arities, copyable);
+    return;
+}
+
+fn seed_intrinsic_types(
+    kinds: &var std::map::Map<[]u8, model::TypeKind>,
+    arities: &var std::map::Map<[]u8, i64>,
+    copyable: &var std::map::Map<[]u8, bool>
+) -> !void {
+    var index = 0;
+    while index < intrinsic_type_contract::source_named_kind_count() {
+        let kind = try intrinsic_type_contract::source_named_kind_at(index);
+        let name = try intrinsic_type_contract::canonical_name(kind);
+        let type_arity = intrinsic_type_contract::arity(kind);
+        // An intrinsic that takes type arguments constructs a value over storage it
+        // owns; one that takes none is a scalar identity duplicated by value.
+        if type_arity == 0 {
+            try kinds.insert(name, model::TypeKind::Primitive);
+        } else {
+            try kinds.insert(name, model::TypeKind::Container);
+        }
+        try arities.insert(name, type_arity);
+        try copyable.insert(name, intrinsic_is_duplicated_by_value(kind));
+        index = index + 1;
+    }
+    return;
+}
+
+// intrinsic_is_duplicated_by_value classifies an intrinsic identity for the rules that ask
+// whether a value can be stored by copying it. Taking a type argument means the intrinsic
+// constructs a value over storage it owns, so it is moved rather than copied. Among the
+// identities that take none, the concurrency resources -- a task group, a work queue, a
+// partition, a local buffer -- are still storage exactly one scope releases, and
+// `Function` and `type` are compile-time tokens no runtime value duplicates. Everything
+// else an arity-0 intrinsic names is a scalar identity duplicated by value.
+fn intrinsic_is_duplicated_by_value(kind: i64) -> bool {
+    if intrinsic_type_contract::arity(kind) > 0 {
+        return false;
+    }
+    if kind == intrinsic_type_contract::kind_task_group() or
+        kind == intrinsic_type_contract::kind_queue() or
+        kind == intrinsic_type_contract::kind_partition() or
+        kind == intrinsic_type_contract::kind_local_buffer() {
+        return false;
+    }
+    return kind != intrinsic_type_contract::kind_function() and
+        kind != intrinsic_type_contract::kind_meta_type();
+}
+
+fn seed_std_nominal_types(
+    kinds: &var std::map::Map<[]u8, model::TypeKind>,
+    arities: &var std::map::Map<[]u8, i64>,
+    copyable: &var std::map::Map<[]u8, bool>
+) -> !void {
     try kinds.insert("std::string::String", model::TypeKind::Struct);
     try arities.insert("std::string::String", 0);
     try copyable.insert("std::string::String", false);
@@ -135,6 +161,18 @@ pub fn collect_declared_types_from_ast(
             union_decl.name,
             model::TypeKind::Union,
             union_decl.type_params.len,
+            false,
+            kinds,
+            arities,
+            copyable
+        );,
+        ContractDecl(contract_decl) => return collect_declared_type_from_ast(
+            allocator,
+            file,
+            ast,
+            contract_decl.name,
+            model::TypeKind::Contract,
+            0,
             false,
             kinds,
             arities,
@@ -233,6 +271,14 @@ pub fn collect_type_parameters_from_ast(
             file,
             ast,
             impl_decl.methods,
+            kinds,
+            arities,
+            copyable
+        );,
+        ContractDecl(contract_decl) => return collect_type_parameters_in_range(
+            file,
+            ast,
+            contract_decl.methods,
             kinds,
             arities,
             copyable

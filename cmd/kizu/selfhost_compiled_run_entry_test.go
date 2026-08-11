@@ -8,6 +8,12 @@ import (
 	"testing"
 )
 
+// TestSelfhostCompiledRunEntryOwnsFactDrivenWrapper pins where the program entry
+// wrapper gets its knowledge from. The emitter may build the wrapper, but every
+// name and offset in it has to come from a contract module: the entry symbols
+// from program_entry_contract, the error field indexes from compiled_error_abi,
+// the slice field indexes from fixed_abi_contract. Spelling any of those in the
+// emitter would give the ABI a second, silently diverging definition.
 func TestSelfhostCompiledRunEntryOwnsFactDrivenWrapper(t *testing.T) {
 	emitter := readSelfhostFile(
 		t, "../../selfhost/src/backend/compiled_run_entry_llvm.kizu",
@@ -24,7 +30,28 @@ func TestSelfhostCompiledRunEntryOwnsFactDrivenWrapper(t *testing.T) {
 	hosted := readSelfhostFile(t, "../../selfhost/runtime/selfhost.hosted.c")
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 
-	body := selfhostKizuFunctionBody(t, emitter, "pub fn append_run_entry(")
+	assertRunEntryOwnerBody(
+		t, selfhostKizuFunctionBody(t, emitter, "pub fn append_run_entry("),
+	)
+	assertRunEntryLayoutOwners(t, emitter, contract, errorABI, fixedABI)
+
+	if count := strings.Count(
+		hosted, "void kizu_main_error_message(",
+	); count != 1 {
+		t.Fatalf("hosted main error boundary definition count = %d, want 1", count)
+	}
+	if strings.Contains(cli, "compiled_run_entry_llvm") {
+		t.Fatal("CLI switched to compiled run entry before the dedicated integration slice")
+	}
+}
+
+// assertRunEntryOwnerBody reads append_run_entry itself: it must validate the
+// program-entry facts and resolve the signature through the indexed resolver,
+// and it must not name an entry symbol or rebuild the IR index locally. The
+// forbidden list is quoted spellings, so a call that fetches the same symbol
+// from the contract still passes.
+func assertRunEntryOwnerBody(t *testing.T, body string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"exact_program_entry(index, facts)",
 		"require_definition_owner(index, facts, &program)",
@@ -48,9 +75,19 @@ func TestSelfhostCompiledRunEntryOwnsFactDrivenWrapper(t *testing.T) {
 		"ir_index::build(",
 	} {
 		if strings.Contains(body, forbidden) {
-			t.Errorf("compiled run entry owner contains forbidden source or ABI hardcode %q", forbidden)
+			t.Errorf(
+				"compiled run entry owner contains forbidden source or ABI hardcode %q",
+				forbidden,
+			)
 		}
 	}
+}
+
+// assertRunEntryLayoutOwners checks both ends of the contract borrow: the
+// emitter asks for each layout index by accessor, and the modules it asks are
+// the ones that still define them.
+func assertRunEntryLayoutOwners(t *testing.T, emitter, contract, errorABI, fixedABI string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"compiled_error_abi::success_flag_field_index()",
 		"compiled_error_abi::message_field_index(success_abi)",
@@ -88,24 +125,26 @@ func TestSelfhostCompiledRunEntryOwnsFactDrivenWrapper(t *testing.T) {
 			t.Errorf("fixed ABI contract missing slice layout owner %q", fragment)
 		}
 	}
-	if count := strings.Count(
-		hosted, "void kizu_main_error_message(",
-	); count != 1 {
-		t.Fatalf("hosted main error boundary definition count = %d, want 1", count)
-	}
-	if strings.Contains(cli, "compiled_run_entry_llvm") {
-		t.Fatal("CLI switched to compiled run entry before the dedicated integration slice")
-	}
 }
 
-func TestSelfhostCompiledRunEntryLLVMShapes(t *testing.T) {
-	cases := []struct {
-		name        string
-		entry       string
-		declaration string
-		types       string
-		want        []string
-	}{
+// compiledRunEntryShapeCase is one program-entry return shape: the gate that
+// emits the wrapper, the surrounding declarations that make the emitted module
+// verifiable on its own, and the fragments the wrapper must contain.
+type compiledRunEntryShapeCase struct {
+	name        string
+	entry       string
+	declaration string
+	types       string
+	want        []string
+}
+
+// compiledRunEntryShapeCases enumerates the four return shapes the wrapper has
+// to distinguish: plain and error-carrying, each with and without a payload.
+// The payload is what moves the message field, so error_void reads field 1 and
+// error_i64 reads field 2 -- and only the error shapes report a failing exit
+// code.
+func compiledRunEntryShapeCases() []compiledRunEntryShapeCase {
+	return []compiledRunEntryShapeCase{
 		{
 			name:        "void",
 			entry:       "void_gate",
@@ -125,9 +164,10 @@ func TestSelfhostCompiledRunEntryLLVMShapes(t *testing.T) {
 			},
 		},
 		{
-			name:        "error_void",
-			entry:       "error_void_gate",
-			types:       "%kizu.slice.u8 = type { ptr, i64 }\n%kizu.error.void = type { i1, %kizu.slice.u8 }\n",
+			name:  "error_void",
+			entry: "error_void_gate",
+			types: "%kizu.slice.u8 = type { ptr, i64 }\n" +
+				"%kizu.error.void = type { i1, %kizu.slice.u8 }\n",
 			declaration: "declare %kizu.error.void @kizu_app__entry_start()\n",
 			want: []string{
 				"extractvalue %kizu.error.void %program_result, 1",
@@ -136,9 +176,10 @@ func TestSelfhostCompiledRunEntryLLVMShapes(t *testing.T) {
 			},
 		},
 		{
-			name:        "error_i64",
-			entry:       "error_i64_gate",
-			types:       "%kizu.slice.u8 = type { ptr, i64 }\n%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }\n",
+			name:  "error_i64",
+			entry: "error_i64_gate",
+			types: "%kizu.slice.u8 = type { ptr, i64 }\n" +
+				"%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }\n",
 			declaration: "declare %kizu.error.i64 @kizu_app__entry_start()\n",
 			want: []string{
 				"extractvalue %kizu.error.i64 %program_result, 2",
@@ -147,7 +188,15 @@ func TestSelfhostCompiledRunEntryLLVMShapes(t *testing.T) {
 			},
 		},
 	}
-	for _, tc := range cases {
+}
+
+// TestSelfhostCompiledRunEntryLLVMShapes runs each return shape through the
+// emitter and then hands the module to clang, so the assertions cover both the
+// fragments we care about and the fact that the surrounding IR is well formed --
+// a wrapper that extracts the right field but builds an ill-typed module would
+// pass the string checks alone.
+func TestSelfhostCompiledRunEntryLLVMShapes(t *testing.T) {
+	for _, tc := range compiledRunEntryShapeCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := runSelfhostAbiParamsGate(
 				t,
@@ -180,6 +229,11 @@ func TestSelfhostCompiledRunEntryLLVMShapes(t *testing.T) {
 	}
 }
 
+// TestSelfhostCompiledRunEntryRejectsInvalidFacts covers the fact tapes that
+// must not produce a wrapper at all. Each case asserts its own message: the
+// emitter has several ways to fail on a bad tape, and a duplicate entry that got
+// rejected for, say, a missing signature would mean the uniqueness rule quietly
+// stopped running.
 func TestSelfhostCompiledRunEntryRejectsInvalidFacts(t *testing.T) {
 	cases := []struct {
 		entry string
@@ -205,6 +259,10 @@ func TestSelfhostCompiledRunEntryRejectsInvalidFacts(t *testing.T) {
 	}
 }
 
+// verifyCompiledRunEntryLLVM compiles the module to an object file, which is the
+// cheapest way to run the LLVM verifier over emitted text. It skips rather than
+// fails without clang so the shape assertions still run on machines that have no
+// toolchain.
 func verifyCompiledRunEntryLLVM(t *testing.T, llvm string) {
 	t.Helper()
 	clang, err := exec.LookPath("clang")

@@ -71,6 +71,10 @@ entry:
 	}
 }
 
+// TestOptimizeKeepsStructFieldAndCleanupOperandsLive pins struct field values and
+// cleanup arguments as real uses: copy propagation has to rewrite them through the
+// `id` copy, and DCE must keep a producer whose only readers sit in those two
+// positions. Missing either one drops the allocation a struct still owns.
 func TestOptimizeKeepsStructFieldAndCleanupOperandsLive(t *testing.T) {
 	module := &Module{Functions: []*Function{{Name: "main", Return: "Holder"}}}
 	fn := module.Functions[0]

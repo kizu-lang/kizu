@@ -1,0 +1,481 @@
+import selfhost::source;
+import selfhost::types::ast_text;
+import selfhost::types::model;
+import selfhost::types::type_ref_ast;
+
+// visibility owns the public API boundary. A declaration marked `pub` is readable from
+// outside the module, so every type its signature names has to be readable from there
+// too: a public signature that mentions a private declaration hands out a name the reader
+// cannot spell (internal/types/checker.go:1421). Only the declarations a module publishes
+// carry the rule -- a private function may name whatever it likes -- and the rule is
+// decided from declarations alone, before any body is read.
+
+struct DeclaredTypeLookup {
+    found: bool,
+    public: bool,
+}
+
+// no_declared_type_lookup is the answer for a name this file declares nothing for. It is
+// a call rather than a struct literal at each use: an enum-dispatch arm is rendered from
+// an enumerated set of return shapes, and a struct-literal return is not one of them.
+fn no_declared_type_lookup() -> DeclaredTypeLookup {
+    return DeclaredTypeLookup { found: false, public: false };
+}
+
+fn found_declared_type_lookup(public: bool) -> DeclaredTypeLookup {
+    return DeclaredTypeLookup { found: true, public: public };
+}
+
+pub fn first_visibility_diagnostic_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return first_exposure_in_declarations(
+            file, ast, program.declarations
+        );,
+        _ => return no_visibility_diagnostic();,
+    }
+    return no_visibility_diagnostic();
+}
+
+fn first_exposure_in_declarations(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !model::VisibilitySummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_exposure_in_declaration(file, ast, declarations, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_visibility_diagnostic();
+}
+
+fn first_exposure_in_declaration(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return first_exposure_in_signature(
+            file,
+            ast,
+            declarations,
+            fn_decl.public,
+            ast_text::ast_node_text(file, ast, fn_decl.name),
+            fn_decl.params,
+            fn_decl.return_type
+        );,
+        StructDecl(struct_decl) => return first_exposure_in_fields(
+            file,
+            ast,
+            declarations,
+            ast_text::ast_node_text(file, ast, struct_decl.name),
+            struct_decl.fields
+        );,
+        UnionDecl(union_decl) => return first_exposure_in_variants(
+            file,
+            ast,
+            declarations,
+            union_decl.public,
+            ast_text::ast_node_text(file, ast, union_decl.name),
+            union_decl.variants
+        );,
+        ContractDecl(contract_decl) => return first_exposure_in_contract_methods(
+            file, ast, declarations, contract_decl.public, contract_decl.methods
+        );,
+        _ => return no_visibility_diagnostic();,
+    }
+    return no_visibility_diagnostic();
+}
+
+// first_exposure_in_signature reads one function's public boundary: the parameters first,
+// in the order they are written, then the return type.
+fn first_exposure_in_signature(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    public: bool,
+    name: []u8,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    if !public {
+        return no_visibility_diagnostic();
+    }
+    var index = 0;
+    while index < params.len {
+        let param = try ast.child_at(params, index);
+        let found = try first_exposure_in_param(file, ast, declarations, name, param);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    let exposed = try private_type_in_node(file, ast, declarations, return_type);
+    if exposed.found {
+        let node = ast.get(return_type);
+        return visibility_summary(
+            true, kind_function_return(), node.span.start, node.span.end,
+            name, "", exposed.name
+        );
+    }
+    return no_visibility_diagnostic();
+}
+
+fn first_exposure_in_param(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_name: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return try param_exposure(
+            file, ast, declarations, function_name, node_id, param_node.type_node
+        );,
+        _ => return no_visibility_diagnostic();,
+    }
+    return no_visibility_diagnostic();
+}
+
+fn param_exposure(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_name: []u8,
+    param: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    let exposed = try private_type_in_node(file, ast, declarations, type_node);
+    if !exposed.found {
+        return no_visibility_diagnostic();
+    }
+    let node = ast.get(param);
+    return visibility_summary(
+        true, kind_function_param(), node.span.start, node.span.end,
+        function_name, "", exposed.name
+    );
+}
+
+// first_exposure_in_fields reads a struct's published members. A field carries its own
+// `pub` marker, so the field decides this and the struct around it does not.
+fn first_exposure_in_fields(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    owner: []u8,
+    fields: std::kizu::ast::ChildRange
+) -> !model::VisibilitySummary {
+    var index = 0;
+    while index < fields.len {
+        let child = try ast.child_at(fields, index);
+        let found = try field_exposure(file, ast, declarations, owner, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_visibility_diagnostic();
+}
+
+fn field_exposure(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    owner: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Field(field_node) => return try member_exposure(
+            file,
+            ast,
+            declarations,
+            kind_struct_field(),
+            field_node.public,
+            node_id,
+            owner,
+            ast_text::ast_node_text(file, ast, field_node.name),
+            field_node.type_node
+        );,
+        _ => return no_visibility_diagnostic();,
+    }
+    return no_visibility_diagnostic();
+}
+
+// first_exposure_in_variants reads a union's published payloads. A variant carries no
+// marker of its own, so the union's marker decides every one of them.
+fn first_exposure_in_variants(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    public: bool,
+    owner: []u8,
+    variants: std::kizu::ast::ChildRange
+) -> !model::VisibilitySummary {
+    if !public {
+        return no_visibility_diagnostic();
+    }
+    var index = 0;
+    while index < variants.len {
+        let child = try ast.child_at(variants, index);
+        let found = try variant_exposure(file, ast, declarations, owner, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_visibility_diagnostic();
+}
+
+fn variant_exposure(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    owner: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    let node = ast.get(node_id);
+    match node.data {
+        UnionVariant(union_variant) => return try member_exposure(
+            file,
+            ast,
+            declarations,
+            kind_union_variant(),
+            true,
+            node_id,
+            owner,
+            ast_text::ast_node_text(file, ast, union_variant.name),
+            union_variant.payload
+        );,
+        _ => return no_visibility_diagnostic();,
+    }
+    return no_visibility_diagnostic();
+}
+
+fn member_exposure(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    kind: i64,
+    published: bool,
+    member_node: std::kizu::ast::NodeId,
+    owner: []u8,
+    member: []u8,
+    type_node: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    if !published {
+        return no_visibility_diagnostic();
+    }
+    let exposed = try private_type_in_node(file, ast, declarations, type_node);
+    if !exposed.found {
+        return no_visibility_diagnostic();
+    }
+    let node = ast.get(member_node);
+    return visibility_summary(
+        true, kind, node.span.start, node.span.end, owner, member, exposed.name
+    );
+}
+
+// A public contract publishes every method it declares, so each signature carries the
+// same boundary a public function does.
+fn first_exposure_in_contract_methods(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    public: bool,
+    methods: std::kizu::ast::ChildRange
+) -> !model::VisibilitySummary {
+    if !public {
+        return no_visibility_diagnostic();
+    }
+    var index = 0;
+    while index < methods.len {
+        let child = try ast.child_at(methods, index);
+        let found = try contract_method_exposure(file, ast, declarations, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_visibility_diagnostic();
+}
+
+fn contract_method_exposure(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    node_id: std::kizu::ast::NodeId
+) -> !model::VisibilitySummary {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return first_exposure_in_signature(
+            file,
+            ast,
+            declarations,
+            true,
+            ast_text::ast_node_text(file, ast, fn_decl.name),
+            fn_decl.params,
+            fn_decl.return_type
+        );,
+        _ => return no_visibility_diagnostic();,
+    }
+    return no_visibility_diagnostic();
+}
+
+// ---------------------------------------------------------------------------
+// Which name a spelling exposes
+// ---------------------------------------------------------------------------
+
+struct ExposedType {
+    found: bool,
+    name: []u8,
+}
+
+// private_type_in_node names the first private declaration a type spelling mentions. Every
+// name a spelling writes is a name the reader has to be able to resolve, whatever layer it
+// sits under, so the whole spelling is read name by name.
+fn private_type_in_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    type_node: std::kizu::ast::NodeId
+) -> !ExposedType {
+    let node = ast.get(type_node);
+    match node.data {
+        Empty => return no_exposed_type();,
+        _ => return try private_type_in_spelling(
+            file, ast, declarations, ast_text::ast_node_text(file, ast, type_node)
+        );,
+    }
+    return no_exposed_type();
+}
+
+fn private_type_in_spelling(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    spelling: []u8
+) -> !ExposedType {
+    var index = 0;
+    while index < std::mem::len(spelling) {
+        // One assignment advances the cursor. The MIR lowering recognises a
+        // branch-merge loop only when the exiting arm carries nothing but the
+        // bound assignment, so the two-armed form stops `selfhost stage selfhost`.
+        var next = index + 1;
+        if type_ref_ast::is_type_identifier_start_byte(spelling[index]) {
+            let end = type_ref_ast::type_path_end_in_text(spelling, index);
+            next = end;
+            let name = spelling[index..end];
+            let lookup = try declared_type_lookup(file, ast, declarations, name);
+            if lookup.found and !lookup.public {
+                return ExposedType { found: true, name: name };
+            }
+        }
+        index = next;
+    }
+    return no_exposed_type();
+}
+
+// declared_type_lookup resolves a name against the type declarations of this file and
+// reports whether that declaration is published. A name no declaration here defines is
+// not this module's to publish, so the rule says nothing about it.
+fn declared_type_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !DeclaredTypeLookup {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let lookup = declaration_type_lookup(file, ast, child, name);
+        if lookup.found {
+            return lookup;
+        }
+        index = index + 1;
+    }
+    return DeclaredTypeLookup { found: false, public: false };
+}
+
+fn declaration_type_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> DeclaredTypeLookup {
+    let node = ast.get(node_id);
+    match node.data {
+        StructDecl(struct_decl) => return named_type_lookup(
+            file, ast, struct_decl.name, struct_decl.public, name
+        );,
+        EnumDecl(enum_decl) => return named_type_lookup(
+            file, ast, enum_decl.name, enum_decl.public, name
+        );,
+        UnionDecl(union_decl) => return named_type_lookup(
+            file, ast, union_decl.name, union_decl.public, name
+        );,
+        ContractDecl(contract_decl) => return named_type_lookup(
+            file, ast, contract_decl.name, contract_decl.public, name
+        );,
+        _ => return no_declared_type_lookup();,
+    }
+    return no_declared_type_lookup();
+}
+
+fn named_type_lookup(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name_node: std::kizu::ast::NodeId,
+    public: bool,
+    name: []u8
+) -> DeclaredTypeLookup {
+    if std::mem::equal_bytes(ast_text::ast_node_text(file, ast, name_node), name) {
+        return found_declared_type_lookup(public);
+    }
+    return no_declared_type_lookup();
+}
+
+fn no_exposed_type() -> ExposedType {
+    return ExposedType { found: false, name: "" };
+}
+
+pub fn kind_function_param() -> i64 { return 1; }
+pub fn kind_function_return() -> i64 { return 2; }
+pub fn kind_struct_field() -> i64 { return 3; }
+pub fn kind_union_variant() -> i64 { return 4; }
+
+fn no_visibility_diagnostic() -> model::VisibilitySummary {
+    return visibility_summary(false, 0, 0, 0, "", "", "");
+}
+
+fn visibility_summary(
+    found: bool,
+    kind: i64,
+    start: i64,
+    end: i64,
+    owner: []u8,
+    member: []u8,
+    type_name: []u8
+) -> model::VisibilitySummary {
+    return model::VisibilitySummary {
+        found: found,
+        kind: kind,
+        start: start,
+        end: end,
+        owner: owner,
+        member: member,
+        type_name: type_name
+    };
+}

@@ -90,12 +90,23 @@ fn first_type_error_in_ast_with_imports(
             import_alias_starts,
             import_alias_ends
         );,
-        ImplDecl(impl_decl) => return first_type_error_in_node_and_range_ast(
+        ImplDecl(impl_decl) => return first_type_error_in_impl_ast(
             allocator,
             file,
             ast,
             impl_decl.type_name,
+            impl_decl.contract_name,
             impl_decl.methods,
+            kinds,
+            arities,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        ContractDecl(contract_decl) => return first_type_error_in_ast_range(
+            allocator,
+            file,
+            ast,
+            contract_decl.methods,
             kinds,
             arities,
             import_alias_starts,
@@ -593,6 +604,120 @@ fn first_type_error_in_three_ast(
     );
 }
 
+// first_type_error_in_impl_ast resolves an impl header. The implementing type resolves in
+// the declared-type namespace, and the contract -- present only for
+// `impl Contract for Type`, empty for an inherent impl -- resolves in the contract
+// namespace, because an impl claims to provide a declared method set and only a contract
+// declares one (SPEC.md 16). The header resolves before the methods, so a header naming
+// nothing is reported from the header rather than from a body written against it.
+fn first_type_error_in_impl_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_name: std::kizu::ast::NodeId,
+    contract_name: std::kizu::ast::NodeId,
+    methods: std::kizu::ast::ChildRange,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    let type_error = try first_type_error_in_type_node_ast(
+        allocator,
+        file,
+        ast,
+        type_name,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
+    if type_error.found {
+        return type_error;
+    }
+    let contract_error = try first_contract_error_in_name_node_ast(
+        allocator,
+        file,
+        ast,
+        contract_name,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
+    if contract_error.found {
+        return contract_error;
+    }
+    return first_type_error_in_ast_range(
+        allocator,
+        file,
+        ast,
+        methods,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
+}
+
+// first_contract_error_in_name_node_ast resolves one name in the contract namespace. The
+// Empty node is the absence of a contract, not a name that failed to resolve.
+fn first_contract_error_in_name_node_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name_node: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    let node = ast.get(name_node);
+    match node.data {
+        Empty => return type_ref_names::no_type_reference_error();,
+        _ => return first_contract_error_in_name_text(
+            allocator,
+            file,
+            file.text[node.span.start..node.span.end],
+            node.span.start,
+            kinds,
+            arities,
+            import_alias_starts,
+            import_alias_ends
+        );,
+    }
+    return type_ref_names::no_type_reference_error();
+}
+
+// first_contract_error_in_name_text asks the name resolver the question a `dyn` layer asks
+// of the name that follows it: the whole spelling is one contract name, so the scan a type
+// spelling needs has nothing left to do here.
+fn first_contract_error_in_name_text(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    text: []u8,
+    absolute_start: i64,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    return type_ref_names::type_error_for_name_text_with_imports(
+        allocator,
+        file,
+        kinds,
+        arities,
+        text,
+        text,
+        std::mem::len(text),
+        absolute_start,
+        absolute_start + std::mem::len(text),
+        true,
+        import_alias_starts,
+        import_alias_ends
+    );
+}
+
 fn first_type_error_in_node_and_range_ast(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -797,6 +922,10 @@ fn first_type_error_in_type_text(
     import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
     var index = 0;
+    // `dyn` is a layer over the name that follows it, so the scan carries that one bit of
+    // structure: the name directly after `dyn` resolves as a contract, every other name as
+    // an ordinary type.
+    var under_dyn = false;
     while index < std::mem::len(text) {
         let byte = text[index];
         var next = index + 1;
@@ -804,23 +933,29 @@ fn first_type_error_in_type_text(
             let start = index;
             let end = type_path_end_in_text(text, index);
             let name = text[start..end];
-            if !should_ignore_type_name(name) {
-                let found = try type_ref_names::type_error_for_name_text_with_imports(
-                    allocator,
-                    file,
-                    kinds,
-                    arities,
-                    name,
-                    text,
-                    end,
-                    absolute_start + start,
-                    absolute_start + end,
-                    import_alias_starts,
-                    import_alias_ends
-                );
-                if found.found {
-                    return found;
+            if is_dynamic_type_keyword(name) {
+                under_dyn = true;
+            } else {
+                if !should_ignore_type_name(name) {
+                    let found = try type_ref_names::type_error_for_name_text_with_imports(
+                        allocator,
+                        file,
+                        kinds,
+                        arities,
+                        name,
+                        text,
+                        end,
+                        absolute_start + start,
+                        absolute_start + end,
+                        under_dyn,
+                        import_alias_starts,
+                        import_alias_ends
+                    );
+                    if found.found {
+                        return found;
+                    }
                 }
+                under_dyn = false;
             }
             next = end;
         }
@@ -837,6 +972,12 @@ fn ast_node_text(
     let node = ast.get(node_id);
     let span = &node.span;
     return file.text[span.start..span.end];
+}
+
+// is_dynamic_type_keyword reports the `dyn` layer keyword. It is the one keyword a type
+// scan cannot merely skip, because it decides which namespace the next name resolves in.
+pub fn is_dynamic_type_keyword(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "dyn");
 }
 
 pub fn should_ignore_type_name(name: []u8) -> bool {

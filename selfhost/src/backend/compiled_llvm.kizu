@@ -9,6 +9,7 @@ import selfhost::backend::compiled_mir_llvm;
 import selfhost::backend::compiled_struct_cf;
 import selfhost::backend::ir_contract;
 import selfhost::backend::ir_index;
+import selfhost::backend::compiled_mir_types;
 
 pub fn append_compiled_function(
     out: &var std::string::String,
@@ -90,6 +91,13 @@ pub fn append_compiled_function_params_indexed(
     return;
 }
 
+// Each lowering dispatched below returns a MirFunction whose SSA and local names are byte views
+// into the MirNameStore its CallArgTypeCache owns, so that cache has to outlive the lowering that
+// filled it -- a cache created and released inside the lowering would hand this function names
+// whose buffers are already freed. That is why every name-inventing lowering here is given a cache
+// created at its render site rather than making its own. The two defers at each site are registered
+// cache-first, MirFunction-second, so they run MirFunction-first and no name is read after the
+// store behind it is gone.
 fn append_compiled_function_params_context_indexed(
     ir_lookup_index: &ir_index::IrIndex,
     canonical_facts: &compiled_canonical_facts::CanonicalFactTable,
@@ -111,6 +119,8 @@ fn append_compiled_function_params_context_indexed(
     // through a single-return or parser-specific lowering path.
     if instance_context.found and
         compiled_instance_context::actual_len(instance_context) > 0 {
+        var instance_cache = compiled_mir_types::call_arg_type_cache();
+        defer instance_cache.deinit();
         let instance_mir = try compiled_mir_lower::lower_multi_statement_function(
             ir_lookup_index,
             canonical_facts,
@@ -121,7 +131,8 @@ fn append_compiled_function_params_context_indexed(
             llvm_return_type,
             params_spec,
             statement_count,
-            bs
+            bs,
+            &var instance_cache
         );
         defer instance_mir.deinit();
         try compiled_mir_llvm::append_function(out, &instance_mir);
@@ -175,6 +186,8 @@ fn append_compiled_function_params_context_indexed(
             return;
         }
         if std::mem::equal_bytes(kind, "Match") {
+            var match_cache = compiled_mir_types::call_arg_type_cache();
+            defer match_cache.deinit();
             let match_mir = try compiled_mir_lower::lower_single_match_statement_function(
                 ir_lookup_index,
                 canonical_facts,
@@ -185,13 +198,16 @@ fn append_compiled_function_params_context_indexed(
                 llvm_return_type,
                 params_spec,
                 statement,
-                bs
+                bs,
+                &var match_cache
             );
             defer match_mir.deinit();
             try compiled_mir_llvm::append_function(out, &match_mir);
             return;
         }
         if !std::mem::equal_bytes(kind, "Return") {
+            var multi_cache = compiled_mir_types::call_arg_type_cache();
+            defer multi_cache.deinit();
             let multi_mir = try compiled_mir_lower::lower_multi_statement_function(
                 ir_lookup_index,
                 canonical_facts,
@@ -202,7 +218,8 @@ fn append_compiled_function_params_context_indexed(
                 llvm_return_type,
                 params_spec,
                 statement_count,
-                bs
+                bs,
+                &var multi_cache
             );
             defer multi_mir.deinit();
             try compiled_mir_llvm::append_function(out, &multi_mir);
@@ -229,6 +246,8 @@ fn append_compiled_function_params_context_indexed(
         // shared multi-statement path, which emits the void success return for both a plain void
         // function and an error-union void function.
         if std::mem::equal_bytes(value_kind, "Empty") {
+            var void_return_cache = compiled_mir_types::call_arg_type_cache();
+            defer void_return_cache.deinit();
             let void_return_mir = try compiled_mir_lower::lower_multi_statement_function(
                 ir_lookup_index,
                 canonical_facts,
@@ -239,7 +258,8 @@ fn append_compiled_function_params_context_indexed(
                 llvm_return_type,
                 params_spec,
                 statement_count,
-                bs
+                bs,
+                &var void_return_cache
             );
             defer void_return_mir.deinit();
             try compiled_mir_llvm::append_function(out, &void_return_mir);
@@ -261,6 +281,8 @@ fn append_compiled_function_params_context_indexed(
             return;
         }
         if std::mem::equal_bytes(value_kind, "Match") {
+            var match_value_cache = compiled_mir_types::call_arg_type_cache();
+            defer match_value_cache.deinit();
             let match_value_mir = try compiled_mir_lower::lower_multi_statement_function(
                 ir_lookup_index,
                 canonical_facts,
@@ -271,7 +293,8 @@ fn append_compiled_function_params_context_indexed(
                 llvm_return_type,
                 params_spec,
                 statement_count,
-                bs
+                bs,
+                &var match_value_cache
             );
             defer match_value_mir.deinit();
             try compiled_mir_llvm::append_function(out, &match_value_mir);
@@ -294,8 +317,11 @@ fn append_compiled_function_params_context_indexed(
             return;
         }
         if std::mem::equal_bytes(value_kind, "FieldExpr") {
+            var enum_field_cache = compiled_mir_types::call_arg_type_cache();
+            defer enum_field_cache.deinit();
             let mir = try compiled_mir_lower::lower_enum_field_return_function(
-                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, value, bs
+                ir_lookup_index, ir_bytes, function_name, llvm_symbol, llvm_return_type, value, bs,
+                &var enum_field_cache
             );
             defer mir.deinit();
             try compiled_mir_llvm::append_function(out, &mir);
@@ -313,10 +339,12 @@ fn append_compiled_function_params_context_indexed(
                     ir_bytes, function_name, value, bs
                 );
             if !needs_expr_value {
+                var struct_cache = compiled_mir_types::call_arg_type_cache();
+                defer struct_cache.deinit();
                 let mir = try compiled_mir_lower::lower_struct_return_function(
                     ir_lookup_index, canonical_facts, instance_context,
                     ir_bytes, function_name, llvm_symbol,
-                    llvm_return_type, params_spec, value, bs
+                    llvm_return_type, params_spec, value, bs, &var struct_cache
                 );
                 defer mir.deinit();
                 try compiled_mir_llvm::append_function(out, &mir);
@@ -352,10 +380,12 @@ fn append_compiled_function_params_context_indexed(
             if !(try compiled_mir_lower::call_has_hoisted_arg(
                 ir_bytes, function_name, value, bs
             )) {
+                var call_cache = compiled_mir_types::call_arg_type_cache();
+                defer call_cache.deinit();
                 let mir = try compiled_mir_lower::lower_call_return_function(
                     ir_lookup_index, canonical_facts, instance_context,
                     ir_bytes, function_name, llvm_symbol, llvm_return_type,
-                    params_spec, value, bs
+                    params_spec, value, bs, &var call_cache
                 );
                 defer mir.deinit();
                 try compiled_mir_llvm::append_function(out, &mir);
@@ -368,9 +398,12 @@ fn append_compiled_function_params_context_indexed(
         if try compiled_mir_lower::return_value_is_literal_plus_try(
             ir_bytes, function_name, value, bs
         ) {
+            var try_cache = compiled_mir_types::call_arg_type_cache();
+            defer try_cache.deinit();
             let try_mir = try compiled_mir_lower::lower_return_try_binary_function(
                 ir_lookup_index, canonical_facts, instance_context,
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, value, bs
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, value, bs,
+                &var try_cache
             );
             defer try_mir.deinit();
             try compiled_mir_llvm::append_function(out, &try_mir);
@@ -379,10 +412,13 @@ fn append_compiled_function_params_context_indexed(
         if try compiled_mir_lower::return_value_is_short_circuit_or(
             ir_bytes, function_name, value, bs
         ) {
+            var or_cache = compiled_mir_types::call_arg_type_cache();
+            defer or_cache.deinit();
             let or_mir = try compiled_mir_lower::lower_short_circuit_or_return_function(
                 ir_lookup_index,
                 canonical_facts,
-                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, value, bs
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, params_spec, value, bs,
+                &var or_cache
             );
             defer or_mir.deinit();
             try compiled_mir_llvm::append_function(out, &or_mir);
@@ -391,11 +427,13 @@ fn append_compiled_function_params_context_indexed(
         if std::mem::len(llvm_return_type) == 0 {
             return error("compiled function: unsupported return value kind");
         }
+        var expr_cache = compiled_mir_types::call_arg_type_cache();
+        defer expr_cache.deinit();
         let mir = try compiled_mir_lower::lower_expr_return_function(
             ir_lookup_index,
             canonical_facts,
             ir_bytes, function_name, llvm_symbol,
-            llvm_return_type, params_spec, value, bs
+            llvm_return_type, params_spec, value, bs, &var expr_cache
         );
         defer mir.deinit();
         try compiled_mir_llvm::append_function(out, &mir);
@@ -544,10 +582,12 @@ fn append_compiled_function_params_context_indexed(
         if std::mem::len(llvm_return_type) == 0 {
             return error("compiled function: count_range requires llvm_return_type");
         }
+        var range_cache = compiled_mir_types::call_arg_type_cache();
+        defer range_cache.deinit();
         let range_mir = try compiled_mir_lower::lower_count_range_function(
             ir_lookup_index, canonical_facts, instance_context,
             ir_bytes, function_name, llvm_symbol,
-            llvm_return_type, params_spec, bs
+            llvm_return_type, params_spec, bs, &var range_cache
         );
         defer range_mir.deinit();
         try compiled_mir_llvm::append_function(out, &range_mir);
@@ -689,6 +729,8 @@ fn append_compiled_function_params_context_indexed(
             return;
         }
     }
+    var mir_cache = compiled_mir_types::call_arg_type_cache();
+    defer mir_cache.deinit();
     let mir = try compiled_mir_lower::lower_multi_statement_function(
         ir_lookup_index,
         canonical_facts,
@@ -699,7 +741,8 @@ fn append_compiled_function_params_context_indexed(
         llvm_return_type,
         params_spec,
         statement_count,
-        bs
+        bs,
+        &var mir_cache
     );
     defer mir.deinit();
     try compiled_mir_llvm::append_function(out, &mir);

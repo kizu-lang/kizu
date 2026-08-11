@@ -48,7 +48,13 @@ check_function_comments() {
   ' "$file" || status=1
 }
 
-files="$(find . -path './.direnv' -prune -o -path './.git' -prune -o -name '*.go' -print)"
+# .claude holds agent worktree checkouts -- copies of this repository that git does not
+# track here and that are checked by their own working tree, not by this one.
+files="$(find . \
+  -path './.direnv' -prune -o \
+  -path './.git' -prune -o \
+  -path './.claude' -prune -o \
+  -name '*.go' -print)"
 
 for file in $files; do
   check_function_comments "$file"

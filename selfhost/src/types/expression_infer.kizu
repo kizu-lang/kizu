@@ -1,8 +1,13 @@
+import selfhost::ir::intrinsic_type_contract;
 import selfhost::types::expression_facts;
 import selfhost::source;
 import selfhost::type_constructor;
 import selfhost::type_spelling;
 import selfhost::types::ast_text;
+import selfhost::types::concurrency_contract;
+import selfhost::types::integer_literal;
+import selfhost::types::primitive_type;
+import selfhost::types::raw_pointer;
 
 pub fn infer_expression_type(
     allocator: Allocator,
@@ -19,7 +24,16 @@ pub fn infer_expression_type(
         Bool(bool_node) => return "bool";,
         Empty => return "void";,
         Var(var_node) => return infer_var_expression_type(file, ast, node_id, local_types);,
-        Binary(binary) => return binary_expression_type(binary.op);,
+        Binary(binary) => return try binary_result_type(
+            allocator,
+            file,
+            ast,
+            binary.op,
+            binary.left,
+            binary.right,
+            local_types,
+            function_returns
+        );,
         Prefix(prefix_node) => return prefix_expression_type(prefix_node.op);,
         CastExpr(cast_expr) => return ast_text::ast_return_type_text(file, ast, cast_expr.type_node);,
         ComptimeExpr(comptime_expr_node) => return infer_expression_type(
@@ -48,7 +62,14 @@ pub fn infer_expression_type(
             local_types,
             function_returns
         );,
-        DerefExpr(deref_expr_node) => return "unknown";,
+        DerefExpr(deref_expr_node) => return try deref_expression_type(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver,
+            local_types,
+            function_returns
+        );,
         Call(call_node) => return call_expression_type(
             allocator,
             file,
@@ -96,6 +117,7 @@ pub fn infer_expression_type(
         EnumDecl(enum_decl) => return "unknown";,
         UnionDecl(union_decl) => return "unknown";,
         ImplDecl(impl_decl) => return "unknown";,
+        ContractDecl(contract_decl) => return "unknown";,
         UnionVariant(union_variant) => return "unknown";,
         Match(match_node) => return infer_match_expression_type(
             allocator,
@@ -111,6 +133,31 @@ pub fn infer_expression_type(
         FnDecl(fn_decl) => return "unknown";,
         TypeName(type_name) => return ast_text::ast_node_text(file, ast, node_id);,
     }
+}
+
+// `receiver.*` reads the value the receiver refers to. Through a raw pointer that is
+// the pointee, with `const` dropped: read-only-ness qualifies the access, not the value
+// it produces. Every other receiver form is left unresolved here.
+fn deref_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> ![]u8 {
+    let receiver_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        receiver,
+        local_types,
+        function_returns
+    );
+    if !raw_pointer::is_raw_pointer(receiver_type) {
+        return "unknown";
+    }
+    return raw_pointer::pointee_value_type(raw_pointer::pointee(receiver_type));
 }
 
 fn infer_match_expression_type(
@@ -555,6 +602,9 @@ pub fn collect_declared_expression_type_facts(
         ImplDecl(value) => return collect_declared_expression_type_one_range(
             allocator, file, ast, value.type_name, value.methods, facts
         );,
+        ContractDecl(value) => return collect_declared_expression_type_one_range(
+            allocator, file, ast, value.name, value.methods, facts
+        );,
         UnionVariant(value) => return collect_declared_expression_type_facts(
             allocator, file, ast, value.payload, facts
         );,
@@ -697,14 +747,24 @@ fn collect_type_apply_expression_fact(
     try append_expression_type_key(key, file, &ast, node_id);
     let key_bytes = key.as_bytes();
     if !facts.contains_source(&key_bytes) {
-        var canonical_type = try build_canonical_type_spelling(
-            allocator,
-            file,
-            ast_text::ast_node_text(file, ast, node_id),
-            facts
-        );
-        defer canonical_type.deinit();
-        try facts.insert_source_owned(&key_bytes, &canonical_type);
+        // A type application names the type it constructs, except for the meta
+        // type: `type<X>` is a type value, so its own type is `type` for every
+        // X. Collapsing it here is what lets two type values be compared.
+        if type_constructor::is_meta_type_name(
+            ast_text::ast_node_text(file, ast, callee)
+        ) {
+            let meta_type = try type_constructor::meta_type_name();
+            try facts.insert_source(allocator, &key_bytes, meta_type);
+        } else {
+            var canonical_type = try build_canonical_type_spelling(
+                allocator,
+                file,
+                ast_text::ast_node_text(file, ast, node_id),
+                facts
+            );
+            defer canonical_type.deinit();
+            try facts.insert_source_owned(allocator, &key_bytes, &canonical_type);
+        }
     }
     return collect_declared_expression_type_one_range(
         allocator, file, ast, callee, type_args, facts
@@ -1113,6 +1173,22 @@ fn call_expression_type(
             function_returns
         );
     }
+    // A std constructor that hands back a builtin type names a type no declaration
+    // spells out, so its result comes from the intrinsic registry rather than from a
+    // declared return type.
+    let intrinsic = concurrency_contract::constructor_result_type(callee_text);
+    if std::mem::len(intrinsic) > 0 {
+        return intrinsic;
+    }
+    // An intrinsic method may hand back a type built from its receiver rather than one a
+    // declaration spells out, so that result is registry data for the same reason an
+    // intrinsic constructor's is.
+    let built = try intrinsic_method_result_type(
+        allocator, callee_text, local_types, function_returns
+    );
+    if std::mem::len(built) > 0 {
+        return built;
+    }
     let method_type = try method_call_text_type(callee_text, local_types);
     if !std::mem::equal_bytes(method_type, "unknown") {
         return method_type;
@@ -1169,7 +1245,16 @@ fn method_call_text_type(
     local_types: &std::map::Map<[]u8, []u8>
 ) -> ![]u8 {
     let method = last_field_segment(callee);
-    var receiver_type = "unknown";
+    let receiver_type = try method_receiver_type(callee, local_types);
+    return try method_return_type(method, receiver_type);
+}
+
+// method_receiver_type answers with the type a method call's receiver binding already
+// settled on, or `unknown` when the receiver is not a binding this scope knows.
+fn method_receiver_type(
+    callee: []u8,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
     var last_dot = -1;
     var index = 0;
     while index < std::mem::len(callee) {
@@ -1178,13 +1263,75 @@ fn method_call_text_type(
         }
         index = index + 1;
     }
-    if last_dot > 0 {
-        let receiver = callee[0..last_dot];
-        if local_types.contains(receiver) {
-            receiver_type = try local_types.get(receiver);
-        }
+    if last_dot <= 0 {
+        return "unknown";
     }
-    return try method_return_type(method, receiver_type);
+    let receiver = callee[0..last_dot];
+    if !local_types.contains(receiver) {
+        return "unknown";
+    }
+    return try local_types.get(receiver);
+}
+
+// intrinsic_method_result_type builds the type an intrinsic method names by wrapping its
+// receiver's element type. `Arena<T>.add` is the v0.2 case: it answers with the handle
+// that names the slot it filled (internal/types/checker.go:6663). The wrapper is registry
+// data keyed on the receiver's intrinsic identity, and the built spelling is interned so
+// it outlives this call the way every other collected type fact does. An empty answer
+// means the receiver's identity has no such method.
+fn intrinsic_method_result_type(
+    allocator: Allocator,
+    callee: []u8,
+    local_types: &std::map::Map<[]u8, []u8>,
+    facts: &var expression_facts::ExpressionTypeFacts
+) -> ![]u8 borrows facts {
+    let receiver_type = try method_receiver_type(callee, local_types);
+    let wrapper = try intrinsic_method_result_constructor(
+        receiver_type,
+        last_field_segment(callee)
+    );
+    if std::mem::len(wrapper) == 0 {
+        return "";
+    }
+    let element = try generic_argument(receiver_type, 0);
+    var spelling = std::string::String(allocator);
+    defer spelling.deinit();
+    try spelling.append_bytes(wrapper);
+    try spelling.append_bytes("<");
+    try spelling.append_bytes(element);
+    try spelling.append_bytes(">");
+    var key = std::string::String(allocator);
+    defer key.deinit();
+    try key.append_bytes("im ");
+    try key.append_bytes(wrapper);
+    try key.append_bytes("<");
+    try key.append_bytes(element);
+    try key.append_bytes(">");
+    let key_bytes = key.as_bytes();
+    if !facts.contains_source(&key_bytes) {
+        try facts.insert_source_owned(allocator, &key_bytes, &spelling);
+    }
+    return try facts.get_source(&key_bytes);
+}
+
+fn intrinsic_method_result_constructor(
+    receiver_type: []u8,
+    method: []u8
+) -> ![]u8 {
+    let layer = try type_spelling::parse(receiver_type);
+    if layer.kind != type_spelling::layer_named() or !layer.has_arguments {
+        return "";
+    }
+    let kind = intrinsic_type_contract::from_source_name(
+        try type_spelling::constructor(&layer, receiver_type)
+    );
+    if kind == intrinsic_type_contract::kind_arena() and
+        std::mem::equal_bytes(method, "add") {
+        return intrinsic_type_contract::source_spelling(
+            intrinsic_type_contract::kind_arena_handle()
+        );
+    }
+    return "";
 }
 
 fn last_field_segment(text: []u8) -> []u8 {
@@ -1351,6 +1498,57 @@ fn infer_var_expression_type(
     return "unknown";
 }
 
+// binary_result_type answers an arithmetic operator with the type its operands carry.
+// The comparisons answer bool whatever they compare, but `a + b` on two i32s is an i32:
+// the operator does not widen its operands, and a position declaring i32 would otherwise
+// be told it received i64. An integer literal takes the other operand's type, the same
+// contextual rule a declared position applies (SPEC.md 7.2).
+fn binary_result_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    op: std::kizu::ast::BinaryOp,
+    left_node: std::kizu::ast::NodeId,
+    right_node: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &var expression_facts::ExpressionTypeFacts
+) -> ![]u8 {
+    let op_type = binary_expression_type(op);
+    if !std::mem::equal_bytes(op_type, "i64") {
+        return op_type;
+    }
+    let left = try infer_expression_type(
+        allocator, file, ast, left_node, local_types, function_returns
+    );
+    let right = try infer_expression_type(
+        allocator, file, ast, right_node, local_types, function_returns
+    );
+    if is_sized_integer_text(left) {
+        if std::mem::equal_bytes(left, right) {
+            return left;
+        }
+        if integer_literal::integer_literal_value(file, ast, right_node).found {
+            return left;
+        }
+    }
+    if is_sized_integer_text(right) {
+        if integer_literal::integer_literal_value(file, ast, left_node).found {
+            return right;
+        }
+    }
+    return op_type;
+}
+
+// is_sized_integer_text reports an integer spelling other than the default `i64`, which
+// is already what an untyped literal carries.
+fn is_sized_integer_text(type_text: []u8) -> bool {
+    if std::mem::equal_bytes(type_text, "i64") {
+        return false;
+    }
+    let record = primitive_type::record_from_text(type_text);
+    return record.kind == primitive_type::type_kind_integer();
+}
+
 fn binary_expression_type(op: std::kizu::ast::BinaryOp) -> []u8 {
     match op {
         Add => return "i64";,
@@ -1378,6 +1576,19 @@ fn prefix_expression_type(op: std::kizu::ast::PrefixOp) -> []u8 {
     }
 }
 
+// is_unknown_type_text reports an inference result that names no type. A rule comparing
+// two types has nothing to decide against it, which is why known_type_mismatch below and
+// the contract conformance check both stand down on it.
+pub fn is_unknown_type_text(type_name: []u8) -> bool {
+    return std::mem::equal_bytes(value_type_text(type_name), "unknown");
+}
+
+// known_type_mismatch decides the one question every position rule asks: does the value
+// that flows into a position have the type the position declares? A declared type is
+// compared against the value whatever the type is -- the reference checker settles it by
+// comparing the two type spellings (internal/types/checker.go:1167) and knows no class of
+// type it declines to compare. The stand-downs below are the cases where one of the two
+// spellings names no single type here, not a list of types the rule applies to.
 pub fn known_type_mismatch(expected: []u8, actual: []u8) -> bool {
     let expected_type = value_type_text(expected);
     let actual_type = value_type_text(actual);
@@ -1385,22 +1596,121 @@ pub fn known_type_mismatch(expected: []u8, actual: []u8) -> bool {
         std::mem::equal_bytes(actual_type, "unknown") {
         return false;
     }
-    if std::mem::starts_with(expected_type, "!") {
-        return false;
-    }
-    if std::mem::starts_with(actual_type, "!") or type_text_has_error_marker(actual_type) {
+    // An error union admits both a success value and an error value, on either side of
+    // the comparison, so the spelling alone does not say which type flows here.
+    if type_text_has_error_marker(expected_type) or
+        type_text_has_error_marker(actual_type) {
         return false;
     }
     if borrow_type_accepts_actual(expected_type, actual_type) {
         return false;
     }
-    if is_u8_slice(expected_type) or is_u8_slice(actual_type) {
-        return !(is_u8_slice(expected_type) and is_u8_slice(actual_type));
+    return !type_text_names_same_type(expected_type, actual_type);
+}
+
+// type_text_names_same_type compares two spellings layer for layer, reading each named
+// type as its final path segment. A declared type is spelled the way its own source
+// writes it while inference records the module-qualified name the resolver settled on, so
+// `Shape` and `selfhost::union::Shape` are one type under two spellings and comparing the
+// raw bytes would report every module-local type as a mismatch with itself.
+fn type_text_names_same_type(left: []u8, right: []u8) -> bool {
+    var left_index = last_path_segment_start(left, 0);
+    var right_index = last_path_segment_start(right, 0);
+    while left_index < std::mem::len(left) and right_index < std::mem::len(right) {
+        if left[left_index] != right[right_index] {
+            return false;
+        }
+        left_index = last_path_segment_start(left, left_index + 1);
+        right_index = last_path_segment_start(right, right_index + 1);
     }
-    if !is_scalar_comparable_type(expected_type) or !is_scalar_comparable_type(actual_type) {
+    return left_index >= std::mem::len(left) and right_index >= std::mem::len(right);
+}
+
+// last_path_segment_start returns the index the comparison reads from: the start of the
+// final segment when `index` opens an `a::b::Name` path, and `index` itself anywhere else.
+fn last_path_segment_start(spelling: []u8, index: i64) -> i64 {
+    if index >= std::mem::len(spelling) {
+        return index;
+    }
+    if !opens_path_segment(spelling, index) {
+        return index;
+    }
+    var start = index;
+    var cursor = path_segment_end(spelling, index);
+    while path_separator_at(spelling, cursor) {
+        start = cursor + 2;
+        cursor = path_segment_end(spelling, start);
+    }
+    return start;
+}
+
+fn opens_path_segment(spelling: []u8, index: i64) -> bool {
+    if !is_path_byte(spelling[index]) {
         return false;
     }
-    return !std::mem::equal_bytes(expected_type, actual_type);
+    if index == 0 {
+        return true;
+    }
+    return !is_path_byte(spelling[index - 1]);
+}
+
+fn path_segment_end(spelling: []u8, index: i64) -> i64 {
+    var cursor = index;
+    while cursor < std::mem::len(spelling) and is_path_byte(spelling[cursor]) {
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn path_separator_at(spelling: []u8, index: i64) -> bool {
+    if index + 1 >= std::mem::len(spelling) {
+        return false;
+    }
+    return spelling[index] == cast<u8>(58) and spelling[index + 1] == cast<u8>(58);
+}
+
+fn is_path_byte(byte: u8) -> bool {
+    return type_spelling::is_name_byte(byte);
+}
+
+// contextual_integer applies the contextual integer typing rule of SPEC.md 7.2.
+// Where a position fixes a unique expected integer type -- a function argument, a
+// return value, an assignment to an already-typed binding -- an integer literal that
+// is in range for that type takes it instead of the default `i64`.
+//
+// Narrowing is keyed on the literal syntax of the value node, not on its inferred
+// type, so a binding that already settled on `i64` still needs an explicit `cast<T>`.
+//
+// A literal the position's integer type cannot hold is not a value of the wrong type:
+// it is a literal written outside the range of the type it was written for, and the
+// rule rejects it in place with that diagnostic
+// (internal/types/checker.go:2962). Reporting the position's ordinary mismatch instead
+// would blame `i64`, the very type the rule exists to stop naming.
+pub fn contextual_integer(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    expected: []u8,
+    actual: []u8
+) -> integer_literal::ContextualInteger {
+    let expected_type = value_type_text(expected);
+    let actual_type = value_type_text(actual);
+    if !std::mem::equal_bytes(actual_type, "i64") or
+        std::mem::equal_bytes(expected_type, actual_type) {
+        return integer_literal::contextual_type(actual);
+    }
+    let record = primitive_type::record_from_text(expected_type);
+    if record.kind != primitive_type::type_kind_integer() {
+        return integer_literal::contextual_type(actual);
+    }
+    let literal = integer_literal::integer_literal_value(file, ast, node_id);
+    if !literal.found {
+        return integer_literal::contextual_type(actual);
+    }
+    if !integer_literal::integer_literal_fits(record, literal.value) {
+        return integer_literal::contextual_out_of_range(actual, expected_type, literal);
+    }
+    return integer_literal::contextual_type(expected_type);
 }
 
 pub fn known_binary_operand_type_mismatch(left: []u8, right: []u8) -> bool {
@@ -1433,16 +1743,21 @@ fn borrow_type_accepts_actual(expected: []u8, actual: []u8) -> bool {
     }
     if std::mem::starts_with(expected, "&") {
         let borrowed = std::mem::trim_ascii(expected[1..std::mem::len(expected)]);
+        // A mutable borrow satisfies a shared one: `&var T` grants everything `&T` does,
+        // so passing a `&var` parameter onward to a `&` parameter is how the language is
+        // written and how selfhost's own sources are written. The reverse does not hold,
+        // which is why only this direction strips the marker off the actual.
+        if std::mem::starts_with(actual, "&var ") {
+            let granted = std::mem::trim_ascii(actual[5..std::mem::len(actual)]);
+            return type_text_equal_for_borrow(borrowed, granted);
+        }
         return type_text_equal_for_borrow(borrowed, actual);
     }
     return false;
 }
 
 fn type_text_equal_for_borrow(expected: []u8, actual: []u8) -> bool {
-    if is_u8_slice(expected) or is_u8_slice(actual) {
-        return is_u8_slice(expected) and is_u8_slice(actual);
-    }
-    return std::mem::equal_bytes(expected, actual);
+    return type_text_names_same_type(expected, actual);
 }
 
 fn value_type_text(type_name: []u8) -> []u8 {

@@ -7,159 +7,31 @@ import (
 	"testing"
 )
 
-// parseFormatAllocMaxLines pins the hand-written parse_format_alloc LLVM emitter at its
+// parseFormatAllocMaxCodeLines pins the hand-written parse_format_alloc LLVM emitter at its
 // current size. The formatter migration (issue 1165 / issue 1162) moves real
 // selfhost::parser::format helpers onto the compiled path; it must not grow the legacy
 // hand-written indentation / import-sort / comment logic in append_parse_format_alloc_function.
-const parseFormatAllocMaxLines = 197
+//
+// The ceiling counts code lines, skipping comments and blanks. Counting raw lines also fired on
+// documentation: commit 5689d099 relocated one already-emitted line below its block's phis (LLVM
+// groups a block's phis at the top) and explained why in two comment lines, which tripped a
+// 197-raw-line ceiling while emitting exactly the same LLVM. Counting emission statements
+// instead would fix that but stop being a size ceiling at all -- growth spelled with any other
+// helper, including a wall of hardcoded static LLVM, would pass.
+//
+// 197 is the code-line count at 5a579a65, before the WIP checkpoint, and at every revision
+// since, so the ceiling has zero headroom: one added line of code in any idiom fails the gate.
+const parseFormatAllocMaxCodeLines = 197
 
-// formatCompiledHelperSeeds is the read-only formatter closure compiled into stage2: the
-// four TokenKind predicates, token_text, next_token_text_equals (the first token-array
-// read helper, reading tokens.len()/tokens.get(...) on a value-receiver Array<Token> param
-// and calling lexer::is_eof across the module boundary), index_after_import (the first
-// token-array scan-while helper, a bounded counter loop with a parameter-seeded induction
-// variable and i64 early returns), and index_after_leading_imports (the first scan-while
-// whose loop latch is a loop-carried try-call, 'index = try index_after_import(tokens,
-// index);', feeding the loop-head phi from the try-call success value), and compare_bytes
-// (the first import-sort helper, an i64 byte comparison whose loop header is a short-circuit
-// `and` of two comparisons over pure length locals with []u8 index loads in the body guards),
-// and import_path_less (the first multi-counter helper: two lockstep token cursors with
-// base-plus-offset inits advanced by a trailing run of constant-step increments under a
-// short-circuit `and` header, with a nested-call-argument compare_bytes let and a prefix-not
-// call return), and sort_import_indices (the first structured-control-flow helper: the
-// scan-shift insertion sort with an outer counter loop, a nested scan loop carrying a cursor
-// and a boolean flag through loop-head phis, an if/else that re-merges into the loop, a
-// try-call import_path_less condition, and Array<i64>.get/set element reads/writes through the
-// element-size-generic @kizu_rt_array_at / @kizu_rt_array_set ABI on its '&var
-// std::array::Array<i64>' parameter, lowered through compiled_struct_cf), and
-// leading_import_indices (the first structured-control-flow collector: it builds a
-// runtime-owned Array<i64> through the element-size-generic @kizu_rt_array_new /
-// @kizu_rt_array_append ABI, scans the token array through an if/else branch-merge loop -- a
-// loop-terminating 'index = tokens.len()' on one arm, an append-then-try-advance on the other
-// re-merging at a loop-latch phi -- then sorts the collected indices in place and returns the
-// filled array as the '!std::array::Array<i64>' success (a %kizu.error.owned wrap), lowered
-// through compiled_struct_cf), and append_indent (the indentation emitter: 'var index = 0; while
-// index < depth { try out.append_bytes("    "); index = index + 1; }', a String-append counter
-// loop that mutates a '&var std::string::String' accumulator through the
-// @kizu_rt_string_append_bytes ABI, sharing the (Let(Int), While, Return(Empty)) top-level shape
-// with the import-cluster emitter and so dispatched ahead of it, lowered through
-// compiled_struct_cf), and the two leaf byte classifiers of the comment-preservation cluster
-// is_horizontal_space / is_line_break ('return byte == cast<u8>(<a>) or byte == cast<u8>(<b>);',
-// single-return short-circuit 'or' predicates over a u8 that lower through the generic
-// short-circuit-or-return path), and after_line_break (the first comment-preservation scalar
-// helper, a three-operand short-circuit 'and' if whose trailing byte load is guarded by a bounds
-// check), and line_end_excluding_break / line_end_including_break (the first compiled helpers with
-// a genuine short-circuit 'and' while header: 'while index < length and
-// !is_line_break(source[index])' loads source[index] only when 'index < length' holds, so the
-// guarded byte load lowers into a loopN_head_rhs block rather than an eager 'and i1';
-// line_end_including_break adds a trailing 'if index < length { return after_line_break(source,
-// index); }' ReturnCall tail), and line_comment_is_full_line (the first compiled helper with a
-// downward 'while index > 0' header over a literal bound: its loop body opens with a 'let
-// previous = index - 1' decrement local feeding both a checked 'source[previous]' byte-load call
-// argument and the 'index = previous' latch, and carries two boolean early returns), and
-// line_comment_has_blank_after (the first compiled helper with a continue-latch loop: 'var cursor =
-// line_end_including_break(source, comment_end); while cursor < end { if
-// is_horizontal_space(source[cursor]) { cursor = cursor + 1; continue; } return
-// is_line_break(source[cursor]); } return false;' -- its induction variable advances inside a body
-// 'if <cond> { cursor = cursor + 1; continue; }' that branches back to the loop latch rather than a
-// trailing increment, its primary init is call-seeded so the line_end_including_break call runs in
-// the preheader, and its non-continue path returns is_line_break(source[cursor]) whose call
-// argument is a checked byte load), and line_comment_has_blank_before (the first compiled helper
-// with a nested continue-latch loop and the first whose continue-latch step is a copy-decrement:
-// 'var cursor = comment_start; while cursor > start { let previous = cursor - 1; if
-// is_horizontal_space(source[previous]) { cursor = previous; continue; } if
-// !is_line_break(source[previous]) { return false; } cursor = previous; while cursor > start { let
-// before = cursor - 1; if is_horizontal_space(source[before]) { cursor = before; continue; } return
-// is_line_break(source[before]); } return false; } return false;' -- both scans advance the cursor
-// inside a body 'if <cond> { cursor = previous; continue; }' whose latch reads the decrement local
-// rather than a constant-step add, both headers are non-literal 'cursor > start' comparisons, and
-// the inner scan reuses the cursor induction renamed so its loop-head phi does not clash with the
-// outer scan's), and should_insert_space (the spacing predicate, the first compiled helper whose
-// body lowers a multi-operand short-circuit 'or' in an 'if' condition: 'if last == cast<u8>(0) or
-// last == cast<u8>(10) or last == cast<u8>(32) { return false; }' flattens to three operand blocks
-// where each true edge short-circuits to the then block and only an all-false fall-through reaches
-// the next guard -- the 'or' twin of the existing short-circuit 'and' if-chain -- alongside an
-// 'and' guard of two predicate calls ('equal_bytes(previous, "]") and
-// can_follow_slice_marker(current)') and a run of call-guarded early returns; its body BFS pulls in
-// no_space_before, no_space_after, and can_follow_slice_marker). They are the
-// first selfhost::parser::format members on the compiled path and must keep being emitted from
-// both the IR fact catalog and the backend BFS.
-var formatCompiledHelperSeeds = []string{
-	"is_import_token",
-	"is_ident_token",
-	"is_double_colon_token",
-	"is_semicolon_token",
-	"token_text",
-	"next_token_text_equals",
-	"index_after_import",
-	"index_after_leading_imports",
-	"compare_bytes",
-	"import_path_less",
-	"sort_import_indices",
-	"leading_import_indices",
-	"append_import_decl",
-	"append_sorted_imports",
-	"append_indent",
-	"is_horizontal_space",
-	"is_line_break",
-	"after_line_break",
-	"line_end_excluding_break",
-	"line_end_including_break",
-	"line_comment_is_full_line",
-	"line_comment_has_blank_after",
-	"line_comment_has_blank_before",
-	"should_insert_space",
-	"lbrace_opens_enum_decl",
-	"is_match_arm_trailing_comma",
-	"rbrace_closes_enum_decl",
-	// append_preserved_line_comments is the comment-preservation driver: the first
-	// selfhost::parser::format member returning a struct in an error union
-	// ('-> !CommentFormatState'). It mutates the '&var std::string::String' accumulator, threads
-	// the loop-carried scalar state current_last / current_at_line_start / current_after_comment
-	// through a forward 'while index < end' scan loop whose if/else comment arm scans a '// ...'
-	// full-line comment (a short-circuit '//' detection, a blank-before insertion guarded by
-	// out.len(), an indentation + comment-slice + newline emit through the @kizu_rt_string_append_*
-	// ABI, and a blank-after insertion), and closes with 'return CommentFormatState { ... };'. It
-	// lowers through compiled_struct_cf::append_comment_preserve_function, dispatched by its
-	// %kizu.error.comment_format_state return type (the CommentFormatState struct value + error
-	// union ABI), and is the last selfhost::parser::format member that parse_format_alloc owns to
-	// move onto the compiled path (issue 1165 / 1162).
-	"append_preserved_line_comments",
-	// The following read-only helpers join the closure through the shared catalog + BFS without
-	// new per-helper lowering (issue 1165 / 1162); they lower through the existing generic
-	// single-statement / multi-statement expression paths:
-	//   - is_top_level_decl_start: a single-return short-circuit 'or' of std::mem::equal_bytes calls
-	//     (the no_space_before / no_space_after shape), a BFS leaf.
-	//   - starts_new_top_level_decl: a leading 'if !is_top_level_decl_start(current) { return false;
-	//     }' guard plus a prefix-not-of-short-circuit-or return; BFS pulls in is_top_level_decl_start.
-	//   - last_byte: a single-return checked single-element index load
-	//     'text[std::mem::len(text) - 1]'.
-	//   - has_line_comment_between: the first compiled helper whose while header compares a 'counter +
-	//     1' binary on the left ('while index + 1 < end'), its body a short-circuit '//' byte-pair
-	//     guard with an early return true, a BFS leaf.
-	//   - rbrace_wants_newline: two early-return guards, a token_text let, and a prefix-not of a
-	//     ten-operand short-circuit 'or' over the next token's text; BFS pulls in token_text and
-	//     references lexer::is_eof across the module boundary.
-	"is_top_level_decl_start",
-	"starts_new_top_level_decl",
-	"last_byte",
-	"has_line_comment_between",
-	"rbrace_wants_newline",
-	// is_trailing_comma is the first compiled helper with a try-call in sub-expression position
-	// (issue 1165 / 1162): a ',' early-return guard, two 'let <name> = try next_token_text_equals(
-	// ...)' let-try binds with bool early returns, an 'if !(try next_token_text_equals(source,
-	// tokens, index, "}")) { return false; }' guard, and a closing 'return !(try
-	// is_match_arm_trailing_comma(source, tokens, index));'. The two '!(try <call>)' sub-expression
-	// try-calls lower through the generic prefix-not-of-try-call path (a return-not-try-call and an
-	// if-not-try-call-return-bool statement): the renderer emits the call, propagates a failure as
-	// this function's own error union, negates the unwrapped bool, and either wraps it as the
-	// error-union success or branches into the guard's bool return. Its BFS pulls in
-	// next_token_text_equals and is_match_arm_trailing_comma (both seeded members).
-	"is_trailing_comma",
-	// format_source is the whole-formatter entry now compiled into stage2. The hosted fmt
-	// command calls it directly and consumes the returned owned String handle.
-	"format_source",
-}
+// The per-helper seed list that used to live here (formatCompiledHelperSeeds, one entry per
+// compiled selfhost::parser::format member, checked for by name against the two emission
+// sources) is gone with the mechanism it described. The semantic package graph derives closure
+// membership from the real format.kizu call graph, so no emitter names a helper any more --
+// assertFormatClosurePackageGraphDriven below asserts the opposite of what that list needed,
+// that no hand-written per-component closure table survives. Per-member coverage now sits at
+// the artifact level in TestSelfhostBackendArtifactGate, which pins the emitted
+// 'define ... @kizu_selfhost__parser_format_<member>' definitions; git history at ffb2306f keeps
+// the per-helper shape notes.
 
 // TestSelfhostFormatHelperStructuralGate pins that the first selfhost::parser::format
 // read-only helpers stay on the compiled path through the shared component catalog, and
@@ -512,7 +384,10 @@ func readSelfhostSrc(t *testing.T, rel string) string {
 
 // assertFormatClosurePackageGraphDriven pins that formatter facts flow through
 // the semantic package graph while the backend resolves each compiled member
-// from signature facts.
+// from signature facts. The fact entry (append_facts_from_parsed) and the closure
+// walk (append_numeric_package_closure) are named explicitly because they are the
+// generic replacements for the deleted per-component format fact collector; the
+// forbidden list is what keeps that collector from growing back.
 func assertFormatClosurePackageGraphDriven(t *testing.T, irEmission, backendEmission string) {
 	t.Helper()
 	irRequired := []string{
@@ -520,6 +395,8 @@ func assertFormatClosurePackageGraphDriven(t *testing.T, irEmission, backendEmis
 		`package_dependency_graph::dependency_graph`,
 		`package_call_resolution::append_resolved_dependencies`,
 		`append_numeric_package_definition(`,
+		`fn append_facts_from_parsed(`,
+		`fn append_numeric_package_closure(`,
 	}
 	for _, fragment := range irRequired {
 		if !strings.Contains(irEmission, fragment) {
@@ -529,6 +406,7 @@ func assertFormatClosurePackageGraphDriven(t *testing.T, irEmission, backendEmis
 	for _, fragment := range []string{
 		`component_function_catalog::`,
 		`collect_catalog_closure_`,
+		`append_format_function_facts`,
 	} {
 		if strings.Contains(irEmission, fragment) {
 			t.Errorf("executable_functions.kizu retains legacy closure path: %q", fragment)
@@ -554,42 +432,12 @@ func assertFormatClosurePackageGraphDriven(t *testing.T, irEmission, backendEmis
 	}
 }
 
-// assertFormatClosureSeeds pins the read-only seed set on both emission sites.
-func assertFormatClosureSeeds(t *testing.T, irEmission, backendEmission string) {
-	t.Helper()
-	for _, seed := range formatCompiledHelperSeeds {
-		quoted := `"` + seed + `"`
-		if !strings.Contains(irEmission, quoted) {
-			t.Errorf("executable_functions.kizu format closure missing seed %q", seed)
-		}
-		if !strings.Contains(backendEmission, quoted) {
-			t.Errorf("cli_llvm.kizu format closure missing seed %q", seed)
-		}
-	}
-}
-
-// assertFormatClosureIncludesDriver pins that the production format closure seeds format_source
-// itself, not only the helper frontier. The driver has its own lowering gate, so this structural
-// check only confirms it is wired into the artifact-producing facts and backend BFS.
-func assertFormatClosureIncludesDriver(t *testing.T, irEmission, backendEmission string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"fn append_facts_from_parsed(",
-		"package_call_resolution::append_resolved_dependencies(",
-		"fn append_numeric_package_closure(",
-	} {
-		if !strings.Contains(irEmission, fragment) {
-			t.Errorf("generic package closure missing %q", fragment)
-		}
-	}
-	quoted := `"format_source"`
-	if !strings.Contains(backendEmission, quoted) {
-		t.Errorf("cli_llvm.kizu format closure does not seed format_source")
-	}
-	if strings.Contains(irEmission, "append_format_function_facts") {
-		t.Error("legacy format fact collector remains")
-	}
-}
+// format_source's own membership in the compiled closure is no longer checked here by looking
+// for its name in the backend emitter: under the package graph the backend names no member. It
+// is rooted in the external ABI manifest, where
+// TestSelfhostExternalABIEntrypointsOwnCompiledPackageRoots pins the entry and its exact semantic
+// signature against a closed root count, and assertParseFormatAllocNotExtended below pins that
+// hosted fmt calls the compiled symbol.
 
 // The format_source driver call surface (the std::string::String(allocator) constructor, the
 // lexer::tokenize tokenizer entry, and the owned-handle '.deinit()') is no longer pinned here as a
@@ -604,11 +452,11 @@ func assertFormatClosureIncludesDriver(t *testing.T, irEmission, backendEmission
 // not grown for the formatter path, and that hosted fmt now calls the compiled formatter driver.
 func assertParseFormatAllocNotExtended(t *testing.T, parseLLVM string) {
 	t.Helper()
-	lines := parseFormatAllocFunctionLineCount(t, parseLLVM)
-	if lines > parseFormatAllocMaxLines {
-		t.Errorf("append_parse_format_alloc_function grew to %d lines (max %d) -- the formatter "+
-			"migration must not extend the hand-written indentation / import-sort / comment logic",
-			lines, parseFormatAllocMaxLines)
+	code := parseFormatAllocCodeLineCount(t, parseLLVM)
+	if code > parseFormatAllocMaxCodeLines {
+		t.Errorf("append_parse_format_alloc_function grew to %d code lines (max %d) -- the "+
+			"formatter migration must not extend the hand-written indentation / import-sort / "+
+			"comment logic", code, parseFormatAllocMaxCodeLines)
 	}
 	if !strings.Contains(parseLLVM, "@kizu_selfhost__parser_format_format_source") {
 		t.Errorf("cli_parse_llvm.kizu does not call the compiled format_source driver")
@@ -633,9 +481,11 @@ func assertParseFormatAllocNotExtended(t *testing.T, parseLLVM string) {
 	}
 }
 
-// parseFormatAllocFunctionLineCount returns the line span of the hand-written
-// append_parse_format_alloc_function definition.
-func parseFormatAllocFunctionLineCount(t *testing.T, parseLLVM string) int {
+// parseFormatAllocCodeLineCount returns the number of code lines in the hand-written
+// append_parse_format_alloc_function definition: the span from its header line through the
+// first column-0 closing brace, skipping blanks and comment-only lines so documenting the
+// body does not register as growth.
+func parseFormatAllocCodeLineCount(t *testing.T, parseLLVM string) int {
 	t.Helper()
 	lines := strings.Split(parseLLVM, "\n")
 	start := -1
@@ -651,7 +501,15 @@ func parseFormatAllocFunctionLineCount(t *testing.T, parseLLVM string) int {
 	}
 	for i := start; i < len(lines); i++ {
 		if lines[i] == "}" {
-			return i - start + 1
+			code := 0
+			for _, body := range lines[start : i+1] {
+				trimmed := strings.TrimSpace(body)
+				if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+					continue
+				}
+				code++
+			}
+			return code
 		}
 	}
 	t.Fatalf("append_parse_format_alloc_function has no closing brace")

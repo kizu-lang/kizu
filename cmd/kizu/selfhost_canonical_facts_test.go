@@ -8,6 +8,11 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
+// TestSelfhostCanonicalFactsStrictValidation drives the canonical fact table in
+// both directions: every well-formed tape must validate, and every malformed one
+// must fail with its own diagnostic. Matching the message matters as much as the
+// failure -- a tape that is rejected for the wrong reason would still look green
+// while the rule it was written for has stopped being enforced.
 func TestSelfhostCanonicalFactsStrictValidation(t *testing.T) {
 	_, program, err := loadPackageProgram("../../selfhost")
 	if err != nil {
@@ -45,7 +50,10 @@ func TestSelfhostCanonicalFactsStrictValidation(t *testing.T) {
 		{"numeric_overflow_gate", "numeric token overflow"},
 		{"typed_error_spelling_gate", "cannot erase typed error"},
 		{"declared_generic_arity_mismatch_gate", "declared type argument arity mismatch"},
-		{"mismatched_error_result_receiver_child_gate", "runtime result receiver child selector mismatch"},
+		{
+			"mismatched_error_result_receiver_child_gate",
+			"runtime result receiver child selector mismatch",
+		},
 		{"unsupported_print_runtime_abi_gate", "print type unsupported"},
 	} {
 		var out bytes.Buffer
@@ -58,6 +66,12 @@ func TestSelfhostCanonicalFactsStrictValidation(t *testing.T) {
 	}
 }
 
+// TestSelfhostRuntimeStorageCodec pins the one storage codec every runtime
+// argument goes through: narrow scalars widen with zext/sext, anything larger
+// spills to an alloca and travels as a byte view, and the element size comes
+// from a null getelementptr rather than a table of per-type constants. The
+// asserted fragments are the observable shape of "one codec", so a per-type
+// special case reintroduced anywhere would drop one of them.
 func TestSelfhostRuntimeStorageCodec(t *testing.T) {
 	_, program, err := loadPackageProgram("../../selfhost")
 	if err != nil {
@@ -93,6 +107,12 @@ func TestSelfhostRuntimeStorageCodec(t *testing.T) {
 	}
 }
 
+// TestSelfhostRuntimeResultStorageCodec extends the storage codec to the
+// result-carrying runtime calls (map get, array pop) and to the method receiver
+// that feeds them. The negative assertions carry the point: the runtime symbols
+// must stay unspecialized, so a returning `kizu_rt_map_get_i64` or
+// `kizu_rt_array_pop_or_panic_*` means the backend went back to emitting one
+// entry point per payload type.
 func TestSelfhostRuntimeResultStorageCodec(t *testing.T) {
 	_, program, err := loadPackageProgram("../../selfhost")
 	if err != nil {
@@ -162,6 +182,14 @@ func TestSelfhostRuntimeResultStorageCodec(t *testing.T) {
 	}
 }
 
+// TestSelfhostArrayPopOrPanicRuntimeIsGenericAndChecked reads the shipped
+// runtime IR instead of generated output, because the hand-written
+// array_pop_or_panic body is where a missing guard would actually live: it must
+// check the handle, the buffer, the length, and the element size before it
+// shortens the array, and trap rather than fall through. The tail of the test
+// covers the caller side -- receiver resolution must reach a field through the
+// indexed type cache, never by recognizing a particular type or variable name
+// (AGENTS.md forbids source-literal dispatch).
 func TestSelfhostArrayPopOrPanicRuntimeIsGenericAndChecked(t *testing.T) {
 	storage := readSelfhostFile(t, "../../selfhost/runtime/selfhost.storage.ll")
 	start := strings.Index(
@@ -219,6 +247,12 @@ func TestSelfhostArrayPopOrPanicRuntimeIsGenericAndChecked(t *testing.T) {
 	}
 }
 
+// TestSelfhostCompiledPrintRenderer pins that print lowers through the runtime
+// descriptor: slices are unpacked to pointer and length, sub-word integers are
+// widened to i64 with the sign their type calls for, and bool keeps its i1
+// transport. An operand with no descriptor must be a hard error -- silently
+// falling back to some default print would make an unsupported type look
+// supported.
 func TestSelfhostCompiledPrintRenderer(t *testing.T) {
 	_, program, err := loadPackageProgram("../../selfhost")
 	if err != nil {
@@ -255,6 +289,9 @@ func TestSelfhostCompiledPrintRenderer(t *testing.T) {
 	}
 }
 
+// TestSelfhostCompiledPrintStatementLowering checks the step before the
+// renderer: a print statement must reach MIR already carrying a slice-typed
+// operand, so the renderer never has to infer a transport from the syntax.
 func TestSelfhostCompiledPrintStatementLowering(t *testing.T) {
 	_, program, err := loadPackageProgram("../../selfhost")
 	if err != nil {
@@ -279,6 +316,10 @@ func TestSelfhostCompiledPrintStatementLowering(t *testing.T) {
 	}
 }
 
+// TestSelfhostHostedPrintRuntimeHasSingleOwner keeps the print symbols defined
+// exactly once, by the hosted C runtime. Both runtimes are linked together, so a
+// second definition in the storage IR is either a duplicate-symbol link failure
+// or, worse, a silent pick between two implementations.
 func TestSelfhostHostedPrintRuntimeHasSingleOwner(t *testing.T) {
 	hosted := readSelfhostFile(t, "../../selfhost/runtime/selfhost.hosted.c")
 	storage := readSelfhostFile(t, "../../selfhost/runtime/selfhost.storage.ll")

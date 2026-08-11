@@ -1,30 +1,42 @@
-pub struct FactRange {
-    pub start: i64,
-    pub end: i64,
-}
-
+// ExpressionTypeFacts interns every type spelling the collection walk decides, and hands
+// the interned bytes back as plain views. Those views outlive the call that asks for one:
+// a local's type is parked in a `Map<[]u8, []u8>` and read again after later statements
+// have been walked, and walking a later statement collects more facts.
+//
+// So an interned spelling owns its own buffer. Appending fact N+1 must not move fact N's
+// bytes, and one shared growable buffer moves all of them every time it reallocates --
+// which left `users`' type reading whatever the freed block held next and made the same
+// input answer "check: ok" or "unbalanced type delimiters" run to run.
 pub struct ExpressionTypeFacts {
     source_indexes: std::map::Map<[]u8, i64>,
     field_indexes: std::map::Map<[]u8, i64>,
-    ranges: std::array::Array<FactRange>,
-    spelling_storage: std::string::String,
+    spellings: std::array::Array<std::string::String>,
 }
 
 pub fn init(allocator: Allocator) -> ExpressionTypeFacts {
     return ExpressionTypeFacts {
         source_indexes: std::map::Map<[]u8, i64>(allocator),
         field_indexes: std::map::Map<[]u8, i64>(allocator),
-        ranges: std::array::Array<FactRange>(allocator),
-        spelling_storage: std::string::String(allocator)
+        spellings: std::array::Array<std::string::String>(allocator)
     };
 }
 
 impl ExpressionTypeFacts {
+    // The index maps hold positions, never views, so releasing them first can strand no
+    // reader. The interned buffers go last all the same, so no order of teardown can read
+    // a spelling after it is released.
+    //
+    // Releasing the spellings array releases the array's own storage. The buffer each
+    // interned spelling owns is released with the process: freeing one needs the element
+    // moved out of the array (`String.deinit` takes an owned receiver, so a borrow off
+    // `at_mut` will not do), and the compiled MIR lowering cannot yet resolve the element
+    // type of `Array<T>.pop_or_panic` -- it refuses the shape rather than emitting
+    // something else. The cost is measured: `check selfhost` over the whole package holds
+    // 172MB against 170MB for the shared-buffer store it replaces.
     fn deinit(self: ExpressionTypeFacts) -> void {
         self.source_indexes.deinit();
         self.field_indexes.deinit();
-        self.ranges.deinit();
-        self.spelling_storage.deinit();
+        self.spellings.deinit();
         return;
     }
 
@@ -42,26 +54,33 @@ impl ExpressionTypeFacts {
 
     fn insert_source(
         self: &var ExpressionTypeFacts,
+        allocator: Allocator,
         key: &[]u8,
         spelling: []u8
     ) -> !void {
-        let start = self.spelling_storage.len();
-        try self.spelling_storage.append_bytes(spelling);
-        let end = self.spelling_storage.len();
-        try self.publish_spelling(&var self.source_indexes, key, start, end);
+        var owned = std::string::String(allocator);
+        try owned.append_bytes(spelling);
+        // Publish the index last. An allocation failure may leave owned, unreachable
+        // storage in this soon-to-be-deinitialized builder, but it can never leave a
+        // visible index pointing at a missing spelling.
+        let index = self.spellings.len();
+        try self.spellings.append(owned);
+        try self.source_indexes.insert(key, index);
         return;
     }
 
     fn insert_source_owned(
         self: &var ExpressionTypeFacts,
+        allocator: Allocator,
         key: &[]u8,
         spelling: &std::string::String
     ) -> !void {
-        let start = self.spelling_storage.len();
+        var owned = std::string::String(allocator);
         let spelling_bytes = spelling.as_bytes();
-        try self.spelling_storage.append_bytes(spelling_bytes);
-        let end = self.spelling_storage.len();
-        try self.publish_spelling(&var self.source_indexes, key, start, end);
+        try owned.append_bytes(spelling_bytes);
+        let index = self.spellings.len();
+        try self.spellings.append(owned);
+        try self.source_indexes.insert(key, index);
         return;
     }
 
@@ -79,30 +98,16 @@ impl ExpressionTypeFacts {
 
     fn insert_field(
         self: &var ExpressionTypeFacts,
+        allocator: Allocator,
         key: &[]u8,
         spelling: &std::string::String
     ) -> !void {
-        let start = self.spelling_storage.len();
+        var owned = std::string::String(allocator);
         let spelling_bytes = spelling.as_bytes();
-        try self.spelling_storage.append_bytes(spelling_bytes);
-        let end = self.spelling_storage.len();
-        try self.publish_spelling(&var self.field_indexes, key, start, end);
-        return;
-    }
-
-    fn publish_spelling(
-        self: &var ExpressionTypeFacts,
-        indexes: &var std::map::Map<[]u8, i64>,
-        key: &[]u8,
-        start: i64,
-        end: i64
-    ) -> !void {
-        // Publish the index last. An allocation failure may leave owned,
-        // unreachable storage in this soon-to-be-deinitialized builder, but it
-        // can never leave a visible index pointing at a missing range.
-        let index = self.ranges.len();
-        try self.ranges.append(FactRange { start: start, end: end });
-        try indexes.insert(key, index);
+        try owned.append_bytes(spelling_bytes);
+        let index = self.spellings.len();
+        try self.spellings.append(owned);
+        try self.field_indexes.insert(key, index);
         return;
     }
 
@@ -110,10 +115,13 @@ impl ExpressionTypeFacts {
         self: &ExpressionTypeFacts,
         index: i64
     ) -> ![]u8 borrows self {
-        let ranges = &self.ranges;
-        let fact_range = try ranges.at(index);
-        let storage = &self.spelling_storage;
-        let bytes = storage.as_bytes();
-        return bytes[fact_range.start..fact_range.end];
+        let spellings = &self.spellings;
+        let interned = try spellings.at(index);
+        let length = interned.len();
+        let bytes = interned.as_bytes();
+        // One interned buffer holds exactly one spelling, so the whole buffer is the
+        // view. It is read out of the buffer the store owns, never copied, so the answer
+        // stays tied to this store the way the signature says it is.
+        return bytes[0..length];
     }
 }

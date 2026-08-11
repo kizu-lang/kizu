@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+// TestSelfhostCompiledRunModuleIsPureComposition pins the compiled run renderer
+// as a composition of stages that other modules own. It is the module that
+// replaces the legacy renderer, so the test tracks both sides of the handover:
+// the new renderer must own no declarations and no file policy of its own, the
+// legacy renderer must call into the shared declaration owner instead of
+// repeating it, and that owner must stay declarations-only.
 func TestSelfhostCompiledRunModuleIsPureComposition(t *testing.T) {
 	renderer := readSelfhostFile(
 		t, "../../selfhost/src/backend/compiled_run_llvm.kizu",
@@ -18,6 +24,18 @@ func TestSelfhostCompiledRunModuleIsPureComposition(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 
 	body := selfhostKizuFunctionBody(t, renderer, "pub fn render_module(")
+	assertCompiledRunRenderStages(t, body)
+	assertCompiledRunRendererIsPolicyFree(t, renderer, cli)
+	assertLegacyRendererDelegatesDeclarations(t, legacyRenderer)
+	assertRuntimeDeclarationOwnerDeclaresOnly(t, runtimeDeclarations)
+}
+
+// assertCompiledRunRenderStages checks render_module calls each stage, builds the
+// index and parses the canonical facts once rather than per stage, and emits the
+// stages in an order the module text can only satisfy by declaring types before
+// the functions that use them and the entry point last.
+func assertCompiledRunRenderStages(t *testing.T, body string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"validate_fact_bytes(facts)",
 		"ir_index::build(facts)",
@@ -57,6 +75,15 @@ func TestSelfhostCompiledRunModuleIsPureComposition(t *testing.T) {
 		}
 		previous = at
 	}
+}
+
+// assertCompiledRunRendererIsPolicyFree keeps the renderer free of the legacy
+// modules it supersedes and of any filesystem work: rendering a module is a
+// bytes-to-bytes job, so choosing paths or reading files belongs to the caller.
+// The final check is a staging guard -- the CLI must not adopt this renderer
+// until the integration slice lands.
+func assertCompiledRunRendererIsPolicyFree(t *testing.T, renderer, cli string) {
+	t.Helper()
 	for _, forbidden := range []string{
 		"selfhost::backend::llvm",
 		"selfhost::backend::cli_llvm",
@@ -73,7 +100,14 @@ func TestSelfhostCompiledRunModuleIsPureComposition(t *testing.T) {
 	if strings.Contains(cli, "compiled_run_llvm") {
 		t.Fatal("CLI switched to compiled run renderer before the integration slice")
 	}
+}
 
+// assertLegacyRendererDelegatesDeclarations checks the legacy renderer takes its
+// declarations from the shared owner instead of spelling them out again. It must
+// not declare the storage externals, because unlike the compiled renderer it
+// defines them itself, and a module cannot both declare and define a symbol.
+func assertLegacyRendererDelegatesDeclarations(t *testing.T, legacyRenderer string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"compiled_runtime_declarations::append_foundation_types(out)",
 		"compiled_runtime_declarations::append_linked_host_externals(out)",
@@ -99,6 +133,14 @@ func TestSelfhostCompiledRunModuleIsPureComposition(t *testing.T) {
 			t.Errorf("legacy renderer retains duplicate declaration ownership %q", forbidden)
 		}
 	}
+}
+
+// assertRuntimeDeclarationOwnerDeclaresOnly checks the shared owner holds the
+// runtime declarations and nothing more. A definition or a runtime type body
+// here would be linked into every module that includes it and collide with the
+// real runtime.
+func assertRuntimeDeclarationOwnerDeclaresOnly(t *testing.T, runtimeDeclarations string) {
+	t.Helper()
 	for _, fragment := range []string{
 		`"declare %kizu.owned @kizu_rt_mem_page_allocator()"`,
 		`"declare %kizu.error.void @kizu_rt_array_append(%kizu.owned, %kizu.slice.u8)"`,
@@ -120,6 +162,11 @@ func TestSelfhostCompiledRunModuleIsPureComposition(t *testing.T) {
 	}
 }
 
+// TestSelfhostCompiledRunMinimalModuleLLVM renders the smallest complete run
+// module and checks it is self-contained at the declaration level but not at the
+// definition level: the runtime symbols it uses are declared, the entry chain
+// down to C main is defined, and the runtime implementations stay out because
+// they arrive at link time.
 func TestSelfhostCompiledRunMinimalModuleLLVM(t *testing.T) {
 	out, err := runSelfhostAbiParamsGate(
 		t, "selfhost::backend::compiled_run_llvm::minimal_module_gate",

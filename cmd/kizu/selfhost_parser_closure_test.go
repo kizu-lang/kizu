@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+// TestSelfhostParserClosureUsesComponentCatalog pins the parser's compiled
+// closure to the generic package catalog: facts come from resolving every parsed
+// file's calls and walking the dependency queue, not from a hand-maintained list
+// of parser entry points. The forbidden names are the selectors that list
+// replaced.
 func TestSelfhostParserClosureUsesComponentCatalog(t *testing.T) {
 	source := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	production := selfhostKizuFunctionBody(t, source, "fn append_facts_from_parsed(")

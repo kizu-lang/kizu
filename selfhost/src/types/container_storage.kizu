@@ -1,0 +1,749 @@
+import selfhost::ir::intrinsic_type_contract;
+import selfhost::source;
+import selfhost::type_spelling;
+import selfhost::types::ast_text;
+import selfhost::types::model;
+import selfhost::types::raw_pointer;
+import selfhost::types::symbols;
+import selfhost::types::type_ref_names;
+
+// container_storage owns what a v0.2 container position may hold. A container lays out
+// storage for elements that do not exist yet, so what it accepts is decided from the
+// element type's classification and nothing else: whether the type is duplicated by value
+// or owns storage someone has to release, whether it is a borrow with no lifetime the
+// declaration can check, whether it is a dynamic object with no size, and which intrinsic
+// identity it names. Every one of those answers comes from the type registry the frontend
+// already builds -- `kinds` for the declared kind, `copyable` for duplication, and
+// selfhost::ir::intrinsic_type_contract for the intrinsic identity -- so a spelling added
+// for an identity the registry already knows is decided the same way the old one was.
+//
+// Four positions ask it (internal/types/checker.go:1369, :1101, :3748):
+//   - a `std::map::Map` key, which the v0.2 table hashes as bytes,
+//   - a `std::map::Map` value, which the table stores by copying,
+//   - a struct field or union variant payload, which cannot be a borrow,
+//   - a `std::array::Array` element, whose lifetime the array owns.
+
+pub fn kind_map_key() -> i64 { return 1; }
+pub fn kind_map_value() -> i64 { return 2; }
+pub fn kind_borrow_field() -> i64 { return 3; }
+pub fn kind_borrow_payload() -> i64 { return 4; }
+pub fn kind_array_element() -> i64 { return 5; }
+pub fn kind_array_element_in_struct() -> i64 { return 6; }
+pub fn kind_array_element_in_union() -> i64 { return 7; }
+
+// Why an array refused an element.
+pub fn cause_raw_pointer() -> i64 { return 1; }
+pub fn cause_dyn() -> i64 { return 2; }
+pub fn cause_intrinsic() -> i64 { return 3; }
+
+// ArrayElementCause is the policy's answer about one element type. `frame` is the report
+// kind for the declaration the refused type was reached through -- a struct or a union --
+// or 0 when the element type written at the constructor is the one refused.
+struct ArrayElementCause {
+    found: bool,
+    cause: i64,
+    detail: []u8,
+    frame: i64,
+    owner: []u8,
+    member: []u8,
+}
+
+// ---------------------------------------------------------------------------
+// Declaration positions
+// ---------------------------------------------------------------------------
+
+// A field and a variant payload are the same position under two names: storage the
+// declaration lays out ahead of every value that will fill it. A borrow is a view whose
+// source the declaration cannot name, so neither may hold one. The spelling's own
+// container rules are decided first, because they are properties of the type the borrow
+// points at and hold however it is reached.
+pub fn stored_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    copyable: &std::map::Map<[]u8, bool>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    type_params: std::kizu::ast::ChildRange,
+    declaration: std::kizu::ast::NodeId,
+    owner: []u8,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    borrow_kind: i64
+) -> !model::ContainerStorageSummary {
+    let spelling = ast_text::ast_node_text(file, ast, type_node);
+    let inside = try spelling_violation(
+        allocator, file, ast, kinds, copyable, alias_starts, alias_ends, type_params,
+        spelling, declaration
+    );
+    if inside.found {
+        return inside;
+    }
+    if !stores_borrow(spelling) {
+        return no_container_storage_diagnostic();
+    }
+    let node = ast.get(declaration);
+    return container_storage_summary(
+        borrow_kind, 0, node.span.start, node.span.end,
+        owner, ast_text::ast_node_text(file, ast, name), ""
+    );
+}
+
+fn stores_borrow(spelling: []u8) -> bool {
+    if std::mem::len(spelling) == 0 {
+        return false;
+    }
+    return spelling[0] == cast<u8>(38);
+}
+
+// ---------------------------------------------------------------------------
+// Map key and value
+// ---------------------------------------------------------------------------
+
+// The map rules hold of the spelling wherever it stands, so every layer of every written
+// spelling is asked, outermost first: `std::array::Array<std::map::Map<i64, i64>>` names
+// a map with an unhashable key just as plainly as the map spelled on its own.
+pub fn spelling_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    copyable: &std::map::Map<[]u8, bool>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    type_params: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::ContainerStorageSummary {
+    if std::mem::len(spelling) == 0 {
+        return no_container_storage_diagnostic();
+    }
+    if try mentions_type_parameter(file, ast, type_params, spelling) {
+        return no_container_storage_diagnostic();
+    }
+    return try layer_violation(
+        allocator, file, ast, kinds, copyable, alias_starts, alias_ends, spelling, node_id
+    );
+}
+
+fn layer_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    copyable: &std::map::Map<[]u8, bool>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    spelling: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::ContainerStorageSummary {
+    // A container's rules hold of the type however the position reaches it, so the layers
+    // a spelling wraps it in come off first: `&std::map::Map<i64, i64>` names the same
+    // unhashable key the owned spelling does.
+    let inner = std::mem::trim_ascii(
+        spelling[wrapper_layers_end(spelling)..std::mem::len(spelling)]
+    );
+    let arguments_start = type_arguments_start(inner);
+    if arguments_start < 0 {
+        return no_container_storage_diagnostic();
+    }
+    let constructor = std::mem::trim_ascii(inner[0..arguments_start - 1]);
+    let arguments = inner[arguments_start..std::mem::len(inner) - 1];
+    if intrinsic_type_contract::from_source_name(constructor) ==
+        intrinsic_type_contract::kind_map() {
+        let entry = try map_entry_violation(
+            allocator, file, ast, kinds, copyable, alias_starts, alias_ends,
+            arguments, node_id
+        );
+        if entry.found {
+            return entry;
+        }
+    }
+    return try arguments_violation(
+        allocator, file, ast, kinds, copyable, alias_starts, alias_ends,
+        arguments, node_id
+    );
+}
+
+fn arguments_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    copyable: &std::map::Map<[]u8, bool>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    arguments: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::ContainerStorageSummary {
+    var start = 0;
+    while start < std::mem::len(arguments) {
+        let end = argument_end(arguments, start);
+        let found = try layer_violation(
+            allocator, file, ast, kinds, copyable, alias_starts, alias_ends,
+            std::mem::trim_ascii(arguments[start..end]), node_id
+        );
+        if found.found {
+            return found;
+        }
+        start = end + 1;
+    }
+    return no_container_storage_diagnostic();
+}
+
+// The v0.2 table hashes a key as bytes and stores a value by copying it, so the key is
+// the byte-string identity and the value is any type the registry says is duplicated by
+// value.
+fn map_entry_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    copyable: &std::map::Map<[]u8, bool>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    arguments: []u8,
+    node_id: std::kizu::ast::NodeId
+) -> !model::ContainerStorageSummary {
+    let key_end = argument_end(arguments, 0);
+    if key_end >= std::mem::len(arguments) {
+        return no_container_storage_diagnostic();
+    }
+    let node = ast.get(node_id);
+    let key = std::mem::trim_ascii(arguments[0..key_end]);
+    if !is_byte_string_spelling(key) {
+        return container_storage_summary(
+            kind_map_key(), 0, node.span.start, node.span.end, "", "", ""
+        );
+    }
+    let value = std::mem::trim_ascii(
+        arguments[key_end + 1..std::mem::len(arguments)]
+    );
+    if try is_duplicated_by_value(
+        allocator, file, kinds, copyable, alias_starts, alias_ends, value
+    ) {
+        return no_container_storage_diagnostic();
+    }
+    return container_storage_summary(
+        kind_map_value(), 0, node.span.start, node.span.end, "", "", ""
+    );
+}
+
+// is_duplicated_by_value asks the registry whether a value of the written type is
+// duplicated by copying its bytes. A wrapper layer answers before the registry does: a
+// borrow, a nullable pointer, a dynamic object, an error union and a constructed generic
+// all name storage or a view that something else owns. A slice is duplicated when it is
+// the byte string the language copies by descriptor.
+fn is_duplicated_by_value(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    copyable: &std::map::Map<[]u8, bool>,
+    alias_starts: &std::map::Map<[]u8, i64>,
+    alias_ends: &std::map::Map<[]u8, i64>,
+    spelling: []u8
+) -> !bool {
+    if std::mem::len(spelling) == 0 {
+        return false;
+    }
+    if is_byte_string_spelling(spelling) {
+        return true;
+    }
+    if !is_plain_name(spelling) {
+        return false;
+    }
+    var resolved = std::string::String(allocator);
+    try type_ref_names::append_resolved_type_reference_name(
+        resolved, file, kinds, spelling, alias_starts, alias_ends
+    );
+    let key = resolved.as_bytes();
+    // The map is asked directly because `key` borrows `resolved` and cannot escape into a
+    // helper; a name the registry never recorded is not duplicated by value.
+    var duplicated = false;
+    if copyable.contains(key) {
+        duplicated = try copyable.get(key);
+    } else {
+        duplicated = symbols::is_builtin_primitive_name(spelling);
+    }
+    resolved.deinit();
+    return duplicated;
+}
+
+// is_plain_name reports whether a spelling names a type directly, with no wrapper layer
+// and no static arguments applied to it.
+fn is_plain_name(spelling: []u8) -> bool {
+    var index = 0;
+    while index < std::mem::len(spelling) {
+        let byte = spelling[index];
+        if !type_spelling::is_name_byte(byte) and byte != cast<u8>(58) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+// The byte string is the one slice the language copies by descriptor, so it is spelled as
+// the slice layer over the intrinsic byte identity rather than matched as a name.
+fn is_byte_string_spelling(spelling: []u8) -> bool {
+    if std::mem::len(spelling) < 3 {
+        return false;
+    }
+    if spelling[0] != cast<u8>(91) or spelling[1] != cast<u8>(93) {
+        return false;
+    }
+    let element = std::mem::trim_ascii(spelling[2..std::mem::len(spelling)]);
+    return intrinsic_type_contract::from_source_name(element) ==
+        intrinsic_type_contract::kind_u8();
+}
+
+// ---------------------------------------------------------------------------
+// Array elements
+// ---------------------------------------------------------------------------
+
+pub fn array_constructor_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    callee: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange
+) -> !model::ContainerStorageSummary {
+    let node = ast.get(callee);
+    match node.data {
+        TypeApplyExpr(type_apply) => return array_element_violation(
+            allocator, file, ast, root, type_apply.callee, type_apply.type_args,
+            type_params
+        );,
+        _ => return no_container_storage_diagnostic();,
+    }
+}
+
+fn array_element_violation(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    constructor: std::kizu::ast::NodeId,
+    type_args: std::kizu::ast::ChildRange,
+    type_params: std::kizu::ast::ChildRange
+) -> !model::ContainerStorageSummary {
+    let name = ast_text::ast_node_text(file, ast, constructor);
+    if intrinsic_type_contract::from_source_name(name) !=
+        intrinsic_type_contract::kind_array() {
+        return no_container_storage_diagnostic();
+    }
+    var visited = std::map::Map<[]u8, bool>(allocator);
+    defer visited.deinit();
+    var index = 0;
+    while index < type_args.len {
+        let child = try ast.child_at(type_args, index);
+        let spelling = ast_text::ast_node_text(file, ast, child);
+        if !(try mentions_type_parameter(file, ast, type_params, spelling)) {
+            let cause = try element_cause(file, ast, root, spelling, visited);
+            if cause.found {
+                let node = ast.get(child);
+                return container_storage_summary(
+                    array_kind_for_frame(cause.frame), cause.cause,
+                    node.span.start, node.span.end,
+                    cause.owner, cause.member, cause.detail
+                );
+            }
+        }
+        index = index + 1;
+    }
+    return no_container_storage_diagnostic();
+}
+
+fn array_kind_for_frame(frame: i64) -> i64 {
+    if frame == 0 {
+        return kind_array_element();
+    }
+    return frame;
+}
+
+// An array owns its elements' storage for as long as the array lives, and it hands one
+// back by copying it out. Three classifications cannot survive that: a raw pointer, which
+// carries no lifetime for the array to keep valid; a dynamic object, which has no size to
+// lay out; and the concurrency intrinsics, whose values name a runtime resource one scope
+// must release. `option` is transparent to the question -- an optional raw pointer is
+// still a raw pointer -- and a nominal type is whatever its fields or payloads are.
+fn element_cause(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !ArrayElementCause {
+    if raw_pointer::is_raw_pointer(spelling) {
+        return element_cause_found(cause_raw_pointer(), "");
+    }
+    if is_dynamic_spelling(spelling) {
+        return element_cause_found(cause_dyn(), "");
+    }
+    // A recursive type reaches itself; having asked once is answer enough.
+    if visited.contains(spelling) {
+        return no_element_cause();
+    }
+    try visited.insert(spelling, true);
+    let arguments_start = type_arguments_start(spelling);
+    if arguments_start < 0 {
+        return try declared_element_cause(file, ast, root, spelling, visited);
+    }
+    let constructor = std::mem::trim_ascii(spelling[0..arguments_start - 1]);
+    let kind = intrinsic_type_contract::from_source_name(constructor);
+    if is_concurrency_resource_kind(kind) {
+        return element_cause_found(cause_intrinsic(), constructor);
+    }
+    if kind != intrinsic_type_contract::kind_option() {
+        return no_element_cause();
+    }
+    let arguments = spelling[arguments_start..std::mem::len(spelling) - 1];
+    let end = argument_end(arguments, 0);
+    return try element_cause(
+        file, ast, root, std::mem::trim_ascii(arguments[0..end]), visited
+    );
+}
+
+fn is_concurrency_resource_kind(kind: i64) -> bool {
+    return kind == intrinsic_type_contract::kind_task() or
+        kind == intrinsic_type_contract::kind_channel() or
+        kind == intrinsic_type_contract::kind_mutex() or
+        kind == intrinsic_type_contract::kind_atomic();
+}
+
+fn is_dynamic_spelling(spelling: []u8) -> bool {
+    let marker = "dyn ";
+    if std::mem::len(spelling) < std::mem::len(marker) {
+        return false;
+    }
+    return std::mem::equal_bytes(spelling[0..std::mem::len(marker)], marker);
+}
+
+// A nominal type is only as storable as what it stores, so the declarations of the file
+// being checked answer for it. A type declared in another module answers nothing until
+// the frontend resolves nominal declarations across modules.
+fn declared_element_cause(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !ArrayElementCause {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return declarations_element_cause(
+            file, ast, root, program.declarations, spelling, visited
+        );,
+        _ => return no_element_cause();,
+    }
+}
+
+fn declarations_element_cause(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    declarations: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !ArrayElementCause {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try declaration_element_cause(
+            file, ast, root, child, spelling, visited
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_element_cause();
+}
+
+fn declaration_element_cause(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    spelling: []u8,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !ArrayElementCause {
+    let node = ast.get(node_id);
+    match node.data {
+        StructDecl(struct_decl) => return named_members_element_cause(
+            file, ast, root, struct_decl.name, struct_decl.fields, spelling,
+            kind_array_element_in_struct(), visited
+        );,
+        UnionDecl(union_decl) => return named_members_element_cause(
+            file, ast, root, union_decl.name, union_decl.variants, spelling,
+            kind_array_element_in_union(), visited
+        );,
+        _ => return no_element_cause();,
+    }
+}
+
+fn named_members_element_cause(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    members: std::kizu::ast::ChildRange,
+    spelling: []u8,
+    frame: i64,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !ArrayElementCause {
+    let owner = ast_text::ast_node_text(file, ast, name);
+    if !std::mem::equal_bytes(owner, spelling) {
+        return no_element_cause();
+    }
+    var index = 0;
+    while index < members.len {
+        let child = try ast.child_at(members, index);
+        let found = try member_element_cause(file, ast, root, child, visited);
+        if found.found {
+            return framed_element_cause(found, frame, owner);
+        }
+        index = index + 1;
+    }
+    return no_element_cause();
+}
+
+fn member_element_cause(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    node_id: std::kizu::ast::NodeId,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !ArrayElementCause {
+    let node = ast.get(node_id);
+    match node.data {
+        Field(field_node) => return member_named_element_cause(
+            file, ast, root, field_node.name, field_node.type_node, visited
+        );,
+        UnionVariant(variant_node) => return member_named_element_cause(
+            file, ast, root, variant_node.name, variant_node.payload, visited
+        );,
+        _ => return no_element_cause();,
+    }
+}
+
+fn member_named_element_cause(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    visited: &var std::map::Map<[]u8, bool>
+) -> !ArrayElementCause {
+    let spelling = ast_text::ast_node_text(file, ast, type_node);
+    if std::mem::len(spelling) == 0 {
+        return no_element_cause();
+    }
+    let found = try element_cause(file, ast, root, spelling, visited);
+    if !found.found {
+        return no_element_cause();
+    }
+    return ArrayElementCause {
+        found: true,
+        cause: found.cause,
+        detail: found.detail,
+        frame: found.frame,
+        owner: found.owner,
+        member: ast_text::ast_node_text(file, ast, name)
+    };
+}
+
+// The report names the declaration the element type was reached through. A cause found
+// deeper already carries the declaration nearest to it, which is the one a reader has to
+// change, so only the innermost frame is kept.
+fn framed_element_cause(
+    found: ArrayElementCause,
+    frame: i64,
+    owner: []u8
+) -> ArrayElementCause {
+    var reported_frame = found.frame;
+    var reported_owner = found.owner;
+    if reported_frame == 0 {
+        reported_frame = frame;
+        reported_owner = owner;
+    }
+    return ArrayElementCause {
+        found: true,
+        cause: found.cause,
+        detail: found.detail,
+        frame: reported_frame,
+        owner: reported_owner,
+        member: found.member
+    };
+}
+
+fn element_cause_found(cause: i64, detail: []u8) -> ArrayElementCause {
+    return ArrayElementCause {
+        found: true,
+        cause: cause,
+        detail: detail,
+        frame: 0,
+        owner: "",
+        member: ""
+    };
+}
+
+fn no_element_cause() -> ArrayElementCause {
+    return ArrayElementCause {
+        found: false,
+        cause: 0,
+        detail: "",
+        frame: 0,
+        owner: "",
+        member: ""
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Spelling helpers
+// ---------------------------------------------------------------------------
+
+// A type parameter stands for whatever type the caller chose, and the frontend checks a
+// generic declaration once rather than once per instantiation, so a spelling that mentions
+// one fixes no classification here and every rule above stands down on it.
+fn mentions_type_parameter(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_params: std::kizu::ast::ChildRange,
+    spelling: []u8
+) -> !bool {
+    var index = 0;
+    while index < type_params.len {
+        let child = try ast.child_at(type_params, index);
+        if type_spelling::mentions_name(
+            spelling,
+            ast_text::ast_node_text(file, ast, child)
+        ) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// wrapper_layers_end reports where the type a spelling wraps begins: past every borrow,
+// slice, nullable, dynamic, const and error-union marker written in front of it.
+fn wrapper_layers_end(spelling: []u8) -> i64 {
+    var start = 0;
+    var moved = true;
+    while moved {
+        let next = wrapper_layer_end(spelling, start);
+        moved = next > start;
+        start = next;
+    }
+    return start;
+}
+
+fn wrapper_layer_end(spelling: []u8, start: i64) -> i64 {
+    if prefix_at(spelling, start, "&var ") {
+        return start + 5;
+    }
+    if prefix_at(spelling, start, "&") {
+        return start + 1;
+    }
+    if prefix_at(spelling, start, "[]") {
+        return start + 2;
+    }
+    if prefix_at(spelling, start, "?") {
+        return start + 1;
+    }
+    if prefix_at(spelling, start, "dyn ") {
+        return start + 4;
+    }
+    if prefix_at(spelling, start, "const ") {
+        return start + 6;
+    }
+    if prefix_at(spelling, start, "!") {
+        return start + 1;
+    }
+    return start;
+}
+
+fn prefix_at(spelling: []u8, start: i64, prefix: []u8) -> bool {
+    let width = std::mem::len(prefix);
+    if std::mem::len(spelling) - start < width {
+        return false;
+    }
+    return std::mem::equal_bytes(spelling[start..start + width], prefix);
+}
+
+// type_arguments_start reports where a generic application's arguments begin, or -1 when
+// the spelling applies no static arguments.
+fn type_arguments_start(spelling: []u8) -> i64 {
+    let length = std::mem::len(spelling);
+    if length < 1 or spelling[length - 1] != cast<u8>(62) {
+        return -1;
+    }
+    var index = 0;
+    while index < length and spelling[index] != cast<u8>(60) {
+        index = index + 1;
+    }
+    if index >= length or index == 0 {
+        return -1;
+    }
+    return index + 1;
+}
+
+// argument_end reports where the argument that starts at `start` ends: the next top-level
+// separator, or the end of the argument list.
+fn argument_end(arguments: []u8, start: i64) -> i64 {
+    var depth = 0;
+    var index = start;
+    while index < std::mem::len(arguments) {
+        let byte = arguments[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                depth = depth - 1;
+            } else {
+                if byte == cast<u8>(44) and depth == 0 {
+                    return index;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return std::mem::len(arguments);
+}
+
+pub fn no_container_storage_diagnostic() -> model::ContainerStorageSummary {
+    return model::ContainerStorageSummary {
+        found: false,
+        kind: 0,
+        cause: 0,
+        start: 0,
+        end: 0,
+        owner: "",
+        member: "",
+        detail: ""
+    };
+}
+
+fn container_storage_summary(
+    kind: i64,
+    cause: i64,
+    start: i64,
+    end: i64,
+    owner: []u8,
+    member: []u8,
+    detail: []u8
+) -> model::ContainerStorageSummary {
+    return model::ContainerStorageSummary {
+        found: true,
+        kind: kind,
+        cause: cause,
+        start: start,
+        end: end,
+        owner: owner,
+        member: member,
+        detail: detail
+    };
+}

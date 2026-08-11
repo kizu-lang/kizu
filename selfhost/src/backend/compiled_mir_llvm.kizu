@@ -354,6 +354,8 @@ pub fn short_circuit_condition_renderer_gate() -> !void {
         std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator()),
         0,
+        "",
+        "",
         std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator()),
         std::array::Array<compiled_mir::MirIfMergeVar>(std::mem::page_allocator())
     ));
@@ -1000,6 +1002,10 @@ fn append_multi_statement_mir(
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("entry:");
     try out.append_byte(cast<u8>(10));
+    // Every if-merge slot in the function is reserved here, once, before any statement renders.
+    // Entry runs exactly once per call and dominates every block, so a slot reserved here is live
+    // and singly-allocated however deep inside a loop the if that uses it sits.
+    try append_multi_statement_merge_allocas(out, function);
     let stmts = &function.multi_stmts;
     var stmt_index = 0;
     while stmt_index < stmts.len() {
@@ -5656,7 +5662,10 @@ fn append_dispatch_arm_return_scoped(
         VoidReturnSuccess(payload) => try append_multi_if_return_void_success(
             out, function.return_type.llvm_name
         );,
-        _ => return error("compiled mir llvm: enum-dispatch arm return shape not yet supported");,
+        // Name the function. The lowering recognises an enumerated set of statement
+        // shapes rather than a general IR, so this is the message a source written
+        // outside that set hits, and a bare one costs a native rebuild to locate.
+        _ => return unsupported_dispatch_arm_shape(function.name);,
     }
     return;
 }
@@ -5676,9 +5685,16 @@ fn append_dispatch_return_call(
             out, function.name, &stmt.call_args, scope.numeric_scope
         );
     }
-    try out.append_bytes("  %");
-    try append_dispatch_call_result_name(out, scope);
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM.
+    let produces_value = compiled_mir_llvm_call::call_produces_value(stmt.llvm_type);
+    if produces_value {
+        try out.append_bytes("  %");
+        try append_dispatch_call_result_name(out, scope);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -5697,6 +5713,20 @@ fn append_dispatch_return_call(
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
     let own_return = function.return_type.llvm_name;
+    if !produces_value {
+        // Nothing was named, so the DECLARATION alone decides the return. The wrap name keeps
+        // append_dispatch_call_result_name's per-scope disambiguation.
+        if scope.enum_dispatch {
+            return compiled_mir_llvm_call::append_void_call_return(
+                out, function.name, own_return, "enumdispatchcall",
+                scope.match_index, scope.arm_index, "_wrap0"
+            );
+        }
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, own_return, "dispatchcall",
+            scope.numeric_scope, -1, "_wrap0"
+        );
+    }
     if std::mem::starts_with(own_return, "%kizu.error.") and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
         try out.append_bytes("  %");
@@ -5745,6 +5775,19 @@ fn append_dispatch_return_expr(
     try append_expr_insts(out, function.name, &stmt.expr_insts);
     let return_type = function.return_type.llvm_name;
     let value_type = try expr_inst_type_by_id(&stmt.expr_insts, stmt.expr_result_id);
+    if !compiled_mir_llvm_call::call_produces_value(value_type) {
+        // The returned expression is a void call, emitted as a statement with no name to return.
+        if scope.enum_dispatch {
+            return compiled_mir_llvm_call::append_void_call_return(
+                out, function.name, return_type, "enumdispatchret",
+                scope.match_index, scope.arm_index, "_ok"
+            );
+        }
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, return_type, "dispatchret",
+            scope.numeric_scope, -1, "_ok"
+        );
+    }
     let needs_wrap = is_error_union_type(return_type) and
         std::mem::len(value_type) > 0 and
         !std::mem::equal_bytes(value_type, return_type);
@@ -6049,9 +6092,16 @@ fn append_multi_return_call(
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
         out, function.name, &stmt.call_args, local_prefix
     );
-    try out.append_bytes("  %");
-    try append_return_call_result_name(out, stmt, local_prefix);
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM.
+    let produces_value = compiled_mir_llvm_call::call_produces_value(stmt.llvm_type);
+    if produces_value {
+        try out.append_bytes("  %");
+        try append_return_call_result_name(out, stmt, local_prefix);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -6065,6 +6115,13 @@ fn append_multi_return_call(
     // success-typed callee: wrap the plain result into the function's error union.
     // A callee sharing the function's return type returns its value directly.
     let own_return = function.return_type.llvm_name;
+    if !produces_value {
+        // Nothing was named, so the DECLARATION alone decides the return. The wrap name matches
+        // append_return_call_result_name's '<stmt.name>_<local_prefix>'.
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, own_return, stmt.name, local_prefix, -1, "_wrap0"
+        );
+    }
     if std::mem::starts_with(own_return, "%kizu.error.") and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
         try out.append_bytes("  %");
@@ -6170,8 +6227,8 @@ fn append_multi_return_expr(
 ) -> !void {
     try append_expr_insts(out, function.name, &stmt.expr_insts);
     try append_expr_return_value(
-        out, function.return_type.llvm_name, &stmt.expr_insts, stmt.expr_result_id,
-        stmt.expr_result_id
+        out, function.name, function.return_type.llvm_name, &stmt.expr_insts,
+        stmt.expr_result_id, stmt.expr_result_id
     );
     return;
 }
@@ -6661,6 +6718,7 @@ fn append_while_globals(
         index = index + 1;
     }
     try append_expr_globals(out, llvm_symbol, &stmt.branch_latch_cond_insts);
+    try append_expr_globals(out, llvm_symbol, &stmt.branch_latch_exit_value_insts);
     let advance_stmts = &stmt.branch_latch_advance_stmts;
     var advance_index = 0;
     while advance_index < advance_stmts.len() {
@@ -6710,14 +6768,140 @@ fn append_if_globals(
     }
     return;
 }
+
+// append_multi_statement_merge_allocas reserves every if-merge slot the function will use, in the
+// entry block, before the first statement renders. It walks the same nesting the string-globals
+// pre-pass above walks, for the same reason: an if can sit at any depth inside a loop body, an if
+// arm, or a dispatch arm, and every one of them must be reached. See append_if_merge_slot_allocas
+// for why the entry block is the placement.
+//
+// Missing a nesting here is not a silent wrong answer: the if would then store to and load from a
+// slot no instruction defines, and LLVM rejects the module by name.
+fn append_multi_statement_merge_allocas(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction
+) -> !void {
+    try append_stmts_merge_allocas(out, &function.multi_stmts);
+    return;
+}
+
+fn append_stmts_merge_allocas(
+    out: &var std::string::String,
+    stmts: &std::array::Array<compiled_mir::MirStmt>
+) -> !void {
+    var index = 0;
+    while index < stmts.len() {
+        let stmt = try stmts.at(index);
+        try append_stmt_merge_allocas(out, stmt);
+        index = index + 1;
+    }
+    return;
+}
+
+// Only the statement kinds that nest further statements appear here; every other kind renders no
+// if and so reserves nothing. A while's latch_stmts hold one call or field read, never an if, so
+// the globals pre-pass skips them and so does this one.
+fn append_stmt_merge_allocas(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirStmt
+) -> !void {
+    match stmt {
+        If(payload) => try append_if_merge_allocas_walk(out, payload);,
+        While(payload) => try append_while_merge_allocas_walk(out, payload);,
+        ValueCursorWhile(payload) => try append_stmts_merge_allocas(out, &payload.body_stmts);,
+        PrecedenceLoop(payload) => try append_stmts_merge_allocas(out, &payload.body_stmts);,
+        DualCursorLoop(payload) => try append_stmts_merge_allocas(out, &payload.body_stmts);,
+        TypeApplyLoop(payload) => try append_type_apply_loop_merge_allocas_walk(out, payload);,
+        WhileMatchLoop(payload) => try append_while_match_loop_merge_allocas_walk(out, payload);,
+        GuardedCursorLoop(payload) => try append_guarded_cursor_loop_merge_allocas_walk(out, payload);,
+        EnumDispatch(payload) => try append_enum_dispatch_merge_allocas_walk(out, payload);,
+        _ => return;,
+    }
+    return;
+}
+
+fn append_if_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    try append_if_merge_slot_allocas(out, stmt);
+    try append_stmts_merge_allocas(out, &stmt.then_body_stmts);
+    try append_stmts_merge_allocas(out, &stmt.else_body_stmts);
+    return;
+}
+
+fn append_while_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt
+) -> !void {
+    try append_stmts_merge_allocas(out, &stmt.body_stmts);
+    try append_stmts_merge_allocas(out, &stmt.branch_latch_advance_stmts);
+    return;
+}
+
+fn append_type_apply_loop_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirTypeApplyLoopStmt
+) -> !void {
+    try append_stmts_merge_allocas(out, &stmt.body_stmts);
+    try append_stmts_merge_allocas(out, &stmt.terminal_stmts);
+    try append_stmts_merge_allocas(out, &stmt.guard_stmts);
+    return;
+}
+
+fn append_while_match_loop_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileMatchLoopStmt
+) -> !void {
+    try append_stmts_merge_allocas(out, &stmt.body_stmts);
+    let arms = &stmt.arms;
+    var arm_index = 0;
+    while arm_index < arms.len() {
+        let arm = try arms.at(arm_index);
+        try append_stmts_merge_allocas(out, &arm.arm_stmts);
+        arm_index = arm_index + 1;
+    }
+    return;
+}
+
+fn append_guarded_cursor_loop_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirGuardedCursorLoopStmt
+) -> !void {
+    try append_stmts_merge_allocas(out, &stmt.body_stmts);
+    try append_stmts_merge_allocas(out, &stmt.else_stmts);
+    try append_stmts_merge_allocas(out, &stmt.exit_stmts);
+    return;
+}
+
+fn append_enum_dispatch_merge_allocas_walk(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirEnumDispatchStmt
+) -> !void {
+    let arms = &stmt.arms;
+    var arm_index = 0;
+    while arm_index < arms.len() {
+        let arm = try arms.at(arm_index);
+        try append_stmts_merge_allocas(out, &arm.arm_stmts);
+        arm_index = arm_index + 1;
+    }
+    return;
+}
 fn append_expr_return_value(
     out: &var std::string::String,
+    llvm_symbol: []u8,
     return_type: []u8,
     insts: &std::array::Array<compiled_mir::MirExprInst>,
     result_id: i64,
     local_prefix: i64
 ) -> !void {
     let value_type = try expr_inst_type_by_id(insts, result_id);
+    if !compiled_mir_llvm_call::call_produces_value(value_type) {
+        // The returned expression is a void call, emitted as a statement with no name to return.
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, llvm_symbol, return_type, "retwrap", local_prefix, -1, "_ok"
+        );
+    }
     let needs_wrap = is_error_union_type(return_type) and
         std::mem::len(value_type) > 0 and
         !std::mem::equal_bytes(value_type, return_type);
@@ -6814,10 +6998,10 @@ fn append_struct_literal_expr_ref(
         return true;
     }
     let last = try fields.at(fields.len() - 1);
-    try out.append_bytes("%v");
-    try std::fmt::append_i64(out, expr_struct_prefix(inst.id));
-    try out.append_bytes("_");
-    try std::fmt::append_i64(out, last.index);
+    try out.append_bytes("%");
+    try compiled_util::append_struct_expr_value_name(
+        out, expr_struct_prefix(inst.id), last.index
+    );
     return true;
 }
 
@@ -7011,9 +7195,16 @@ fn append_call_inst(
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
         out, llvm_symbol, call_args, local_prefix
     );
-    try out.append_bytes("  %");
-    try out.append_bytes(name);
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM. The only expression position a void call can hold is the returned value itself, and
+    // the return emitters read the void type rather than this name.
+    if compiled_mir_llvm_call::call_produces_value(llvm_type) {
+        try out.append_bytes("  %");
+        try out.append_bytes(name);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -7160,10 +7351,33 @@ fn append_if_merge_slot_ref(
     return;
 }
 
-fn append_if_merge_allocas(
+// A merge slot is stack memory, and LLVM reclaims a function's stack only when the function
+// returns -- an 'alloca' executed N times reserves N slots. Emitted inline at the if, an if inside
+// a loop therefore grows the stack once per iteration until the process runs out of it, which is a
+// SIGSEGV at -O0 and merely invisible at -O2 (mem2reg promotes the slot and the growth disappears
+// with it). The loop CARRY slots have always avoided this by living in the loop preheader; the if
+// merge slots are reserved here instead, once, in the function's ENTRY block, by a pre-pass over
+// the whole statement tree (append_multi_statement_merge_allocas). Only the seeding store stays at
+// the if, so the slot is still re-initialized on every entry to the if -- hoisting the reservation
+// must not hoist the initialization.
+//
+// The entry block rather than the enclosing loop's preheader: entry dominates every block in the
+// function and runs exactly once per call, which holds for an if at any loop depth and for an if
+// in no loop at all, and it is the placement mem2reg needs to promote the slot away again under
+// optimization. A preheader would reserve less stack but has to name the RIGHT loop for an if
+// nested several loops deep, and has no answer at all for an if outside every loop. The cost of
+// the entry block is one slot per merge variable per if in the function text, which no execution
+// can multiply.
+//
+// Only a VoidBody if reads a merge slot (both append_multi_if call sites are under that kind), so
+// only a VoidBody if reserves one.
+fn append_if_merge_slot_allocas(
     out: &var std::string::String,
     stmt: &compiled_mir::MirIfStmt
 ) -> !void {
+    if stmt.if_then_kind != compiled_mir::MirIfThenKind::VoidBody {
+        return;
+    }
     let merge_vars = &stmt.merge_vars;
     var merge_index = 0;
     while merge_index < merge_vars.len() {
@@ -7173,6 +7387,22 @@ fn append_if_merge_allocas(
         try out.append_bytes(" = alloca ");
         try out.append_bytes(merge.llvm_type);
         try out.append_byte(cast<u8>(10));
+        merge_index = merge_index + 1;
+    }
+    return;
+}
+
+// append_if_merge_seed_stores writes each merge variable's incoming value into its slot on the way
+// into the if. It stays at the if -- the slot holds the value the fall-through continuation loads
+// when the then arm does not run, so it has to be rewritten on every entry.
+fn append_if_merge_seed_stores(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirIfStmt
+) -> !void {
+    let merge_vars = &stmt.merge_vars;
+    var merge_index = 0;
+    while merge_index < merge_vars.len() {
+        let merge = try merge_vars.at(merge_index);
         try out.append_bytes("  store ");
         try out.append_bytes(merge.llvm_type);
         try out.append_bytes(" %");
@@ -7269,6 +7499,34 @@ fn body_ends_with_return(
     }
 }
 
+// The rule: a basic block has exactly one terminator, and a continue or a break is one.
+// body_ends_with_return deliberately names only the returning terminators -- while_body_terminates
+// is a thin wrapper over it and asks a narrower question (does the loop body fall through into the
+// latch), so widening it would move the branch-merge and continue-latch error surfaces. An if arm
+// asks the general question instead: has this block already branched?
+//
+// Emitting the arm's fall-through 'br' after a continue's own 'br' is not merely dead text. LLVM's
+// parser ends the block at the first terminator and opens a fresh ANONYMOUS block for the second
+// one, and that block consumes an implicit value number -- so the first unnamed value anywhere in
+// the module then fails to parse. This backend names every value today, which is the only reason
+// the stray block has been survivable.
+fn body_ends_with_terminator(
+    body_stmts: &std::array::Array<compiled_mir::MirStmt>
+) -> !bool {
+    if try body_ends_with_return(body_stmts) {
+        return true;
+    }
+    if body_stmts.len() < 1 {
+        return false;
+    }
+    let last = try body_stmts.at(body_stmts.len() - 1);
+    match last {
+        LoopContinue(_) => return true;,
+        LoopBreak(_) => return true;,
+        _ => return false;,
+    }
+}
+
 fn append_void_then_body(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
@@ -7286,7 +7544,7 @@ fn append_void_then_body(
         );
         body_index = body_index + 1;
     }
-    if try body_ends_with_return(body) {
+    if try body_ends_with_terminator(body) {
         return;
     }
     try append_if_merge_then_stores(out, stmt);
@@ -7314,7 +7572,7 @@ fn append_void_else_body(
         );
         body_index = body_index + 1;
     }
-    if try body_ends_with_return(body) {
+    if try body_ends_with_terminator(body) {
         return;
     }
     try append_if_merge_else_stores(out, stmt);
@@ -7345,7 +7603,7 @@ fn append_multi_if(
             &stmt.cond_call_args,
             local_prefix
         );
-        try append_if_merge_allocas(out, stmt);
+        try append_if_merge_seed_stores(out, stmt);
         try out.append_bytes("  br i1 ");
         try append_tryif_ref(out, local_prefix, "_success");
         if stmt.cond_try_then_on_success {
@@ -7374,7 +7632,7 @@ fn append_multi_if(
     } else {
         try append_expr_insts(out, function.name, &stmt.cond_insts);
         if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
-            try append_if_merge_allocas(out, stmt);
+            try append_if_merge_seed_stores(out, stmt);
         }
         if stmt.cond_short_circuit == 0 {
             try out.append_bytes("  br i1 ");
@@ -7461,8 +7719,28 @@ fn append_multi_if(
     try out.append_byte(cast<u8>(10));
     if stmt.if_then_kind == compiled_mir::MirIfThenKind::VoidBody {
         try append_if_merge_loads(out, stmt);
+        // Neither arm branches here, so nothing follows this join along any path the program can
+        // take. It is still opened as a block, and when the if is the last statement of its block
+        // -- 'if <cond> { return <x>; } else { return <y>; }' as a whole function body is the
+        // ordinary case -- no later statement renders into it. An empty trailing block is not a
+        // module LLVM will parse, so terminate it here with the terminator that states the fact.
+        if try if_both_arms_terminate(stmt) {
+            try append_ll_line(out, "  unreachable");
+        }
     }
     return;
+}
+
+// if_both_arms_terminate reports an if/else whose then and else arms each end in a return, a break
+// or a continue, so the join block the renderer opens after them has no predecessor.
+fn if_both_arms_terminate(stmt: &compiled_mir::MirIfStmt) -> !bool {
+    if !if_has_else_body(stmt) {
+        return false;
+    }
+    if !(try body_ends_with_terminator(&stmt.then_body_stmts)) {
+        return false;
+    }
+    return try body_ends_with_terminator(&stmt.else_body_stmts);
 }
 // append_multi_then_call_return returns a then-block call result: a callee sharing the
 // function's return type returns directly, while a success-typed callee inside an
@@ -7476,6 +7754,12 @@ fn append_multi_then_call_return(
 ) -> !void {
     let temp_base = try then_temp_base(stmt);
     let own_return = function.return_type.llvm_name;
+    if !compiled_mir_llvm_call::call_produces_value(stmt.llvm_type) {
+        // Nothing was named, so the DECLARATION alone decides the return.
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, own_return, "if", stmt.if_index, -1, "_retcall_ok"
+        );
+    }
     if is_error_union_type(own_return) and
         !std::mem::equal_bytes(stmt.llvm_type, own_return) {
         try out.append_bytes("  %if");
@@ -7591,6 +7875,12 @@ fn append_multi_if_return_expr(
     try append_expr_insts(out, function.name, &stmt.then_expr_insts);
     let return_type = function.return_type.llvm_name;
     let value_type = try expr_inst_type_by_id(&stmt.then_expr_insts, stmt.then_expr_result_id);
+    if !compiled_mir_llvm_call::call_produces_value(value_type) {
+        // The returned expression is a void call, emitted as a statement with no name to return.
+        return compiled_mir_llvm_call::append_void_call_return(
+            out, function.name, return_type, "if", stmt.if_index, -1, "_retexpr_ok"
+        );
+    }
     let needs_wrap = is_error_union_type(return_type) and
         std::mem::len(value_type) > 0 and
         !std::mem::equal_bytes(value_type, return_type);
@@ -7678,14 +7968,29 @@ fn append_while_branch_merge_latch(
     try out.append_bytes(", label %loop");
     try std::fmt::append_i64(out, stmt.loop_index);
     if stmt.branch_latch_exit_on_true {
-        try out.append_bytes("_exit, label %loop");
+        try out.append_bytes("_branch_exit, label %loop");
         try std::fmt::append_i64(out, stmt.loop_index);
         try out.append_bytes("_branch_advance");
     } else {
         try out.append_bytes("_branch_advance, label %loop");
         try std::fmt::append_i64(out, stmt.loop_index);
-        try out.append_bytes("_exit");
+        try out.append_bytes("_branch_exit");
     }
+    try out.append_byte(cast<u8>(10));
+    // The exit arm leaves through a block of its own rather than branching straight to the loop
+    // exit. A phi names its predecessors, and the block the terminal branch sits in is whatever
+    // block the body statements left open -- the loop body, or an if's continuation. This block is
+    // the one label this lowering can state, so it is what the exit phis join against.
+    try out.append_bytes("loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_branch_exit:");
+    try out.append_byte(cast<u8>(10));
+    // The exit arm's own '<induction> = <bound>' assignment. It belongs on this edge and nowhere
+    // else, and the exit block's join reads its result under this block's label.
+    try append_expr_insts(out, function.name, &stmt.branch_latch_exit_value_insts);
+    try out.append_bytes("  br label %loop");
+    try std::fmt::append_i64(out, stmt.loop_index);
+    try out.append_bytes("_exit");
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("loop");
     try std::fmt::append_i64(out, stmt.loop_index);
@@ -7895,6 +8200,11 @@ fn append_loop_break(
 // append_loop_continue renders a 'continue'. A loop that contains one carries its values in
 // slots rather than loop-head phis, so every update has already been stored by the time control
 // reaches here and the back edge is the whole statement: the head reloads them on arrival.
+// The premise holds because the lowering stores where the update happens rather than at the join --
+// an assignment in an arm writes the slot in the arm, and an update the arm produced through a
+// block of its own (a nested loop) is written by the arm's own jump edge
+// (append_loop_jump_carry_stores). Either way the block this branch ends is the last one on the
+// edge, and it has already stored (compiled_mir.kizu MirWhileStmt.memory_carried).
 fn append_loop_continue(
     out: &var std::string::String,
     stmt: &compiled_mir::MirLoopContinueStmt
@@ -7990,6 +8300,13 @@ fn append_multi_while(
     try std::fmt::append_i64(out, stmt.loop_index);
     try out.append_bytes("_head:");
     try out.append_byte(cast<u8>(10));
+    // A loop whose lowering built its phis says so, and then this is the whole of the head: one
+    // phi per carried name, each with one operand per edge, exactly as recorded. Nothing here
+    // derives an operand or a predecessor label -- that derivation is what the two-edge
+    // description below has to do, and what a loop with a break or a continue cannot survive.
+    if stmt.header_phis.len() > 0 {
+        try append_generic_header_phis(out, stmt);
+    } else {
     // The primary loop-head phi, then one phi per secondary lockstep counter. Each phi is
     // named after its variable so plain Var reads in the condition and body resolve to it.
     // A condition-only loop carries no counter, so the head defines no primary phi: the header is
@@ -8041,6 +8358,7 @@ fn append_multi_while(
         }
         }
         carried_phi_index = carried_phi_index + 1;
+    }
     }
     try append_expr_insts(out, function.name, &stmt.cond_insts);
     if stmt.cond_short_circuit == 0 {
@@ -8213,6 +8531,53 @@ fn append_multi_while(
             exit_scalar_index = exit_scalar_index + 1;
         }
     }
+    // The branch-merge counter is joined the same way, and it is the one variable whose two exit
+    // edges the shape guarantees: the header's, where %<phi> is what the last advance produced, and
+    // the terminal if's, where the arm has just assigned the bound. Without this the reads after
+    // the loop spelled %<phi> and got the value from before the exit arm ran.
+    if stmt.branch_latch_exit_value_result_id >= 0 and std::mem::len(stmt.induction_var) > 0 {
+        try out.append_bytes("  ");
+        try append_while_carry_exit_ref(out, stmt.loop_index, stmt.induction_var);
+        try out.append_bytes(" = phi ");
+        try out.append_bytes(try while_induction_phi_type(stmt));
+        try out.append_bytes(" [ %");
+        try out.append_bytes(stmt.induction_var);
+        try out.append_bytes(", %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_head ], [ ");
+        try append_expr_value_ref(
+            out, &stmt.branch_latch_exit_value_insts, stmt.branch_latch_exit_value_result_id
+        );
+        try out.append_bytes(", %loop");
+        try std::fmt::append_i64(out, stmt.loop_index);
+        try out.append_bytes("_branch_exit ]");
+        try out.append_byte(cast<u8>(10));
+    }
+    // A carried scalar that named a second exit edge is joined here. The head's edge carries the
+    // head phi; the body's edge carries the value that edge left with. A slot-carried loop reaches
+    // the same answer through the loads above -- memory is how it joins any number of exit edges --
+    // so only a phi-carried loop with a second edge reaches this.
+    var exit_join_index = 0;
+    while exit_join_index < carried.len() {
+        let entry = try carried.at(exit_join_index);
+        if std::mem::len(entry.exit_var) > 0 {
+            try out.append_bytes("  ");
+            try append_while_carry_exit_ref(out, stmt.loop_index, entry.var_name);
+            try out.append_bytes(" = phi ");
+            try out.append_bytes(entry.llvm_type);
+            try out.append_bytes(" [ %");
+            try out.append_bytes(entry.var_name);
+            try out.append_bytes(", %loop");
+            try std::fmt::append_i64(out, stmt.loop_index);
+            try out.append_bytes("_head ], [ %");
+            try out.append_bytes(entry.exit_var);
+            try out.append_bytes(", %loop");
+            try std::fmt::append_i64(out, stmt.loop_index);
+            try out.append_bytes("_branch_exit ]");
+            try out.append_byte(cast<u8>(10));
+        }
+        exit_join_index = exit_join_index + 1;
+    }
     return;
 }
 // append_while_short_circuit_branches renders the guarded leaf blocks of a genuine short-circuit
@@ -8360,6 +8725,58 @@ fn append_while_counter_preheader_init(
 // call-seeded ('var cursor = line_end_including_break(source, comment_end)'), so the phi reads the
 // preheader call's result temp instead of %<init_var> / the literal. It is -1 for a literal,
 // plain-copy, or base-plus-offset seed and for every secondary counter (issue 1165 / 1162).
+// append_generic_header_phis writes one phi per carried name, each with the operands its lowering
+// recorded. It is the whole of a loop head, and it is short for the reason the pair below is long:
+// it spells what it was given instead of working out what to spell.
+//
+// append_while_counter_phi has to choose between init_result_id, init_var plus init_offset, and
+// init_literal for the preheader operand, between latch_copy_var and <var>_next for the latch one,
+// and then ask append_while_latch_pred_label to derive the latch block's LABEL from the shape of
+// the latch statement -- because MirCarriedScalar does not carry it. Three derivations, all of
+// which exist only because the operand count is fixed at two.
+fn append_generic_header_phis(
+    out: &var std::string::String,
+    stmt: &compiled_mir::MirWhileStmt
+) -> !void {
+    let phis = &stmt.header_phis;
+    var phi_index = 0;
+    while phi_index < phis.len() {
+        let phi = try phis.at(phi_index);
+        let incomings = &phi.incomings;
+        if incomings.len() < 2 {
+            // A phi with one operand is not a phi, and LLVM's verifier requires one operand per
+            // predecessor. Emitting it would produce a module that parses and does not verify, so
+            // the lowering that built it is wrong and says so here rather than downstream.
+            return error("compiled mir llvm: a loop header phi has fewer than two incoming edges");
+        }
+        try out.append_bytes("  %");
+        try out.append_bytes(phi.name);
+        try out.append_bytes(" = phi ");
+        try out.append_bytes(phi.llvm_type);
+        var incoming_index = 0;
+        while incoming_index < incomings.len() {
+            let incoming = try incomings.at(incoming_index);
+            if incoming_index > 0 {
+                try out.append_bytes(",");
+            }
+            // Both halves take the sigil here: mir_env holds a register name and a block label as
+            // bare identifiers -- it spells no LLVM -- so the renderer is where they become
+            // operands. Every value on this path is a register, never a literal: the lowering
+            // emits a definition for a declaration it folded rather than teaching the phi about
+            // literals, and it refuses an operand with no name.
+            try out.append_bytes(" [ %");
+            try out.append_bytes(incoming.value);
+            try out.append_bytes(", %");
+            try out.append_bytes(incoming.block);
+            try out.append_bytes(" ]");
+            incoming_index = incoming_index + 1;
+        }
+        try out.append_byte(cast<u8>(10));
+        phi_index = phi_index + 1;
+    }
+    return;
+}
+
 fn append_while_counter_phi(
     out: &var std::string::String,
     stmt: &compiled_mir::MirWhileStmt,
@@ -8738,9 +9155,15 @@ fn append_multi_then_call(
     try compiled_mir_llvm_call::append_call_arg_setup_with_prefix(
         out, llvm_symbol, &stmt.then_call_args, local_prefix
     );
-    try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, try then_temp_base(stmt));
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM. append_multi_then_call_return reads the void type rather than this name.
+    if compiled_mir_llvm_call::call_produces_value(stmt.llvm_type) {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, try then_temp_base(stmt));
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(stmt.llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -8754,25 +9177,64 @@ fn append_multi_then_call(
 }
 // append_multi_then_struct renders a ReturnStruct then-block: it builds the struct
 // value with the generic struct-body helper (seeded from then_struct_string_index)
-// and returns it. This mirrors append_multi_return_struct for the top-level case.
+// and returns it. This mirrors append_multi_return_struct for the top-level case,
+// error-union wrap included: inside an error-union function the literal builds in the
+// SUCCESS struct type and that whole value goes into the union at field 1. Building it
+// in the union type instead would write the literal's fields over the union's own -- it
+// type-checks only when the two happen to line up, and answers wrongly when they do.
 fn append_multi_then_struct(
     out: &var std::string::String,
     function: &compiled_mir::MirFunction,
     stmt: &compiled_mir::MirIfStmt
 ) -> !void {
+    var struct_llvm = function.return_type.llvm_name;
+    if std::mem::len(stmt.then_struct_wrap_error_union) > 0 {
+        struct_llvm = stmt.then_struct_success_llvm;
+    }
     var stream = no_expr_insts();
     defer stream.deinit();
     try append_struct_body_at(
         out,
         function.name,
-        function.return_type.llvm_name,
+        struct_llvm,
         &stmt.then_struct_fields,
         stmt.then_struct_string_index,
         &stream
     );
+    let return_fields = &stmt.then_struct_fields;
+    if std::mem::len(stmt.then_struct_wrap_error_union) > 0 {
+        try out.append_bytes("  %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try out.append_bytes("_wrap0 = insertvalue ");
+        try out.append_bytes(stmt.then_struct_wrap_error_union);
+        try append_ll_line(out, " zeroinitializer, i1 true, 0");
+        try out.append_bytes("  %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try out.append_bytes("_wrap1 = insertvalue ");
+        try out.append_bytes(stmt.then_struct_wrap_error_union);
+        try out.append_bytes(" %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try out.append_bytes("_wrap0, ");
+        try out.append_bytes(stmt.then_struct_success_llvm);
+        if return_fields.len() == 0 {
+            try out.append_bytes(" poison");
+        } else {
+            let wrap_last_field = try return_fields.at(return_fields.len() - 1);
+            try out.append_bytes(" %v");
+            try std::fmt::append_i64(out, stmt.then_struct_string_index);
+            try out.append_bytes("_");
+            try std::fmt::append_i64(out, wrap_last_field.index);
+        }
+        try append_ll_line(out, ", 1");
+        try out.append_bytes("  ret ");
+        try out.append_bytes(stmt.then_struct_wrap_error_union);
+        try out.append_bytes(" %v");
+        try std::fmt::append_i64(out, stmt.then_struct_string_index);
+        try append_ll_line(out, "_wrap1");
+        return;
+    }
     try out.append_bytes("  ret ");
     try out.append_bytes(function.return_type.llvm_name);
-    let return_fields = &stmt.then_struct_fields;
     if return_fields.len() == 0 {
         try out.append_bytes(" poison");
     } else {
@@ -8806,6 +9268,7 @@ fn append_expr_return(
     // '!bool' function) wraps it instead of returning a bare i1 typed as the union.
     try append_expr_return_value(
         out,
+        function.name,
         function.return_type.llvm_name,
         &function.expr_insts,
         function.entry.terminator.value.id,
@@ -9380,7 +9843,7 @@ fn append_struct_literal_expr(
 }
 
 fn expr_struct_prefix(id: i64) -> i64 {
-    return 1000000 + id;
+    return compiled_util::struct_expr_value_prefix(id);
 }
 fn append_prefix_not_expr(
     out: &var std::string::String,
@@ -9559,9 +10022,16 @@ fn append_call_expr(
         try append_ll_line(out, "_storage_failure ]");
         return;
     }
-    try out.append_bytes("  %t");
-    try std::fmt::append_i64(out, inst.id);
-    try out.append_bytes(" = call ");
+    // A void callee defines nothing, so the call is spelled as a statement: naming it is invalid
+    // LLVM. The only expression position a void call can hold is the returned value itself, and
+    // the return emitters read the void type rather than this name.
+    if compiled_mir_llvm_call::call_produces_value(inst.llvm_type) {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = call ");
+    } else {
+        try out.append_bytes("  call ");
+    }
     try out.append_bytes(inst.llvm_type);
     try out.append_bytes(" @");
     try compiled_mir_llvm_call::append_callee_symbol(
@@ -9979,6 +10449,14 @@ fn append_struct_simple_field(
                         try std::fmt::append_i64(&var message, field.index);
                         try message.append_bytes(" prefix ");
                         try std::fmt::append_i64(&var message, prefix);
+                        // prefix is the statement's own SSA slot; struct names the aggregate
+                        // under construction and source node names the field value's body node.
+                        // Together they pin the one literal in the function that produced this,
+                        // which the field index alone does not.
+                        try message.append_bytes(" struct ");
+                        try message.append_bytes(llvm_return_type);
+                        try message.append_bytes(" source node ");
+                        try std::fmt::append_i64(&var message, field.expr_node);
                         let message_bytes = message.as_bytes();
                         return error(message_bytes);
                     }
@@ -10341,4 +10819,14 @@ fn append_struct_computed_scalar_binary_field(
     try std::fmt::append_i64(out, field.index);
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+// unsupported_dispatch_arm_shape reports an enum-dispatch arm whose return the LLVM
+// rendering has no shape for, naming the function it sits in.
+fn unsupported_dispatch_arm_shape(function_name: []u8) -> !void {
+    var message = std::string::String(std::mem::page_allocator());
+    try message.append_bytes("compiled mir llvm: enum-dispatch arm return shape not yet supported: ");
+    try message.append_bytes(function_name);
+    let message_bytes = message.as_bytes();
+    return error(message_bytes);
 }

@@ -1,0 +1,499 @@
+import selfhost::backend::mir_env;
+import selfhost::backend::mir_env_loop;
+
+// mir_env_gate builds control-flow graphs by hand and asserts the phi set the construction in
+// mir_env.kizu / mir_env_loop.kizu produces for each. The eight shapes here are the ones that
+// produced the twenty-five alias defects fixed over the past week and the fourteen an enumeration
+// then found: a loop with a continue, a loop with a break, a jump out of an if arm, a name an arm
+// binds itself, a join over a name the environment does and does not hold, a loop over a shadowed
+// name, two loops over one name, and a nested loop.
+//
+// There is no AST and no lowering here on purpose. Each gate is the sequence of environment
+// operations the lowering of that source shape would make, so what is asserted is the
+// construction's answer and nothing else.
+
+fn report(label: []u8, space: &mir_env::EnvSpace, expected: []u8) -> !void {
+    let allocator = std::mem::page_allocator();
+    var out = std::string::String(allocator);
+    defer out.deinit();
+    try mir_env::render_phis(space, &var out);
+    // as_bytes must be bound with a let, and the borrow it hands back cannot be reused after the
+    // branch, so the phi-bearing case takes its own.
+    let rendered = out.as_bytes();
+    std::testing::expect_equal<[]u8>(expected, rendered);
+    print(label);
+    if mir_env::phi_count(space) > 0 {
+        let lines = out.as_bytes();
+        print(lines);
+    }
+    return;
+}
+
+// expect_value asserts what a name denotes, by the spelling the construction would emit for it.
+fn expect_value(
+    space: &mir_env::EnvSpace,
+    env: i64,
+    name: []u8,
+    expected: []u8
+) -> !void {
+    let allocator = std::mem::page_allocator();
+    var out = std::string::String(allocator);
+    defer out.deinit();
+    let value = try mir_env::value_of(space, env, name);
+    try mir_env::append_value(space, &var out, &value);
+    let spelled = out.as_bytes();
+    std::testing::expect_equal<[]u8>(expected, spelled);
+    return;
+}
+
+// Every value in these graphs is an i64, so bind and declare_i64 keep each gate to the shape of
+// the source it stands for. ValueRef is passed by borrow because a struct passed by value is
+// moved, and a value bound on one arm of an `if` would then be unusable on the other.
+fn bind(space: &var mir_env::EnvSpace, env: i64, name: []u8, value_name: []u8) -> !void {
+    let value = mir_env::named_value(value_name, "i64");
+    try mir_env::assign(space, env, name, &value);
+    return;
+}
+
+fn declare_i64(
+    space: &var mir_env::EnvSpace,
+    env: i64,
+    name: []u8,
+    value_name: []u8
+) -> !void {
+    let value = mir_env::named_value(value_name, "i64");
+    try mir_env::declare(space, env, name, &value);
+    return;
+}
+
+fn carried_names(name: []u8) -> !std::array::Array<[]u8> {
+    let allocator = std::mem::page_allocator();
+    var names = std::array::Array<[]u8>(allocator);
+    errdefer names.deinit();
+    try names.append(name);
+    return names;
+}
+
+// var n = n0; while c { n = add; if p { n = mul; continue; } }
+//
+// The continue leaves the body from inside an arm, so the header phi takes three edges: the
+// preheader, the body's fallthrough end, and the arm the continue jumped from.
+pub fn gate_loop_with_continue() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+    var assigned = try carried_names("n");
+    defer assigned.deinit();
+
+    let env = try mir_env::new_env(&var space);
+    try declare_i64(&var space, env, "n", "n0");
+
+    let loop_id = try mir_env_loop::push_loop(&var space, "", "while.end", "while.header");
+    let group = try mir_env_loop::create_loop_phis(
+        &var space, "while.header", "entry", env, &assigned
+    );
+    try bind(&var space, env, "n", "add");
+
+    let then_env = try mir_env::copy_env(&var space, env);
+    try mir_env::enter_scope(&var space, then_env);
+    try bind(&var space, then_env, "n", "mul");
+    let target = try mir_env_loop::find_loop(&space, "");
+    std::testing::expect_equal<i64>(loop_id, target);
+    let _edge = try mir_env_loop::record_loop_edge(
+        &var space, target, false, "if.then", then_env
+    );
+    try mir_env::leave_scope(&var space, then_env);
+    let else_env = try mir_env::copy_env(&var space, env);
+    let body_env = try mir_env::merge_branches(
+        &var space, "if.end", then_env, "if.then", false, else_env, "if.else", true
+    );
+
+    try mir_env_loop::pop_loop(&var space, loop_id);
+    let latch = try mir_env::copy_env(&var space, body_env);
+    try mir_env_loop::finish_loop_phis(&var space, group, body_env, "if.end", latch, loop_id);
+    try mir_env_loop::finish_loop_exit_phis(
+        &var space, group, "while.end", "while.header", loop_id, body_env
+    );
+
+    try expect_value(&space, body_env, "n", "loop.0");
+    try report(
+        "loop-with-continue",
+        &space,
+        "while.header loop.0 i64 <- n0@entry add@if.end mul@if.then"
+    );
+    return;
+}
+
+// var n = n0; while c { if p { n = zero; break; } n = add; }
+//
+// The break carries a value the condition-false edge does not, so the exit block needs a phi of
+// its own over the header phi and the arm the break jumped from.
+pub fn gate_loop_with_break() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+    var assigned = try carried_names("n");
+    defer assigned.deinit();
+
+    let env = try mir_env::new_env(&var space);
+    try declare_i64(&var space, env, "n", "n0");
+
+    let loop_id = try mir_env_loop::push_loop(&var space, "", "while.end", "while.header");
+    let group = try mir_env_loop::create_loop_phis(
+        &var space, "while.header", "entry", env, &assigned
+    );
+
+    let then_env = try mir_env::copy_env(&var space, env);
+    try mir_env::enter_scope(&var space, then_env);
+    try bind(&var space, then_env, "n", "zero");
+    let target = try mir_env_loop::find_loop(&space, "");
+    let _edge = try mir_env_loop::record_loop_edge(
+        &var space, target, true, "if.then", then_env
+    );
+    try mir_env::leave_scope(&var space, then_env);
+    let else_env = try mir_env::copy_env(&var space, env);
+    let body_env = try mir_env::merge_branches(
+        &var space, "if.end", then_env, "if.then", false, else_env, "if.else", true
+    );
+    try bind(&var space, body_env, "n", "add");
+
+    try mir_env_loop::pop_loop(&var space, loop_id);
+    let latch = try mir_env::copy_env(&var space, body_env);
+    try mir_env_loop::finish_loop_phis(&var space, group, body_env, "if.end", latch, loop_id);
+    try mir_env_loop::finish_loop_exit_phis(
+        &var space, group, "while.end", "while.header", loop_id, body_env
+    );
+
+    try expect_value(&space, body_env, "n", "exit.1");
+    try report(
+        "loop-with-break",
+        &space,
+        "while.header loop.0 i64 <- n0@entry add@if.end
+while.end exit.1 i64 <- loop.0@while.header zero@if.then"
+    );
+    return;
+}
+
+// var x = x0;
+// if p { x = x1; return; } else { x = x2; }   the arm that jumped away contributes no edge
+// if q { x = x3; } else { x = x4; }           both arms reach the join, so it takes a phi
+pub fn gate_jump_out_of_arm() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+
+    let env = try mir_env::new_env(&var space);
+    try declare_i64(&var space, env, "x", "x0");
+
+    let then_one = try mir_env::copy_env(&var space, env);
+    try bind(&var space, then_one, "x", "x1");
+    let else_one = try mir_env::copy_env(&var space, env);
+    try bind(&var space, else_one, "x", "x2");
+    let join_one = try mir_env::merge_branches(
+        &var space, "if1.end", then_one, "if1.then", false, else_one, "if1.else", true
+    );
+    std::testing::expect_equal<i64>(0, mir_env::phi_count(&space));
+    try expect_value(&space, join_one, "x", "x2");
+
+    let then_two = try mir_env::copy_env(&var space, join_one);
+    try bind(&var space, then_two, "x", "x3");
+    let else_two = try mir_env::copy_env(&var space, join_one);
+    try bind(&var space, else_two, "x", "x4");
+    let join_two = try mir_env::merge_branches(
+        &var space, "if2.end", then_two, "if2.then", true, else_two, "if2.else", true
+    );
+    try expect_value(&space, join_two, "x", "join.0");
+
+    try report("jump-out-of-arm", &space, "if2.end join.0 i64 <- x3@if2.then x4@if2.else");
+    return;
+}
+
+// var end = e0; if p { let end = e1; end = e2; } else { }
+//
+// The arm's own `end` is not the enclosing `end`: the declaration binds a new variable, the
+// assignment that follows writes THAT one, and both die with the arm. The join sees one value on
+// both edges and emits nothing.
+pub fn gate_arm_binds_its_own_name() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+
+    let env = try mir_env::new_env(&var space);
+    try declare_i64(&var space, env, "end", "e0");
+
+    let then_env = try mir_env::copy_env(&var space, env);
+    try mir_env::enter_scope(&var space, then_env);
+    try declare_i64(&var space, then_env, "end", "e1");
+    try expect_value(&space, then_env, "end", "e1");
+    try bind(&var space, then_env, "end", "e2");
+    try expect_value(&space, then_env, "end", "e2");
+    try mir_env::leave_scope(&var space, then_env);
+    try expect_value(&space, then_env, "end", "e0");
+
+    let else_env = try mir_env::copy_env(&var space, env);
+    let join = try mir_env::merge_branches(
+        &var space, "if.end", then_env, "if.then", true, else_env, "if.else", true
+    );
+    try expect_value(&space, join, "end", "e0");
+    try report("arm-binds-its-own-name", &space, "");
+    return;
+}
+
+// var n = n0; { let n = n1; while c { n = add; } }
+//
+// The loop carries the INNER n, so its header phi is seeded from n1 and never from n0, and the
+// outer n is back when the block ends. That is the whole of what shadowed_outer_name and
+// shadowed_outer_block are for.
+pub fn gate_loop_over_shadowed_name() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+    var assigned = try carried_names("n");
+    defer assigned.deinit();
+
+    let env = try mir_env::new_env(&var space);
+    try declare_i64(&var space, env, "n", "n0");
+    try mir_env::enter_scope(&var space, env);
+    try declare_i64(&var space, env, "n", "n1");
+
+    let loop_id = try mir_env_loop::push_loop(&var space, "", "while.end", "while.header");
+    let group = try mir_env_loop::create_loop_phis(
+        &var space, "while.header", "entry", env, &assigned
+    );
+    try bind(&var space, env, "n", "add");
+    let latch = try mir_env::copy_env(&var space, env);
+    try mir_env_loop::pop_loop(&var space, loop_id);
+    try mir_env_loop::finish_loop_phis(&var space, group, env, "while.body", latch, loop_id);
+    try mir_env_loop::finish_loop_exit_phis(
+        &var space, group, "while.end", "while.header", loop_id, env
+    );
+    try expect_value(&space, env, "n", "loop.0");
+
+    try mir_env::leave_scope(&var space, env);
+    try expect_value(&space, env, "n", "n0");
+
+    try report(
+        "loop-over-shadowed-name",
+        &space,
+        "while.header loop.0 i64 <- n1@entry add@while.body"
+    );
+    return;
+}
+
+// var n = n0; while c { n = add1; } while d { n = add2; }
+//
+// Two heads over one name. Each mints its own result, so neither can claim the other's, and the
+// second is seeded from what the first left behind.
+pub fn gate_two_loops_over_one_name() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+    var assigned = try carried_names("n");
+    defer assigned.deinit();
+
+    let env = try mir_env::new_env(&var space);
+    try declare_i64(&var space, env, "n", "n0");
+
+    let first = try mir_env_loop::push_loop(&var space, "", "w1.end", "w1.header");
+    let first_group = try mir_env_loop::create_loop_phis(
+        &var space, "w1.header", "entry", env, &assigned
+    );
+    try bind(&var space, env, "n", "add1");
+    let first_latch = try mir_env::copy_env(&var space, env);
+    try mir_env_loop::pop_loop(&var space, first);
+    try mir_env_loop::finish_loop_phis(&var space, first_group, env, "w1.body", first_latch, first);
+    try mir_env_loop::finish_loop_exit_phis(
+        &var space, first_group, "w1.end", "w1.header", first, env
+    );
+
+    let second = try mir_env_loop::push_loop(&var space, "", "w2.end", "w2.header");
+    let second_group = try mir_env_loop::create_loop_phis(
+        &var space, "w2.header", "w1.end", env, &assigned
+    );
+    try bind(&var space, env, "n", "add2");
+    let second_latch = try mir_env::copy_env(&var space, env);
+    try mir_env_loop::pop_loop(&var space, second);
+    try mir_env_loop::finish_loop_phis(
+        &var space, second_group, env, "w2.body", second_latch, second
+    );
+    try mir_env_loop::finish_loop_exit_phis(
+        &var space, second_group, "w2.end", "w2.header", second, env
+    );
+
+    try expect_value(&space, env, "n", "loop.1");
+    try report(
+        "two-loops-over-one-name",
+        &space,
+        "w1.header loop.0 i64 <- n0@entry add1@w1.body
+w2.header loop.1 i64 <- loop.0@w1.end add2@w2.body"
+    );
+    return;
+}
+
+// var n = n0; outer: while c { while d { n = add; } }
+//
+// The inner head is seeded from the outer head's phi and the outer head's latch takes what the
+// inner loop left. An unlabeled branch inside the inner body binds to the inner loop; the label
+// reaches past it; and once the inner loop is closed the unlabeled branch binds to the outer one.
+pub fn gate_nested_loops() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+    var assigned = try carried_names("n");
+    defer assigned.deinit();
+
+    let env = try mir_env::new_env(&var space);
+    try declare_i64(&var space, env, "n", "n0");
+
+    let outer = try mir_env_loop::push_loop(&var space, "outer", "o.end", "o.header");
+    let outer_group = try mir_env_loop::create_loop_phis(
+        &var space, "o.header", "entry", env, &assigned
+    );
+
+    let inner = try mir_env_loop::push_loop(&var space, "", "i.end", "i.header");
+    let inner_group = try mir_env_loop::create_loop_phis(
+        &var space, "i.header", "o.body", env, &assigned
+    );
+    std::testing::expect_equal<i64>(inner, try mir_env_loop::find_loop(&space, ""));
+    std::testing::expect_equal<i64>(outer, try mir_env_loop::find_loop(&space, "outer"));
+
+    try bind(&var space, env, "n", "add");
+    let inner_latch = try mir_env::copy_env(&var space, env);
+    try mir_env_loop::pop_loop(&var space, inner);
+    try mir_env_loop::finish_loop_phis(&var space, inner_group, env, "i.body", inner_latch, inner);
+    try mir_env_loop::finish_loop_exit_phis(
+        &var space, inner_group, "i.end", "i.header", inner, env
+    );
+    std::testing::expect_equal<i64>(outer, try mir_env_loop::find_loop(&space, ""));
+
+    let outer_latch = try mir_env::copy_env(&var space, env);
+    try mir_env_loop::pop_loop(&var space, outer);
+    try mir_env_loop::finish_loop_phis(&var space, outer_group, env, "i.end", outer_latch, outer);
+    try mir_env_loop::finish_loop_exit_phis(
+        &var space, outer_group, "o.end", "o.header", outer, env
+    );
+
+    try expect_value(&space, env, "n", "loop.0");
+    try report(
+        "nested-loops",
+        &space,
+        "o.header loop.0 i64 <- n0@entry loop.1@i.end
+i.header loop.1 i64 <- loop.0@o.body add@i.body"
+    );
+    return;
+}
+
+// if p { x = a; } -- one arm assigns a variable declared outside the if, twice: once against an
+// environment that HOLDS x, and once against one that has never heard of it.
+//
+// The first is the ordinary join and it opens a phi. The second opens none, and the merged
+// environment carries the arm's own value out as though every edge into the join had it. That is
+// not a bug in merge_envs -- it is the reference's rule, mergeEnvs walking the right environment's
+// rows and looking each name up on the left, where a name only the left side holds can only be a
+// declaration the arm left standing. It becomes a wrong answer only when the environment is
+// INCOMPLETE, because then a one-sided name is an assignment to an outer variable instead.
+//
+// So this pins the precondition every if-join in compiled_mir_lower.kizu now depends on: the
+// environment an arm is forked from holds the variables the arm assigns. The nine loop-shape
+// lowerings that open a body against a fresh environment satisfy it by seeding
+// (seed_env_with_outer_names); before they did, the inner no-else if of
+// kizu::parser::type_apply_has_valid_static_arguments lost its merge variable exactly as the second
+// half here does, and the enclosing if then stored that arm's own %void.then.alias.1 on an edge the
+// value does not reach -- the module the LLVM verifier rejects.
+//
+// An earlier reading of the same failure had assign bind an unknown name at depth zero so it would
+// outlive the arm. That case stood here and is gone: it made the arm's value survive to be carried
+// out one-sided, which is the leak above rather than a repair of it.
+pub fn gate_join_needs_the_name_in_the_environment() -> !void {
+    var space = mir_env::env_space();
+    defer space.deinit();
+
+    // The environment holds x, as a seeded one does. The join has two values for it and chooses.
+    let held = try mir_env::new_env(&var space);
+    try declare_i64(&var space, held, "x", "x");
+    let held_then = try mir_env::copy_env(&var space, held);
+    try mir_env::enter_scope(&var space, held_then);
+    try bind(&var space, held_then, "x", "a");
+    try mir_env::leave_scope(&var space, held_then);
+    let held_else = try mir_env::copy_env(&var space, held);
+    let held_join = try mir_env::merge_branches(
+        &var space, "if.end", held_then, "if.then", true, held_else, "if.else", true
+    );
+    std::testing::expect_equal<i64>(1, mir_env::phi_count(&space));
+    try expect_value(&space, held_join, "x", "join.0");
+
+    // The same arm against an environment with no row for x. Nothing is merged, and what the join
+    // carries out is the arm's value alone.
+    let absent = try mir_env::new_env(&var space);
+    let absent_then = try mir_env::copy_env(&var space, absent);
+    try bind(&var space, absent_then, "x", "a");
+    let absent_else = try mir_env::copy_env(&var space, absent);
+    let absent_join = try mir_env::merge_branches(
+        &var space, "if.end", absent_then, "if.then", true, absent_else, "if.else", true
+    );
+    std::testing::expect_equal<i64>(1, mir_env::phi_count(&space));
+    try expect_value(&space, absent_join, "x", "a");
+
+    try report(
+        "join-needs-the-name-in-the-environment",
+        &space,
+        "if.end join.0 i64 <- a@if.then x@if.else"
+    );
+    return;
+}
+
+pub fn gate() -> !void {
+    let probe_phis = try lowering_probe();
+    std::testing::expect_equal<i64>(2, probe_phis);
+    try gate_loop_with_continue();
+    try gate_loop_with_break();
+    try gate_jump_out_of_arm();
+    try gate_arm_binds_its_own_name();
+    try gate_join_needs_the_name_in_the_environment();
+    try gate_loop_over_shadowed_name();
+    try gate_two_loops_over_one_name();
+    try gate_nested_loops();
+    return;
+}
+
+// lowering_probe is the shape that answers "can the selfhost compiler lower this component?".
+// `stage` emits only what is reachable from the program entry and the external ABI manifest, so a
+// module nothing calls is never lowered and `stage: ok` says nothing about it. Adding
+//
+//     try append(&var manifest, "selfhost", "backend/mir_env_gate", "lowering_probe", "!i64", "");
+//
+// to selfhost/src/ir/external_abi_entrypoints.kizu makes the MIR lowering walk every function in
+// mir_env.kizu and mir_env_loop.kizu, which is how the four shapes those files had to be written
+// around were found. It touches every operation the two modules export, so nothing is missed.
+pub fn lowering_probe() -> !i64 {
+    var space = mir_env::env_space();
+    defer space.deinit();
+    var assigned = try carried_names("n");
+    defer assigned.deinit();
+    let env = try mir_env::new_env(&var space);
+    try declare_i64(&var space, env, "n", "n0");
+    try mir_env::enter_scope(&var space, env);
+    try declare_i64(&var space, env, "n", "n1");
+    let loop_id = try mir_env_loop::push_loop(&var space, "", "while.end", "while.header");
+    let group = try mir_env_loop::create_loop_phis(
+        &var space, "while.header", "entry", env, &assigned
+    );
+    try bind(&var space, env, "n", "add");
+    let then_env = try mir_env::copy_env(&var space, env);
+    let target = try mir_env_loop::find_loop(&space, "");
+    let _edge = try mir_env_loop::record_loop_edge(
+        &var space, target, true, "if.then", then_env
+    );
+    let _break_to = try mir_env_loop::loop_break_target(&space, loop_id);
+    let _continue_to = try mir_env_loop::loop_continue_target(&space, loop_id);
+    let else_env = try mir_env::copy_env(&var space, env);
+    let body_env = try mir_env::merge_branches(
+        &var space, "if.end", then_env, "if.then", false, else_env, "if.else", true
+    );
+    try bind(&var space, body_env, "n", "add2");
+    let latch = try mir_env::copy_env(&var space, body_env);
+    try mir_env_loop::pop_loop(&var space, loop_id);
+    try mir_env_loop::finish_loop_phis(&var space, group, body_env, "if.end", latch, loop_id);
+    try mir_env_loop::finish_loop_exit_phis(
+        &var space, group, "while.end", "while.header", loop_id, body_env
+    );
+    try mir_env::leave_scope(&var space, env);
+    let out_allocator = std::mem::page_allocator();
+    var out = std::string::String(out_allocator);
+    defer out.deinit();
+    try mir_env::render_phis(&space, &var out);
+    return mir_env::phi_count(&space);
+}

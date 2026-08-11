@@ -144,6 +144,10 @@ func TestSelfhostTypeDeclarationRegistryGate(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryUsesExactNominalIdentity runs
+// gate_non_nominal_shared_abi. Two distinct nominal types that happen to lower to the same
+// ABI must stay distinct in the registry: sharing is keyed on exact identity, not on the
+// rendered representation, or unrelated types would collapse into one declaration.
 func TestSelfhostTypeDeclarationRegistryUsesExactNominalIdentity(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	var out bytes.Buffer
@@ -159,6 +163,11 @@ func TestSelfhostTypeDeclarationRegistryUsesExactNominalIdentity(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryRejectsInvalidFacts is the registry's fail-closed
+// table: cycles, malformed or contradictory struct fields, colliding nominals, duplicate
+// canonical kinds, malformed union variant tags and reserved names. Each case names the
+// diagnostic it expects, because "some error" would let one validator's failure masquerade
+// as another's. Subtests keep a single broken validator from hiding the rest.
 func TestSelfhostTypeDeclarationRegistryRejectsInvalidFacts(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	cases := []struct {
@@ -210,6 +219,10 @@ func TestSelfhostTypeDeclarationRegistryRejectsInvalidFacts(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryRecursiveUnionLayout runs gate_recursive_union_layout.
+// A union nesting another union renders as a tag plus an opaque payload array, so the
+// expected output pins the computed payload widths: outer's 24 bytes must account for the
+// widest variant transitively, not just for inner's own tag.
 func TestSelfhostTypeDeclarationRegistryRecursiveUnionLayout(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	var out bytes.Buffer
@@ -227,6 +240,11 @@ func TestSelfhostTypeDeclarationRegistryRecursiveUnionLayout(t *testing.T) {
 	}
 }
 
+// TestSelfhostScalarABIAndUnionLayoutShareWidths runs gate_scalar_abi_layout, which resolves
+// i8/u16/i32/u64/isize/f32/f64, checks each against the fixed ABI contract internally, and
+// then prints the payload capacity of a union wrapping each one. The printed 1/2/4/8/4/8 is
+// therefore the layout side agreeing with the ABI side; a drift between the two shows up
+// here rather than as a miscompiled union somewhere downstream.
 func TestSelfhostScalarABIAndUnionLayoutShareWidths(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	var out bytes.Buffer
@@ -241,6 +259,10 @@ func TestSelfhostScalarABIAndUnionLayoutShareWidths(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryTraversesGenericArguments runs
+// gate_reachable_generic_arguments. Channel and ptr lower to opaque handles, so app::Model
+// only ever appears as a generic argument -- the registry has to walk into the arguments to
+// reach it. The single declared struct in the output is the proof it did.
 func TestSelfhostTypeDeclarationRegistryTraversesGenericArguments(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	var out bytes.Buffer
@@ -255,6 +277,11 @@ func TestSelfhostTypeDeclarationRegistryTraversesGenericArguments(t *testing.T) 
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryScopesFunctionTypeParameters runs
+// gate_reachable_function_type_parameters. app::generic::make's reachable types are all
+// written in terms of its own formals T/K/V, which have no ABI and must be skipped; only
+// app::concrete::make's fully substituted root reaches app::Model. One declaration in the
+// output means the formals were recognised as formals rather than resolved as type names.
 func TestSelfhostTypeDeclarationRegistryScopesFunctionTypeParameters(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	var out bytes.Buffer
@@ -270,6 +297,11 @@ func TestSelfhostTypeDeclarationRegistryScopesFunctionTypeParameters(t *testing.
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryDoesNotLeakFunctionTypeParameterScope is the negative
+// counterpart to the test above: app::generic::make declares a formal T, app::plain::run
+// does not, and a plain T in app::plain::run must stay an unresolved type name. The asserted
+// diagnostic names app::plain:: specifically, so a registry that pooled formals globally
+// would fail here even though it would still pass the positive gate.
 func TestSelfhostTypeDeclarationRegistryDoesNotLeakFunctionTypeParameterScope(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	var out bytes.Buffer
@@ -291,6 +323,10 @@ func TestSelfhostTypeDeclarationRegistryDoesNotLeakFunctionTypeParameterScope(t 
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryRejectsMalformedFunctionTypeParameters covers the two
+// ways a function's formal list can be inconsistent -- indices that do not start at zero and
+// run contiguously, and a name bound twice. Either would make substitution ambiguous, so the
+// registry rejects the table instead of scoping what it can.
 func TestSelfhostTypeDeclarationRegistryRejectsMalformedFunctionTypeParameters(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	cases := []struct {
@@ -315,6 +351,10 @@ func TestSelfhostTypeDeclarationRegistryRejectsMalformedFunctionTypeParameters(t
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryUsesUnionDeclarationModule runs
+// gate_imported_union_payload. A union imported from app::defs spells its variant payloads
+// unqualified, and those names have to be resolved against app::defs -- where the union is
+// declared -- not against the importing module. Both emitted declarations are app::defs's.
 func TestSelfhostTypeDeclarationRegistryUsesUnionDeclarationModule(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	var out bytes.Buffer
@@ -331,6 +371,10 @@ func TestSelfhostTypeDeclarationRegistryUsesUnionDeclarationModule(t *testing.T)
 	}
 }
 
+// TestSelfhostTypeDeclarationRegistryUsesImportedStructDeclarationModule is the struct-field
+// analogue of the union test above: an imported struct's unqualified field types resolve
+// against the declaring module. Envelope's field lands on app::defs::Payload, and Payload
+// itself is pulled into the output because reaching a field type makes it reachable.
 func TestSelfhostTypeDeclarationRegistryUsesImportedStructDeclarationModule(t *testing.T) {
 	program := loadSelfhostTypeDeclarationRegistryProgram(t)
 	var out bytes.Buffer
@@ -348,7 +392,119 @@ func TestSelfhostTypeDeclarationRegistryUsesImportedStructDeclarationModule(t *t
 	}
 }
 
+// selfhostSupersededLLVMDeclarations lists the type declarations llvm.kizu used to emit by
+// hand, one string literal per type, before the reachable declaration registry took over.
+// Any of them reappearing means a type is being declared from a hardcoded spelling instead
+// of from facts -- and, worse, that the two sources can now disagree. The list lives at
+// package scope because it is a fixture, not logic; keeping it inside the assertion would
+// bury the check under ninety lines of data.
+var selfhostSupersededLLVMDeclarations = []string{
+	`"%kizu.selfhost.parser.format.comment_format_state = type`,
+	`"%kizu.error.comment_format_state = type`,
+	`"%kizu.kizu.ast.node_id = type`,
+	`"%kizu.error.node_id = type`,
+	`"%kizu.error.parse_result = type`,
+	`"%kizu.error.parse_node = type`,
+	`"%kizu.error.parse_range = type`,
+	`"%kizu.error.token = type`,
+	`"%kizu.error.prefix_op = type`,
+	`"%kizu.error.binary_op = type`,
+	`"%kizu.selfhost.codegen.run_ast = type`,
+	`"%kizu.error.run_ast = type`,
+	`"%kizu.selfhost.codegen.value = type`,
+	`"%kizu.selfhost.codegen.instruction = type`,
+	`"%kizu.selfhost.codegen.block = type`,
+	`"%kizu.selfhost.codegen.function = type`,
+	`"%kizu.selfhost.codegen.program = type`,
+	`"%kizu.selfhost.codegen.local_binding = type`,
+	`"%kizu.selfhost.codegen.local_table = type`,
+	`"%kizu.selfhost.codegen.code_eval = type`,
+	`"%kizu.error.code_eval = type`,
+	`"%kizu.selfhost.cli.parse_node_result = type`,
+	`"%kizu.error.related_span = type`,
+	`"%kizu.selfhost.codegen.payload_span = type`,
+	`"%kizu.error.payload_span = type`,
+	`"%kizu.selfhost.source.source_file = type`,
+	`"%kizu.selfhost.types.constructor_facts.constructor_facts = type`,
+	`"%kizu.selfhost.types.primitive_type.type_record = type`,
+	`"%kizu.kizu.diagnostic.file_span = type`,
+	`"%kizu.kizu.diagnostic.related_span = type`,
+	`"%kizu.kizu.diagnostic.diagnostic = type`,
+	`"%kizu.kizu.ast.source_file = type`,
+	`"%kizu.kizu.ast.span = type`,
+	`"%kizu.kizu.ast.token_id = type`,
+	`"%kizu.kizu.ast.symbol_id = type`,
+	`"%kizu.kizu.ast.child_range = type`,
+	`"%kizu.kizu.ast.program_node = type`,
+	`"%kizu.kizu.ast.int_node = type`,
+	`"%kizu.kizu.ast.string_node = type`,
+	`"%kizu.kizu.ast.type_name_node = type`,
+	`"%kizu.kizu.ast.var_node = type`,
+	`"%kizu.kizu.ast.bool_node = type`,
+	`"%kizu.kizu.ast.prefix_node = type`,
+	`"%kizu.kizu.ast.binary_node = type`,
+	`"%kizu.kizu.ast.field_expr_node = type`,
+	`"%kizu.kizu.ast.deref_expr_node = type`,
+	`"%kizu.kizu.ast.call_node = type`,
+	`"%kizu.kizu.ast.type_apply_expr_node = type`,
+	`"%kizu.kizu.ast.cast_expr_node = type`,
+	`"%kizu.kizu.ast.index_expr_node = type`,
+	`"%kizu.kizu.ast.struct_literal_expr_node = type`,
+	`"%kizu.kizu.ast.struct_field_init_node = type`,
+	`"%kizu.kizu.ast.arena_new_expr_node = type`,
+	`"%kizu.kizu.ast.try_expr_node = type`,
+	`"%kizu.kizu.ast.comptime_expr_node = type`,
+	`"%kizu.kizu.ast.block_node = type`,
+	`"%kizu.kizu.ast.if_node = type`,
+	`"%kizu.kizu.ast.let_node = type`,
+	`"%kizu.kizu.ast.assign_node = type`,
+	`"%kizu.kizu.ast.return_node = type`,
+	`"%kizu.kizu.ast.defer_node = type`,
+	`"%kizu.kizu.ast.err_defer_node = type`,
+	`"%kizu.kizu.ast.expr_stmt_node = type`,
+	`"%kizu.kizu.ast.while_node = type`,
+	`"%kizu.kizu.ast.for_node = type`,
+	`"%kizu.kizu.ast.break_node = type`,
+	`"%kizu.kizu.ast.continue_node = type`,
+	`"%kizu.kizu.ast.import_decl_node = type`,
+	`"%kizu.kizu.ast.param_node = type`,
+	`"%kizu.kizu.ast.field_node = type`,
+	`"%kizu.kizu.ast.struct_decl_node = type`,
+	`"%kizu.kizu.ast.enum_decl_node = type`,
+	`"%kizu.kizu.ast.union_decl_node = type`,
+	`"%kizu.kizu.ast.impl_decl_node = type`,
+	`"%kizu.kizu.ast.union_variant_node = type`,
+	`"%kizu.kizu.ast.match_node = type`,
+	`"%kizu.kizu.ast.match_arm_node = type`,
+	`"%kizu.kizu.ast.unsafe_node = type`,
+	`"%kizu.kizu.ast.comptime_if_node = type`,
+	`"%kizu.kizu.ast.fn_decl_node = type`,
+	`"%kizu.kizu.lexer.position = type`,
+	`"%kizu.kizu.lexer.token = type`,
+	`"%kizu.kizu.parser.parse_node = type`,
+	`"%kizu.kizu.parser.parse_range = type`,
+	`"%kizu.kizu.ast.ast = type`,
+	`"%kizu.kizu.ast.parse_result = type`,
+	`"%kizu.kizu.ast.ast_node = type`,
+}
+
+// TestSelfhostTypeDeclarationRegistryProductionHook checks that the registry the gates above
+// exercise is the one production actually uses. The gates prove the registry is correct;
+// this proves nothing is bypassing it -- neither by re-emitting declarations by hand, nor by
+// keeping the old hand-written renderers alive, nor by starving the registry of the
+// reachability roots it needs.
 func TestSelfhostTypeDeclarationRegistryProductionHook(t *testing.T) {
+	assertLLVMRendererDelegatesTypeDeclarations(t)
+	assertCLILLVMDropsHandWrittenReturnRenderers(t)
+	assertPayloadSpanRendererUsesFactDerivedReturnABI(t)
+	assertReachableTypeRootsAreEmitted(t)
+}
+
+// assertLLVMRendererDelegatesTypeDeclarations pins both halves of the handover in llvm.kizu:
+// the registry is called, and none of the declarations it now owns are still spelled out by
+// hand. Checking only the call would let a duplicate manual declaration survive next to it.
+func assertLLVMRendererDelegatesTypeDeclarations(t *testing.T) {
+	t.Helper()
 	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
 	if !strings.Contains(
 		llvm,
@@ -356,99 +512,19 @@ func TestSelfhostTypeDeclarationRegistryProductionHook(t *testing.T) {
 	) {
 		t.Fatal("production LLVM renderer does not call the reachable declaration registry")
 	}
-	for _, removed := range []string{
-		`"%kizu.selfhost.parser.format.comment_format_state = type`,
-		`"%kizu.error.comment_format_state = type`,
-		`"%kizu.kizu.ast.node_id = type`,
-		`"%kizu.error.node_id = type`,
-		`"%kizu.error.parse_result = type`,
-		`"%kizu.error.parse_node = type`,
-		`"%kizu.error.parse_range = type`,
-		`"%kizu.error.token = type`,
-		`"%kizu.error.prefix_op = type`,
-		`"%kizu.error.binary_op = type`,
-		`"%kizu.selfhost.codegen.run_ast = type`,
-		`"%kizu.error.run_ast = type`,
-		`"%kizu.selfhost.codegen.value = type`,
-		`"%kizu.selfhost.codegen.instruction = type`,
-		`"%kizu.selfhost.codegen.block = type`,
-		`"%kizu.selfhost.codegen.function = type`,
-		`"%kizu.selfhost.codegen.program = type`,
-		`"%kizu.selfhost.codegen.local_binding = type`,
-		`"%kizu.selfhost.codegen.local_table = type`,
-		`"%kizu.selfhost.codegen.code_eval = type`,
-		`"%kizu.error.code_eval = type`,
-		`"%kizu.selfhost.cli.parse_node_result = type`,
-		`"%kizu.error.related_span = type`,
-		`"%kizu.selfhost.codegen.payload_span = type`,
-		`"%kizu.error.payload_span = type`,
-		`"%kizu.selfhost.source.source_file = type`,
-		`"%kizu.selfhost.types.constructor_facts.constructor_facts = type`,
-		`"%kizu.selfhost.types.primitive_type.type_record = type`,
-		`"%kizu.kizu.diagnostic.file_span = type`,
-		`"%kizu.kizu.diagnostic.related_span = type`,
-		`"%kizu.kizu.diagnostic.diagnostic = type`,
-		`"%kizu.kizu.ast.source_file = type`,
-		`"%kizu.kizu.ast.span = type`,
-		`"%kizu.kizu.ast.token_id = type`,
-		`"%kizu.kizu.ast.symbol_id = type`,
-		`"%kizu.kizu.ast.child_range = type`,
-		`"%kizu.kizu.ast.program_node = type`,
-		`"%kizu.kizu.ast.int_node = type`,
-		`"%kizu.kizu.ast.string_node = type`,
-		`"%kizu.kizu.ast.type_name_node = type`,
-		`"%kizu.kizu.ast.var_node = type`,
-		`"%kizu.kizu.ast.bool_node = type`,
-		`"%kizu.kizu.ast.prefix_node = type`,
-		`"%kizu.kizu.ast.binary_node = type`,
-		`"%kizu.kizu.ast.field_expr_node = type`,
-		`"%kizu.kizu.ast.deref_expr_node = type`,
-		`"%kizu.kizu.ast.call_node = type`,
-		`"%kizu.kizu.ast.type_apply_expr_node = type`,
-		`"%kizu.kizu.ast.cast_expr_node = type`,
-		`"%kizu.kizu.ast.index_expr_node = type`,
-		`"%kizu.kizu.ast.struct_literal_expr_node = type`,
-		`"%kizu.kizu.ast.struct_field_init_node = type`,
-		`"%kizu.kizu.ast.arena_new_expr_node = type`,
-		`"%kizu.kizu.ast.try_expr_node = type`,
-		`"%kizu.kizu.ast.comptime_expr_node = type`,
-		`"%kizu.kizu.ast.block_node = type`,
-		`"%kizu.kizu.ast.if_node = type`,
-		`"%kizu.kizu.ast.let_node = type`,
-		`"%kizu.kizu.ast.assign_node = type`,
-		`"%kizu.kizu.ast.return_node = type`,
-		`"%kizu.kizu.ast.defer_node = type`,
-		`"%kizu.kizu.ast.err_defer_node = type`,
-		`"%kizu.kizu.ast.expr_stmt_node = type`,
-		`"%kizu.kizu.ast.while_node = type`,
-		`"%kizu.kizu.ast.for_node = type`,
-		`"%kizu.kizu.ast.break_node = type`,
-		`"%kizu.kizu.ast.continue_node = type`,
-		`"%kizu.kizu.ast.import_decl_node = type`,
-		`"%kizu.kizu.ast.param_node = type`,
-		`"%kizu.kizu.ast.field_node = type`,
-		`"%kizu.kizu.ast.struct_decl_node = type`,
-		`"%kizu.kizu.ast.enum_decl_node = type`,
-		`"%kizu.kizu.ast.union_decl_node = type`,
-		`"%kizu.kizu.ast.impl_decl_node = type`,
-		`"%kizu.kizu.ast.union_variant_node = type`,
-		`"%kizu.kizu.ast.match_node = type`,
-		`"%kizu.kizu.ast.match_arm_node = type`,
-		`"%kizu.kizu.ast.unsafe_node = type`,
-		`"%kizu.kizu.ast.comptime_if_node = type`,
-		`"%kizu.kizu.ast.fn_decl_node = type`,
-		`"%kizu.kizu.lexer.position = type`,
-		`"%kizu.kizu.lexer.token = type`,
-		`"%kizu.kizu.parser.parse_node = type`,
-		`"%kizu.kizu.parser.parse_range = type`,
-		`"%kizu.kizu.ast.ast = type`,
-		`"%kizu.kizu.ast.parse_result = type`,
-		`"%kizu.kizu.ast.ast_node = type`,
-	} {
+	for _, removed := range selfhostSupersededLLVMDeclarations {
 		if strings.Contains(llvm, removed) {
 			t.Fatalf("production LLVM retained superseded manual declaration %s", removed)
 		}
 	}
+}
+
+// assertCLILLVMDropsHandWrittenReturnRenderers pins the deletion of the per-type return
+// renderers in cli_llvm.kizu. Each hardcoded one type's return ABI; with returns now derived
+// from facts they are not merely unused but wrong, so they must not be left behind to be
+// reached again.
+func assertCLILLVMDropsHandWrittenReturnRenderers(t *testing.T) {
+	t.Helper()
 	cliLLVM := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	for _, removed := range []string{
 		"fn append_run_ast_success_return(",
@@ -461,6 +537,15 @@ func TestSelfhostTypeDeclarationRegistryProductionHook(t *testing.T) {
 			t.Fatalf("production LLVM renderer retained dead RunAst helper %s", removed)
 		}
 	}
+}
+
+// assertPayloadSpanRendererUsesFactDerivedReturnABI inspects only
+// append_multi_string_literal_span's body, the last renderer that used to name PayloadSpan's
+// ABI directly. It must read the return type off the function record instead; both the old
+// selfhost::codegen and the current selfhost::ir::codegen spellings are rejected so a
+// module move cannot reintroduce the hardcoding under a new name.
+func assertPayloadSpanRendererUsesFactDerivedReturnABI(t *testing.T) {
+	t.Helper()
 	compiledMIRLLVM := readSelfhostFile(t, "../../selfhost/src/backend/compiled_mir_llvm.kizu")
 	payloadSpanRenderer := selfhostKizuFunctionBody(
 		t, compiledMIRLLVM, "fn append_multi_string_literal_span(",
@@ -476,7 +561,15 @@ func TestSelfhostTypeDeclarationRegistryProductionHook(t *testing.T) {
 			t.Fatalf("PayloadSpan renderer retained hardcoded ABI %s", hardcoded)
 		}
 	}
+}
 
+// assertReachableTypeRootsAreEmitted covers the producer side the registry depends on. A
+// reachable-type root has to come from every runtime signature (comptime parameters excluded,
+// since they have no ABI) and from struct literals and type names in bodies, and each root
+// has to be attributable to an exact owner module -- otherwise unqualified spellings cannot
+// be resolved and the registry silently under-declares.
+func assertReachableTypeRootsAreEmitted(t *testing.T) {
+	t.Helper()
 	signatures := readSelfhostFile(t, "../../selfhost/src/ir/function_signature.kizu")
 	for _, required := range []string{
 		`if !comptime_param {`,
@@ -502,6 +595,10 @@ func TestSelfhostTypeDeclarationRegistryProductionHook(t *testing.T) {
 	}
 }
 
+// loadSelfhostTypeDeclarationRegistryProgram loads and type-checks the selfhost package
+// once so a test can interpret several gate entries against the same program. Failures here
+// are setup failures, not gate failures, so they abort immediately rather than being
+// returned.
 func loadSelfhostTypeDeclarationRegistryProgram(t *testing.T) *ast.Program {
 	t.Helper()
 	_, program, err := loadPackageProgram("../../selfhost")

@@ -184,6 +184,19 @@ pub struct CallArgTypeCache {
     pub instance_id: i64,
     pub lookups: i64,
     pub hits: i64,
+    // void_alias_slots is the function's single supply of '%void.then.alias.<n>' slot numbers; its
+    // length is the next slot. LLVM keeps one local namespace per function, so every such name
+    // minted anywhere in a function body has to be distinct, and a counter owned by one
+    // body-lowering entry point cannot guarantee that: a sibling body lowered from another entry
+    // point restarts its own counter at 0 and remints .0/.1/.2 into the same namespace. This cache
+    // is created once per rendered function (see append_compiled_function_params_context_indexed)
+    // and lives for the whole of that function's lowering, so a supply kept here is monotonic
+    // across every body in the function and can never restart. It is an array rather than an i64
+    // because the cache reaches the mint as a '&var CallArgTypeCache' threaded through many calls
+    // and only the heap behind a field survives that: a plain scalar field assigned through such a
+    // parameter does not reach the caller's cache under the native backend, which would silently
+    // pin every slot at 0. Only next_void_alias_slot reads or advances it.
+    pub void_alias_slots: std::array::Array<i64>,
 }
 
 pub fn call_arg_type_cache() -> CallArgTypeCache {
@@ -234,15 +247,27 @@ pub fn call_arg_type_cache() -> CallArgTypeCache {
         name_store: compiled_mir::mir_name_store(),
         instance_id: -1,
         lookups: 0,
-        hits: 0
+        hits: 0,
+        void_alias_slots: std::array::Array<i64>(std::mem::page_allocator())
     };
+}
+
+// next_void_alias_slot hands out this function's next '%void.then.alias.<n>' slot number and
+// advances the supply. Every mint goes through here, so two bodies in one function can never be
+// handed the same slot no matter which body-lowering entry point they were lowered from.
+pub fn next_void_alias_slot(cache: &var CallArgTypeCache) -> !i64 {
+    let slot = cache.void_alias_slots.len();
+    try cache.void_alias_slots.append(slot);
+    return slot;
 }
 
 impl CallArgTypeCache {
     fn deinit(self: CallArgTypeCache) -> void {
-        // The name store is deliberately not released here: the names it owns are referenced by the
-        // MirFunction this cache helped build, which its caller renders after the lowering has
-        // returned and this cache is gone. See MirNameStore.
+        // The name store outlives the lowering: its views are referenced by the MirFunction this
+        // cache helped build. The render site owns this cache and releases it only after that
+        // function has been rendered, so this is the last use of those names. See MirNameStore.
+        self.name_store.deinit();
+        self.void_alias_slots.deinit();
         self.struct_field_kizu_types.deinit();
         self.struct_field_indexes.deinit();
         self.struct_field_names.deinit();

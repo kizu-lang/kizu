@@ -191,6 +191,158 @@ func appendSelfhostBackendArtifactReport(t *testing.T, out *strings.Builder) int
 	return failures
 }
 
+// dominanceViolationModule is a module LLVM's verifier must reject: %x is defined
+// only on the `a` path, so it does not dominate its use in `join`. It is the smallest
+// spelling of the defect family the MIR lowering rewrite exists to eliminate -- a name
+// denoting a value that does not reach the place the name is read.
+const dominanceViolationModule = `define i64 @f(i1 %c) {
+entry:
+  br i1 %c, label %a, label %b
+a:
+  %x = add i64 1, 2
+  br label %join
+b:
+  br label %join
+join:
+  %r = add i64 %x, 3
+  ret i64 %r
+}
+`
+
+// moduleReaders lists the tools that can be asked to read a module, in the order the
+// gate reports them.
+func moduleReaders(path string) []struct {
+	tool string
+	args []string
+} {
+	return []struct {
+		tool string
+		args []string
+	}{
+		{"opt", []string{"-passes=verify", "-disable-output", path}},
+		{"clang", []string{"-x", "ir", path, "-S", "-emit-llvm", "-o", os.DevNull}},
+	}
+}
+
+// wellFormedModule is the same function with the definition moved where it dominates
+// its use. A reader that rejects this rejects everything, and a tool that rejects
+// everything would otherwise pass for a verifier.
+const wellFormedModule = `define i64 @f(i1 %c) {
+entry:
+  %x = add i64 1, 2
+  br i1 %c, label %a, label %b
+a:
+  br label %join
+b:
+  br label %join
+join:
+  %r = add i64 %x, 3
+  ret i64 %r
+}
+`
+
+// verifyingModuleReaders returns the readers on PATH that PROVE they run the LLVM
+// verifier: they reject dominanceViolationModule and accept wellFormedModule.
+//
+// Naming a tool is not enough, because the answer depends on the vendor rather than on
+// the name. Measured on this repo's own machine: `clang -x ir <bad.ll> -c -o /dev/null`
+// exits 1 under Homebrew LLVM 21 and exits 0 -- accepting the violation -- under Apple
+// clang, and `/usr/bin/clang` is what an unadorned PATH resolves. A gate that counted
+// "clang was present" would therefore report a verified module on one machine and an
+// unread one on another, with no way to tell which from the output.
+//
+// So the reader is asked both questions first. A reader that cannot reject a module
+// LLVM's verifier rejects is not verifying anything, and its acceptance of the staged
+// module carries no information; a reader that also rejects the well-formed twin is
+// broken rather than strict, and counting it would turn a missing toolchain into a
+// gate that always fails for the wrong reason.
+func verifyingModuleReaders(t *testing.T) []string {
+	t.Helper()
+	dir := t.TempDir()
+	probes := []struct {
+		name     string
+		module   string
+		rejected bool
+	}{
+		{"dominance-violation.ll", dominanceViolationModule, true},
+		{"well-formed.ll", wellFormedModule, false},
+	}
+	for i, probe := range probes {
+		path := filepath.Join(dir, probe.name)
+		if err := os.WriteFile(path, []byte(probe.module), 0o600); err != nil {
+			t.Errorf("write verifier probe module %s: %v", probe.name, err)
+			return nil
+		}
+		probes[i].name = path
+	}
+	verifying := []string{}
+	for _, reader := range moduleReaders("") {
+		binary, err := exec.LookPath(reader.tool)
+		if err != nil {
+			continue
+		}
+		answers := true
+		for _, probe := range probes {
+			args := moduleReaderArgs(reader.tool, probe.name)
+			if (exec.Command(binary, args...).Run() != nil) != probe.rejected {
+				answers = false
+			}
+		}
+		if answers {
+			verifying = append(verifying, reader.tool)
+		}
+	}
+	return verifying
+}
+
+// moduleReaderArgs spells one reader's argument list for a given module path.
+func moduleReaderArgs(tool string, path string) []string {
+	for _, reader := range moduleReaders(path) {
+		if reader.tool == tool {
+			return reader.args
+		}
+	}
+	return nil
+}
+
+// countEmittedModuleRejections hands the staged module to LLVM and fails if LLVM
+// will not have it. The compiler reported `stage: ok` for a long time while emitting
+// three duplicate local names, because nothing between the emitter and the linker
+// ever read the whole module: this gate weighed it and searched it for substrings,
+// and the probe harnesses link an extracted closure rather than the module.
+//
+// Only readers that verifyingModuleReaders proved are verifiers are run, and at least
+// one is required. Reporting "no verifier is on PATH" is the point: a silent skip is
+// how the unread module survived, and a module nobody verified is not a module this
+// gate can call good.
+func countEmittedModuleRejections(t *testing.T, path string) int {
+	t.Helper()
+	verifying := verifyingModuleReaders(t)
+	if len(verifying) == 0 {
+		t.Errorf("no LLVM verifier on PATH: the staged module went unread. " +
+			"Install LLVM's `opt` (brew install llvm) or put a clang whose IR reader " +
+			"rejects a dominance violation ahead of Apple clang on PATH")
+		return 1
+	}
+	// Say which readers earned the right to answer. Which tools verified is the whole
+	// weight of this check, and a run whose log does not name them cannot be told apart
+	// from one where the strict reader had quietly dropped off PATH.
+	t.Logf("module verified by: %s", strings.Join(verifying, ", "))
+	for _, tool := range verifying {
+		binary, err := exec.LookPath(tool)
+		if err != nil {
+			t.Errorf("%s left PATH between the probe and the read", tool)
+			return 1
+		}
+		out, err := exec.Command(binary, moduleReaderArgs(tool, path)...).CombinedOutput()
+		if err != nil {
+			t.Errorf("%s rejected the staged module: %v\n%s", tool, err, out)
+			return 1
+		}
+	}
+	return 0
+}
+
 // countSelfhostBackendArtifactFileFailures validates deterministic LLVM artifacts.
 func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 	t.Helper()
@@ -203,6 +355,11 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 	if err != nil {
 		t.Errorf("read LLVM artifact: %v", err)
 		return 1
+	}
+	if failures := countEmittedModuleRejections(
+		t, "../../target/selfhost/selfhost.ll",
+	); failures > 0 {
+		return failures
 	}
 	metaBytes, err := os.ReadFile("../../target/selfhost/selfhost.ll.meta")
 	if err != nil {
@@ -292,7 +449,36 @@ func requiredLLVMFragments() []string {
 	fragments = append(fragments, requiredLLVMExecutableFragments()...)
 	fragments = append(fragments, requiredLLVMMemStartsWithFragments()...)
 	fragments = append(fragments, requiredLLVMSourceAbsoluteNameFragments()...)
+	fragments = append(fragments, requiredLLVMNestedArmJoinFragments()...)
 	return fragments
+}
+
+// requiredLLVMNestedArmJoinFragments pins the join of an if nested inside another
+// if's arm, inside a loop body that is lowered against a fresh environment.
+//
+// It is here because nothing else in the repo witnesses it. The lowering has to tell
+// that environment which outer variables exist -- a fresh alias map beside it means
+// "every name is back at its own spelling", not "no names", and an SSA environment has
+// no total form to say that in -- and when it does not, the inner join emits no merge
+// variable at all. Both halves of that are silent: the probe corpus stages
+// byte-identically either way, and the module still verifies, because the inner arm's
+// value is simply carried out as though the arm had declared it.
+//
+// It only became loud in passing: the OUTER join then took that value, defined inside
+// the inner arm, as its else-arm edge, and stored it in a block the definition does not
+// dominate -- which opt rejects. Depth alone decides which of the two wrong answers
+// appears, so a change to the environment's scope rule can move this from broken module
+// to quiet wrong answer without touching what is actually missing.
+//
+// The seed store is what is pinned rather than the load or the arm store: it is the one
+// line that has no counterpart at all when the merge variable is not created, and it
+// names a source variable and a statement-derived index rather than a mint counter, so
+// unrelated churn does not move it.
+func requiredLLVMNestedArmJoinFragments() []string {
+	return []string{
+		"store i64 %depth, ptr %if2002500001_merge0",
+		"%if2002500001_merge0 = alloca i64",
+	}
 }
 
 // requiredLLVMRuntimeFragments returns mandatory hosted runtime declarations.
@@ -602,7 +788,12 @@ func requiredLLVMRunCodegenLoweringFragments() []string {
 			"@kizu_selfhost__ir_codegen_empty_payload_span",
 		"define i1 @kizu_selfhost__ir_codegen_is_payload_supported",
 		"%index = phi i64 [ 0, %loop4_preheader ], [ %index_next, %loop4_latch ]",
-		"%t5 = icmp slt i64 %index, %t4",
+		// The bound test of parse_int_literal's digit scan. It used to be spelled
+		// "%t5 = icmp slt i64 %index, %t4", which no define in the artifact carries any more: that
+		// string had drifted onto std::kizu::parser::parse_type_apply_expr_with_args' inner
+		// type-argument loop, and it left with lower_type_apply_nested_counted_while. This spelling
+		// is the one parse_int_literal actually emits, and it occurs in that define alone.
+		"%t8 = icmp slt i64 %index.while.head.26, %length",
 		", label %loop4_body, label %loop4_exit",
 		"%index_next = add i64 %index, 1",
 		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
@@ -767,7 +958,8 @@ func requiredLLVMArenaGetFragments() []string {
 		"%elem = load %kizu.kizu.ast.ast_node, ptr %elem_ptr",
 		"  ret %kizu.kizu.ast.ast_node %elem",
 		"call void @kizu_rt_trap(%kizu.slice.u8 %fail_msg)",
-		"@.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c\"invalid arena handle\"",
+		"@.kizu.rt.arena_invalid_handle = private unnamed_addr constant " +
+			"[20 x i8] c\"invalid arena handle\"",
 		"define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %handle)",
 		"%handle_arena = extractvalue %kizu.handle %handle, 0",
 		"%same_arena = icmp eq ptr %raw, %handle_arena",
@@ -820,8 +1012,12 @@ func requiredLLVMMatchUnionFragments() []string {
 // (bool -> i1, an enum tag -> i64, NodeId / ChildRange / Span -> their value types). The five
 // leaf variants and the payload-less Empty are not modelled here. This is the type-definition
 // foundation; the cluster's lowering lands in a later PR.
+//
+// The id types and the expression variants are here; BlockNode through FnDeclNode are in
+// requiredLLVMNodeCountStatementTypeFragments. The two lists are one foundation and are
+// always read together.
 func requiredLLVMNodeCountTypeFragments() []string {
-	return []string{
+	fragments := []string{
 		"%kizu.kizu.ast.token_id = type { i64 }",
 		"%kizu.kizu.ast.symbol_id = type { i64 }",
 		"%kizu.kizu.ast.int_node = type { %kizu.kizu.ast.token_id }",
@@ -845,6 +1041,15 @@ func requiredLLVMNodeCountTypeFragments() []string {
 		"%kizu.kizu.ast.arena_new_expr_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.try_expr_node = type { %kizu.kizu.ast.node_id }",
 		"%kizu.kizu.ast.comptime_expr_node = type { %kizu.kizu.ast.node_id }",
+	}
+	return append(fragments, requiredLLVMNodeCountStatementTypeFragments()...)
+}
+
+// requiredLLVMNodeCountStatementTypeFragments returns the statement and declaration half of
+// the node_count type foundation described on requiredLLVMNodeCountTypeFragments: the AstData
+// variant payload structs from BlockNode through FnDeclNode, modelled in stage2 the same way.
+func requiredLLVMNodeCountStatementTypeFragments() []string {
+	return []string{
 		"%kizu.kizu.ast.block_node = type { %kizu.kizu.ast.child_range }",
 		"%kizu.kizu.ast.if_node = type { %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.node_id }",
@@ -873,7 +1078,13 @@ func requiredLLVMNodeCountTypeFragments() []string {
 		"%kizu.kizu.ast.union_decl_node = type { i1, %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.child_range, %kizu.kizu.ast.child_range, " +
 			"%kizu.kizu.ast.span }",
-		"%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
+		// Three fields since 07c0c094 prepended contract_name to ImplDeclNode. The two
+		// leading node_ids are distinct fields, not a duplicated one: the ImplDecl arm of
+		// collect_nominal_resolution_facts_from_ast extracts index 0 and index 1 and passes
+		// them as the separate contract_name / type_name arguments of
+		// insert_contract_conformance_fact, and the methods reader moved from index 1 to 2.
+		"%kizu.kizu.ast.impl_decl_node = type { %kizu.kizu.ast.node_id, " +
+			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
 		"%kizu.kizu.ast.union_variant_node = type { %kizu.kizu.ast.node_id, " +
 			"%kizu.kizu.ast.node_id, %kizu.kizu.ast.span }",
 		"%kizu.kizu.ast.match_node = type { %kizu.kizu.ast.node_id, %kizu.kizu.ast.child_range }",
@@ -890,13 +1101,13 @@ func requiredLLVMNodeCountTypeFragments() []string {
 }
 
 // requiredLLVMNodeCountLoweringFragments returns the tracker-961 node_count recursive
-// AST-traversal cluster compiled into stage2: node_count (the 45-arm match-over-AstData
+// AST-traversal cluster compiled into stage2: node_count (the 46-arm match-over-AstData
 // traversal), count_range (the two-phi accumulator loop calling Ast.child_at + node_count),
 // and the count_* helpers (let-try / return-try arithmetic). The whole mutually-recursive
 // cluster is defined so selfhost.ll links with no undefined symbol; every arm returns a real
 // value (no 'unreachable'). These fragments lock each lowered body shape.
 func requiredLLVMNodeCountLoweringFragments() []string {
-	return []string{
+	fragments := []string{
 		// All eleven cluster defines are present (linkage invariant).
 		"define %kizu.error.i64 @kizu_selfhost__ast_node_count(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_range(",
@@ -909,17 +1120,34 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_range(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_named_ranges(",
 		"define %kizu.error.i64 @kizu_selfhost__ast_count_fn_decl_parts(",
+	}
+	fragments = append(fragments, requiredLLVMNodeCountDispatchFragments()...)
+	return append(fragments, requiredLLVMNodeCountRangeLoweringFragments()...)
+}
+
+// requiredLLVMNodeCountDispatchFragments returns node_count's own entry shape from the cluster
+// described on requiredLLVMNodeCountLoweringFragments: the Ast.get bind, the union tag extract,
+// the 46-arm dispatch chain, and the Program arm's forward to count_with_range.
+func requiredLLVMNodeCountDispatchFragments() []string {
+	return []string{
 		// node_count: bind the AstNode via Ast.get, extract the union tag, and dispatch over
-		// the 45-arm icmp/br chain (Program tag 0 first, FnDecl tag 43 second, ...). The
-		// chain is exhaustive over AstData, so the last test is elided: dispatch1_check_44
-		// falls through unconditionally to the Empty arm, which returns 1. No 'unreachable'.
+		// the 46-arm icmp/br chain (Program tag 0 first, FnDecl tag 43 second, ...). The
+		// last arm's test is elided unconditionally, so dispatch1_check_45 falls through to
+		// the Empty arm, which returns 1. No 'unreachable'.
+		//
+		// The chain was 45 arms until 07c0c094 added the ContractDecl variant. Its tag was
+		// appended, so no earlier variant's tag moved and the two tag pins below still hold;
+		// its match arm was inserted at index 7, so every arm index from 7 up rose by one.
+		// The Empty-arm pin moved 44 -> 45 with it. It did NOT fail on the way: Bool also
+		// lowers to `=> 1`, so at 44 the pin went on matching while silently guarding a
+		// different arm than the one this comment names.
 		"%node = call %kizu.kizu.ast.ast_node @kizu_kizu__ast_ast_get(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %node_id)",
 		"%dispatch1_is_1 = icmp eq i64 %dispatch1_tag0, 43",
 		"br i1 %dispatch1_is_1, label %dispatch1_arm_1, label %dispatch1_check_2",
-		"dispatch1_check_44:\n  br label %dispatch1_arm_44",
-		"%enumdispatchret1_44_val = insertvalue %kizu.error.i64 " +
-			"%enumdispatchret1_44_ok, i64 1, 1",
+		"dispatch1_check_45:\n  br label %dispatch1_arm_45",
+		"%enumdispatchret1_45_val = insertvalue %kizu.error.i64 " +
+			"%enumdispatchret1_45_ok, i64 1, 1",
 		// node_count Program arm: load the ProgramNode payload, forward declarations to
 		// count_with_range, then try-unwrap that error union and re-wrap the i64 as this
 		// function's own success. The argument is named from the call-argument namespace
@@ -930,20 +1158,46 @@ func requiredLLVMNodeCountLoweringFragments() []string {
 		"%enumdispatchret1_0_val = insertvalue %kizu.error.i64 " +
 			"%enumdispatchret1_0_ok, i64 %t2, 1",
 		"  ret %kizu.error.i64 %enumdispatchret1_0_val",
+	}
+}
+
+// requiredLLVMNodeCountRangeLoweringFragments returns the lowered bodies of the helpers
+// node_count recurses through, from the cluster described on
+// requiredLLVMNodeCountLoweringFragments: count_range's two-phi accumulator loop, and the
+// let-try / return-try arithmetic of count_two and count_one.
+func requiredLLVMNodeCountRangeLoweringFragments() []string {
+	return []string{
 		// count_range: a two-phi accumulator loop over the range calling the checked
 		// Ast.child_at and the recursive node_count, propagating either failure and returning
 		// the accumulated count wrapped as the success. Both phis take their back edge from
 		// the latch, and the exit reads the head phi, so the returned count is the one the
 		// last completed iteration produced.
-		"%t1 = extractvalue %kizu.kizu.ast.child_range %range, 1",
-		"%count = phi i64 [ 0, %loop2_preheader ], [ %count.loop.24, %loop2_latch ]",
-		"%index = phi i64 [ 0, %loop2_preheader ], [ %index_next, %loop2_latch ]",
+		//
+		// This loop is now lowered by the generic while path, so its two declarations --
+		// 'var count = 0' and 'var index = 0', which the walk used to fold into the head -- are
+		// emitted in the entry block as %<var>.seed.<declaration node> and the head phis seed
+		// from them. The seven fragments this replaces spelled %count / %index bare and mint
+		// temps around them; six stopped matching, and the seventh -- the %index phi -- went on
+		// matching once, in source_manifest_quoted_marker_value, saying nothing about this one.
+		// (The %t1 extractvalue stopped matching too: the 20 occurrences measured for it belong
+		// to its replacement below, which drops the %t1.) So each fragment below either
+		// names this function's own values (%range, %child, %child_call) or a %<var>.while.head.
+		// name, and none spells a mint index. Measured on the staged module: the child_at call
+		// and the node_count call occur once each, the entry-block seed pair twice, the %count
+		// phi and the accumulator add three times, the exit wrap twice, and the range-length
+		// extractvalue -- which names no counter and is kept for the loop bound it reads -- 20.
+		" = extractvalue %kizu.kizu.ast.child_range %range, 1",
+		"entry:\n  %count.seed.1 = select i1 true, i64 0, i64 0\n" +
+			"  %index.seed.4 = select i1 true, i64 0, i64 0",
+		"%count.while.head.7 = phi i64 [ %count.seed.1, %loop2_preheader ]",
+		"%index.while.head.7 = phi i64 [ %index.seed.4, %loop2_preheader ]",
 		"%child_call = call %kizu.error.kizu.kizu.ast.node_id @kizu_kizu__ast_ast_child_at(" +
-			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %range, i64 %index)",
-		"%t4 = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
+			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.child_range %range, " +
+			"i64 %index.while.head.7)",
+		" = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
 			"%kizu.kizu.ast.ast %tree, %kizu.kizu.ast.node_id %child)",
-		"%t6 = add i64 %count, %t5",
-		"loop2_exit:\n  %retwrap7_ok = insertvalue %kizu.error.i64 zeroinitializer, i1 true, 0",
+		" = add i64 %count.while.head.7, ",
+		", i64 %count.while.head.7, 1\n  ret %kizu.error.i64 %retwrap",
 		// count_two: let-try the recursive node_count, propagate failure, bind the success,
 		// then return the arithmetic wrapped as the error-union success.
 		"%first_count_call = call %kizu.error.i64 @kizu_selfhost__ast_node_count(" +
@@ -1000,14 +1254,30 @@ func requiredLLVMMemStartsWithFragments() []string {
 		"%prefix_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %prefix)",
 		"%t1 = call i64 @kizu_std__mem_len(%kizu.slice.u8 %bytes)",
 		"%t2 = icmp sgt i64 %prefix_len, %t1",
-		"%index = phi i64 [ 0, %loop3_preheader ], [ %index_next, %loop3_latch ]",
-		"%t5 = icmp slt i64 %index, %prefix_len",
-		"%t7_bad = or i1 %t7_neg, %t7_high",
-		"br i1 %t7_bad, label %t7_idx_oob, label %t7_idx_ok",
-		"%t9_bad = or i1 %t9_neg, %t9_high",
-		"br i1 %t9_bad, label %t9_idx_oob, label %t9_idx_ok",
-		"%t10 = icmp ne i8 %t7, %t9",
-		"%index_next = add i64 %index, 1",
+		// The prefix scan is now lowered by the generic while path: 'var index = 0' is emitted in
+		// if1_cont, the block that branches to the preheader, and the head phi takes its own
+		// %index.while.head.<node> name. Eight fragments spelled %index bare or named a mint temp
+		// around it. One failed; the other seven went on matching elsewhere -- the phi in four
+		// unrelated functions, '%t10 = icmp ne i8 %t7, %t9' in owned_string_equal_bytes, and
+		// '%index_next = add i64 %index, 1' in nineteen functions -- so they had stopped checking
+		// this body. Measured on the staged module: the guard against %prefix_len occurs once and
+		// is what ties the group to this function; the seed line and the mismatch arm twice; the
+		// head phi and the advance three times, over this function, std::mem::equal_bytes and
+		// type_spelling::next_argument; the two bounds tests five times, because the first two of
+		// those read an element twice per body; the head-phi-seed line 18 and the if3001 branch
+		// nine, both of which are group members rather than anchors.
+		//
+		// Of these only if3001 spells a generated index, and it is a body position rather than a
+		// mint counter -- loop_index * 1000 plus the if's index in the body -- which is the same
+		// thing the if1002_ and try1001_ fragments elsewhere in this file already pin.
+		"if1_cont:\n  %index.seed.24 = select i1 true, i64 0, i64 0",
+		"%index.while.head.27 = phi i64 [ %index.seed.24, %loop3_preheader ]",
+		"%index.while.head.27, %prefix_len",
+		"_neg = icmp slt i64 %index.while.head.27, 0",
+		"_high = icmp sge i64 %index.while.head.27, ",
+		", label %if3001_then, label %if3001_cont",
+		"if3001_then:\n  ret i1 false",
+		" = add i64 %index.while.head.27, 1",
 		"loop3_exit:\n  ret i1 true",
 	}
 }
@@ -1198,17 +1468,29 @@ func requiredLLVMTokenizerFragments() []string {
 		"define %kizu.kizu.lexer.token @kizu_kizu__lexer_next_token(",
 		"%nt_next = call %kizu.kizu.lexer.position @kizu_kizu__lexer_advance_position(",
 		// tokenize: build a dynamic Token array via the runtime helpers and fold first/next_token
-		// into it, returning the array as the error-union-owned success. It lowers through the
-		// generic ArrayNew + ValueWhile path (issue 1165): the element width comes from the element
-		// type (ptrtoint), the carried Token threads through a value phi, and the seed/iteration
-		// appends propagate failure as the error-union-owned failure.
+		// into it, returning the array as the error-union-owned success. The element width still
+		// comes from the element type (ptrtoint).
+		//
+		// The four fragments below replace the %vw0_* ones this list used to carry. Those came from
+		// lower_value_array_loop, a whole-function shape that emitted the loop as a single opaque
+		// ValueWhile MIR statement and never lowered its body; that shape is gone and tokenize now
+		// goes through the ordinary multi-statement walker. The observable difference is what is
+		// being pinned here: the carried Token is reloaded from a loop-carried slot at the head
+		// rather than threaded through a value phi, and BOTH appends -- the seed one before the
+		// loop and the one inside the body -- are now real emitted array_append calls, so the body
+		// append can be pinned at all. The %loop3 / %voidtry0 / %voidtry3000 / %retwrap4 numbers are
+		// lowering counters, not source names; each of these four strings occurs in exactly one
+		// define in the artifact, which is this one.
 		"define %kizu.error.owned @kizu_kizu__lexer_tokenize(",
 		"%tokens = call %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, " +
 			"i64 ptrtoint (ptr getelementptr (%kizu.kizu.lexer.token, ptr null, i32 1) to i64))",
-		"%current = phi %kizu.kizu.lexer.token [ %current_init, %entry ], " +
-			"[ %current_next, %vw0_after ]",
-		"%vw0_seed_app = call %kizu.error.void @kizu_rt_array_append(",
-		"%vw0_ok1 = insertvalue %kizu.error.owned %vw0_ok0, %kizu.owned %tokens, 1",
+		"%current = load %kizu.kizu.lexer.token, ptr %loop3_carry_current",
+		"%voidtry0_call = call %kizu.error.void @kizu_rt_array_append(" +
+			"%kizu.owned %tokens, ",
+		"%voidtry3000_call = call %kizu.error.void @kizu_rt_array_append(" +
+			"%kizu.owned %tokens, ",
+		"%retwrap4_val = insertvalue %kizu.error.owned %retwrap4_ok, " +
+			"%kizu.owned %tokens, 1",
 	}
 }
 
@@ -1236,53 +1518,22 @@ func requiredLLVMFormatHelperFragments() []string {
 		"define %kizu.slice.u8 @kizu_selfhost__parser_format_token_text(",
 		"define %kizu.error.bool @kizu_selfhost__parser_format_next_token_text_equals(",
 		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_import(",
-		// Pin the parameter-seeded induction phi: the loop counter seeds from the
-		// %import_index parameter SSA value on the preheader edge, not a literal, so a
-		// regression back to a literal seed is caught here (issue 1165).
-		"%index = phi i64 [ %import_index, %loop1_preheader ]",
-		// Pin the i64 error-union early-return wrap: 'return index + 1;' inside the loop
-		// wraps the i64 into %kizu.error.i64 with an if-index-suffixed SSA name rather than
-		// returning a raw i64 as the error union (issue 1165).
-		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %t7, 1",
-		// index_after_leading_imports is the first scan-while whose loop latch is a
-		// loop-carried try-call: 'var index = 0; while index < tokens.len() { let token =
-		// try tokens.get(index); if !is_import_token(token) { return index; } index = try
-		// index_after_import(tokens, index); } return index;' (issue 1165).
-		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_leading_imports(",
-		// Pin the generic loop-carried latch: the phi seeds from the literal 0 on the
-		// preheader edge and takes its latch operand %index_next from the try-call
-		// continuation block %try1001_cont (the real predecessor), not %loop1_latch, so a
-		// regression to a constant-step latch or a wrong phi predecessor is caught.
-		"%index = phi i64 [ 0, %loop1_preheader ], [ %index_next, %try1001_cont ]",
-		// Pin that the latch update is the index_after_import try-call (resolved through the
-		// catalog/BFS, not a literal step) producing the loop-carried %kizu.error.i64.
-		"%index_next_call = call %kizu.error.i64 " +
-			"@kizu_selfhost__parser_format_index_after_import(%kizu.owned %tokens, i64 %index)",
-		// Pin that the phi's latch operand is the try-call success value (field 1), so the
-		// loop-carried counter advances by the callee result rather than a raw step.
-		"%index_next = extractvalue %kizu.error.i64 %index_next_call, 1",
-		// Pin the latch failure propagation: a try-call failure rewraps the callee message
-		// into this function's own %kizu.error.i64 and returns it, never a raw i64 or an
-		// 'unreachable', so a broken error-union propagation is caught (issue 1165).
-		"%index_next_fail_val = insertvalue %kizu.error.i64 %index_next_fail_flag, " +
-			"%kizu.slice.u8 %index_next_msg, 2",
-		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64
-		// wraps into %kizu.error.i64 rather than returning a raw i64 as the error union.
-		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, i64 %index, 1",
-		// format_source is the compiled formatter driver used by the hosted fmt command. Pin the
-		// tokenizer call and owned String return shape so the artifact cannot silently fall back to
-		// the old parse_format_alloc emitter.
-		"define %kizu.error.owned @kizu_selfhost__parser_format_format_source(",
-		// format.kizu imports selfhost::lexer, so the compiled driver calls the selfhost
-		// tokenizer; the pin follows the source rather than the std::kizu spelling it had.
-		"%format_tokens_call = call %kizu.error.owned @kizu_selfhost__lexer_tokenize(",
-		"%index = phi i64 [ %void.then.alias.13, %loop13_preheader ], [ %index_next, %loop13_latch ]",
-		"%t24 = icmp slt i64 %index, %t23",
-		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +
-			"%kizu.owned %format_tokens, i64 %index)",
-		"%retwrap0_ok = insertvalue %kizu.error.owned zeroinitializer, i1 true, 0",
-		"%retwrap0_val = insertvalue %kizu.error.owned %retwrap0_ok, %kizu.owned %out, 1",
+		// Pin the parameter-seeded counter: 'var index = import_index' is a declaration the walk
+		// folds into the loop head, and the generic while path emits it before the loop instead,
+		// so the value the head phi seeds from is the %import_index parameter and not a literal.
+		// A regression back to a literal seed is caught here (issue 1165). It replaces
+		// "%index = phi i64 [ %import_index, %loop1_preheader ]", which named the counter %index.
+		// Measured on the staged module: this line occurs once.
+		"%index.seed.1 = select i1 true, i64 %import_index, i64 %import_index",
+		// Pin the i64 error-union early-return wrap: 'return index + 1;' inside the loop computes
+		// the sum off the head phi and wraps it into %kizu.error.i64 rather than returning a raw
+		// i64 (issue 1165). The fragment this replaces spelled the sum's mint temp, %t7, and went
+		// on matching in parser::validation::skip_fn_param_type after the temp became %t8.
+		// Measured: once.
+		" = add i64 %index.while.head.4, 1\n  %if1002_retexpr_ok",
 	}
+	fragments = append(fragments, requiredLLVMFormatIndexAfterLeadingImportsFragments()...)
+	fragments = append(fragments, requiredLLVMFormatSourceDriverFragments()...)
 	fragments = append(fragments, requiredLLVMFormatImportSortFragments()...)
 	fragments = append(fragments, requiredLLVMFormatSortFragments()...)
 	fragments = append(fragments, requiredLLVMFormatLeadingImportFragments()...)
@@ -1293,7 +1544,141 @@ func requiredLLVMFormatHelperFragments() []string {
 	fragments = append(fragments, requiredLLVMFormatAfterLineBreakFragments()...)
 	fragments = append(fragments, requiredLLVMFormatLineEndFragments()...)
 	fragments = append(fragments, requiredLLVMFormatCommentPreserveFragments()...)
+	fragments = append(fragments, requiredLLVMFormatClosureLeafFragments()...)
 	return append(fragments, requiredLLVMFormatTrailingCommaFragments()...)
+}
+
+// requiredLLVMFormatIndexAfterLeadingImportsFragments locks
+// selfhost::parser::format::index_after_leading_imports, the first scan-while whose loop latch
+// is a loop-carried try-call. It belongs to the component described on
+// requiredLLVMFormatHelperFragments.
+func requiredLLVMFormatIndexAfterLeadingImportsFragments() []string {
+	return []string{
+		// index_after_leading_imports is the first scan-while whose loop latch is a
+		// loop-carried try-call: 'var index = 0; while index < tokens.len() { let token =
+		// try tokens.get(index); if !is_import_token(token) { return index; } index = try
+		// index_after_import(tokens, index); } return index;' (issue 1165).
+		"define %kizu.error.i64 @kizu_selfhost__parser_format_index_after_leading_imports(",
+		// Pin that the loop's advance is the index_after_import try-call (resolved through the
+		// catalog/BFS, not a literal step) reading the head phi. This is the fragment that ties
+		// the four below to this function: measured on the staged module, it occurs once.
+		//
+		// The call's result no longer takes the source spelling %index_next. The generic while
+		// path lowers 'index = try index_after_import(tokens, index)' as an ordinary body
+		// assignment, so the value is bound under the assignment's own alias name and the head phi
+		// reads it on the latch edge; the four fragments this group used to carry all spelled
+		// %index or %index_next and stopped matching with it.
+		"_call = call %kizu.error.i64 " +
+			"@kizu_selfhost__parser_format_index_after_import(" +
+			"%kizu.owned %tokens, i64 %index.while.head.4)",
+		// Pin that the value the loop carries back is the try-call's success field and that it is
+		// bound in the try continuation, which branches to the latch -- so the counter advances by
+		// the callee result rather than a raw step. Measured: the continuation pair occurs in
+		// three functions and the success-field-then-latch line in six; the call above is what
+		// says which loop this is.
+		"try1001_cont:\n  %void.then.alias.",
+		"_call, 1\n  br label %loop1_latch",
+		// Pin the latch failure propagation: a try-call failure rewraps the callee message
+		// into this function's own %kizu.error.i64 and returns it, never a raw i64 or an
+		// 'unreachable', so a broken error-union propagation is caught (issue 1165).
+		//
+		// The rewrap itself is what is pinned, not the block label. The fragment this replaced
+		// was "try1001_fail:\n  %void.then.alias." -- a label followed by a line that begins with
+		// the alias prefix, which is satisfied by the message extract alone and says nothing about
+		// the insertvalue chain, the error type or the return. Its predecessor DID check the
+		// rewrap; swapping them kept the pin count whole while the property quietly left, which is
+		// the failure ca2d7a52 was written to remove. Measured on the staged module: this line
+		// occurs once, and the ret below once.
+		"_fail_val = insertvalue %kizu.error.i64 %void.then.alias.",
+		"ret %kizu.error.i64 %void.then.alias.0_fail_val",
+		// Pin the 'return index;' early exit wrap on the !is_import_token branch: the i64 wraps
+		// into %kizu.error.i64 rather than returning a raw i64 as the error union, and the i64 it
+		// wraps is the head phi. Measured: two functions.
+		"%if1002_retexpr_val = insertvalue %kizu.error.i64 %if1002_retexpr_ok, " +
+			"i64 %index.while.head.4, 1",
+	}
+}
+
+// requiredLLVMFormatSourceDriverFragments locks selfhost::parser::format::format_source, the
+// compiled formatter driver the hosted fmt command runs: its tokenizer call, its owned String
+// return shape, and the header phis of the one loop in the staged module that the generic
+// while lowering takes. It belongs to the component described on
+// requiredLLVMFormatHelperFragments.
+func requiredLLVMFormatSourceDriverFragments() []string {
+	return []string{
+		// format_source is the compiled formatter driver used by the hosted fmt command. Pin the
+		// tokenizer call and owned String return shape so the artifact cannot silently fall back to
+		// the old parse_format_alloc emitter.
+		"define %kizu.error.owned @kizu_selfhost__parser_format_format_source(",
+		// format.kizu imports selfhost::lexer, so the compiled driver calls the selfhost
+		// tokenizer; the pin follows the source rather than the std::kizu spelling it had.
+		"%format_tokens_call = call %kizu.error.owned @kizu_selfhost__lexer_tokenize(",
+		// format_source's tokenizer loop is the one loop in the staged module that the generic
+		// while lowering takes. Its header no longer binds a single %index counter with the
+		// other mutated locals threaded around it: it opens one phi per name the body assigns,
+		// each named %<var>.while.head.<node>, and %index is one of eight.
+		//
+		// The property being pinned is unchanged -- the counter is a header phi seeded on the
+		// preheader edge from the value that reaches the if11 join (next_index on the
+		// leading-import fast path, 0 otherwise) and taking its latch operand from
+		// %loop13_latch, and every read of the counter inside the loop resolves to that phi
+		// rather than to a value from before it. Seeding from the raw initializer, or from a
+		// value published inside an arm that does not dominate the join, is the defect family
+		// this backend keeps producing, and it shows up exactly here.
+		//
+		// The four fragments this replaces all spelled %index bare. Three stopped matching
+		// when the phi took its own name; the fourth, "%index = phi i64 [ %void.then.alias.",
+		// went on matching -- in types::raw_pointer_pointee_start, a function it says nothing
+		// about. That is the same silent repointing the node_count pin suffered, so none of
+		// the five below spells a mint index or a node number: %<var>.while.head. is a
+		// prefix, and %loop13_ is the loop's own label. Measured on the staged module:
+		// %index.while.head. occurs 9 times, %cursor.while.head. 4, the preheader-and-join
+		// pair 8 (one per header phi), and the icmp and the array read once each.
+		"%index.while.head.",
+		"%cursor.while.head.",
+		", %loop13_preheader ], [ %void.then.alias.",
+		" = icmp slt i64 %index.while.head.",
+		"%token_view = call %kizu.error.slice.u8 @kizu_rt_array_at(" +
+			"%kizu.owned %format_tokens, i64 %index.while.head.",
+		"%retwrap0_ok = insertvalue %kizu.error.owned zeroinitializer, i1 true, 0",
+		"%retwrap0_val = insertvalue %kizu.error.owned %retwrap0_ok, %kizu.owned %out, 1",
+	}
+}
+
+// requiredLLVMFormatClosureLeafFragments locks the eleven selfhost::parser::format
+// members that no other fragment in this file names. They used to be pinned by the
+// emitter-side seed list that 1abebb90 removed when the hand-written catalog became
+// the package graph; since then they have been covered only transitively, as leaves
+// reachable from format_source, so the closure could drop any one of them and every
+// remaining assertion would still pass. The artifact is the honest place to pin them:
+// each entry requires the member to be emitted as a real compiled function with its
+// own return type, and to be reached by a call rather than left as an orphan define.
+func requiredLLVMFormatClosureLeafFragments() []string {
+	fragments := []string{}
+	for _, member := range []struct {
+		name       string
+		returnType string
+	}{
+		{"line_comment_is_full_line", "i1"},
+		{"line_comment_has_blank_after", "i1"},
+		{"line_comment_has_blank_before", "i1"},
+		{"should_insert_space", "i1"},
+		{"is_top_level_decl_start", "i1"},
+		{"starts_new_top_level_decl", "i1"},
+		{"has_line_comment_between", "i1"},
+		{"last_byte", "i8"},
+		{"lbrace_opens_enum_decl", "%kizu.error.bool"},
+		{"rbrace_closes_enum_decl", "%kizu.error.bool"},
+		{"rbrace_wants_newline", "%kizu.error.bool"},
+	} {
+		symbol := "@kizu_selfhost__parser_format_" + member.name + "("
+		fragments = append(
+			fragments,
+			"define "+member.returnType+" "+symbol,
+			"call "+member.returnType+" "+symbol,
+		)
+	}
+	return fragments
 }
 
 // requiredLLVMFormatTrailingCommaFragments locks the selfhost::parser::format is_trailing_comma
@@ -1406,38 +1791,48 @@ func requiredLLVMFormatLineEndFragments() []string {
 		"  %kizu.slice.u8 %source",
 		"  i64 %start",
 		"%length = call i64 @kizu_std__mem_len(%kizu.slice.u8 %source)",
-		"%index = phi i64 [ %start, %loop2_preheader ], [ %index_next, %loop2_latch ]",
+		// The counter, seeded from %start rather than a literal. Both spellings moved when this
+		// loop passed from the shape lowering to the generic while walker: the declaration is
+		// materialised in the block that branches to the preheader as %<var>.seed.<node>, and the
+		// head phi is %<var>.while.head.<node>. Same two edges, same values.
+		"%index.seed.1 = select i1 true, i64 %start, i64 %start",
+		"%index.while.head.13 = phi i64 [ %index.seed.1, %loop2_preheader ], " +
+			"[ %void.then.alias.0, %loop2_latch ]",
 		// Operand 0 in the loop head: the 'index < length' guard branching into the guarded
 		// loop2_head_rhs block on success and short-circuiting to loop2_exit on failure. This pins
 		// the short-circuit while header block layout: the byte load never runs unless the guard
-		// holds.
-		"%t2 = icmp slt i64 %index, %length",
-		"br i1 %t2, label %loop2_head_rhs, label %loop2_exit",
-		// Operand 1 in the guarded loop2_head_rhs block: the checked source[index] byte load (the
-		// single-element index argument hoisted into temp %t4), the is_line_break call, and the
-		// prefix-not xor, branching into the loop body on a non-break byte and to loop2_exit on a
-		// break byte.
+		// holds. It is the property the generic walker had to reproduce to take this loop at all --
+		// it refused every short-circuit header until it could emit the operand chain -- so this
+		// fragment is what says it reproduced it rather than flattening the guard away.
+		"%t3 = icmp slt i64 %index.while.head.13, %length",
+		"br i1 %t3, label %loop2_head_rhs, label %loop2_exit",
+		// Operand 1 in the guarded loop2_head_rhs block: the checked source[index] byte load, the
+		// is_line_break call, and the prefix-not xor, branching into the loop body on a non-break
+		// byte and to loop2_exit on a break byte. Every read of the counter here is the head phi,
+		// not the preheader value -- a leaf reading the seed would test the same byte forever.
 		"loop2_head_rhs:",
-		"%t4_bad = or i1 %t4_neg, %t4_high",
-		"%t4 = load i8, ptr %t4_gep",
-		"%t5 = call i1 @kizu_selfhost__parser_format_is_line_break(i8 %t4)",
-		"%t6 = xor i1 %t5, true",
-		"br i1 %t6, label %loop2_body, label %loop2_exit",
-		"%index_next = add i64 %index, 1",
+		"%t5_bad = or i1 %t5_neg, %t5_high",
+		"%t5_gep = getelementptr i8, ptr %t5_ptr, i64 %index.while.head.13",
+		"%t5 = load i8, ptr %t5_gep",
+		"%t6 = call i1 @kizu_selfhost__parser_format_is_line_break(i8 %t5)",
+		"%t7 = xor i1 %t6, true",
+		"br i1 %t7, label %loop2_body, label %loop2_exit",
+		"%t10 = add i64 %index.while.head.13, 1",
 		"loop2_exit:",
 		// line_end_including_break: the same short-circuit while header plus the trailing 'if index
 		// < length { return after_line_break(source, index); } return index;' that folds a CRLF/LF
 		// into the line. The then-block is a 'return after_line_break(..)' ReturnCall returning a
 		// plain i64 (no error-union wrap on this scalar helper); the fall-through returns index.
 		"define i64 @kizu_selfhost__parser_format_line_end_including_break(",
-		"%t9 = icmp slt i64 %index, %length",
-		"br i1 %t9, label %if3_then, label %if3_cont",
+		"br i1 %t13, label %if3_then, label %if3_cont",
 		"if3_then:",
-		"%t10 = call i64 @kizu_selfhost__parser_format_after_line_break(" +
-			"%kizu.slice.u8 %source, i64 %index)",
-		"  ret i64 %t10",
+		"%t14 = call i64 @kizu_selfhost__parser_format_after_line_break(" +
+			"%kizu.slice.u8 %source, i64 %index.while.head.13)",
+		"  ret i64 %t14",
 		"if3_cont:",
-		"  ret i64 %index",
+		// Both exits read the head phi. The loop leaves its counter through the phi that dominates
+		// loop2_exit, so nothing after the loop reads the preheader seed.
+		"  ret i64 %index.while.head.13",
 	}
 }
 
@@ -1653,33 +2048,50 @@ func requiredLLVMFormatImportSortFragments() []string {
 		// bound to the named length locals the loop header reads.
 		"%left_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %left)",
 		"%right_len = call i64 @kizu_std__mem_len(%kizu.slice.u8 %right)",
-		// Pin the short-circuit `and` while header: the two `index < *_len` comparisons lower
-		// to an eager `and i1` over the comparison results (their operands are side-effect
-		// free), so a regression that rejects an `and` header or mis-lowers it is caught.
-		"%t6 = and i1 %t2, %t5",
+		// Pin the `and` while header: the two `index < *_len` comparisons lower to an EAGER
+		// `and i1` over the comparison results, because their operands are side-effect free and
+		// condition_eager_safe says so. That is the half of the header story the guarded chain in
+		// requiredLLVMFormatLineEndFragments does not tell, and it has to keep being told
+		// separately: a lowering that turned every `and` into a chain of guarded blocks would
+		// still be correct and would still pass that group.
+		//
+		// Both comparisons name the head phi, so a leaf reading the preheader seed is caught here.
+		// The fragments name %left_len and %right_len for a reason: the pin this replaces was
+		// "%t6 = and i1 %t2, %t5", which named none of this function's values, matched four
+		// functions at HEAD and three others now -- including lexer_is_alpha and path_join -- and
+		// went on passing while compare_bytes moved to %t7 = and i1 %t3, %t6. It had stopped
+		// checking what its comment claimed long before this commit.
+		"%t3 = icmp slt i64 %index.while.head.22, %left_len",
+		"%t6 = icmp slt i64 %index.while.head.22, %right_len",
 		// import_path_less is the first multi-counter import-sort helper on the compiled path:
 		// two lockstep token cursors with base-plus-offset inits advanced under a short-circuit
 		// `and` header, with a nested-call compare_bytes let and a prefix-not call return
 		// (issue 1165 / 1162).
 		"define %kizu.error.bool @kizu_selfhost__parser_format_import_path_less(",
-		// Pin the base-plus-offset preheader seeds ('var left_index = left + 1; var right_index
-		// = right + 1;'): each lockstep counter materializes %<var>_init in the preheader so the
-		// loop-head phi seeds from it instead of a literal or a plain copy.
-		"%right_index_init = add i64 %right, 1",
-		"%left_index_init = add i64 %left, 1",
-		// Pin the two lockstep loop-head phis seeded from the preheader inits and advanced from
-		// the shared latch, so a regression to a single induction counter is caught.
-		"%right_index = phi i64 [ %right_index_init, %loop2_preheader ], " +
-			"[ %right_index_next, %loop2_latch ]",
-		"%left_index = phi i64 [ %left_index_init, %loop2_preheader ], " +
-			"[ %left_index_next, %loop2_latch ]",
-		// Pin the two-counter constant-step latch: both cursors advance by one in the same
-		// latch block.
-		"%right_index_next = add i64 %right_index, 1",
-		"%left_index_next = add i64 %left_index, 1",
-		// Pin the prefix-not call return ('return !is_semicolon_token(right_token);'): the bool
-		// call result is negated with 'xor i1 %call, true' before the error-union wrap.
-		"%t11 = xor i1 %t10, true",
+		// Pin the base-plus-offset seeds ('var left_index = left + 1; var right_index = right + 1;'):
+		// each lockstep counter is materialised before the preheader so the head phi seeds from a
+		// register rather than from a literal or a plain copy. Both declarations are folded out of
+		// the emitted path by the walker, so their being here at all is what says the generic while
+		// gave a folded declaration a definition instead of refusing the loop.
+		"%left_index.seed.1 = select i1 true, i64 %t2, i64 %t2",
+		"%right_index.seed.6 = select i1 true, i64 %t5, i64 %t5",
+		// Pin the two lockstep loop-head phis, seeded from those and advanced from the shared
+		// latch, so a regression to a single induction counter is caught. Two carried names, two
+		// phis: the generic while opens one per assigned name rather than one induction variable
+		// plus threaded scalars.
+		"%left_index.while.head.11 = phi i64 [ %left_index.seed.1, %loop2_preheader ], " +
+			"[ %void.then.alias.0, %loop2_latch ]",
+		"%right_index.while.head.11 = phi i64 [ %right_index.seed.6, %loop2_preheader ], " +
+			"[ %void.then.alias.1, %loop2_latch ]",
+		// Pin the two-counter constant-step advance: both cursors advance by one, each reading its
+		// own head phi and not its seed.
+		"%t30 = add i64 %left_index.while.head.11, 1",
+		"%t33 = add i64 %right_index.while.head.11, 1",
+		// Pin the eager `and` header over the two `index < len(tokens)` guards. Measured: this
+		// fragment occurs once in the module, so it names this function and no other -- unlike the
+		// `%t11 = xor i1 %t10, true` it replaces, which occurs nine times and pinned the prefix-not
+		// return of whatever function happened to number its temps that way.
+		"%t12 = and i1 %t8, %t11",
 	}
 }
 
